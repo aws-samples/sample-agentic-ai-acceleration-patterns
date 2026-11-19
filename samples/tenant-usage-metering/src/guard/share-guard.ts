@@ -4,9 +4,9 @@
 /**
  * The bus share guard (ADR-0006, threat model M-6): before an AWS RAM share
  * of the ingest or usage bus is created or changed, the deploy reads the
- * registry and fails if any account the buses are shared with already holds
- * a registered cell. A cell account that could subscribe to a bus would see
- * other tenants' usage. `PutCellEmitter` refuses new cells in those
+ * registry and fails if any account the buses are shared with holds a cell
+ * that can still send. A cell account that could subscribe to a bus would
+ * see other tenants' usage. `PutCellEmitter` refuses new cells in those
  * accounts; this check covers the cells registered before the account was
  * added to a list.
  */
@@ -22,14 +22,25 @@ export interface OffendingEmitter {
   readonly cellId: string;
 }
 
-type EmitterProjection = Pick<EmitterItem, 'accountId' | 'cellId' | 'expiresAt'>;
+type EmitterProjection = Pick<EmitterItem, 'accountId' | 'cellId' | 'status' | 'closesAt'>;
 
 /**
- * The registered emitters whose account is in `accountIds`. Every emitter
- * item carries `listType = EMITTER`, so one paginated Query on the
- * `list-by-type` index reads them all, projected to three attributes. An
- * item past its `expiresAt` that TTL has not removed yet counts as absent,
- * as every registry read treats it.
+ * Whether an emitter can still send: `ACTIVE`, or `CLOSING` with `closesAt`
+ * still ahead. Past `closesAt` ingest admits nothing from it (spec §4.2), so
+ * a deleted cell stops counting at its close time, not at TTL.
+ */
+export function canStillSend(item: Pick<EmitterItem, 'status' | 'closesAt'>, nowMs: number): boolean {
+  if (item.status === 'ACTIVE') {
+    return true;
+  }
+  return item.closesAt === undefined || Date.parse(item.closesAt) > nowMs;
+}
+
+/**
+ * The registered emitters that can still send and whose account is in
+ * `accountIds`. Every emitter item carries `listType = EMITTER`, so one
+ * paginated Query on the `list-by-type` index reads them all, projected to
+ * four attributes.
  */
 export async function offendingEmitters(
   db: DynamoDBDocumentClient,
@@ -46,15 +57,17 @@ export async function offendingEmitters(
     IndexName: LIST_BY_TYPE_INDEX,
     KeyConditionExpression: 'listType = :t',
     ExpressionAttributeValues: { ':t': 'EMITTER' },
-    ProjectionExpression: 'accountId, cellId, expiresAt',
+    // `status` is a DynamoDB reserved word.
+    ExpressionAttributeNames: { '#status': 'status' },
+    ProjectionExpression: 'accountId, cellId, #status, closesAt',
   });
   return emitters
-    .filter((item) => shared.has(item.accountId) && (item.expiresAt === undefined || item.expiresAt * 1000 > nowMs))
+    .filter((item) => shared.has(item.accountId) && canStillSend(item, nowMs))
     .map((item) => ({ accountId: item.accountId, cellId: item.cellId }));
 }
 
 /** The deploy error that names each offending account and cell. */
 export function refusal(found: ReadonlyArray<OffendingEmitter>): string {
   const list = found.map((item) => `account ${item.accountId} (cell ${item.cellId})`).join(', ');
-  return `a bus may not be shared with an account that holds a registered cell: ${list}. Delete those cells (DeleteCellEmitter) or remove the accounts from rawSubscriberAccountIds / usageSubscriberAccountIds (ADR-0006).`;
+  return `a bus may not be shared with an account that holds a cell that can still send: ${list}. Delete those cells (DeleteCellEmitter) and deploy again after their close time (closesAt), or remove the accounts from rawSubscriberAccountIds / usageSubscriberAccountIds (ADR-0006).`;
 }

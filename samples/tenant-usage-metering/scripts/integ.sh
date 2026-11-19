@@ -26,6 +26,13 @@
 
 set -uo pipefail
 
+if (( $# > 0 )); then
+  echo "integ.sh takes no arguments, got: $*" >&2
+  echo "Set INTEG_STACK_NAME, INTEG_FLEET, INTEG_INGEST_PATH, INTEG_PUBLISH_SERVICE_PARAMETER," >&2
+  echo "INTEG_LATE_GRACE_MINUTES or INTEG_KEEP_STACK instead (see the header of this script)." >&2
+  exit 2
+fi
+
 if [[ -z "${AWS_REGION:-}" ]]; then
   echo "AWS_REGION is not set: the integration test runs in exactly one Region" >&2
   exit 2
@@ -40,6 +47,10 @@ stack="${INTEG_STACK_NAME:-TenantUsageMetering}"
 fleet="${INTEG_FLEET:-demo}"
 ingest_path="${INTEG_INGEST_PATH:-BUS}"
 publish="${INTEG_PUBLISH_SERVICE_PARAMETER:-true}"
+if [[ ! "$stack" =~ ^[A-Za-z][A-Za-z0-9-]{0,127}$ ]]; then
+  echo "INTEG_STACK_NAME must match ^[A-Za-z][A-Za-z0-9-]{0,127}\$, got '$stack'" >&2
+  exit 2
+fi
 if [[ "$ingest_path" != BUS && "$ingest_path" != DIRECT ]]; then
   echo "INTEG_INGEST_PATH must be BUS or DIRECT, got '$ingest_path'" >&2
   exit 2

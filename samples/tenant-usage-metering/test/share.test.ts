@@ -68,10 +68,32 @@ describe('bus sharing through AWS RAM (spec §3.2, ADR-0006, M-6)', () => {
   });
 
   test('only the usage bus is shared on DIRECT, which has no ingest bus', () => {
-    const template = synth({ ingestPath: 'DIRECT', rawSubscriberAccountIds: [VENDOR_A], usageSubscriberAccountIds: [VENDOR_B] });
+    const template = synth({ ingestPath: 'DIRECT', usageSubscriberAccountIds: [VENDOR_B] });
     const shares = sharesOf(template);
     expect(shares).toHaveLength(1);
     expect(shares[0].Properties.Principals).toEqual([VENDOR_B]);
+  });
+
+  test('a raw subscriber list on DIRECT fails synth', () => {
+    expect(() => synth({ ingestPath: 'DIRECT', rawSubscriberAccountIds: [VENDOR_A] })).toThrow(/rawSubscriberAccountIds needs ingestPath BUS/);
+  });
+
+  test.each(['rawSubscriberAccountIds', 'usageSubscriberAccountIds'] as const)('the metering account in %s fails synth', (list) => {
+    expect(() => synth({ [list]: [ACCOUNT] })).toThrow(new RegExp(`${list} holds the metering account ${ACCOUNT}`));
+  });
+
+  test('an unresolved stack account skips the metering-account check', () => {
+    const app = new App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    const stack = new Stack(app, 'Agnostic');
+    expect(() => new TenantUsageMetering(stack, 'Metering', { ...base, usageSubscriberAccountIds: [ACCOUNT] })).not.toThrow();
+  });
+
+  test('the guard runs after the admin function, so the block list is live before the registry is read', () => {
+    const template = synth({ usageSubscriberAccountIds: [VENDOR_B] });
+    const guard = Object.values(template.findResources('Custom::BusShareGuard'))[0] as { DependsOn?: string[] };
+    const adminFn = Object.keys(template.findResources('AWS::Lambda::Function')).find((id) => id.startsWith('MeteringAdminFunction'));
+    expect(adminFn).toBeDefined();
+    expect(guard.DependsOn).toContain(adminFn);
   });
 
   test('an empty usage list leaves the usage bus unshared', () => {
@@ -107,10 +129,11 @@ describe('bus sharing through AWS RAM (spec §3.2, ADR-0006, M-6)', () => {
 describe('bus share guard (ADR-0006)', () => {
   const ddb = mockClient(DynamoDBDocumentClient);
   const NOW = Date.parse('2026-11-19T12:00:00Z');
-  const emitter = (accountId: string, cellId: string, expiresAt?: number) => ({
+  const emitter = (accountId: string, cellId: string, closesAt?: string) => ({
     accountId,
     cellId,
-    ...(expiresAt !== undefined ? { expiresAt } : {}),
+    status: closesAt === undefined ? 'ACTIVE' : 'CLOSING',
+    ...(closesAt !== undefined ? { closesAt } : {}),
   });
   const event = (RequestType: 'Create' | 'Update' | 'Delete', AccountIds: string[]): CloudFormationCustomResourceEvent =>
     ({
@@ -142,13 +165,20 @@ describe('bus share guard (ADR-0006)', () => {
     ]);
     const calls = ddb.commandCalls(QueryCommand);
     expect(calls).toHaveLength(2);
-    expect(calls[0].args[0].input).toMatchObject({ IndexName: 'list-by-type', ExpressionAttributeValues: { ':t': 'EMITTER' }, ProjectionExpression: 'accountId, cellId, expiresAt' });
+    expect(calls[0].args[0].input).toMatchObject({
+      IndexName: 'list-by-type',
+      ExpressionAttributeValues: { ':t': 'EMITTER' },
+      ExpressionAttributeNames: { '#status': 'status' },
+      ProjectionExpression: 'accountId, cellId, #status, closesAt',
+    });
   });
 
-  test('an item past its expiresAt counts as absent', async () => {
-    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, 'C1', NOW / 1000 - 1)] });
+  test('a CLOSING emitter counts before its closesAt and not after', async () => {
+    ddb.on(QueryCommand).resolves({
+      Items: [emitter(VENDOR_A, 'C1', new Date(NOW + 60_000).toISOString()), emitter(VENDOR_A, 'C2', new Date(NOW - 60_000).toISOString())],
+    });
     const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
-    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([]);
+    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([{ accountId: VENDOR_A, cellId: 'C1' }]);
   });
 
   test.each(['Create', 'Update'] as const)('%s fails when a listed account holds a cell, naming the account and the cell', async (type) => {

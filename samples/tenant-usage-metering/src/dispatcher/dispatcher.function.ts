@@ -27,6 +27,7 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
   dispatcher ??= new Dispatcher({
     db: documentClient(),
     tableName: requireEnv(ENV.tableName),
+    fleetName: requireEnv(ENV.fleetName),
     exportBucket: requireEnv(ENV.exportBucket),
     s3: new S3Client({}),
     secrets: new SecretsManagerClient({}),

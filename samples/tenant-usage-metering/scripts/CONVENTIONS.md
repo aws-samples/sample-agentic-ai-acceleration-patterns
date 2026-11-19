@@ -28,9 +28,12 @@ the control plane's hook log; all three are an audience.
 
 ## Credentials
 
-- Credentials live in shell variables or process memory only. The hook
-  hands the signing key and session token to `curl` in a mode-600 config
-  file, never on a command line, and removes the file from its exit trap.
+- Credentials never appear on a command line, where `ps` and
+  `/proc/<pid>/cmdline` show them. Every script that signs with `curl`
+  (`demo.sh`, the hook) sets `umask 077`, writes the signing key and
+  session token into a `mktemp` curl config file (`user` and the
+  `x-amz-security-token` header), passes it with `--config`, and removes
+  it from its exit trap.
 - `emit-usage.ts` signs with the credential provider chain of the cell's
   emitter role; it never reads or logs a key itself.
 - Every value from the hook environment is checked against its charset

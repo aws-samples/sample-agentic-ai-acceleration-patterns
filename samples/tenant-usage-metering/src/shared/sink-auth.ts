@@ -35,6 +35,19 @@ export function iamTarget(hostname: string): IamTarget | undefined {
   return undefined;
 }
 
+/** The prefix every `SECRET` sink's secret sits under; the dispatcher's role may read only this prefix. */
+export function sinkSecretPrefix(fleetName: string): string {
+  return `${fleetName}/metering/sinks/`;
+}
+
+/**
+ * Whether a `SECRET` sink's `secretName` sits under the fleet's sink prefix
+ * with no `..`. `CreateSink`, `UpdateSink` and the dispatcher share it.
+ */
+export function secretNameInFleet(fleetName: string, secretName: string): boolean {
+  return secretName.startsWith(sinkSecretPrefix(fleetName)) && !secretName.includes('..');
+}
+
 /** The SigV4 target of a whole `AWS_IAM` sink endpoint, or `undefined` when the URL may not be signed. */
 export function iamSinkTarget(endpoint: string): IamTarget | undefined {
   let url: URL;

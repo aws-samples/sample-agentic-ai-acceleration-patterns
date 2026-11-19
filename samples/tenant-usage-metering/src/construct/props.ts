@@ -42,16 +42,19 @@ export interface TenantUsageMeteringProps {
   readonly usageBusRetentionDays?: number;
   /**
    * Vendor accounts the ingest bus is shared with through AWS RAM, under the
-   * SubscribeOnly permission (`BUS` only; ADR-0006). None of them may hold a
+   * SubscribeOnly permission (ADR-0006). `BUS` only: a non-empty list on
+   * `DIRECT`, which has no ingest bus, fails synth. None of them may hold a
    * cell: `PutCellEmitter` refuses one there, and a deploy that adds an
-   * account already holding a registered cell fails. @default []
+   * account already holding a cell that can still send fails. Neither list
+   * may name the metering account, which reads its buses directly.
+   * @default []
    */
   readonly rawSubscriberAccountIds?: string[];
   /**
    * Vendor accounts the usage bus is shared with through AWS RAM, under the
    * SubscribeOnly permission (ADR-0006). None of them may hold a cell:
    * `PutCellEmitter` refuses one there, and a deploy that adds an account
-   * already holding a registered cell fails. @default []
+   * already holding a cell that can still send fails. @default []
    */
   readonly usageSubscriberAccountIds?: string[];
   /**
@@ -98,16 +101,22 @@ function roleArns(name: string, values: string[], required: boolean): void {
   }
 }
 
-function accounts(name: string, values: string[]): void {
+function accounts(name: string, values: string[], meteringAccount: string | undefined): void {
   for (const value of values) {
     if (!Token.isUnresolved(value) && !ACCOUNT.test(value)) {
       throw new Error(`${name} holds ${JSON.stringify(value)}, which is not a 12-digit account id`);
     }
+    if (meteringAccount !== undefined && !Token.isUnresolved(meteringAccount) && value === meteringAccount) {
+      throw new Error(`${name} holds the metering account ${value}, which reads its buses directly and needs no share`);
+    }
   }
 }
 
-/** Applies the defaults of spec §3.3 and fails synth on any value it refuses. */
-export function resolveProps(props: TenantUsageMeteringProps): ResolvedProps {
+/**
+ * Applies the defaults of spec §3.3 and fails synth on any value it refuses.
+ * `meteringAccount` is the stack's account; a token skips the checks on it.
+ */
+export function resolveProps(props: TenantUsageMeteringProps, meteringAccount?: string): ResolvedProps {
   const resolved: ResolvedProps = {
     fleetName: props.fleetName,
     registrarPrincipalArns: props.registrarPrincipalArns,
@@ -161,7 +170,10 @@ export function resolveProps(props: TenantUsageMeteringProps): ResolvedProps {
   if (resolved.ingestPath !== 'BUS' && resolved.ingestPath !== 'DIRECT') {
     throw new Error(`ingestPath must be BUS or DIRECT, got ${JSON.stringify(resolved.ingestPath)}`);
   }
-  accounts('rawSubscriberAccountIds', resolved.rawSubscriberAccountIds);
-  accounts('usageSubscriberAccountIds', resolved.usageSubscriberAccountIds);
+  accounts('rawSubscriberAccountIds', resolved.rawSubscriberAccountIds, meteringAccount);
+  accounts('usageSubscriberAccountIds', resolved.usageSubscriberAccountIds, meteringAccount);
+  if (resolved.ingestPath === 'DIRECT' && resolved.rawSubscriberAccountIds.length > 0) {
+    throw new Error('rawSubscriberAccountIds needs ingestPath BUS: DIRECT has no ingest bus to share');
+  }
   return resolved;
 }

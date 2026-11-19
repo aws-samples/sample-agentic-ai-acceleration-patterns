@@ -8,11 +8,16 @@
  * (src/guard/share-guard.ts). The AWS RAM shares depend on it, so a failed
  * check stops the deploy before a share changes, rather than shrinking it.
  *
- * shortcut: the check reads the registry once per deploy. A cell registered
- * in a newly listed account between the check and the admin function's
- * update to its block list is not caught; the next deploy that changes a
- * list catches it. A stricter version would block the account first and
- * share in a second deploy.
+ * The guard depends on the admin function, so the function's block list
+ * (`PutCellEmitter` refuses cells in listed accounts) is live before the
+ * check reads the registry.
+ *
+ * shortcut: the check reads the `list-by-type` index, which is eventually
+ * consistent. A `PutCellEmitter` that succeeded just before the block list
+ * went live may not be in the index yet when the check reads it (index
+ * propagation lag, normally under a second), and is not caught; the next
+ * deploy that changes a list catches it. A stricter version would block the
+ * account in one deploy and share in a second.
  */
 
 import { CustomResource, Duration, RemovalPolicy, Validations } from 'aws-cdk-lib';

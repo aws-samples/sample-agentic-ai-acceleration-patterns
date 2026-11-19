@@ -130,8 +130,9 @@ The construct shares each bus whose subscriber list is not empty through
 AWS RAM with the managed permission
 `AWSRAMEventBridgeEventBusV2SubscribeOnly`. An account outside the
 organization accepts the resource share invitation before it can attach a
-subscriber. A deploy fails when a listed account already holds a
-registered cell (architecture.md §4.1).
+subscriber. A deploy fails when a listed account holds a cell that can
+still send; a deleted cell stops counting at its close time
+(architecture.md §4.1).
 
 Then give `<fleet>-global-hook` a policy from `metering.registrarStatement`
 and each cell's emitter role a policy from `metering.ingestStatement`, and
@@ -235,10 +236,11 @@ tenant cost ≈ Σ hours [ share of accepted events × per-event cost
             + fixed cost / tenants with a record in the month
 ```
 
-Refused events, calls from unregistered roles, and repair jobs carry no
-verified tenant; they are charged to the emitter's cell where it is known
-and otherwise stay vendor overhead. Unit prices come from each service's
-pricing page.
+Refused events and calls from unregistered roles carry no verified
+tenant. Refusals can be charged to the emitter's cell, which the `error/`
+objects and the access log name; the rest of them, and the cost of repair
+jobs (re-admission, redrives, recounts), is vendor overhead. Unit prices
+come from each service's pricing page.
 
 ## Security notes
 

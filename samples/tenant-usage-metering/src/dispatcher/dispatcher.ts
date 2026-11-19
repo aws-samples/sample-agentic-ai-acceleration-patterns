@@ -30,7 +30,7 @@ import { keys, publishShard } from '../shared/keys';
 import { log } from '../shared/logger';
 import { METRIC, type Metrics } from '../shared/metrics';
 import { isConditionFailure, withRetry } from '../shared/retry';
-import { iamSinkTarget, type IamTarget } from '../shared/sink-auth';
+import { iamSinkTarget, secretNameInFleet, type IamTarget } from '../shared/sink-auth';
 import { HOUR_MS, iso } from '../shared/time';
 
 export const DELIVERY_WINDOW_MS = 24 * HOUR_MS;
@@ -54,6 +54,8 @@ export type RequestSigner = (
 export interface DispatcherDeps {
   readonly db: DynamoDBDocumentClient;
   readonly tableName: string;
+  /** The fleet whose sink secret prefix a `SECRET` sink must use. */
+  readonly fleetName: string;
   readonly exportBucket: string;
   readonly s3: S3Client;
   readonly secrets: SecretsManagerClient;
@@ -89,17 +91,21 @@ export function needsBillingAccount(sink: Pick<SinkItem, 'type' | 'mapping'>): b
 
 /**
  * Why a stored `HTTP` sink can never deliver, or undefined: an `AWS_IAM`
- * endpoint that is not a function URL or API Gateway host, or a `SECRET`
- * sink that names no secret.
+ * endpoint that is not a function URL or API Gateway host, a `SECRET` sink
+ * that names no secret, or one whose secret is outside the fleet's sink
+ * prefix (the dispatcher's role may not read it).
  */
-export function malformedSinkReason(sink: Pick<SinkItem, 'type' | 'auth' | 'endpoint' | 'secretName'>): string | undefined {
+export function malformedSinkReason(sink: Pick<SinkItem, 'type' | 'auth' | 'endpoint' | 'secretName'>, fleetName: string): string | undefined {
   if (sink.type !== 'HTTP') {
     return undefined;
   }
   if (sink.auth === 'AWS_IAM') {
     return iamSinkTarget(sink.endpoint) === undefined ? 'AUTH_TARGET_INVALID' : undefined;
   }
-  return sink.secretName === undefined || sink.secretName.length === 0 ? 'SECRET_NAME_MISSING' : undefined;
+  if (sink.secretName === undefined || sink.secretName.length === 0) {
+    return 'SECRET_NAME_MISSING';
+  }
+  return secretNameInFleet(fleetName, sink.secretName) ? undefined : 'SECRET_NAME_INVALID';
 }
 
 /** Backoff of a retried delivery: 30 s doubling per receive, at most 15 minutes. */
@@ -174,7 +180,7 @@ export class Dispatcher {
 
     // CreateSink and UpdateSink refuse such a sink, so only a direct table
     // write gets here; it can never succeed, so it fails at once.
-    const malformed = malformedSinkReason(sink);
+    const malformed = malformedSinkReason(sink, this.deps.fleetName);
     if (malformed !== undefined) {
       if (await this.setState(record, message.sinkId, { status: 'FAILED', reason: malformed })) {
         metrics.add(METRIC.deliveryFailed, 1, { sinkId: message.sinkId });

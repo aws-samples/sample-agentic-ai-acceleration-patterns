@@ -158,7 +158,7 @@ All in the metering account, one stack.
 | Error store | S3 `error/hour=YYYY-MM-DDTHH/`, one object per batch with refused events, each with its reason |
 | `UsageSubscriber` | Published construct that attaches a reader to the ingest bus (`raw`) or the usage bus (`usage`) with a dead-letter queue, a retry policy and alarms built in (ADR-0006) |
 | Bus shares | One AWS RAM resource share per bus whose subscriber list is not empty, with the managed permission `AWSRAMEventBridgeEventBusV2SubscribeOnly`, external principals allowed (§3.2) |
-| Share guard | A custom resource that runs before the shares change: reads the registry and fails the deploy if an account on either subscriber list already holds a registered cell (ADR-0006) |
+| Share guard | A custom resource that runs before the shares change: reads the registry and fails the deploy if an account on either subscriber list holds a cell that can still send: an `ACTIVE` emitter, or a `CLOSING` one before its `closesAt` (ADR-0006) |
 
 ### 3.2 Callers and identity
 
@@ -230,9 +230,12 @@ External principals are allowed; an account outside the organization
 accepts the resource share invitation before it can use the bus.
 `PutCellEmitter` refuses a cell in any account on either list, vendor-owned
 or not, and in the metering account itself (`ACCOUNT_NOT_ALLOWED`), and
-a deploy-time guard reads the registry before the shares change and fails
-a deploy that lists an account already holding a registered cell
-(ADR-0006). A subscriber created while its account was listed keeps
+a deploy-time guard reads the registry after the admin function's block
+list is updated and before the shares change, and fails a deploy that
+lists an account holding a cell that can still send; a deleted cell stops
+counting at its `closesAt` (ADR-0006). `rawSubscriberAccountIds` needs
+`ingestPath` `BUS`, and neither list may name the metering account; synth
+refuses both. A subscriber created while its account was listed keeps
 delivering after the account leaves the share, until the vendor revokes
 it with EventBridge `RevokeResource`. `UsageSubscriber`'s `meters` and `tenants` filters (a `DATA` pattern under `detail`, since `DATA` is the `PutEvents` envelope) are a
 convenience; an account a bus is shared with can create an unfiltered
@@ -472,7 +475,7 @@ placed in another cell, it lands in a new item, and the old one stays
 | `enabled` | boolean |
 | `endpoint` | `HTTP`: HTTPS URL. `S3_EXPORT`: a key prefix in the sample's export bucket |
 | `version` | moves on every write; `UpdateSink` is conditioned on it |
-| `auth` | `HTTP` only, fixed at create: `SECRET` (default) sends the credential in `secretName`; `AWS_IAM` signs with SigV4 as the dispatcher's role and takes no `secretName`. An `AWS_IAM` endpoint must be a Lambda function URL (`*.lambda-url.<region>.on.aws`) or an API Gateway host (`*.execute-api.<region>.amazonaws.com`) with no port, on `https:`, so the signing scope stays on an endpoint that verifies SigV4 (ADR-0007). The check runs at create, on update and before each send; a stored sink that fails it is `FAILED` with `AUTH_TARGET_INVALID`. It does not decide who owns the endpoint: the deployer grants the dispatcher role invoke on the billing endpoint only, and across accounts the target's resource policy must also name that role |
+| `auth` | `HTTP` only, fixed at create: `SECRET` (default) sends the credential in `secretName`; `AWS_IAM` signs with SigV4 as the dispatcher's role and takes no `secretName`. An `AWS_IAM` endpoint must be a Lambda function URL (`*.lambda-url.<region>.on.aws`) or an API Gateway host (`*.execute-api.<region>.amazonaws.com`) with no port, on `https:`, so the signing scope stays on an endpoint that verifies SigV4 (ADR-0007). The check runs at create, on update and before each send; a stored sink that fails it is `FAILED` with `AUTH_TARGET_INVALID`. A stored `SECRET` sink without `secretName` is `FAILED` with `SECRET_NAME_MISSING`, and one whose `secretName` is outside `<fleet>/metering/sinks/` or contains `..` with `SECRET_NAME_INVALID`, before any secret is read. It does not decide who owns the endpoint: the deployer grants the dispatcher role invoke on the billing endpoint only, and across accounts the target's resource policy must also name that role |
 | `secretName` | `SECRET` `HTTP` sinks only: Secrets Manager name of the credential, under `<fleet>/metering/sinks/`; `CreateSink` and `UpdateSink` refuse any other name, and the dispatcher's role may read only that prefix |
 | `mapping` | `HTTP` only: target field name → source (record field, meter field, or constant); without one, the body is the `UsageRecorded` detail |
 | `meters` | meter ids this sink takes; empty is all |

@@ -39,6 +39,10 @@ AWS_REGION=eu-central-1 npx projen integ
 | `INTEG_LATE_GRACE_MINUTES` | `6` | the demo stack's `lateGraceMinutes`, the shortest the construct accepts |
 | `INTEG_KEEP_STACK` | `0` | `1` leaves the stack in place after the run |
 
+The script takes its settings from these variables only and fails on any
+argument, so `npx projen integ -c ...` stops before it deploys.
+`INTEG_STACK_NAME` must match `^[A-Za-z][A-Za-z0-9-]{0,127}$`.
+
 The `DIRECT` path runs as a second stack, beside the first if wanted, with
 its own name and fleet:
 
@@ -104,8 +108,8 @@ If the script stops before its teardown, delete the stack
 (`npx cdk destroy <INTEG_STACK_NAME> --force`) and check for:
 
 - the log groups of the two CDK provider functions,
-  `/aws/lambda/<stack>-CustomS3AutoDeleteObjectsCusto-*` and
-  `/aws/lambda/<stack>-BucketNotificationsHandler050a-*`, which every
+  `/aws/lambda/<stack>-CustomS3AutoDelete*` and
+  `/aws/lambda/<stack>-BucketNotificationsHand*`, which every
   delete leaves behind;
 - the parameter `/application-plane/shared/metering/service`, when
   `INTEG_PUBLISH_SERVICE_PARAMETER` was `true`.

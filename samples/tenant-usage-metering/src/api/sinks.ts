@@ -22,7 +22,7 @@ import { getItem } from '../shared/db';
 import type { MappingSource, SinkItem } from '../shared/items';
 import { keys, LIST_BY_TYPE_INDEX } from '../shared/keys';
 import { isConditionFailure } from '../shared/retry';
-import { iamSinkTarget } from '../shared/sink-auth';
+import { iamSinkTarget, secretNameInFleet, sinkSecretPrefix } from '../shared/sink-auth';
 import { iso } from '../shared/time';
 import type { MappingSource as ModelMappingSource, SinkAuth, SinkSummary, SinkType } from '../smithy/metering/typescript-ssdk-codegen/src';
 
@@ -117,8 +117,8 @@ export function validateSink(sink: SinkItem, fleetName: string): SinkItem {
       }
       return sink;
     }
-    if (sink.secretName === undefined || !sink.secretName.startsWith(`${fleetName}/metering/sinks/`) || sink.secretName.includes('..')) {
-      throw apiError.validation(`secretName must be under ${fleetName}/metering/sinks/`);
+    if (sink.secretName === undefined || !secretNameInFleet(fleetName, sink.secretName)) {
+      throw apiError.validation(`secretName must be under ${sinkSecretPrefix(fleetName)}`);
     }
     return sink;
   }

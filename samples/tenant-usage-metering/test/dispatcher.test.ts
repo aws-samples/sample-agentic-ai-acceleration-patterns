@@ -55,6 +55,7 @@ function setup(sink: SinkItem) {
   const dispatcher = new Dispatcher({
     db,
     tableName: 't',
+    fleetName: 'demo',
     exportBucket: 'b',
     s3: new S3Client({ region: 'eu-central-1' }),
     secrets,
@@ -93,15 +94,18 @@ describe('AWS_IAM sinks (spec §4.4)', () => {
   });
 
   test.each([
-    ['no secretName', {}],
-    ['an empty secretName', { secretName: '' }],
-  ])('a stored SECRET sink with %s fails at once, unsent', async (_name, overrides) => {
+    ['no secretName', {}, 'SECRET_NAME_MISSING'],
+    ['an empty secretName', { secretName: '' }, 'SECRET_NAME_MISSING'],
+    ['a secretName of another fleet', { secretName: 'other/metering/sinks/s' }, 'SECRET_NAME_INVALID'],
+    ['a secretName outside the sink prefix', { secretName: 'demo/other/s' }, 'SECRET_NAME_INVALID'],
+    ['a secretName with ..', { secretName: 'demo/metering/sinks/../admin' }, 'SECRET_NAME_INVALID'],
+  ])('a stored SECRET sink with %s fails at once, unsent', async (_name, overrides, reason) => {
     const { dispatcher, sent } = setup(sinkItem({ auth: 'SECRET', ...overrides }));
     expect(await dispatcher.dispatch(message, 1)).toEqual({ done: true });
     expect(sent).toHaveLength(0);
     expect(secretsMock.commandCalls(GetSecretValueCommand)).toHaveLength(0);
     const update = ddb.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(update.ExpressionAttributeValues?.[':state']).toEqual({ status: 'FAILED', reason: 'SECRET_NAME_MISSING' });
+    expect(update.ExpressionAttributeValues?.[':state']).toEqual({ status: 'FAILED', reason });
   });
 
   test('sigV4Signer signs for the target, over the delivery headers, with every value of a repeated query key', async () => {

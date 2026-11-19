@@ -19,7 +19,7 @@ SPDX-License-Identifier: MIT-0
 > update through the raw bucket's configuration deny. The two paths differ
 > only before the raw store; the `BUS` run is on the current code. A
 > delete leaves only the CDK provider log groups (§11). Unit tests:
-> 177.
+> 185.
 > **Not exercised live:** `StartIngestRedrive` with messages in the queue,
 > the close of an hour after `recountWindowHours`, a cell or a bus
 > subscriber in a second account (the AWS RAM shares and the share guard
@@ -72,7 +72,7 @@ Two layers check each route, from one table
 | Ingest subscriber | `AWS::EventsV2::Subscriber` to Firehose, batches of 500, 24 h and 185 attempts, SQS dead-letter queue | same |
 | Raw stream | Firehose, dynamic partitioning on the event hour into `raw/hour=…/` | same |
 | Bus shares | one AWS RAM resource share per bus with a non-empty subscriber list, managed permission `AWSRAMEventBridgeEventBusV2SubscribeOnly` | same |
-| Share guard | custom resource that reads the registry before the shares change and fails the deploy if a listed account holds a registered cell | [`src/guard/share-guard.function.ts`](src/guard/share-guard.function.ts) |
+| Share guard | custom resource that reads the registry before the shares change and fails the deploy if a listed account holds a cell that can still send | [`src/guard/share-guard.function.ts`](src/guard/share-guard.function.ts) |
 | Table | DynamoDB `TableV2`, on demand, PITR, TTL, stream with both images, three sparse indexes | [`src/construct/table.ts`](src/construct/table.ts) |
 | Object tracker | Lambda on S3 notifications for `raw/`, `readmitted/` and `firehose-error/`; on-failure queue | [`src/tracker/`](src/tracker/) |
 | Recounter | Step Functions Standard, 25-minute timeout; one Lambda task (`count`, and `fail` on the catch path) | [`src/recount/`](src/recount/) |
@@ -128,8 +128,10 @@ ARN pattern; Scheduler on the stack's schedule group ARN (Scheduler sets
 
 ### 4.1 Bus sharing
 
-`rawSubscriberAccountIds` (`BUS` only) and `usageSubscriberAccountIds`
-name the vendor accounts that read a bus (ADR-0006). For a non-empty list
+`rawSubscriberAccountIds` (`BUS` only; a non-empty list on `DIRECT` fails
+synth) and `usageSubscriberAccountIds` name the vendor accounts that read
+a bus (ADR-0006). Neither list may name the metering account, which reads
+its buses directly; synth refuses it when the stack's account is known. For a non-empty list
 the construct creates an AWS RAM resource share of that bus with those
 accounts and the managed permission
 `AWSRAMEventBridgeEventBusV2SubscribeOnly`: the account may create, update
@@ -141,8 +143,12 @@ the bus. Every subscriber account then attaches a `UsageSubscriber`.
 No account may hold cells and read a bus. The check runs at both ends:
 `PutCellEmitter` refuses a cell in a listed account or the metering
 account (`ACCOUNT_NOT_ALLOWED`), and the share guard, a custom resource
-that runs before the shares change, reads the registry and fails the
-deploy if any listed account already holds a registered cell. A subscriber
+that runs after the admin function's block list is updated and before the
+shares change, reads the registry and fails the deploy if any listed
+account holds a cell that can still send: an `ACTIVE` emitter, or a
+`CLOSING` one before its `closesAt`. A deleted cell stops counting at its
+close time (`closeGraceMinutes` after `DeleteCellEmitter`), so the
+refusal clears once those cells are deleted and closed. A subscriber
 created while its account was listed keeps delivering after the account
 is removed from the share; the vendor revokes it with EventBridge
 `RevokeResource`.
@@ -224,7 +230,9 @@ otherwise.
 
 An `HTTP` sink authenticates in one of two ways (spec §4.4). `SECRET`
 reads the sink's secret under `<fleet>/metering/sinks/` and sends it as a
-header; a stored `SECRET` sink without a secret name is `FAILED` at once.
+header; a stored `SECRET` sink without a secret name is `FAILED` at once
+with `SECRET_NAME_MISSING`, and one whose secret name is outside that
+prefix with `SECRET_NAME_INVALID`.
 `AWS_IAM` signs each delivery with SigV4 as the dispatcher role, only for a
 Lambda function URL or API Gateway host, checked again before each send; a
 stored sink that fails the check is `FAILED` with `AUTH_TARGET_INVALID`
@@ -325,4 +333,9 @@ which CDK creates outside the stack.
 - The integration test reads stack outputs for the stand-in callers' role
   ARNs; a consumer reads the published parameter instead (integration-test.md,
   test-only shortcuts).
+- The share guard reads the `list-by-type` index, which is eventually
+  consistent. A `PutCellEmitter` that succeeded just before the block list
+  went live may not be in the index when the guard reads it, and is missed
+  for that propagation lag; the next deploy that changes a list catches it
+  (§4.1, M-6).
 - The residuals of [`threat-model.md`](threat-model.md) apply.

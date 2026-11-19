@@ -114,7 +114,6 @@ project.preCompileTask.exec('smithy build');
 project.addTask('integ', {
   description: 'Deploy the demo stack, run test/integ.metering.ts, destroy the stack (needs AWS_REGION)',
   exec: 'bash scripts/integ.sh',
-  receiveArgs: true,
 });
 
 // ts-jest transpiles per file and reports no type errors, so the tests are

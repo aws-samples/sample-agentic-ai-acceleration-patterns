@@ -7,7 +7,7 @@
  * ingest pipeline, the recounter and the sinks (spec §3.1).
  */
 
-import { Aws, Names } from 'aws-cdk-lib';
+import { Aws, Names, Stack } from 'aws-cdk-lib';
 import type * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import type * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -64,7 +64,7 @@ export class TenantUsageMetering extends Construct {
     // bucket keeps ACLs disabled. Set on this node (before any child exists)
     // so the construct does not depend on the consumer's cdk.json.
     this.node.setContext('@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy', true);
-    this.config = resolveProps(props);
+    this.config = resolveProps(props, Stack.of(this).account);
 
     // Physical names the trust conditions and policies need before the
     // resources exist; unique per stack and construct, within service limits.
@@ -91,8 +91,8 @@ export class TenantUsageMetering extends Construct {
     this.usageBusArn = this.pipeline.usageBusArn;
     // The AWS RAM shares and, before them, the registry check (ADR-0006).
     const sharedAccounts = [...this.config.rawSubscriberAccountIds, ...this.config.usageSubscriberAccountIds];
-    if (sharedAccounts.length > 0) {
-      const guard = createShareGuard(this, this.table, sharedAccounts);
+    const guard = sharedAccounts.length > 0 ? createShareGuard(this, this.table, sharedAccounts) : undefined;
+    if (guard !== undefined) {
       shareBuses(this, this.config, this.pipeline, names, guard);
     }
     this.emitterRoleNamePattern = emitterRolePattern(this.config.fleetName, Aws.PARTITION);
@@ -108,6 +108,9 @@ export class TenantUsageMetering extends Construct {
       scheduleGroupName: names.scheduleGroupName,
       metricNamespace: namespace,
     });
+    // The admin function's block list is updated before the guard reads the
+    // registry, so no new cell lands in a listed account after the read.
+    guard?.node.addDependency(this.compute.adminFn);
     denyConfigurationChanges(this, storage);
 
     const api = createApi(this, {
