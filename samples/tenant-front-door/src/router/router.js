@@ -14,9 +14,9 @@ const LOGIN = 'login.' + APP;
 const ID = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const WWW = { 'www-authenticate': 'Bearer' };
 const kvs = cf.kvs();
-// §4.1 value shapes: s string, i non-negative integer, upper case optional.
+// §4.1 fields the router reads: s string, i non-negative integer, upper case optional.
 const SHAPES = {
-  tenant: 'c:s,ac:s,dt:i,s:s,n:s,d:S,dk:S,dx:I', host: 't:s,ac:s', cell: 'ac:s,o:s',
+  tenant: 'c:s,dt:i,s:s,n:s', host: 't:s', cell: 'o:s',
   app: 'az:s,tk:s,cid:s,sc:s,lo:s,ex:S', signin: 'cur:s',
 };
 
@@ -29,7 +29,7 @@ async function get(kind, key) {
   try {
     o = JSON.parse(await kvs.get(key));
   } catch (e) {
-    return null;
+    return null; // a missing key, or any store fault: fail closed
   }
   if (!isObj(o) || o.v !== 1) return null;
   const fields = SHAPES[kind].split(',');
@@ -38,11 +38,12 @@ async function get(kind, key) {
     if (x === undefined && t !== f[1]) continue;
     if (t === 's' ? typeof x !== 'string' : !(typeof x === 'number' && x >= 0 && Math.floor(x) === x)) return null;
   }
-  if (kind === 'tenant' && (!/^(active|suspended)$/.test(o.s) || (o.d === undefined) !== (o.dk === undefined) ||
-    (o.dx !== undefined && o.dk === undefined))) return null;
+  if (kind === 'tenant' && !/^(active|suspended)$/.test(o.s)) return null;
   if (kind === 'signin') {
     if (!isObj(o.k) || !own(o.k, o.cur)) return null;
-    for (const kid in o.k) if (!/^[a-z0-9]{1,8}$/.test(kid) || typeof o.k[kid] !== 'string') return null;
+    for (const kid in o.k) {
+      if (!/^[a-z0-9]{1,8}$/.test(kid) || typeof o.k[kid] !== 'string' || Buffer.from(o.k[kid], 'base64').length !== 32) return null;
+    }
   }
   return o;
 }
@@ -111,7 +112,7 @@ function one(q, name) {
   const x = q[name];
   return x && !(x.multiValue && x.multiValue.length > 1) && x.value ? x.value : null;
 }
-const fwd = (v) => /^[\w.~%+-]*$/.test(v) ? v : encodeURIComponent(v);
+const fwd = (v) => v.replace(/[^\w.~%+-]/g, encodeURIComponent);
 
 // Step 2: the sign-in host, host mode only.
 async function signinHost(req) {
@@ -139,7 +140,8 @@ async function handler(event) {
   if (HOST_MODE && host === LOGIN) return signinHost(req);
   const pooled = isPooled(host);
   let tenant = null;
-  if (HOST_MODE || host !== APP) {
+  const looked = HOST_MODE || host !== APP;
+  if (looked) {
     const he = await get('host', 'host#' + host);
     if (!he) return fail(404);
     tenant = he.t;
@@ -151,24 +153,22 @@ async function handler(event) {
   if (agents && !(AGENTS && /^\/agents\/[a-z0-9-]{1,32}\/invocations$/.test(uri))) return fail(404);
   const ss = uri === '/signin-state', config = uri === '/config.json';
   let te = null;
-  if (api || agents || (HOST_MODE && ss) || (hostTenant && config)) {
+  if (api || agents || (HOST_MODE && ss) || (looked && config)) {
     // Step 4.
     const site = h['sec-fetch-site'];
     if ((api || agents || ss) && site && site.value !== 'same-origin' && site.value !== 'none') return fail(403);
     // Step 5.
     let token = null;
-    if (api || agents || HOST_MODE) {
-      const auth = h.authorization ? h.authorization.value : '';
-      const tooLong = Buffer.byteLength(auth, 'utf8') > 8192;
-      if (api || agents) {
-        const c = tooLong ? null : decodeClaim(auth);
-        if (!HOST_MODE) cf.logCustomData(c && ID.test(c.tenant) ? c.tenant : '-');
-        if (!c) return fail(401, WWW);
-        if (HOST_MODE && c.tenant !== hostTenant) return fail(403);
-        tenant = c.tenant;
-        token = c.token;
-      } else if (tooLong) return fail(401, WWW);
-    }
+    const auth = h.authorization ? h.authorization.value : '';
+    const tooLong = Buffer.byteLength(auth, 'utf8') > 8192;
+    if (api || agents) {
+      const c = tooLong ? null : decodeClaim(auth);
+      if (!HOST_MODE) cf.logCustomData(c && ID.test(c.tenant) ? c.tenant : '-');
+      if (!c) return fail(401, WWW);
+      if (HOST_MODE && c.tenant !== hostTenant) return fail(403);
+      tenant = c.tenant;
+      token = c.token;
+    } else if (tooLong) return fail(401, WWW);
     // Step 6.
     te = ID.test(tenant) && await get('tenant', 'tenant#' + tenant);
     if (!te) return fail(403);

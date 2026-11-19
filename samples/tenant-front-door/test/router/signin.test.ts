@@ -136,6 +136,12 @@ describe('step 2: the sign-in host login.<appDomain> (host)', () => {
       `https://${ACME_HOST}/callback?state=${f.valid[0].state}&error=access_denied&error_description=User%20cancelled+login`);
   });
 
+  test('step 2: existing escapes are kept when other characters in the value are encoded', async () => {
+    const a = await callback(hostMode(), { state: f.valid[0].state, error: 'invalid_scope', error_description: 'a%20b:c/d' });
+    expect(header(a, 'location')).toContain('&error_description=a%20b%3Ac%2Fd');
+    expect(new URL(header(a, 'location')!).searchParams.get('error_description')).toBe('a b:c/d');
+  });
+
   test('step 2: a value with characters that need encoding is encoded, so it cannot add a parameter', async () => {
     const a = await callback(hostMode(), { state: f.valid[0].state, error: 'x&code=evil', error_description: 'a b#c' });
     const url = new URL(header(a, 'location')!);
