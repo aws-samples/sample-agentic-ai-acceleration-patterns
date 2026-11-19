@@ -1268,7 +1268,7 @@ hook's put replaces the entry, `s: active` and routed to the new cell
     its origin is in `connect-src` (§7.1), and the exchange API must
     answer with CORS headers (§7.2). The deployer lists the app's origins
     in `tenant-identity`'s `allowedOrigins` input (`tenant-identity`
-    §5.4.1, ADR-0040, §6.3).
+    §5.4.1 and `tenant-identity` ADR-0040; the values are in §6.1).
   - The request is `tenant-identity`'s: a form-encoded `POST` with
     `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
     `client_id`, `subject_token` (the user's refresh token),
@@ -1683,9 +1683,17 @@ All with a small static HTML or JSON body and `no-store`:
   (§7.2), which only the issuer can configure. For `tenant-identity`,
   deploy its `shared-pool-multi-tenant` stack with `allowedOrigins`
   set to `https://<appDomain>` in `single` mode, or `https://*.<appDomain>`
-  in `host` mode (`tenant-identity` §5.4.1, ADR-0040). Its synth refuses a
-  pattern under a public suffix or `amazonaws.com`, so `appDomain` must be
-  a domain the vendor runs.
+  in `host` mode, `appDomain` in lower case (`tenant-identity` §5.4.1 and
+  ADR-0040). Those are the only pages that post the exchange: in `host`
+  mode the SPA holds a session only on `<tenant>.<appDomain>`, the apex
+  answers 404 and `login.<appDomain>` serves no SPA; a dedicated domain
+  holds no token in either mode, because its session moves to
+  `signInHost` (§3.5). The pattern lets every page one label under
+  `appDomain` read the exchange's answers, so nothing but the front door
+  is served one label under it. `tenant-identity`'s synth refuses a
+  pattern whose domain is a public suffix or is or ends in
+  `amazonaws.com`, so `host` mode needs an `appDomain` of the vendor's
+  own, not a CloudFront or other AWS hostname.
 - With `dedicatedDomains` on, an ACM certificate quota in the edge
   account's `us-east-1` raised before the dedicated domains near 2,500
   (§4.1).
@@ -1860,7 +1868,7 @@ Limits of these promises:
 | Sample | How | Needed for |
 |---|---|---|
 | `control-plane` | its API (`GetCell`, `GetDeployment`, `GetTenant`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its global hooks (R-39 to R-46, control-plane ADR-0044): `PutHook`, the `<fleet>-global-hook` role and `globalHookManagedPolicyArns`, the hook environment and `SCRIPT_OUTPUTS`. A prerequisite: without hooks the front door registers no route, and ADR-0044 is on `main` but still Proposed (Q-5) | placement checks, route registration, the integration test |
-| `tenant-identity` `shared-pool` and `shared-pool-multi-tenant` | its published parameters; the second topology also mints the `tenants` token and serves the token exchange (§3.5), whose `allowedOrigins` input lists the app's origins (`tenant-identity` §5.4.1, ADR-0040, §6.3). Step 5 of §10 uses a `tenants` token only to check the edge's 401 and calls no exchange | the demo issuer and the integration test |
+| `tenant-identity` `shared-pool` and `shared-pool-multi-tenant` | its published parameters; the second topology also mints the `tenants` token and serves the token exchange (§3.5), whose `allowedOrigins` input lists the app's origins (`tenant-identity` §5.4.1 and ADR-0040; the values are in §6.1). Step 5 of §10 uses a `tenants` token only to check the edge's 401 and calls no exchange. A prerequisite: `allowedOrigins` is in [PR #61](https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns/pull/61), which merges before this sample | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter: `baseUrl` gives the `agentIngress` origin's domain and origin path | `/agents/*`, optional |
 
 What the front door assumes of the agent ingress's paths (ADR-0019):
@@ -2000,13 +2008,17 @@ the 1,783.
   body, which adds `;charset=UTF-8`), with `credentials` not `include`.
   Browser instrumentation that adds a tracing header to every `fetch`
   excludes this URL, or the browser sends a preflight that API Gateway
-  refuses. The browser reads the answer only if the exchange API sends
-  `Access-Control-Allow-Origin` and `Vary: Origin`. It echoes an
-  `Origin` equal to `https://<appDomain>` in `single` mode or one label
-  under `appDomain` in `host` mode, and no other. A network error on
-  the exchange (API Gateway's own 429, 403 or 502 carry no CORS header)
-  is retried at most twice with backoff (1 s, then 3 s); then the SPA
-  keeps the refresh token and shows a fixed "try again later" error.
+  refuses with 403 and no CORS header. The browser lets the SPA read the
+  answer only if it carries `Access-Control-Allow-Origin` naming the
+  page's origin. The exchange API sends that header only for an `Origin`
+  equal to `https://<appDomain>` in `single` mode or one label under
+  `appDomain` in `host` mode, and `Vary: Origin` on every answer. API
+  Gateway's own answers (a throttle 429, a resource-policy 403, an
+  integration failure or timeout, a 502 when the function fails to
+  start) carry no CORS header, so the SPA sees a network error and no
+  status. It retries a network error on the exchange at most twice with
+  backoff (1 s, then 3 s), then keeps the refresh token and shows a fixed
+  "try again later" error.
 - `PUT` and `POST` calls to `/api/*` send the body's SHA-256 in
   `x-amz-content-sha256`, which origin access control needs to sign a
   request with a body to a Lambda function URL (ADR-0011).
