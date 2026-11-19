@@ -7,7 +7,7 @@
 // and the result record are the shared library's (stress/k6/lib.js, stress ADR-0007); the
 // scenario files import everything from here.
 //
-// The shared library sits at stress/k6/ in the repository. On the driver host run.sh copies
+// The shared library sits at stress/k6/ in the repository. On the driver host stress/driver/k6.sh copies
 // both folders to the same relative paths under /opt/stress/repo/, so this import works there
 // as it does in a checkout.
 

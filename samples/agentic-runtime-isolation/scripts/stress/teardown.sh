@@ -16,7 +16,7 @@
 # a registry parameter with this prefix is still there.
 #
 # The seeded tenants are kept for the next run (§8.2: Cognito bills per
-# monthly active user). With --tenants, they are deleted first, at 8 a second
+# monthly active user). With --tenants, they are deleted first, at 2 a second
 # (DeleteTenant on tenant-identity's platform API, 204 or 404 both done), and
 # each deleted one leaves the manifest; tenants that would not delete stay in
 # it, the stacks are destroyed anyway, and the script fails at the end naming
@@ -108,8 +108,8 @@ if [[ "$DELETE_TENANTS" == 1 ]]; then
       : >"$BODY"; : >"$REQ"; chmod 600 "$BODY" "$REQ"
       while :; do
         st="$(platform DELETE "platform/tenants/$1")" || st=000
-        if [[ ! "$st" =~ ^(429|5[0-9][0-9]|000)$ ]] || (( attempt >= 5 )); then break; fi
-        sleep "$delay"; attempt=$((attempt + 1)); delay=$((delay * 2))
+        if [[ ! "$st" =~ ^(429|5[0-9][0-9]|000)$ ]] || (( attempt >= 8 )); then break; fi
+        sleep "$delay"; attempt=$((attempt + 1)); delay=$((delay < 30 ? delay * 2 : 30))
       done
       echo "DeleteTenant ${st}" >>"$STATUSES"
       [[ "$st" =~ ^(200|202|204|404)$ ]] && echo "$1" >>"$DELETED"
@@ -118,8 +118,8 @@ if [[ "$DELETE_TENANTS" == 1 ]]; then
     START=$SECONDS
     TOTAL="$(jq '.tenants | length' "$MANIFEST")"
     while read -r id; do
-      pace 125
-      while (( $(jobs -rp | wc -l) >= 24 )); do wait -n 2>/dev/null || true; done
+      pace 500
+      while (( $(jobs -rp | wc -l) >= 4 )); do wait -n 2>/dev/null || true; done
       job_delete "$id" &
     done < <(jq -r '.tenants[].tenantId' "$MANIFEST")
     wait

@@ -10,8 +10,8 @@
  * Both read `STRESS_TIER` (`small`, `medium`, `large`) and need no credentials.
  */
 
-import type { Draw } from '../../../../stress/src/budget';
 import { type StressTier, tierOf } from './tiers';
+import type { Draw } from '../../../../stress/src/budget';
 
 /** The label of the account that holds the cell; in slice mode it is the one test account. */
 export const CELL_ACCOUNT = 'cell-account-1';

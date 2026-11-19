@@ -2,13 +2,12 @@
 
 The load half of the stress test in
 [design/agentic-runtime-isolation.stress-test.md](../../../design/agentic-runtime-isolation.stress-test.md)
-(§5 Phase 2, §6, §8.3). `run.sh` copies this folder, the shared library
+(§5 Phase 2, §6, §8.3). `slice.sh run` (through `stress/driver/k6.sh`) copies this folder, the shared library
 [`stress/k6/`](../../../../../stress/k6/README.md) (token pool and refresh, pacing, the
 correlation header, the result record) and the seed manifest to the driver host and runs
 one scenario; the pass table is computed by `collect.sh`,
-not here. Written for k6 v1.x (ES modules, `k6/execution`); `k6 inspect` of S1 to S7 passes on k6
-v2.4 on the driver host. No full run of these scenarios against an ingress has used the shared
-library yet, so a first run is also its check.
+not here, from the records and the hops' logs. Written for k6 v1.x (ES modules, `k6/execution`); `k6 inspect` of S1 to S7 passes on k6 v2.4
+on the driver host (W-2); `slice.sh run` runs them against an ingress (W-3, ADR-0052).
 
 | File | Does |
 |---|---|
@@ -38,7 +37,7 @@ record (`agentic-runtime-isolation.S<n>.json`, stress spec §4.3).
 | `ENDPOINT` | yes | the ingress `EndpointUrl` output; `/<agent>/invocations` is appended as `lib.sh backend_url` does |
 | `PLATFORM_API` | yes | tenant-identity's API base URL (`.../prod/`): `platform/tenants/{t}/users/{u}/token` (SigV4) and `oauth2/token` (exchange) |
 | `APP_CLIENT_ID` | yes | tenant-identity's app client id (`/application-plane/shared/identity/appClientId`); the exchange form requires it |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` (or `REGION`) | yes | signs IssueToken. On the driver, `run.sh` exports the instance role's credentials from IMDSv2 first; the k6 aws jslib does not read IMDS |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` (or `REGION`) | yes | signs IssueToken. On the driver, `stress/driver/k6.sh` exports the instance role's credentials first; the k6 aws jslib does not read IMDS |
 | `STRESS_RUN_ID` (or `RUN_ID`) | no | names the run's conversations (`stress<run><tenant>`) and the correlation ids; default a timestamp |
 | `ISSUER` | no | when set, each report's `tokenIss` is checked against it (a check, not a mismatch) |
 | `ENTITLEMENTS_API` | no | read by the operator scripts; unused here |

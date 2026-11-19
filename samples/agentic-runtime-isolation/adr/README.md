@@ -57,3 +57,4 @@ SPDX-License-Identifier: MIT-0
 | [0049](./0049-reserve-concurrency-for-the-authoriser-too-and-size-the-stage-throttle-under-it.md) | Reserve concurrency for the authoriser as well as the integration Lambda, and size the stage throttle under it | Accepted | Amends ADR-0023, ADR-0029, ADR-0043 | 2026-11-11 |
 | [0050](./0050-run-the-agent-on-runtime-platform-version-v2.md) | Run the agent on Runtime platform version V2, set explicitly, with the nonce drawn on the first request | Accepted | Amends ADR-0011 | 2026-11-13 |
 | [0051](./0051-keep-the-ingress-minted-token-over-cognito-token-exchange.md) | Keep the ingress-minted transaction token over Cognito token exchange | Accepted | Amends ADR-0030, ADR-0031 | 2026-11-17 |
+| [0052](./0052-run-the-stress-test-as-a-slice-of-the-platform-stress-contract.md) | Run the stress test as a slice of the platform stress contract | Accepted | Amends the stress-test plan | 2026-11-19 |

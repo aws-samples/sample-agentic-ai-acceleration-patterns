@@ -95,7 +95,7 @@ the host through Run Command and reads its output from the results bucket.
 `driver/k6.sh <script> [NAME=value ...]` runs a k6 script on the host: it mirrors `stress/k6/` and
 the script's folder under `/opt/stress/repo/` at their repository paths, passes the `STRESS_*`
 variables, and brings the result records back to `$STRESS_RESULTS`. A slice's `run` verb calls it
-(the runtime-isolation `run.sh` copies its files through S3 instead; see Known limitations). The library, the
+(the runtime-isolation slice's `run` verb does). The library, the
 record it writes and the correlation header are described in [`k6/README.md`](./k6/README.md);
 `k6/smoke.js` is the check that a deployed host runs k6 and writes a record `parseRecord` accepts.
 
@@ -142,8 +142,7 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   against the same accounts is not detected. Run one stress test per set of
   accounts at a time.
 - One run per driver host. `stress/driver/k6.sh` clears `/opt/stress/repo`, `inputs` and `out`
-  on the host before it unpacks, and a sample's own S3 copy (`run.sh ... s3 sync --delete`)
-  rewrites `/opt/stress/`, so two runs against one `<prefix>-driver` overwrite each other's
+  on the host before it unpacks, so two runs against one `<prefix>-driver` overwrite each other's
   files. Nothing on the host locks; give a concurrent run its own prefix and driver.
 - Budget limits are what `--limits` says; without it the runner checks
   against service defaults, not the accounts' applied quotas.

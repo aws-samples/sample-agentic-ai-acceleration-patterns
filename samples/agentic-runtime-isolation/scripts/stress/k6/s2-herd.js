@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 //
-// S2 thundering herd (§5, §13 question 2): run.sh first retires every warm ingress instance
+// S2 thundering herd (§5, §13 question 2): slice.sh run first retires every warm ingress instance
 // and flushes the authoriser cache. This file then primes the tokens (platform API only, the
 // ingress stays idle), and ramps 0 -> herd rate in 5 s, held for the tier's length (large:
 // 120 s; herd rate 1.6 x steady, 800 rps at large; HERD_RPS overrides). No conversation is
