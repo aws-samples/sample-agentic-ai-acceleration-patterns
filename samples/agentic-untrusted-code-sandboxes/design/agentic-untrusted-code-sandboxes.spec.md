@@ -320,15 +320,15 @@ The tool, not the backend, decides reuse from the registry row (§4.1).
 
 | Step | `microvm` | `nitro` | `agentcore` |
 |---|---|---|---|
-| Start | `RunMicrovm` with no `executionRoleArn`, `egressNetworkConnectors` = the sample's VPC connector only (omitting it gives the Lambda-managed `INTERNET_EGRESS`), `ingressNetworkConnectors` = `HTTP_INGRESS`, `maximumDurationInSeconds` = `sandboxMaxLife`, idle policy `{autoResumeEnabled: true, maxIdleDurationSeconds: sandboxIdle, suspendedDurationSeconds: 1800}`, `logging: {disabled: {}}`, `runHookPayload` = `{"nonce": …, "tenant": …}` (the API caps it at 4096 characters), delivered to the runner's `/run` lifecycle hook on port 9000 | `RunTask` with the tool tenant role, task definition with no `taskRoleArn`, sandbox subnets, the task security group, tags `TenantId`, container override env `RUNNER_NONCE` | none; the session starts on the first `InvokeAgentRuntime`, whose job carries the nonce; the runner adopts the first nonce it sees in that session |
+| Start | `RunMicrovm` with no `executionRoleArn`, `egressNetworkConnectors` = the sample's VPC connector only (omitting it gives the Lambda-managed `INTERNET_EGRESS`), `ingressNetworkConnectors` = `HTTP_INGRESS`, `maximumDurationInSeconds` = `sandboxMaxLife`, idle policy `{autoResumeEnabled: true, maxIdleDurationSeconds: sandboxIdle, suspendedDurationSeconds: 1800}`, `logging: {disabled: {}}`, `runHookPayload` = `{"nonceHash": …, "tenant": …}` (the API caps it at 4096 characters), delivered to the runner's `/run` lifecycle hook on port 9000 | `RunTask` with the tool tenant role, task definition with no `taskRoleArn`, sandbox subnets, the task security group, tags `TenantId`, container override env `RUNNER_NONCE_HASH` | none; the session starts on the first `InvokeAgentRuntime`, whose job carries the nonce (data plane: the payload is not in CloudTrail); the runner adopts the first nonce it sees in that session |
 | Address | MicroVM endpoint plus a fresh auth token per call, port 8080 only, 5-minute expiry | task ARN, and the ENI private IP once `ready` reads it, port 8443 | runtime ARN plus `runtimeSessionId` = `rc-` + hex SHA-256 of the tenant id (67 characters, ADR-0009) |
 | Ready | `GetMicrovm` `RUNNING`, then `/ping` answers; `bootId` from `/ping` (made in the `/run` hook, so it survives suspend and resume) | `DescribeTasks` `RUNNING` gives the ENI private IP, written to `address` with a version condition; then `/hello` answers; `bootId` from `/hello` | always ready; `bootId` from each result (made at the session's first job, because every session of a runtime version starts from the same restored process) |
-| Identity check | runner returns `HMAC(nonce, runId)` with the result; the tool checks it | over TLS on 8443 (ADR-0010): the tool sends `POST /hello` with a challenge; the runner answers `HMAC(nonce, challenge ‖ certFingerprint)`; the tool checks it against the connection's certificate and sends the job on the same connection | runner returns `HMAC(nonce, runId)`; a runner with no nonce adopts the job's, so a restart is detected by `bootId`, not by the nonce |
+| Identity check | every job carries `jobAuth` = `HMAC(nonce, runId ‖ SHA-256(code ‖ input))`; the runner checks it before it writes the input or starts code, and refuses a mismatch with `wrong_sandbox`; the result carries `HMAC(nonce, runId)`, which the tool checks | over TLS on 8443 (ADR-0010): the tool sends `POST /hello` with a challenge; the runner answers `HMAC(nonce, challenge ‖ certFingerprint)`; the tool checks it against the connection's certificate and sends the job on the same connection; the job also carries `jobAuth` | the job carries the nonce and `jobAuth`; a runner with no nonce adopts the job's (a restart under the tenant's own session id, detected by `bootId`), and a runner that holds a different nonce refuses with `wrong_sandbox` before it writes or runs anything; the result carries `HMAC(nonce, runId)` |
 | Run | `POST /run` with `X-aws-proxy-auth`, HTTPS | `POST /run` on the checked TLS connection | `InvokeAgentRuntime`, HTTPS, payload is the job |
 | Stop | idle policy suspends, then the platform ends it after 30 suspended minutes or at `sandboxMaxLife`; `TerminateMicrovm` on drain, offboard or overrun | reaper `StopTask` after `sandboxIdle` idle, or when the task's own `startedAt` is older than `sandboxMaxLife`; `StopTask` on drain, offboard or overrun | runtime `lifecycleConfiguration` `idleRuntimeSessionTimeout` = `sandboxIdle`, `maxLifetime` = `sandboxMaxLife`; `StopRuntimeSession` on drain, offboard or overrun |
 | Start cap | 20 s (measured P90 2.8 s) | 5 min (measured 31–34 s from zero instances in two runs that may have used a pre-prepared instance, 11–18 s warm; the cap leaves room for a full instance launch) | 30 s (measured 2–2.5 s for a new session) |
 | Start and stop: enforced or filtered | filtered: the tool role may run, call and stop any MicroVM of the image (MicroVM actions authorize against the image only; a per-tenant tag condition would need an image per tenant) | enforced: `RunTask` requires `aws:RequestTag/TenantId` = `${aws:PrincipalTag/TenantId}`, `StopTask` requires `aws:ResourceTag/TenantId` = `${aws:PrincipalTag/TenantId}` (ADR-0014) | filtered: one runtime; the session id is derived by code (the actions support no session-id condition) |
-| Call: enforced or filtered | filtered by address; the nonce check rejects a wrong MicroVM | filtered by address; the nonce check rejects a wrong task before any job bytes are sent | filtered by session id; `bootId` detects a restarted session |
+| Call: enforced or filtered | filtered by address; a wrong MicroVM's runner refuses the job before any code runs or any input is written | filtered by address; the nonce check rejects a wrong task before any job bytes are sent | filtered by session id; a wrong session's runner refuses the job before any code runs; `bootId` detects a restarted session |
 | Code holds | no credentials; the link-local metadata service answers with the Region, the AZ id and a per-MicroVM key, and holds no credentials without an execution role | no credentials: no task role; the execution role is used by the ECS agent outside the sandbox; the task metadata endpoint gives the task ARN, cluster, image and log group; IMDS does not answer | the runtime role's credentials from IMDSv2 (§6.2 C-2) |
 | Egress | VPC connector into sandbox subnets with no route and a security group with no egress | sandbox subnets with no route; task security group egress only to the Logs endpoint (`awslogs` leaves through the task ENI; the instance pulls the image) | sandbox subnets; runtime security group egress only to the ECR, S3 and Logs endpoints, each with a scoped endpoint policy (§3.7) |
 | DNS | the VPC resolver (through two local forwarders) answers public names; with `dnsFirewall`, only §3.9 names | the VPC resolver answers public names; with `dnsFirewall`, only §3.9 names | the VPC resolver (through two local forwarders) answers public names; with `dnsFirewall`, only §3.9 names |
@@ -370,9 +370,21 @@ in the `/run` lifecycle hook on `microvm`, at process start on `nitro`
 `agentcore`. Every random value comes from `os.urandom` or `secrets`,
 never from a generator a snapshot could restore with its state. On
 `nitro` it also makes a key pair and a self-signed certificate at process
-start, held only in memory. The nonce comes from the `/run` hook payload,
-the `RUNNER_NONCE` variable, or the first AgentCore job, and the runner
-removes it from the environment it hands to code.
+start, held only in memory.
+
+Nonce delivery (ADR-0018). Start calls are control-plane calls that
+CloudTrail records with their parameters, so they never carry the nonce.
+The `microvm` `/run` hook payload and the `nitro` `RUNNER_NONCE_HASH`
+variable carry only `nonceHash` = SHA-256(`"nonce" ‖ nonce`). The tool
+sends the nonce itself on the data channel, in the first `/hello` (`nitro`,
+over TLS) or with the first job (`microvm`, over the MicroVM's HTTPS
+endpoint; `agentcore`, in the `InvokeAgentRuntime` payload, which is not
+recorded). The runner adopts it only if it matches `nonceHash` (on
+`agentcore`, which has no start call, it adopts the first one), and
+removes `RUNNER_NONCE_HASH` from the environment it hands to code. A
+runner that receives a nonce not matching its hash refuses with
+`wrong_sandbox` and keeps nothing; the bytes reach only the runner
+process, which uid 1001 cannot read.
 
 It reads `SANDBOX_MEMORY_MIB` (1024 on `microvm` and `nitro`, 8192 on
 `agentcore`, the default session allocation) for its limits. It listens on
@@ -401,7 +413,14 @@ with `busy`. The runner:
    session and process group, with `/work` as the working directory and
    these limits: `RLIMIT_CPU` = `runTimeout`, `RLIMIT_AS` = sandbox memory
    less 256 MiB, `RLIMIT_NPROC` = 64, `RLIMIT_FSIZE` = 100 MiB,
-   `RLIMIT_NOFILE` = 256.
+   `RLIMIT_NOFILE` = 256. `RLIMIT_AS` is per process, so the job's total
+   is capped separately: the runner puts the job in its own cgroup v2
+   group with `memory.max` = sandbox memory less 256 MiB when it can
+   create one, and otherwise runs a watchdog that sums the resident
+   memory of every uid 1001 process every 200 ms and kills the group above
+   that limit, returning `memoryExceeded` = true. Either way the runner
+   sets its own `oom_score_adj` to -1000 and the job's to 1000, so a
+   kernel out-of-memory kill takes the job, not the runner.
 3. At `runTimeout` wall time, or when the job ends, kills the process group
    and then every remaining uid 1001 process, so nothing the code forked
    survives into the next job.
@@ -746,6 +765,7 @@ Errors (tool error `code`, no stack, no tenant data):
 | `backend_disabled` | no | `backend` names one not deployed |
 | `sandbox_starting` | yes, after `retryAfterSeconds` | the tenant's sandbox is starting (§4.1) |
 | `sandbox_busy` | yes | the tenant's sandbox is running another job |
+| `wrong_sandbox` | yes | internal: the runner refused a job not bound to its nonce; the tool marks the row dead and starts a fresh sandbox, and the caller sees `sandbox_starting` |
 | `sandbox_failed` | yes, after `retryAfterSeconds` | the sandbox ended before it served, or died mid-run (§4.1 failed starts) |
 | `tool_failed` | no | any other fault (from `toolHandler` on the gateway entry, from the core handler on the standalone entry) |
 
@@ -911,6 +931,7 @@ deploy and destroy time, and cleans up on exit.
 | S-11 | Does the tools gateway allow a tool Lambda timeout of 120 s, and what does the agent see past it? | timing budget |
 | S-12 | Can the integration test call `run_code` through the tools gateway with a transaction token without an agent in between, as a consumer could? | §8 drive path |
 | S-13 | Does a VPC-wide Route 53 Resolver DNS Firewall see and block each backend's lookups, and does each backend still work with it on? | §3.9, ADR-0016 |
+| S-14 | Runner checks not yet run: can code in one AgentCore session reach another session of the same runtime (by its address, by a listener on a known port, by anything the sessions share); can the runner create a cgroup v2 group and set `oom_score_adj` on each backend; do `RunTask` container overrides and `runHookPayload` appear in CloudTrail `requestParameters` | C-1 and C-3 on `agentcore`, §3.5 memory cap, ADR-0018 |
 
 ### 7.1 Spike results, S-1 to S-12 (2026-11-18, a non-production test account, eu-central-1)
 
@@ -985,7 +1006,7 @@ touched.
 | limits | a 6 MiB input returns `input_too_large`; a 1 MiB print returns `truncated` = true |
 | no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no answer within the script's own 3 s timeout), and the `GetObject` fails. `agentcore`: credentials load, and every call outside C-2 is denied |
 | no-egress | A's script tries HTTPS to `example.com`, a TCP connect to a public IP address on port 443 with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy. Every request fails within 5 s, and for the IP-literal probe the TCP connect itself must not complete (a TLS error after a completed connect is a failure of the step) |
-| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, and a disk fill: each returns `timedOut` or a non-zero exit, nothing of the job survives into A's next call, and A's next call works |
+| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and 64 processes that each allocate up to their `RLIMIT_AS` (a total far above the sandbox memory): each returns `timedOut` or a non-zero exit, nothing of the job survives into A's next call, and A's next call works |
 | dead-handle | stop A's sandbox out of band; A's next call returns `sandbox` = `started` |
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
 | idle | after `sandboxIdle` (2 min) idle the driver invokes the reaper; A's `nitro` task is stopped, and the stop line carries `sandboxSeconds` |

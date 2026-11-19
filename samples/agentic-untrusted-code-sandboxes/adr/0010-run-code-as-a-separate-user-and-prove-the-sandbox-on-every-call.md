@@ -4,7 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Amended by: ADR-0015
+- Amended by: ADR-0015, ADR-0018
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -64,3 +64,5 @@ and a disk fill. If S-4 shows the MicroVM base image cannot drop to a
 second user, the threat model records the gap for `microvm`.
 
 Note 2026-11-18: amended by ADR-0015. On `microvm` and `agentcore` the runner makes `bootId` and adopts the nonce when the sandbox first serves a tenant (the `/run` hook, the session's first job), because sandboxes start from a shared snapshot. The AgentCore backend is a container, because a direct-code runtime cannot drop code to a second user.
+
+Note 2026-11-19: amended by ADR-0018. Every job carries a MAC bound to the nonce, which the runner checks before it writes the input or runs code; start calls carry only a hash of the nonce, and the nonce travels on the data channel.
