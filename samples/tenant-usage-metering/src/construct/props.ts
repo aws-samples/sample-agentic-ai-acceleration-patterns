@@ -54,7 +54,8 @@ export interface TenantUsageMeteringProps {
    * Vendor accounts the usage bus is shared with through AWS RAM, under the
    * SubscribeOnly permission (ADR-0006). None of them may hold a cell:
    * `PutCellEmitter` refuses one there, and a deploy that adds an account
-   * already holding a cell that can still send fails. @default []
+   * already holding a cell that can still send fails. It may not name the
+   * metering account, which reads its buses directly. @default []
    */
   readonly usageSubscriberAccountIds?: string[];
   /**

@@ -20,14 +20,18 @@ import { LIST_BY_TYPE_INDEX } from '../shared/keys';
 export interface OffendingEmitter {
   readonly accountId: string;
   readonly cellId: string;
+  readonly status: EmitterItem['status'];
+  /** Set on a `CLOSING` emitter: when it stops counting. */
+  readonly closesAt?: string;
 }
 
 type EmitterProjection = Pick<EmitterItem, 'accountId' | 'cellId' | 'status' | 'closesAt'>;
 
 /**
  * Whether an emitter can still send: `ACTIVE`, or `CLOSING` with `closesAt`
- * still ahead. Past `closesAt` ingest admits nothing from it (spec §4.2), so
- * a deleted cell stops counting at its close time, not at TTL.
+ * still ahead or with no `closesAt` at all (the cautious reading of an item
+ * the registry never writes). Past `closesAt` ingest admits nothing from it
+ * (spec §4.2), so a deleted cell stops counting at its close time, not at TTL.
  */
 export function canStillSend(item: Pick<EmitterItem, 'status' | 'closesAt'>, nowMs: number): boolean {
   if (item.status === 'ACTIVE') {
@@ -63,11 +67,21 @@ export async function offendingEmitters(
   });
   return emitters
     .filter((item) => shared.has(item.accountId) && canStillSend(item, nowMs))
-    .map((item) => ({ accountId: item.accountId, cellId: item.cellId }));
+    .map((item) => ({
+      accountId: item.accountId,
+      cellId: item.cellId,
+      status: item.status,
+      ...(item.closesAt !== undefined ? { closesAt: item.closesAt } : {}),
+    }));
 }
 
-/** The deploy error that names each offending account and cell. */
+function describeEmitter(item: OffendingEmitter): string {
+  const state = item.status === 'CLOSING' && item.closesAt !== undefined ? `CLOSING until ${item.closesAt}` : item.status;
+  return `account ${item.accountId} (cell ${item.cellId}, ${state})`;
+}
+
+/** The deploy error that names each offending account and cell, with its state. */
 export function refusal(found: ReadonlyArray<OffendingEmitter>): string {
-  const list = found.map((item) => `account ${item.accountId} (cell ${item.cellId})`).join(', ');
+  const list = found.map(describeEmitter).join(', ');
   return `a bus may not be shared with an account that holds a cell that can still send: ${list}. Delete those cells (DeleteCellEmitter) and deploy again after their close time (closesAt), or remove the accounts from rawSubscriberAccountIds / usageSubscriberAccountIds (ADR-0006).`;
 }

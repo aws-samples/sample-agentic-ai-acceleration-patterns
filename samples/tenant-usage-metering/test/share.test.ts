@@ -160,8 +160,8 @@ describe('bus share guard (ADR-0006)', () => {
       .resolvesOnce({ Items: [emitter(ACCOUNT, 'C2'), emitter(VENDOR_B, 'C3')] });
     const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
     expect(await offendingEmitters(db, 'table', [VENDOR_A, VENDOR_B], NOW)).toEqual([
-      { accountId: VENDOR_A, cellId: 'C1' },
-      { accountId: VENDOR_B, cellId: 'C3' },
+      { accountId: VENDOR_A, cellId: 'C1', status: 'ACTIVE' },
+      { accountId: VENDOR_B, cellId: 'C3', status: 'ACTIVE' },
     ]);
     const calls = ddb.commandCalls(QueryCommand);
     expect(calls).toHaveLength(2);
@@ -178,12 +178,26 @@ describe('bus share guard (ADR-0006)', () => {
       Items: [emitter(VENDOR_A, 'C1', new Date(NOW + 60_000).toISOString()), emitter(VENDOR_A, 'C2', new Date(NOW - 60_000).toISOString())],
     });
     const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
-    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([{ accountId: VENDOR_A, cellId: 'C1' }]);
+    const closesAt = new Date(NOW + 60_000).toISOString();
+    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([{ accountId: VENDOR_A, cellId: 'C1', status: 'CLOSING', closesAt }]);
   });
 
-  test.each(['Create', 'Update'] as const)('%s fails when a listed account holds a cell, naming the account and the cell', async (type) => {
+  test('a CLOSING emitter with no closesAt counts', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [{ accountId: VENDOR_A, cellId: 'C1', status: 'CLOSING' }] });
+    const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
+    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([{ accountId: VENDOR_A, cellId: 'C1', status: 'CLOSING' }]);
+  });
+
+  test.each(['Create', 'Update'] as const)('%s fails when a listed account holds a cell, naming the account, the cell and its state', async (type) => {
     ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, '01JD00000000000000000000C1')] });
-    await expect(handler(event(type, [VENDOR_A]))).rejects.toThrow(`account ${VENDOR_A} (cell 01JD00000000000000000000C1)`);
+    await expect(handler(event(type, [VENDOR_A]))).rejects.toThrow(`account ${VENDOR_A} (cell 01JD00000000000000000000C1, ACTIVE)`);
+  });
+
+  test('the refusal gives a closing cell its close time', async () => {
+    // The handler reads the wall clock, so the close time is far ahead of it.
+    const closesAt = '2999-01-01T00:00:00.000Z';
+    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, 'C1', closesAt)] });
+    await expect(handler(event('Create', [VENDOR_A]))).rejects.toThrow(`(cell C1, CLOSING until ${closesAt})`);
   });
 
   test.each(['Create', 'Update'] as const)('%s succeeds when no listed account holds a cell', async (type) => {

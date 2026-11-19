@@ -19,7 +19,7 @@ SPDX-License-Identifier: MIT-0
 > update through the raw bucket's configuration deny. The two paths differ
 > only before the raw store; the `BUS` run is on the current code. A
 > delete leaves only the CDK provider log groups (§11). Unit tests:
-> 185.
+> 187.
 > **Not exercised live:** `StartIngestRedrive` with messages in the queue,
 > the close of an hour after `recountWindowHours`, a cell or a bus
 > subscriber in a second account (the AWS RAM shares and the share guard
@@ -131,8 +131,9 @@ ARN pattern; Scheduler on the stack's schedule group ARN (Scheduler sets
 `rawSubscriberAccountIds` (`BUS` only; a non-empty list on `DIRECT` fails
 synth) and `usageSubscriberAccountIds` name the vendor accounts that read
 a bus (ADR-0006). Neither list may name the metering account, which reads
-its buses directly; synth refuses it when the stack's account is known. For a non-empty list
-the construct creates an AWS RAM resource share of that bus with those
+its buses directly; synth refuses it when the stack's account is known.
+For a non-empty list the construct creates an AWS RAM resource share of
+that bus with those
 accounts and the managed permission
 `AWSRAMEventBridgeEventBusV2SubscribeOnly`: the account may create, update
 and describe its own subscribers, and may not publish. External principals

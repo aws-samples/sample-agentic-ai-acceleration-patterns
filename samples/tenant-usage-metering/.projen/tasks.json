@@ -194,7 +194,8 @@
       "description": "Deploy the demo stack, run test/integ.metering.ts, destroy the stack (needs AWS_REGION)",
       "steps": [
         {
-          "exec": "bash scripts/integ.sh"
+          "exec": "bash scripts/integ.sh",
+          "receiveArgs": true
         }
       ]
     },
