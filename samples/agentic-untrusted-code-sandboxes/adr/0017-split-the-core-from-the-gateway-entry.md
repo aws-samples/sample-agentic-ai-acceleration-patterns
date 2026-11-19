@@ -59,15 +59,28 @@ because projen owns `package.json`: `devDependencies` holds
 `agentic-runtime-isolation` as `file:../agentic-runtime-isolation`;
 `peerDependencies` holds it as `*` with
 `peerDependenciesMeta.agentic-runtime-isolation.optional = true`;
-`exports` maps `.` to the core entry and `./gateway` to the gateway
-entry, with `typesVersions` for consumers on `node10` resolution. No
+`exports` maps `.` to `src/index.ts` and `./gateway` to
+`src/gateway/index.ts`, with `main` and `types` on `src/index.ts`, and
+`.npmignore` keeps `src/` in the package. The sample ships TypeScript
+sources, like its siblings: CDK apps run under ts-node, and the
+constructs build their Lambdas from `path.join(__dirname, '….function.ts')`,
+which only resolves when the `.ts` files are present. The exports map
+also with `typesVersions` for consumers on `node10` resolution. No
 sample consumes another through `file:` yet, and the producer has no
 `main` or `exports`. The same pull request therefore changes
-`agentic-runtime-isolation`'s `.projenrc.ts` to add `main: lib/index.js`
-and `types: lib/index.d.ts` (its `src/index.ts` already exports
-`ToolTarget` and `toolHandler`), and runs that sample's build and tests.
+`agentic-runtime-isolation`'s `.projenrc.ts` to set `main` and `types` to
+`src/index.ts`, and adds an `exports` map with `.` → `src/index.ts` and
+`./tools` → `src/tools/context.ts`, so the gateway handler imports
+`toolHandler` from `agentic-runtime-isolation/tools` and its bundle does
+not pull in the producer's constructs or `aws-cdk-lib`. A `lib/` target
+was rejected: tsc copies no `.function.ts` files into `lib/`, so every
+producer construct that builds a Lambda from `__dirname` would fail at
+synth, and `lib/` is not committed. That sample's build and tests run in
+the same pull request, and the integration app's synth is the check that
+the entry resolves.
 A deep import of the producer's source was rejected, because standard
 §1.1 asks for imports through the producer's package entry. The first
 build proves the gateway import from the integration app and from a stub
-consumer that has the producer, and the §8 `standalone-build` step proves
-a consumer without it installs, compiles and synths the core.
+consumer that has the producer, and the §8 `standalone-build` step installs the core
+from an `npm pack` tarball into a consumer without the producer and
+proves it installs, compiles and synths.

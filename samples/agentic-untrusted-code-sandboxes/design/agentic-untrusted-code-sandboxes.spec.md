@@ -171,7 +171,6 @@ claim in the README without a test row behind it is a defect.
 | Component | Service | Pattern | Holds |
 |---|---|---|---|
 | `run_code` tool | Lambda: a `ToolTarget` of `agentic-runtime-isolation` on the gateway entry, and with `standalone` the core `runCodeFunction` | Signed tenant context (gateway), verified IAM caller (standalone); tool-side TVM | the shared tool role (§3.6) |
-| Standalone invokers | `lambda:InvokeFunction` on `runCodeFunction`, through `grantInvokeRunCode(principal)` in the app, or an identity policy on the published `runCodeFunctionArn` in another app | the gateway path |
 | Tool tenant role | IAM, vended with the `TenantId` session tag | ABAC on `TenantId` | `inputs/<t>/*` read, `outputs/<t>/*` write, registry rows `TENANT#<t>`, `nitro` `RunTask` and `StopTask` on tasks tagged `<t>` |
 | Input bucket | S3 | Tenant prefix | tenant files the code reads |
 | Sandbox registry | DynamoDB | Tenant-keyed registry, optimistic version, start lease | one row per tenant per backend |
@@ -300,9 +299,10 @@ classes, and the runner's job and result types; nothing that imports
 dev dependency (for the build and tests) and an optional peer dependency
 (`peerDependenciesMeta.optional`), so a consumer who imports only the
 core does not install it. A lint rule (`no-restricted-imports`, applied to `src/**` except
-`src/gateway/**`; the integration app and the demo app may import the
-producer) and a
-unit test fail if any file outside `src/gateway/` imports it.
+`src/gateway/**` and the demo app files `src/main.ts` and
+`src/demo.cdk.ts`; the integration app under `test/` is outside it) and
+a unit test that walks the import graph from `src/index.ts` fail if the
+core entry reaches any producer module.
 
 ### 3.4 Backend interface and enforcement per backend
 
@@ -422,6 +422,7 @@ to its own stdout through the runner.
 | Role | May | May not |
 |---|---|---|
 | Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image (every MicroVM action authorizes against the image ARN; there is no MicroVM ARN), `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only, so a start without the connector, which would get `INTERNET_EGRESS`, is refused; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime; `ecs:DescribeTasks` on the cluster. One role, shared: `runCodeFunction` and every function bound with `bindRunCode` run as it; `ToolTarget` adds `kms:GetPublicKey` on the context key when a gateway function is bound | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
+| Standalone invokers (with `standalone`) | `lambda:InvokeFunction` on `runCodeFunction`, through `grantInvokeRunCode(principal)` in the app, or an identity policy on the published `runCodeFunctionArn` in another app | the gateway path; see T-82 for same-account identity policies |
 | Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only, with the request tag condition and `ecs:cluster` = the sample's cluster; `ecs:TagResource` on `task/<cluster>/*` with the request tag condition and `ecs:CreateAction` = `RunTask` (the action has no `ecs:cluster` key, and this stops the role retagging existing tasks); `ecs:StopTask` with the resource tag condition and `ecs:cluster`; `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
 | Task execution role | `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
 | AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime; code can create extra groups under the prefix, which the cleanup resource removes); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
@@ -998,7 +999,7 @@ touched.
 | dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9); any other blocked name is a platform name missing from the allow list and fails the step |
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | standalone | the driver invokes `run-code`'s `runCodeFunction` with IAM, as a vendor's own API would, with `tenantId` = `A`: A's script parses its invoice; `input` = `../B/invoice.csv`, `tenantId` = `A/x` and an empty `tenantId` each return `invalid_argument`; a role with no invoke grant is refused (shows IAM applies, not that only granted roles can reach it, T-82). Through the gateway, a `tenantId` argument returns `invalid_argument` |
-| standalone-build | before deploy, the driver builds a stub consumer app with no `agentic-runtime-isolation` in its `node_modules`: `npm install` succeeds with no peer error, `tsc` compiles, and `cdk synth` of `UntrustedCodeSandboxes` with `standalone: true` succeeds, including the `runCodeFunction` bundle; the core's `.d.ts` files name no producer type |
+| standalone-build | before deploy, the driver runs `npm pack` on the sample and installs the tarball into a stub consumer app that has no `agentic-runtime-isolation` anywhere in its tree (a packed install carries no dev dependencies and no symlink back to the sample): `npm install` succeeds with no peer error, `tsc` compiles, and `cdk synth` of `UntrustedCodeSandboxes` with `standalone: true` succeeds, including the `runCodeFunction` bundle, and no module reached from the package root resolves to the producer |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
 | teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or construct-owned Logs resource policy of the sample, and the `DescribeResourcePolicies` statements that name the query-log group's ARN match their state before deploy (any difference is reported as the §3.9 known leftover), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
