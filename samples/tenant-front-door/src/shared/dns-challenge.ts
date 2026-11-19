@@ -1,150 +1,126 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { Resolver } from 'node:dns/promises';
+import { CHALLENGE_RECORD_PREFIX, CHALLENGE_VALUE_PREFIX } from '../shared/contracts';
+
 /**
- * The domain challenge lookup (spec §3.4 step 5 sub-step 2, ADR-0018), the
- * same for the registrar's checks and the sweeper's daily re-check. It
- * resolves `_tfd-challenge.<d>` with the function's default resolver.
- *
- * Each query, TXT or CNAME, makes up to five lookups about 100 ms apart
- * and stops at the first lookup that finds what it looks for: a TXT record
- * whose strings, joined, equal `tfd-verify=<dk>`, or a CNAME. Each lookup
- * is one try, abandoned after 1 s of wall time. A query with no such
- * lookup takes its outcome from the lookups that got an answer: records
- * (TXT, or a CNAME) make it a mismatch, otherwise it is missing. It is
- * unresolved only when every lookup errors, so a mix of errors and misses
- * is a miss. A query takes at most 5 × 1 s + 4 × 100 ms = 5.4 s.
- *
- * CNAME is queried only when the TXT answer is empty or holds the token,
- * so a pass never rests on a CNAME, and a CNAME at the name is a mismatch
- * whatever its target holds. Nothing here logs: the token never leaves
- * this module.
+ * The domain challenge lookup (spec §3.4 step 5 sub-steps 2 and 5,
+ * ADR-0018, spike S-10): resolves `_tfd-challenge.<d>` with the function's
+ * default resolver and compares it with the tenant's token. A resolver
+ * error is never a pass, and a CNAME at the name is a mismatch whatever
+ * its target holds.
  */
 
-import { Resolver } from 'node:dns/promises';
-import { CHALLENGE_RECORD_PREFIX, CHALLENGE_VALUE_PREFIX } from './contracts';
-
-export const LOOKUPS_PER_QUERY = 5;
-export const LOOKUP_GAP_MS = 100;
-export const LOOKUP_LIMIT_MS = 1_000;
-
-/** `pass`, or the registrar's `challenge` value for any other answer (§3.4 step 5 sub-step 2). */
+/** `missing`, `mismatch` and `unresolved` are the model's `ChallengeResult` values. */
 export type ChallengeOutcome = 'pass' | 'missing' | 'mismatch' | 'unresolved';
 
-/** One lookup's answer. `none` is NXDOMAIN or no record of the type; `error` is anything else, a timeout included. */
-export type LookupAnswer =
-  | { readonly kind: 'txt'; readonly records: readonly (readonly string[])[] }
-  | { readonly kind: 'cname'; readonly records: readonly string[] }
-  | { readonly kind: 'none' }
-  | { readonly kind: 'error' };
-
-/** Makes one lookup of one try. */
-export type Lookup = (type: 'TXT' | 'CNAME', name: string) => Promise<LookupAnswer>;
-
-export interface ChallengeCheckDeps {
-  readonly lookup: Lookup;
-  readonly sleep: (ms: number) => Promise<void>;
+/** One lookup each; a rejection carries the resolver's error `code`. */
+export interface DnsLookup {
+  txt(name: string): Promise<string[][]>;
+  cname(name: string): Promise<string[]>;
 }
 
-/** NXDOMAIN and NODATA: the resolver answered, with nothing of this type. */
-const NO_RECORD_CODES = new Set(['ENOTFOUND', 'ENODATA']);
+/** Lookups per query, and the pause between them (§3.4 step 5). */
+export const LOOKUPS_PER_QUERY = 5;
+export const LOOKUP_GAP_MS = 100;
+/** Each lookup is one try, abandoned after this much wall time: a chosen value; S-10's longest lookup took 64 ms. */
+export const LOOKUP_TIMEOUT_MS = 1_000;
 
-/** The resolver interface `nodeLookup` uses: what `node:dns/promises` `Resolver` offers. */
-export interface ResolverLike {
-  resolveTxt(name: string): Promise<string[][]>;
-  resolveCname(name: string): Promise<string[]>;
-  cancel(): void;
-}
+/** The name does not exist, or holds no record of the type: an answer, not an error. */
+const NO_RECORD_CODES: readonly string[] = ['ENOTFOUND', 'ENODATA'];
 
-/**
- * One lookup with a fresh default-resolver `Resolver` built with
- * `timeout: 1000, tries: 1`: a plain `timeout` is per try, and the default
- * lookup inherits several attempts from `/etc/resolv.conf`. A timer also
- * cancels the query once 1 s of wall time has passed.
- */
-export function nodeLookup(
-  newResolver: () => ResolverLike = () => new Resolver({ timeout: LOOKUP_LIMIT_MS, tries: 1 }),
-  limitMs: number = LOOKUP_LIMIT_MS,
-): Lookup {
-  return async (type, name) => {
-    const resolver = newResolver();
-    let timer: NodeJS.Timeout | undefined;
-    const abandoned = new Promise<LookupAnswer>((resolve) => {
-      timer = setTimeout(() => {
-        resolver.cancel();
-        resolve({ kind: 'error' });
-      }, limitMs);
-    });
-    const answered = (async (): Promise<LookupAnswer> => {
-      try {
-        if (type === 'TXT') return { kind: 'txt', records: await resolver.resolveTxt(name) };
-        return { kind: 'cname', records: await resolver.resolveCname(name) };
-      } catch (error) {
-        const code = (error as { code?: unknown } | undefined)?.code;
-        return typeof code === 'string' && NO_RECORD_CODES.has(code) ? { kind: 'none' } : { kind: 'error' };
-      }
-    })();
-    try {
-      return await Promise.race([answered, abandoned]);
-    } finally {
-      clearTimeout(timer);
-    }
-  };
-}
-
-export const defaultChallengeCheckDeps: ChallengeCheckDeps = {
-  lookup: nodeLookup(),
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-};
-
-/** `_tfd-challenge.<d>`. */
 export function challengeRecordName(domain: string): string {
   return `${CHALLENGE_RECORD_PREFIX}${domain}`;
 }
 
-type QueryResult = 'found' | 'records' | 'none' | 'error';
-
-/** Up to five lookups of one type; stops at the first that `isMatch` accepts. */
-async function query(
-  deps: ChallengeCheckDeps,
-  type: 'TXT' | 'CNAME',
-  name: string,
-  isMatch: (answer: LookupAnswer) => boolean,
-): Promise<QueryResult> {
-  let records = false;
-  let none = false;
-  for (let i = 0; i < LOOKUPS_PER_QUERY; i++) {
-    if (i > 0) await deps.sleep(LOOKUP_GAP_MS);
-    const answer = await deps.lookup(type, name);
-    if (isMatch(answer)) return 'found';
-    if ((answer.kind === 'txt' || answer.kind === 'cname') && answer.records.length > 0) records = true;
-    else if (answer.kind !== 'error') none = true;
-  }
-  if (records) return 'records';
-  return none ? 'none' : 'error';
+export function challengeRecordValue(token: string): string {
+  return `${CHALLENGE_VALUE_PREFIX}${token}`;
 }
 
 /**
- * Checks the challenge record of `domain` for `token` (§3.4 step 5 sub-step
- * 2, and the daily re-check). A resolver error is never a pass.
+ * Lookups through a fresh Node.js `Resolver` with `timeout: 1000, tries: 1`
+ * each, so the `/etc/resolv.conf` defaults (`timeout:2 attempts:5`) do not
+ * apply, and a wall-time guard that cancels it after the same 1 s.
  */
-export async function checkChallenge(domain: string, token: string, deps: ChallengeCheckDeps = defaultChallengeCheckDeps): Promise<ChallengeOutcome> {
-  const name = challengeRecordName(domain);
-  const expected = `${CHALLENGE_VALUE_PREFIX}${token}`;
-  const txt = await query(deps, 'TXT', name, (a) => a.kind === 'txt' && a.records.some((strings) => strings.join('') === expected));
-  if (txt === 'records') return 'mismatch';
-  if (txt === 'error') return 'unresolved';
+export function nodeDnsLookup(): DnsLookup {
+  const once = async <T>(run: (resolver: Resolver) => Promise<T>): Promise<T> => {
+    const resolver = new Resolver({ timeout: LOOKUP_TIMEOUT_MS, tries: 1 });
+    let timer: NodeJS.Timeout | undefined;
+    const guard = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        resolver.cancel();
+        reject(Object.assign(new Error('lookup abandoned'), { code: 'ETIMEOUT' }));
+      }, LOOKUP_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([run(resolver), guard]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return {
+    txt: (name) => once((r) => r.resolveTxt(name)),
+    cname: (name) => once((r) => r.resolveCname(name)),
+  };
+}
 
-  const cname = await query(deps, 'CNAME', name, (a) => a.kind === 'cname' && a.records.length > 0);
-  if (cname === 'found') return 'mismatch';
-  if (txt === 'found') {
-    // Spec §3.4 step 5 does not name the outcome of a token match whose
-    // CNAME query only errors. A resolver error is never a pass, so it is
-    // unresolved.
-    return cname === 'none' ? 'pass' : 'unresolved';
+/** What one lookup found: what the query looks for, other records, no record, or a resolver error. */
+type LookupResult = 'match' | 'records' | 'empty' | 'error';
+
+async function classify<T>(run: () => Promise<T[]>, isMatch: (records: T[]) => boolean): Promise<LookupResult> {
+  try {
+    const records = await run();
+    if (records.length === 0) return 'empty';
+    return isMatch(records) ? 'match' : 'records';
+  } catch (error) {
+    const code = (error as { code?: unknown } | undefined)?.code;
+    return typeof code === 'string' && NO_RECORD_CODES.includes(code) ? 'empty' : 'error';
   }
-  // The TXT answer was empty: the name holds no TXT record and no CNAME
-  // was found, whether or not the CNAME lookups errored (a mix of errors
-  // and misses is a miss).
-  return 'missing';
+}
+
+/** Up to five lookups about 100 ms apart; stops at the first match. */
+async function query(lookup: () => Promise<LookupResult>, sleep: (ms: number) => Promise<void>): Promise<LookupResult[]> {
+  const results: LookupResult[] = [];
+  for (let i = 0; i < LOOKUPS_PER_QUERY; i++) {
+    if (i > 0) await sleep(LOOKUP_GAP_MS);
+    const result = await lookup();
+    results.push(result);
+    if (result === 'match') break;
+  }
+  return results;
+}
+
+export interface ChallengeCheckOptions {
+  readonly lookup: DnsLookup;
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * The TXT query at `_tfd-challenge.<domain>`; a record whose strings,
+ * joined, equal `tfd-verify=<token>` matches. The CNAME query at the same
+ * name runs only when the TXT answer is empty or holds the token, so a
+ * pass never rests on a CNAME (§3.4 step 5, the daily re-check's rule).
+ *
+ * Outcome: a CNAME found is `mismatch`. A TXT match is a pass only when a
+ * CNAME lookup answered; a CNAME query that errored on every lookup makes
+ * it `unresolved`. With no match, `mismatch` when any TXT lookup held
+ * records, `unresolved` when every TXT lookup errored, `missing` otherwise
+ * (a mix of errors and misses is a miss).
+ */
+export async function checkChallenge(domain: string, token: string, options: ChallengeCheckOptions): Promise<ChallengeOutcome> {
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const name = challengeRecordName(domain);
+  const expected = challengeRecordValue(token);
+  const txt = await query(() => classify(() => options.lookup.txt(name), (records) => records.some((r) => r.join('') === expected)), sleep);
+  const cname = (): Promise<LookupResult[]> => query(() => classify(() => options.lookup.cname(name), () => true), sleep);
+
+  if (txt.includes('match')) {
+    const c = await cname();
+    if (c.includes('match')) return 'mismatch';
+    return c.every((r) => r === 'error') ? 'unresolved' : 'pass';
+  }
+  if (txt.includes('records')) return 'mismatch';
+  if (txt.every((r) => r === 'error')) return 'unresolved';
+  return (await cname()).includes('match') ? 'mismatch' : 'missing';
 }

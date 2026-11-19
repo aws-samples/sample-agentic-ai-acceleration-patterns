@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: MIT-0
 
 import { Resolver } from 'node:dns/promises';
-import { FakeDns } from './domains-support';
 import {
   checkChallenge,
   LOOKUP_GAP_MS,
   LOOKUP_TIMEOUT_MS,
   LOOKUPS_PER_QUERY,
   nodeDnsLookup,
-} from '../../src/registrar/domain-challenge';
+} from '../../src/shared/dns-challenge';
+import { FakeDns } from '../registrar/domains-support';
 
 jest.mock('node:dns/promises', () => ({ Resolver: jest.fn() }));
 

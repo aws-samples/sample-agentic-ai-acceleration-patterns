@@ -27,8 +27,8 @@ import {
 } from '@aws-sdk/client-cloudfront';
 import { mockClient } from 'aws-sdk-client-mock';
 import { EDGE_ACCOUNT } from './support';
-import type { DnsLookup } from '../../src/registrar/domain-challenge';
 import { TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../../src/shared/contracts';
+import type { DnsLookup } from '../../src/shared/dns-challenge';
 
 export const DISTRIBUTION_ID = 'E1EXAMPLE2DIST';
 export const OTHER_DISTRIBUTION_ID = 'E9EXAMPLE9DIST';

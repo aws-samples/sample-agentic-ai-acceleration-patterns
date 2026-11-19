@@ -22,10 +22,10 @@ import {
   type Tags as CloudFrontTags,
   UpdateDistributionTenantCommand,
 } from '@aws-sdk/client-cloudfront';
-import { type ChallengeOutcome, challengeRecordName, challengeRecordValue, checkChallenge, type DnsLookup } from './domain-challenge';
 import { refuse } from './errors';
 import type { ReadKey, RouteStore } from './route-store';
 import { CHALLENGE_TTL_SECONDS, TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../shared/contracts';
+import { type ChallengeOutcome, challengeRecordName, challengeRecordValue, checkChallenge, type DnsLookup } from '../shared/dns-challenge';
 import { decodeHostEntry, encodeEntry, hostEntry, hostKey, RouteTableError, type TenantEntry, tenantEntry, tenantKey } from '../shared/route-table';
 import type { DnsRecord, PutTenantRouteServerOutput } from '../smithy/source/typescript-ssdk-codegen/src';
 
