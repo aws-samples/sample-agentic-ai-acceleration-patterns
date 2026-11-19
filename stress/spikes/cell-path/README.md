@@ -108,3 +108,15 @@ predates the SSM deny; runtime-isolation with `publishParameters=false`
 only reads those parameters. The owner stacks
 (`CellPolicies-spike`, `CellAccountBase-spike`) and `CDKToolkit-cell` stay
 in both accounts: they are what a cell account holds.
+
+## Security scan
+
+ProtoShield v0.18.0 on `stress/` (2026-11-19), with `stress/.protoshield/config.yaml`
+setting the license check to MIT-0. Semgrep, CVE, secrets and license
+headers: 0. IAM least privilege for this spike: 2 high, 2 medium, all in
+`cell-policies.yaml`.
+
+| Finding | Outcome |
+|---|---|
+| Service wildcards (`apigateway:*`, `dynamodb:*`, `kms:*`, `lambda:*`, `logs:*`, `ssm:*`, ...) on `*`, in both policies (high) | Accepted: the file records the policies the spike ran, so CP-1 to CP-7 stay reproducible. The standalone cell account scopes them: it holds nothing but cells, the bootstrap and the owner stacks, and the boundary's explicit denies keep cell roles off everything the owner deployed |
+| `iam:PassRole` on `role/cell/*` without `iam:PassedToService` (medium) | Accepted for the spike: every role on `/cell/` carries the boundary, so a role passed to any service holds at most the boundary's permissions. The cell policies in `stress/application/` (W-10) can add an `iam:PassedToService` list once the cell's services are fixed |
