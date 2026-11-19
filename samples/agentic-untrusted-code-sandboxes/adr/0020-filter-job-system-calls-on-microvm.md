@@ -51,11 +51,12 @@ and `bootId` with no cause code, from 20 lines of Python.
 
 Option 1 (spec §3.5 job filter). On `microvm` the runner sets
 `PR_SET_NO_NEW_PRIVS` and installs the filter in each job after the uid
-drop, checks `PR_GET_SECCOMP` = 2 in the child before `exec` and raises
+drop. The child checks `PR_GET_SECCOMP` = 2 before `exec` and raises
 through `subprocess`'s error pipe if not, so no code runs unfiltered and
-the call returns `tool_failed`, lowers N to ⌊0.6 × `MemTotal` / 256 MiB⌋
-(9 at the default) so the routes left open fit above the floor, also blocks new namespaces through `clone` and
-`clone3`, sets `RLIMIT_NOFILE` to 64, and keeps a `MemAvailable` floor
+the call returns `tool_failed`. The filter also blocks new namespaces
+through `clone` and `clone3`. The runner sets `RLIMIT_NOFILE` to 64,
+lowers N to ⌊0.6 × `MemTotal` / 256 MiB⌋ (9 at the default) so the
+routes left open fit above the floor, and keeps a `MemAvailable` floor
 of 512 MiB checked every 200 ms that kills the job and sweeps uid 1001.
 `/tmp` is disk (S-16), so ADR-0019's lock on it is dropped; `/dev/shm`
 stays closed. On every backend step 3 also removes uid 1001's SysV
@@ -69,10 +70,10 @@ dropped, and the drain stays as ADR-0011's note describes.
 
 `microvm` jobs lose `memfd_create`, SysV IPC, mounts, `unshare`, `setns`,
 new namespaces through `clone`, `vmsplice` and socket buffer sizing,
-have at most 64 open files per process and nine processes and threads,
+have at most 64 open files per process and N processes and threads (9 at the default),
 and the tool description says so. The filter list must be revisited when
 the guest kernel changes, and a new route found by a test is a new list
-entry. The floor catches only fills slower than about 1.2 GiB/s, and it,
+entry. The floor catches only fills slower than about 1.3 GiB/s, and it,
 the `clone` entries, the job-wide Unix socket total and the 20 ordinary
 checks under the new limits are measured in S-18. Whether `nitro` and
 `agentcore` need the filter for socket memory is open: S-16 bounded

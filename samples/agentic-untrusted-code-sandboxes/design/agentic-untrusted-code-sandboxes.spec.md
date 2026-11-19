@@ -530,14 +530,15 @@ and returns `tool_failed`, because retrying cannot fix it; an exit code
 is always tenant data.
 The list blocks only the routes S-17 found, so the runner also keeps a
 free-memory floor on `microvm`: every 200 ms it reads `MemAvailable`
-and kills the job and sweeps uid 1001 below 512 MiB. S-16 lost the guest
-with about 250 MiB still available, so a floor polled every 200 ms has
-about 260 MiB to work with and catches a fill slower than about
-1.2 GiB/s. S-16's `memfd` fill ran at about 4.5 GiB/s and S-17's
-semaphore fill at about 2 GiB/s, so the floor would not catch a route
-that fast; it is a backstop for slow routes only, and S-18 checks it. `/proc/sys` is
-read-only in the guest, so the runner cannot lower the kernel's own
-limits instead (S-17).
+and kills the job and sweeps uid 1001 below 512 MiB. S-16's guest
+survived 100 MiB free (the 3584 MiB run); where below that it is lost is
+not known. So the floor has about 410 MiB between a poll and that point,
+over up to 200 ms of poll and about 100 ms to kill and free, and catches
+a fill slower than about 1.3 GiB/s. S-16's `memfd` fill ran at about
+4.5 GiB/s and S-17's semaphore fill at about 2 GiB/s, so the floor would
+not catch a route that fast; it is a backstop for slow routes only, and
+S-18 checks it. `/proc/sys` is read-only in the guest, so the runner
+cannot lower the kernel's own limits instead (S-17).
 
 On `agentcore` the
 runner prepares the cgroup tree once, at the session's first job and
