@@ -233,8 +233,16 @@ export class PoolPerTenantProvisioner implements Provisioner {
   }
 
   async assertMember(tenant: TenantRecord, username: string): Promise<void> {
-    // R-12: in pool-per-tenant, membership is existence in the tenant's pool.
-    await adminGetUser(this.cognito, this.poolId(tenant), username);
+    await this.member(tenant, username);
+  }
+
+  /**
+   * R-12: in pool-per-tenant, membership is existence in the tenant's pool.
+   * Returns the user so `refreshToken` can bind its result to the user's `sub`
+   * through the same check (ADR-0013 amendment).
+   */
+  private async member(tenant: TenantRecord, username: string): ReturnType<typeof adminGetUser> {
+    return adminGetUser(this.cognito, this.poolId(tenant), username);
   }
 
   async getUser(tenant: TenantRecord, username: string): Promise<UserView> {
@@ -298,9 +306,8 @@ export class PoolPerTenantProvisioner implements Provisioner {
     // R-12 (existence in the tenant's pool), then bind the refreshed token to
     // the path's user (ADR-0013 amendment): another user's refresh token from
     // the same pool would otherwise be served.
-    const userPoolId = this.poolId(tenant);
-    const user = await adminGetUser(this.cognito, userPoolId, username);
-    const tokens = await adminRefresh(this.cognito, userPoolId, this.clientId(tenant), refreshToken);
+    const user = await this.member(tenant, username);
+    const tokens = await adminRefresh(this.cognito, this.poolId(tenant), this.clientId(tenant), refreshToken);
     assertRefreshedFor(tokens, attr(user.attributes, 'sub'), tenant.tenantId, 'tenant_id');
     return tokens;
   }

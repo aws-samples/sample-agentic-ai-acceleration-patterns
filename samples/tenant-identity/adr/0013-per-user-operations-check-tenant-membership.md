@@ -83,4 +83,4 @@ This amendment completes the decision for `RefreshToken`:
 
 Unit tests in `test/topology/*.test.ts` cover a foreign tenant's token, another
 user's token in the same tenant, and the user's own token in each topology;
-spec §10 step 6 runs the cross-tenant case end to end.
+spec §10 step 6a runs the cross-tenant case end to end. The pre-token trigger still logs "issued" for a refreshed token the binding then discards; read that log line as "minted", not "served".

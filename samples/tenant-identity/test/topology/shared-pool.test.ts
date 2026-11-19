@@ -257,6 +257,16 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
       expect(error).not.toBeInstanceOf(NotFoundError);
     });
 
+    it('refuses a non-member with 404 before any refresh (R-12)', async () => {
+      cognito.on(AdminGetUserCommand).resolves({
+        Username: 'u1',
+        UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.b }, { Name: 'sub', Value: 'sub-u1' }],
+        UserStatus: 'CONFIRMED',
+      });
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt')).rejects.toBeInstanceOf(NotFoundError);
+      expect(cognito).toHaveReceivedCommandTimes(AdminInitiateAuthCommand as AnyMock, 0);
+    });
+
     it('refuses when the user record has no sub', async () => {
       cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }] });
       cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-u1', tenant_id: IDS.a })));
