@@ -1728,6 +1728,12 @@ All with a small static HTML or JSON body and `no-store`:
   listed in the control plane's `globalHookManagedPolicyArns`, which
   takes only customer-managed policies in the control plane's own
   account. The registrar admits no role in a cell account (§3.4).
+  The front door's hooks name only cell and deployment events, so the
+  application, tenant and account events of control-plane ADR-0045 do
+  not run them. Under ADR-0045 the control plane's record writes
+  (`PutApplication`, `CreateTenant`, `PutAccount` and their updates and
+  deletes) answer 202 and are polled; the registrar's reads
+  (`GetCell`, `GetDeployment`, `GetTenant`) still answer 200.
 - An edge operator role in the edge account (`edgeOperatorRoleArn`,
   §3.6), held as §3.4 says.
 - For an issuer whose multi-tenant exchange runs on its own API
@@ -2241,8 +2247,11 @@ destroy time, which the test reports with the rest.
    the edge account with an `externalId` the test generates for the run.
    Register both accounts with `PutAccount`: the control plane's account
    as `owner: VENDOR`, and the edge account as `owner: TENANT` with that
-   `externalId`. That registration lets the test run a tenant-owned cell
-   without a third account. It is a test-only shortcut that a deployment
+   `externalId`. Each `PutAccount` answers 202 (control-plane ADR-0045),
+   and the test polls `GetAccount` until the account is `ACTIVE`; it
+   polls `GetApplication` and `GetTenant` the same way after the
+   application and tenant writes below. The edge account's registration
+   lets the test run a tenant-owned cell without a third account. It is a test-only shortcut that a deployment
    must not copy: a real front door's edge account is vendor-owned and
    hosts no tenant-owned cell (§6.1). Deploy the agent ingress stand-in
    (S-5's: a REST API with a REQUEST authoriser and a streaming Lambda proxy that records
