@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { createHash } from 'node:crypto';
 import { ACMClient, RequestCertificateCommand } from '@aws-sdk/client-acm';
 import {
   CloudFrontClient,
@@ -26,7 +27,7 @@ import {
   validationRecord,
 } from './domains-support';
 import { CELL, CELL_ACCOUNT, DT, harness, type Harness, json, restEvent, TENANT, TENANT_2, testConfig } from './support';
-import { AwsDedicatedDomains, MAX_ROUNDS, newChallengeToken, RECORD_READS } from '../../src/registrar/dedicated-domains';
+import { AwsDedicatedDomains, distributionTenantName, MAX_ROUNDS, newChallengeToken, RECORD_READS } from '../../src/registrar/dedicated-domains';
 import { CHALLENGE_TTL_SECONDS, TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../../src/shared/contracts';
 import {
   cellEntry,
@@ -348,17 +349,42 @@ describe('§3.4 step 5 sub-steps 3, 4 and 6: the certificate', () => {
     expect(res.body).toEqual({ tenantId: TENANT, dt: DT, stage: 'certificate' });
   });
 
+  /** The idempotency token the registrar derives for D under `dk`. */
+  const idempotency = (dk: string): string => createHash('sha256').update(`${DISTRIBUTION_ID}\n${t}\n${D}\n${dk}`).digest('hex').slice(0, 32);
+
   test.each([
     ['FAILED', 'CAA_ERROR', /failed validation: CAA_ERROR/],
     ['VALIDATION_TIMED_OUT', undefined, /timed out/],
-  ])('a certificate %s is 422 carrying ACM\'s reason', async (status, failureReason, message) => {
+  ])('a request that returns a certificate %s (ACM\'s hour, the same challenge) is 422 carrying ACM\'s reason', async (status, failureReason, message) => {
     const h = rig();
     passed(h);
-    h.acm.add(certificateArn(1), { domain: D, status, failureReason, tags: ownTags(t) });
+    h.acm.add(certificateArn(1), { domain: D, status, failureReason, tags: ownTags(t), idempotencyToken: idempotency(TOKEN_1) });
     const res = await put(h);
     expect(res.statusCode).toBe(422);
     expect(res.body.message).toMatch(message);
     expect(h.kvs.items.has(hostKey(D))).toBe(false);
+  });
+
+  test.each(['FAILED', 'VALIDATION_TIMED_OUT', 'REVOKED', 'EXPIRED'])('a certificate %s counts as absent: a new one is requested', async (status) => {
+    const h = rig();
+    passed(h);
+    h.acm.add(certificateArn(1), { domain: D, status, tags: ownTags(t) });
+    const res = await put(h);
+    expect(res.statusCode).toBe(202);
+    expect(res.body.stage).toBe('certificate');
+    expect(acmMock.commandCalls(RequestCertificateCommand)).toHaveLength(1);
+  });
+
+  test('sub-step 6: dropped and set again over a failed certificate, the new challenge gets a new certificate', async () => {
+    const h = rig();
+    h.acm.add(certificateArn(1), { domain: D, status: 'FAILED', failureReason: 'OTHER', tags: ownTags(t), idempotencyToken: idempotency(TOKEN_2) });
+    expect((await put(h)).body.stage).toBe('domain-challenge');
+    h.dns.script([[[record(TOKEN_1)]]]);
+    const res = await put(h);
+    expect(res.statusCode).toBe(202);
+    expect(res.body.stage).toBe('certificate');
+    expect(acmMock.commandCalls(RequestCertificateCommand)[0].args[0].input.IdempotencyToken).toBe(idempotency(TOKEN_1));
+    expect(h.acm.requests).toBe(1);
   });
 
   test('an issued certificate is used before a failed one for the same domain', async () => {
@@ -404,13 +430,32 @@ describe('§3.4 step 5 sub-step 5: the certificate issued', () => {
     expect(res.body).toEqual({ tenantId: TENANT, dt: DT });
     expect(cloudFrontMock.commandCalls(CreateDistributionTenantCommand)[0].args[0].input).toEqual({
       DistributionId: DISTRIBUTION_ID,
-      Name: `tfd-${t}-${D}`,
+      Name: distributionTenantName(DISTRIBUTION_ID, t, D),
       Domains: [{ Domain: D }],
       Customizations: { Certificate: { Arn: arn } },
       Tags: { Items: [{ Key: TAG_TENANT_ID, Value: t }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION_ID }] },
       Enabled: true,
     });
     expect(h.kvs.items.get(hostKey(D))).toBe(encodeEntry(hostEntry({ t, ac: CELL_ACCOUNT })));
+  });
+
+  test('the distribution tenant\'s name is a hash within CloudFront\'s 128 characters, for the longest id and domain', () => {
+    const longest = `${'a'.repeat(63)}`;
+    const domain = `${'b'.repeat(51)}.example.com`;
+    const name = distributionTenantName(DISTRIBUTION_ID, longest, domain);
+    expect(name).toMatch(/^tfd-[0-9a-f]{32}$/);
+    expect(distributionTenantName(DISTRIBUTION_ID, longest, `c${domain.slice(1)}`)).not.toBe(name);
+    expect(distributionTenantName(OTHER_DISTRIBUTION_ID, longest, domain)).not.toBe(name);
+  });
+
+  test('§3.4 step 5 sub-step 5: a challenge that passed in this call is not resolved again', async () => {
+    const h = rig();
+    seedTenant(h, { d: D, dk: TOKEN_1, dx: NOW_S + 3600 });
+    issuedCertificate(h);
+    h.dns.script([[[record(TOKEN_1)]]]);
+    const res = await put(h);
+    expect(res.statusCode).toBe(200);
+    expect(h.dns.txtNames).toEqual([NAME]);
   });
 
   test('a repeat once host#<d> exists looks nothing up, changes nothing and answers 200', async () => {
@@ -565,11 +610,26 @@ describe('§3.4 step 5: releaseDomain', () => {
   test.each([
     ['another tenant', { DistributionId: DISTRIBUTION_ID, Tags: dtTags(t2) }],
     ['another distribution', { DistributionId: OTHER_DISTRIBUTION_ID, Tags: dtTags(t, OTHER_DISTRIBUTION_ID) }],
-  ])('refuses with 409 and touches nothing when the distribution tenant is %s\'s', async (_why, tenant) => {
+  ])('touches nothing and logs the refusal by name when the distribution tenant is %s\'s', async (_why, tenant) => {
     const h = rig();
     h.cf.add(D, { Id: 'dt_x', Enabled: true, ...tenant });
-    await expect(h.domainsImpl.releaseDomain(t, D)).rejects.toThrow(/another tenant/);
+    await h.domainsImpl.releaseDomain(t, D);
     expect(cloudFrontMock.commandCalls(UpdateDistributionTenantCommand)).toHaveLength(0);
+    const lines = logSpy.mock.calls.map((x) => JSON.parse(String(x[0])));
+    expect(lines).toContainEqual({ level: 'WARN', message: 'distribution tenant release failed; the sweeper disables it', tenantId: t, domain: D, error: 'ConflictError' });
+  });
+
+  test('is best effort after a committed write: a CloudFront error keeps the answer', async () => {
+    const h = rig();
+    seedTenant(h, { d: D_OLD, dk: TOKEN_2 });
+    h.kvs.items.set(hostKey(D_OLD), encodeEntry(hostEntry({ t, ac: CELL_ACCOUNT })));
+    cloudFrontMock.on(GetDistributionTenantByDomainCommand).rejects(Object.assign(new Error('slow down'), { name: 'Throttling' }));
+    const res = await put(h);
+    expect(res.statusCode).toBe(202);
+    expect(stored(h)).toEqual(expect.objectContaining({ d: D, dk: TOKEN_1 }));
+    expect(h.kvs.items.has(hostKey(D_OLD))).toBe(false);
+    const lines = logSpy.mock.calls.map((x) => JSON.parse(String(x[0])));
+    expect(lines).toContainEqual(expect.objectContaining({ message: 'distribution tenant release failed; the sweeper disables it', error: 'Throttling' }));
   });
 
   test('never touches a certificate: the sweeper deletes it later', async () => {

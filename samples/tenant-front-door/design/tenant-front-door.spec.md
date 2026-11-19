@@ -614,27 +614,46 @@ given below):
       tagged with the tenant id and the distribution id. A request past
       ACM's certificate quota fails with `LimitExceededException`, and
       the call answers 429 with `reason: certificate-quota` (§5.1). The
-      registrar finds it among its own certificates by domain name and tags, and
-      finds the distribution tenant with `GetDistributionTenantByDomain`.
+      registrar finds it among its own certificates by domain name and tags,
+      taking an issued one first, then a pending one. A certificate in a
+      terminal status (`FAILED`, `VALIDATION_TIMED_OUT`, `REVOKED` or
+      `EXPIRED`) counts as absent, so the call requests a new one. The
+      request's idempotency token is the first 32 hex characters of a
+      SHA-256 over the distribution id, the tenant id, the domain and `dk`,
+      so a repeat within ACM's hour gets the same certificate and a new
+      challenge gets a new one. The registrar finds the distribution tenant
+      with `GetDistributionTenantByDomain`.
    4. Certificate pending: answer 202 with `stage: "certificate"` and
       ACM's validation record. The operator repeats the call once the
       tenant has published the record in the domain's DNS.
    5. Certificate issued: resolve `_tfd-challenge.<d>` again as in
       sub-step 2, because up to 72 hours may have passed since the
-      challenge did. Unless the record still holds `tfd-verify=<dk>`,
+      challenge did. When the challenge passed in sub-step 2 of the same
+      call, seconds earlier, this lookup is skipped, which also keeps the
+      call's DNS time to sub-step 2's two queries. Unless the record still holds `tfd-verify=<dk>`,
       answer 202 with `stage: "challenge-recheck"`, the record and its
       `challenge` value (`"missing"`, `"mismatch"` or `"unresolved"`, as
       in sub-step 2) and write no `host#<d>`; the certificate stays, the
       challenge stays passed, and the operator repeats the call once the
       record is back. Otherwise create the distribution tenant with the
       certificate, on this distribution and with the same tags, unless
-      it exists; write `host#<d>`; answer 200. No request is routed on
+      it exists. Its name is `tfd-` and the first 32 hex characters of a
+      SHA-256 over the distribution id, the tenant id and the domain, 36
+      characters, inside CloudFront's 128 for any id and domain. A
+      distribution tenant for the domain that is this tenant's and
+      disabled (the domain was dropped and set again before the sweeper
+      deleted it), or that holds another certificate, is updated to serve,
+      enabled, with this certificate. Then write `host#<d>`; answer 200. No request is routed on
       the domain before then. Once `host#<d>` exists, a repeat looks
       nothing up, changes nothing and answers 200.
    6. Certificate failed, or validation timed out (ACM stops waiting
       after 72 hours): 422 whose `message` carries ACM's failure
-      reason. The operator drops the domain and sets it again, which
-      also issues a new challenge.
+      reason. The 422 comes from the request of sub-step 3, which within
+      ACM's hour returns the failed certificate for the same `dk`. The
+      operator drops the domain and sets it again, which issues a new
+      challenge and so, once it passes, a new certificate request. The
+      sweeper deletes a registrar certificate in a terminal status that
+      nothing uses, whatever its tenant's `d`.
 
    The token binds the challenge to one tenant and one domain: it lives
    in that tenant's `tenant#` entry next to `d`, is compared only for
@@ -664,8 +683,11 @@ given below):
    them held TXT records or a CNAME, `missing` otherwise. It is
    `unresolved` only when every lookup errors; a mix of errors and
    misses is a miss. A query takes at most
-   5.4 s, so sub-step 2's two queries fit the registrar function's 30 s
-   timeout. An environment whose first lookup got the cached negative
+   5.4 s. A call makes at most two queries, because sub-step 5 skips its
+   lookup when sub-step 2 passed in the same call, so 10.8 s of DNS and
+   the ACM calls of sub-step 3 (up to five validation-record reads 1 s
+   apart) fit API Gateway's 29 s integration limit and the registrar
+   function's 30 s timeout. An environment whose first lookup got the cached negative
    answer got it again on its next invocation's first lookup about half
    the time (14 of 24 and 16 of 31). So a repeat made before the tenant
    published the record can still answer `missing` for as long as the
@@ -898,7 +920,11 @@ given below):
    uses. When a domain is changed or dropped, or its tenant route is
    deleted or replaced, the write removes `host#<d>`, `d`, `dk` and `dx` at once,
    so routing on the domain stops after propagation, and then disables
-   the domain's distribution tenant. The sweeper (§3.1), run
+   the domain's distribution tenant. That disable is best effort: the
+   write has landed, so an error (a throttle, or a distribution tenant
+   for the domain that is not this tenant's) is logged by its error name
+   and the call keeps its answer; the sweeper disables what is left
+   enabled. The sweeper (§3.1), run
    every 15 minutes by EventBridge Scheduler, lists this distribution's
    dedicated distribution tenants and the registrar's certificates.
    A distribution tenant whose domain is no longer the `d` of the
@@ -911,8 +937,9 @@ given below):
    call left the same way. A changed domain is offline
    from the write until the new one validates. Before it touches a
    distribution tenant or a certificate, the registrar checks that its
-   tags name this tenant and this distribution (409 otherwise), so a
-   write for one tenant never removes another tenant's domain.
+   tags name this tenant and this distribution (409 on a domain call, a
+   logged refusal on a release), so a write for one tenant never removes
+   another tenant's domain.
    CloudFront returns a distribution tenant's tags only from
    `ListTagsForResource` on its ARN: `GetDistributionTenantByDomain`,
    `GetDistributionTenant` and `ListDistributionTenants` carry none
