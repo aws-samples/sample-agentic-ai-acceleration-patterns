@@ -26,6 +26,8 @@ SPDX-License-Identifier: MIT-0
 > minutes, delete 183 s. It proved an `HTTP` sink `SENT` to an `AWS_IAM`
 > function URL (SigV4 as the dispatcher role), revision 2 `SENT` after the
 > resend, and the receiver's log of both records.
+> A fourth run the same day, with `ingestPath: DIRECT` on the same code,
+> also passed all 54 checks (deploy 233 s, delete 182 s).
 > **Not exercised live yet:** `StartIngestRedrive` with messages in the queue, the
 > close of an hour after `recountWindowHours`, a cell in a second account,
 > and the hook script against a deployed API.

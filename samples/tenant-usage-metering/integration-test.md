@@ -77,9 +77,9 @@ hour) to about 75, then about 20 minutes for the steps after the count.
 Cost is well under one US dollar a run.
 
 Last run: 2026-11-19, eu-central-1, `BUS`, all 54 checks passed (deploy
-228 s, test 40 minutes, delete 183 s). The `DIRECT` path last ran the same
-day, before the filter fix and `AWS_IAM` sinks (see the
-[`architecture.md`](architecture.md) status block).
+228 s, test 40 minutes, delete 183 s). The `DIRECT` path ran the same day on
+the same code: all 54 checks passed (deploy 233 s, test 80 minutes,
+delete 182 s; see the [`architecture.md`](architecture.md) status block).
 
 A second stack runs beside the first with its own name and fleet:
 `-c stackName=TenantUsageMeteringDirect -c fleetName=demo2 -c ingestPath=DIRECT -c publishServiceParameter=false`.
