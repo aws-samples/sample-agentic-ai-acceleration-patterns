@@ -647,7 +647,7 @@ describe('§3.4 step 5: releaseDomain', () => {
     await h.domainsImpl.releaseDomain(t, D);
     expect(cloudFrontMock.commandCalls(UpdateDistributionTenantCommand)).toHaveLength(0);
     const lines = logSpy.mock.calls.map((x) => JSON.parse(String(x[0])));
-    expect(lines).toContainEqual({ level: 'WARN', message: 'distribution tenant release failed; the sweeper disables it', tenantId: t, domain: D, error: 'ConflictError' });
+    expect(lines).toContainEqual({ level: 'WARN', message: 'distribution tenant release failed', tenantId: t, domain: D, error: 'ConflictError' });
   });
 
   test('is best effort after a committed write: a CloudFront error keeps the answer', async () => {
@@ -660,7 +660,7 @@ describe('§3.4 step 5: releaseDomain', () => {
     expect(stored(h)).toEqual(expect.objectContaining({ d: D, dk: TOKEN_1 }));
     expect(h.kvs.items.has(hostKey(D_OLD))).toBe(false);
     const lines = logSpy.mock.calls.map((x) => JSON.parse(String(x[0])));
-    expect(lines).toContainEqual(expect.objectContaining({ message: 'distribution tenant release failed; the sweeper disables it', error: 'Throttling' }));
+    expect(lines).toContainEqual(expect.objectContaining({ message: 'distribution tenant release failed', error: 'Throttling' }));
   });
 
   test('never touches a certificate: the sweeper deletes it later', async () => {

@@ -73,8 +73,8 @@ export const GUARD_TIMEOUT = Duration.minutes(2);
 /** How often the teardown's provider polls, and for how long (§6.2). */
 export const TEARDOWN_POLL = { queryInterval: Duration.seconds(30), totalTimeout: Duration.hours(1) } as const;
 
-const L1_REASON = 'Node.js 24, the runtime the demo cell API uses too, so the sample runs on one pinned runtime (AR-19, dependency '
-  + 'pinning); move both when Node.js 26 is GA.';
+const L1_REASON = 'Node.js 24, the runtime the demo cell API uses too, so the dedicated-domain functions (ADR-0018) run on the '
+  + 'sample\'s one pinned runtime; move both when Node.js 26 is GA.';
 const BASIC_REASON = 'Logs-only managed policy NodejsFunction attaches; a scoped copy changes no access (M-36).';
 
 /** The ARNs that cdk-nag reports as wildcards, built once per stack. */
@@ -666,7 +666,7 @@ export class DedicatedDomainsTeardown extends Construct {
 function acknowledgeProviderFramework(provider: cr.Provider, handlers: readonly lambda.IFunction[]): void {
   const reason = 'CDK\'s custom resource provider framework, which runs only at deploy and delete and calls the teardown\'s two functions (M-25)';
   acknowledge(provider, BASIC_EXECUTION_ROLE_FINDING, `${reason}; logs-only managed policy (M-36).`);
-  acknowledge(provider, 'AwsSolutions-L1', `${reason}; CDK pins the framework's runtime (AR-19, dependency pinning).`);
+  acknowledge(provider, 'AwsSolutions-L1', `${reason}; CDK pins the framework's runtime.`);
   acknowledge(provider, 'AwsSolutions-SF2', `${reason}; the waiter only polls isComplete, and its executions are logged at ALL without data.`);
   acknowledge(
     provider.node.findChild('waiter-state-machine'),
