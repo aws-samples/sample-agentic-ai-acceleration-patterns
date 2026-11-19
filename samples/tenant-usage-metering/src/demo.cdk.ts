@@ -15,7 +15,7 @@
  * `/application-plane/shared/metering/service` (spec §6.3).
  */
 
-import { CfnOutput, RemovalPolicy, Stack, type StackProps, Validations } from 'aws-cdk-lib';
+import { Aws, CfnOutput, Fn, RemovalPolicy, Stack, type StackProps, Validations } from 'aws-cdk-lib';
 import { Duration } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -113,8 +113,12 @@ export class TenantUsageMeteringDemoStack extends Stack {
       new CfnOutput(this, 'EmitterRoleArn', { value: emitter.roleArn });
       new CfnOutput(this, 'CellId', { value: DEMO_CELL_ID });
       // TEST ONLY: the credential of the integration test's HTTP sink.
+      // Named per stack create: a deleted secret keeps its name for its recovery
+      // window, so a fixed name would fail the next run's create.
+      const runId = Fn.select(2, Fn.split('/', Aws.STACK_ID));
+      const sinkSecretName = `${props.context.fleetName}/metering/sinks/integ-${runId}`;
       const sinkSecret = new secretsmanager.Secret(this, 'DemoHttpSinkSecret', {
-        secretName: `${props.context.fleetName}/metering/sinks/integ`,
+        secretName: sinkSecretName,
         description: 'TEST ONLY: credential of the integration test HTTP sink',
         removalPolicy: RemovalPolicy.DESTROY,
       });
@@ -122,7 +126,7 @@ export class TenantUsageMeteringDemoStack extends Stack {
         id: 'AwsSolutions-SMG4',
         reason: 'A test-only credential that lives for one integration run.',
       });
-      new CfnOutput(this, 'HttpSinkSecretName', { value: `${props.context.fleetName}/metering/sinks/integ` });
+      new CfnOutput(this, 'HttpSinkSecretName', { value: sinkSecretName });
     }
 
     // A reader of the usage bus (ADR-0006): UsageRecorded records of one

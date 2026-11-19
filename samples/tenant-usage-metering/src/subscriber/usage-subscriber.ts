@@ -13,7 +13,8 @@
  * these streams must see every event or know which it missed (spec §6.2
  * item 7).
  *
- * `meters` and `tenants` filter on the event's `meterId` and `tenantId`.
+ * `meters` and `tenants` filter on the record's `meterId` and `tenantId`,
+ * under `detail` in the envelope EventBridge matches.
  * They are a convenience, not a boundary: an account a bus is shared with
  * can create an unfiltered subscriber (spec §3.2).
  */
@@ -64,7 +65,10 @@ export function subscriberFilters(meters: string[] | undefined, tenants: string[
   if (tenants !== undefined && tenants.length > 0) {
     data.tenantId = [...tenants];
   }
-  return Object.keys(data).length > 0 ? [{ scope: 'DATA', pattern: JSON.stringify(data) }] : [];
+  // For PutEvents, DATA is the EventBridge envelope and the record is under
+  // `detail` (EventBridge user guide, "Filtering events for a subscriber").
+  // A pattern on the top-level fields matched nothing (pg, 2026-11-19).
+  return Object.keys(data).length > 0 ? [{ scope: 'DATA', pattern: JSON.stringify({ detail: data }) }] : [];
 }
 
 export class UsageSubscriber extends Construct {

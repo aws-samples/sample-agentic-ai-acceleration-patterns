@@ -49,11 +49,16 @@ registrations and usage in it, and the destroy removes all of them.
 | Step | Checks |
 |---|---|
 | Registrations | `PutCellEmitter` is `ACTIVE` and idempotent; a moved cell is 409 `PLACEMENT_MISMATCH`; an operator cannot register (resource policy); two tenants bound; a bad `billingAccount` is 400 |
-| Meters and sinks | a backdated `SUM` meter; a second create is 409 `ALREADY_EXISTS`; an `S3_EXPORT` sink; an `HTTP` sink with a secret outside the fleet prefix is 400 |
+| Meters and sinks | a backdated `SUM` meter; a second create is 409 `ALREADY_EXISTS`; an `S3_EXPORT` sink; an `HTTP` sink that maps `billingAccount`, pointed at an endpoint that refuses; an `HTTP` sink with a secret outside the fleet prefix is 400 |
 | Ingest | one batch judged event by event: four `ACCEPTED`, `TENANT_NOT_IN_CELL`, `UNKNOWN_METER`, `BAD_SHAPE`; an unchanged resend is `ACCEPTED`; a caller that is not an emitter role gets 403 |
 | The count | after the hour closes and its grace passes: tenant-a counted once per event id (15.5), with its billing account; tenant-b counted without one; the hour `COUNTED` |
 | Export sink | both records reach the export bucket as `UsageRecorded` lines; the record shows the delivery `SENT` |
-| Usage-bus reader | the `UsageSubscriber` queue receives both records |
+| Usage-bus readers | an unfiltered `UsageSubscriber` and one filtered to `agent.tokens` each receive both records; on a miss the check prints the reader's dead-letter queue |
+| HTTP sink | tenant-a's delivery is `FAILED` (`HTTP_403`); tenant-b's, with no billing account, is `BLOCKED` (`NO_BILLING_ACCOUNT`) |
+| Resend | a billing account for tenant-b starts `RESEND_BLOCKED`; the record becomes revision 2 with `acct-b`, is sent again, and revision 2 reaches the usage bus |
+| Sink redrive | a sink created after the records is backfilled by `StartSinkRedrive` with an hour range; `StartSinkRedrive` without one sends the `FAILED` deliveries again |
+| Ingest redrive | `StartIngestRedrive` succeeds on the empty ingest dead-letter queue (`BUS`) or is a 400 (`DIRECT`) |
+| Failed alarm | the `DeliveriesFailed` alarm goes to `ALARM` |
 | Late event | a late event in the counted hour gives an `ADJUSTMENT` of 2, total 17.5, seq 0 unchanged |
 | Re-admission | a meter backdated over the refused event; `StartReadmission` re-admits it; it is counted; the reader filter keeps that meter off the queue |
 | Readers and offboarding | a reader reads usage and not meters; `DeleteTenantBinding` closes with the control-plane ids from its headers; a second delete and a delete of a missing binding succeed |
@@ -62,11 +67,17 @@ registrations and usage in it, and the destroy removes all of them.
 ## Runtime and cost
 
 Deploy about 4 minutes, destroy about 3. The test waits for the hour its
-events fall in to close: from 15 minutes (a run started just before the
-hour) to about 75 minutes. Cost is well under one US dollar a run.
+events fall in to close, from 15 minutes (a run started just before the
+hour) to about 75, then about 20 minutes for the steps after the count.
+Cost is well under one US dollar a run.
 
-Last run: 2026-11-18, eu-central-1, every step passed in two parts against
-one stack (see the [`architecture.md`](architecture.md) status block).
+Last run: 2026-11-19, eu-central-1, a `BUS` and a `DIRECT` stack side by
+side, 47 of 48 checks each; the filtered reader's check failed and its fix
+was verified live (see the [`architecture.md`](architecture.md) status
+block).
+
+A second stack runs beside the first with its own name and fleet:
+`-c stackName=TenantUsageMeteringDirect -c fleetName=demo2 -c ingestPath=DIRECT -c publishServiceParameter=false`.
 
 ## After an interruption
 
@@ -87,6 +98,10 @@ If the script stops before its teardown, delete the stack
 - The test reads the stand-in callers' role ARNs and the bucket names from
   stack outputs. A consumer reads the API URL and the bus ARNs from the
   published parameter, and knows its own roles.
+- The `HTTP` sink points at a route of the metering API that refuses an
+  unsigned call, so the test proves `FAILED`, `BLOCKED` and the resend
+  without a public receiver; a consumer points a sink at its billing API.
+  Its secret is created by the demo stack under `<fleet>/metering/sinks/`.
 - The stand-in registrar replaces the control plane's global hook, whose
   hooks are not yet released (spec §6.4); a consumer registers
   [`scripts/control-plane/metering-hook.sh`](scripts/control-plane/metering-hook.sh).

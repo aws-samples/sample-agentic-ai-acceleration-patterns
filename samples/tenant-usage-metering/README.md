@@ -131,7 +131,7 @@ as a global hook on the five events of spec §3.4. Cells send usage with
 `AWS_REGION=eu-central-1 npx projen integ` deploys the demo stack with a
 local test cell, drives registration, ingest, counting, sinks, the usage
 bus, a late event, re-admission and offboarding, and destroys the stack:
-20 to 85 minutes, depending on how far the run starts from the next hour,
+35 to 95 minutes, depending on how far the run starts from the next hour,
 and under one US dollar. See [`integration-test.md`](integration-test.md).
 
 ## End-to-end demo

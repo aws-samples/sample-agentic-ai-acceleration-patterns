@@ -5,17 +5,26 @@ SPDX-License-Identifier: MIT-0
 # Tenant Usage Metering: Architecture
 
 > **Status: implemented and verified in a non-production account in
-> eu-central-1 on 2026-11-18.** The demo stack deployed in 223 s, updated
-> in 69 s and was deleted in 182 s. The integration test
-> ([`integration-test.md`](integration-test.md)) passed every step: the
-> run checked registrations, ingest, the first count, the export sink, a
-> late event, re-admission and offboarding. It ran in two parts, because
-> the first driver process stopped while it waited for the hour to close;
-> the second part continued against the same stack and data. Unit tests:
-> 100 on 2026-11-18.
-> **Not exercised live yet:** `ingestPath: DIRECT`, `StartIngestRedrive`,
-> `StartSinkRedrive`, `StartResendBlocked`, an `HTTP` sink, the close of an
-> hour after `recountWindowHours`, and a cell in a second account.
+> eu-central-1 on 2026-11-19.** Two demo stacks ran the integration test
+> ([`integration-test.md`](integration-test.md)) side by side, one with
+> `ingestPath: BUS` and one with `DIRECT`: deploy 223 s and 249 s, test
+> about 85 minutes each, delete 183 s each, nothing left but the CDK
+> provider log groups (§11). 47 of 48 checks passed in each. The one that
+> failed, the `UsageSubscriber` filtered on a meter, matched nothing: its
+> pattern was written against the record, and EventBridge matches a
+> `PutEvents` event's `DATA` against the envelope, with the record under
+> `detail`. The fix was deployed during the BUS run and the filtered
+> reader then received the next record (an `ADJUSTMENT`) and no
+> `agent.calls` record. The run also proved the `HTTP` sink's `FAILED`
+> (403) and `BLOCKED` paths, `RESEND_BLOCKED` to revision 2,
+> `SINK_REDRIVE` (backfill and `FAILED`), `StartIngestRedrive` (BUS: empty
+> queue; DIRECT: 400) and the `DeliveriesFailed` alarm. A run of
+> 2026-11-18 proved the stack update through the bucket configuration
+> deny (116 s). Unit tests: 107.
+> **Not exercised live yet:** an `HTTP` sink that answers 2xx (needs a
+> public receiver), `StartIngestRedrive` with messages in the queue, the
+> close of an hour after `recountWindowHours`, a cell in a second account,
+> and the hook script against a deployed API.
 
 This document describes what is built. The design is in
 [`design/tenant-usage-metering.spec.md`](design/tenant-usage-metering.spec.md),

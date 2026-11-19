@@ -221,7 +221,7 @@ every tenant's count of it; a distributed map in the recount is a seam
 the usage bus every tenant's counted records, so both are shared only with
 vendor accounts: `rawSubscriberAccountIds` and `usageSubscriberAccountIds`.
 `PutCellEmitter` refuses a cell in any account on either list, vendor-owned
-or not, and in the metering account itself (ADR-0006). `UsageSubscriber`'s `meters` and `tenants` filters are a
+or not, and in the metering account itself (ADR-0006). `UsageSubscriber`'s `meters` and `tenants` filters (a `DATA` pattern under `detail`, since `DATA` is the `PutEvents` envelope) are a
 convenience; an account a bus is shared with can create an unfiltered
 subscriber.
 

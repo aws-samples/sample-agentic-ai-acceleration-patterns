@@ -275,13 +275,13 @@ describe('UsageSubscriber (spec §6.3, ADR-0006)', () => {
   });
 
   test('meter and tenant filters go on the payload; a bad value fails synth', () => {
-    expect(subscriberFilters(['agent.tokens'], ['tenant-a'])).toEqual([{ scope: 'DATA', pattern: '{"meterId":["agent.tokens"],"tenantId":["tenant-a"]}' }]);
+    expect(subscriberFilters(['agent.tokens'], ['tenant-a'])).toEqual([{ scope: 'DATA', pattern: '{"detail":{"meterId":["agent.tokens"],"tenantId":["tenant-a"]}}' }]);
     const { template } = subscribe({ meters: ['agent.tokens'], type: 'FIFO', startingPosition: new Date('2026-11-18T00:00:00Z') });
     template.hasResourceProperties('AWS::EventsV2::Subscriber', {
       Type: 'FIFO',
       StartingPosition: 'POINT_IN_TIME',
       PointInTimeConfiguration: { PointType: 'TIMESTAMP', StartingPoint: 1794960000 },
-      FilterConfiguration: { Filters: [{ Scope: 'DATA', Pattern: '{"meterId":["agent.tokens"]}' }] },
+      FilterConfiguration: { Filters: [{ Scope: 'DATA', Pattern: '{"detail":{"meterId":["agent.tokens"]}}' }] },
     });
     expect(() => subscribe({ tenants: ['bad tenant'] })).toThrow(/charset/);
     expect(() => subscribe({ maxEventAge: Duration.hours(25) })).toThrow(/24 hours/);
