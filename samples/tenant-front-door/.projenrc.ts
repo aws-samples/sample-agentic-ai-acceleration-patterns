@@ -65,8 +65,33 @@ project.gitignore.exclude('.kiro/');
 // Regenerate the registrar SSDK and OpenAPI document from the model before every compile
 project.preCompileTask.exec('smithy build');
 
-// The app has no stack until the edge and main stacks land (build slice
-// S2), and `cdk synth` refuses an app with none. Remove this override in S2.
-project.tasks.tryFind('synth:silent')?.reset('echo "no stacks yet: synth starts with build slice S2"');
+// ---------------------------------------------------------------------------
+// BUILD-ONLY placeholder context. `npx projen build` synthesises the app
+// with cdk-nag, and the app refuses to synthesise without its spec §3.6
+// inputs. These values let it run: reserved example.com names, an
+// all-zero account (never an AWS account) and a zone id no zone has. They
+// NEVER reach a deployment: `npx cdk deploy` runs its own synth with the
+// real `--context` values. The last three point the router, registrar and
+// SPA seams at the test stand-ins until build slices S1, S3 and S4 land;
+// drop each one when its slice's file exists.
+// ---------------------------------------------------------------------------
+const buildOnlyPlaceholderContext = [
+  '--context appDomain=app.build-placeholder.example.com',
+  '--context \'hostedZone={"zoneId":"ZBUILDPLACEHOLDER","zoneName":"build-placeholder.example.com"}\'',
+  '--context applicationId=build-placeholder',
+  '--context \'controlPlane={"apiUrl":"https://control-plane.build-placeholder.example.com","accountId":"000000000000",'
+    + '"region":"eu-central-1","vendorIdp":{"tokenUrl":"https://idp.build-placeholder.example.com/oauth2/token",'
+    + '"clientId":"build-placeholder","clientSecretArn":'
+    + '"arn:aws:secretsmanager:eu-central-1:000000000000:secret:build-placeholder-AAAAAA"}}\'',
+  '--context fleet=build-placeholder',
+  '--context edgeOperatorRoleArn=arn:aws:iam::000000000000:role/build-placeholder-operator',
+  '--context \'issuer={"clientId":"build-placeholder","scopes":"openid","cognitoDomain":"https://auth.build-placeholder.example.com"}\'',
+  '--context routerSourcePath=test/edge/fixtures/router-stub.js',
+  '--context registrarEntry=test/edge/fixtures/registrar-stub.function.ts',
+  '--context spaSource=test/edge/fixtures/spa',
+].join(' ');
+// Only the build's quiet synth: `npx projen synth` stays a plain `cdk synth`,
+// so it reads a deployer's own cdk.json inputs.
+project.tasks.tryFind('synth:silent')?.reset(`cdk synth -q ${buildOnlyPlaceholderContext}`);
 
 project.synth();
