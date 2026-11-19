@@ -24,8 +24,9 @@ import {
   UpdateDistributionTenantCommand,
 } from '@aws-sdk/client-cloudfront';
 import { refuse } from './errors';
+import { logLine } from './log';
 import type { ReadKey, RouteStore } from './route-store';
-import { CHALLENGE_TTL_SECONDS, TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../shared/contracts';
+import { CHALLENGE_TTL_SECONDS, TAG_DISTRIBUTION_ID, TAG_TENANT_ID, TERMINAL_CERTIFICATE_STATUSES } from '../shared/contracts';
 import { type ChallengeOutcome, challengeRecordName, challengeRecordValue, checkChallenge, type DnsLookup } from '../shared/dns-challenge';
 import { decodeHostEntry, encodeEntry, hostEntry, hostKey, RouteTableError, type TenantEntry, tenantEntry, tenantKey } from '../shared/route-table';
 import type { DnsRecord, PutTenantRouteServerOutput } from '../smithy/source/typescript-ssdk-codegen/src';
@@ -92,6 +93,15 @@ export const CERTIFICATE_REGION = 'us-east-1';
 
 /** Rounds of the sub-steps when a write finds the entry changed by another writer; then 503. */
 export const MAX_ROUNDS = 5;
+
+/**
+ * The distribution tenant's name: `tfd-` and 32 hex characters of a
+ * SHA-256 over the distribution, the tenant and the domain, 36 characters,
+ * inside CloudFront's 128 for any tenant id and domain (§3.4 step 5).
+ */
+export function distributionTenantName(distributionId: string, tenantId: string, domain: string): string {
+  return `tfd-${createHash('sha256').update(`${distributionId}\n${tenantId}\n${domain}`).digest('hex').slice(0, 32)}`;
+}
 
 /** `DescribeCertificate` reads while ACM has not yet attached a new certificate's validation record. */
 export const RECORD_READS = 5;
@@ -184,15 +194,35 @@ export class AwsDedicatedDomains implements DedicatedDomains {
     if (this.isRouted(request, state)) return this.routed(request, state.entry);
     // §3.4 step 4: a registrar certificate for the domain tagged for another tenant is that tenant's pending claim.
     const own = await this.ownCertificates(request.tenantId, request.customDomain);
+    // Tokens whose challenge passed in this invocation: sub-step 5 does not resolve them again.
+    const passedNow = new Set<string>();
     for (let round = 1; round <= MAX_ROUNDS; round++) {
-      const next = await this.round(request, state, own);
+      const next = await this.round(request, state, own, passedNow);
       if ('answer' in next) return next.answer;
       state = next.reread;
     }
     throw refuse.unavailable('the tenant route keeps changing; retry');
   }
 
+  /**
+   * Best effort: it runs after the route table write has landed, so a
+   * failure is logged by its error name and never changes the answer. The
+   * sweeper disables an enabled distribution tenant whose domain is no
+   * longer its tenant's `d` (§3.4 step 5).
+   */
   async releaseDomain(tenantId: string, domain: string): Promise<void> {
+    try {
+      await this.disable(tenantId, domain);
+    } catch (error) {
+      logLine('WARN', 'distribution tenant release failed; the sweeper disables it', {
+        tenantId,
+        domain,
+        error: error instanceof Error ? error.name : 'UnknownError',
+      });
+    }
+  }
+
+  private async disable(tenantId: string, domain: string): Promise<void> {
     const found = await this.distributionTenant(domain);
     if (found === undefined) return;
     await this.requireOwnDistributionTenant(found.tenant, tenantId);
@@ -208,7 +238,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
     return state.routed && state.entry.d === request.customDomain;
   }
 
-  private async round(request: DomainRequest, state: DomainCheck, own: OwnCertificate[]): Promise<Round> {
+  private async round(request: DomainRequest, state: DomainCheck, own: OwnCertificate[], passedNow: Set<string>): Promise<Round> {
     const d = request.customDomain;
     let entry = state.entry;
     if (this.isRouted(request, state)) return { answer: this.routed(request, entry) };
@@ -227,6 +257,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
       });
       if (!passed.written) return { reread: passed.reread };
       entry = passed.entry;
+      passedNow.add(entry.dk!);
     }
 
     // Sub-step 3: the challenge has passed; find the certificate or request it.
@@ -244,9 +275,12 @@ export class AwsDedicatedDomains implements DedicatedDomains {
     }
     if (certificate.Status !== 'ISSUED') throw refuse.unprocessable(this.failureMessage(certificate));
 
-    // Sub-step 5: the certificate issued; the challenge is checked once more.
-    const outcome = await this.resolve(d, dk);
-    if (outcome !== 'pass') return { answer: this.pending(request, entry, 'challenge-recheck', this.challengeRecord(d, dk), outcome) };
+    // Sub-step 5: the certificate issued; the challenge is checked once
+    // more, unless it passed seconds ago in this invocation.
+    if (!passedNow.has(dk)) {
+      const outcome = await this.resolve(d, dk);
+      if (outcome !== 'pass') return { answer: this.pending(request, entry, 'challenge-recheck', this.challengeRecord(d, dk), outcome) };
+    }
     await this.ensureDistributionTenant(request.tenantId, d, certificate.CertificateArn!);
     const routed = await this.write(request, entry, async (e) => ({
       entry: e,
@@ -372,8 +406,9 @@ export class AwsDedicatedDomains implements DedicatedDomains {
   }
 
   /**
-   * The certificate the domain uses: an issued one, else a pending one,
-   * else a failed, timed-out or otherwise unusable one, which answers 422.
+   * The certificate the domain uses: an issued one, else a pending one.
+   * One in a terminal status counts as absent, so sub-step 3 requests a
+   * new one (sub-step 6).
    */
   private async certificate(own: readonly OwnCertificate[]): Promise<CertificateDetail | undefined> {
     const details: CertificateDetail[] = [];
@@ -381,7 +416,9 @@ export class AwsDedicatedDomains implements DedicatedDomains {
       const detail = (await this.options.acm.send(new DescribeCertificateCommand({ CertificateArn: c.arn }))).Certificate;
       if (detail !== undefined) details.push(detail);
     }
-    return details.find((x) => x.Status === 'ISSUED') ?? details.find((x) => x.Status === 'PENDING_VALIDATION') ?? details[0];
+    return details.find((x) => x.Status === 'ISSUED')
+      ?? details.find((x) => x.Status === 'PENDING_VALIDATION')
+      ?? details.find((x) => !TERMINAL_CERTIFICATE_STATUSES.includes(x.Status ?? ''));
   }
 
   /**
@@ -473,7 +510,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
     try {
       await cloudfront.send(new CreateDistributionTenantCommand({
         DistributionId: distributionId,
-        Name: `tfd-${tenantId}-${domain}`,
+        Name: distributionTenantName(distributionId, tenantId, domain),
         Domains: [{ Domain: domain }],
         Customizations: { Certificate: { Arn: certificateArn } },
         Tags: { Items: [{ Key: TAG_TENANT_ID, Value: tenantId }, { Key: TAG_DISTRIBUTION_ID, Value: distributionId }] },
