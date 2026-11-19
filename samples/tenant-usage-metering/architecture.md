@@ -26,13 +26,15 @@ SPDX-License-Identifier: MIT-0
 > minutes, delete 183 s. It proved an `HTTP` sink `SENT` to an `AWS_IAM`
 > function URL (SigV4 as the dispatcher role), revision 2 `SENT` after the
 > resend, and the receiver's log of both records.
-> A fourth run the same day, with `ingestPath: DIRECT` on the same code,
-> also passed all 54 checks (deploy 233 s, delete 182 s).
-> A fifth run (`BUS`), after the review fixes of the `AWS_IAM` sink
-> (ADR-0007), passed all 54 checks: deploy 229 s, test 50 minutes, delete
-> 182 s. The receiver refused an unsigned call with 403 `AccessDenied`,
-> and signed deliveries to its URL with a repeated query key
-> (`?tag=a&tag=b`) reached `SENT`. Unit tests: 125.
+> A fourth run the same day, with `ingestPath: DIRECT` on the same code as
+> the third run (the first `AWS_IAM` sink code, before the review fixes),
+> also passed all 54 checks (deploy 233 s, test 80 minutes, delete 182 s).
+> A fifth run (`BUS`), after the review fixes of the `AWS_IAM` sink code
+> (ADR-0007; later review rounds changed only tests and docs), passed all
+> 54 checks: deploy 229 s, test 50 minutes, delete 182 s. The receiver
+> refused an unsigned call with 403 `AccessDenied`, and signed deliveries
+> to its URL with a repeated query key (`?tag=a&tag=b`) reached `SENT`.
+> Unit tests: 128.
 > **Not exercised live yet:** `StartIngestRedrive` with messages in the queue, the
 > close of an hour after `recountWindowHours`, a cell in a second account,
 > and the hook script against a deployed API.

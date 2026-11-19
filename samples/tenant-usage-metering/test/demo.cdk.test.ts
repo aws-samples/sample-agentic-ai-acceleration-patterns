@@ -40,13 +40,20 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
     expect(permissions.filter((p) => p.Principal === '*')).toEqual([]);
   });
 
-  // Every identity statement in the stack: policies, managed policies and roles' inline policies.
+  // Every identity statement in the stack: standalone and managed policies, and the inline
+  // policies of roles, users and groups.
+  const POLICY_TYPES = ['AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy', 'AWS::IAM::RolePolicy', 'AWS::IAM::UserPolicy', 'AWS::IAM::GroupPolicy'];
+  const PRINCIPAL_TYPES = ['AWS::IAM::Role', 'AWS::IAM::User', 'AWS::IAM::Group'];
   const statements = (): Array<{ id: string; s: Statement }> => [
-    ...Object.entries({ ...template.findResources('AWS::IAM::Policy'), ...template.findResources('AWS::IAM::ManagedPolicy') }).flatMap(([id, resource]) =>
-      (resource as PolicyResource).Properties.PolicyDocument.Statement.map((s) => ({ id, s })),
+    ...POLICY_TYPES.flatMap((type) =>
+      Object.entries(template.findResources(type)).flatMap(([id, resource]) =>
+        (resource as PolicyResource).Properties.PolicyDocument.Statement.map((s) => ({ id, s })),
+      ),
     ),
-    ...Object.entries(template.findResources('AWS::IAM::Role')).flatMap(([id, resource]) =>
-      ((resource.Properties.Policies ?? []) as InlinePolicy[]).flatMap((p) => p.PolicyDocument.Statement.map((s) => ({ id, s }))),
+    ...PRINCIPAL_TYPES.flatMap((type) =>
+      Object.entries(template.findResources(type)).flatMap(([id, resource]) =>
+        ((resource.Properties.Policies ?? []) as InlinePolicy[]).flatMap((p) => p.PolicyDocument.Statement.map((s) => ({ id, s }))),
+      ),
     ),
   ];
   // Any action that can invoke a function: `*`, a lambda wildcard (`*` or `?`), or an invoke
@@ -64,24 +71,58 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
     }
   });
 
-  // A resource that covers more than named functions or APIs, matched on its JSON (so `Fn::Join`
-  // pieces count): `*`; a `*` or `?` in a function name (`function:*`, `function:Demo*`), a Region
-  // or an account of a Lambda or execute-api ARN, or an API id; or a join piece that starts with
-  // `:*` and goes on (`':*:function:x'`). A lone version qualifier piece (`':*'`) stays allowed.
-  const BROAD_RESOURCE = new RegExp(
-    [
-      '^"\\*"$',
-      'function:[^:"]*[*?]',
-      ':(lambda|execute-api):[^:"]*[*?]',
-      ':(lambda|execute-api):[^:"]*:[^:"]*[*?]',
-      ':execute-api:[^:"]*:[^:"]*:[^/"]*[*?]',
-      '[*?][^:"]*:function:',
-      '":[*?][^"]+"',
-    ].join('|'),
-  );
+  // A resource as one string: `Fn::Join` and `Fn::Sub` are flattened, and every token (`Ref`,
+  // `Fn::GetAtt`, `${...}`) becomes TOKEN, which is never a wildcard. So a wildcard counts the
+  // same whether it sits in its own join piece or after a `${AWS::StackName}`.
+  const TOKEN = 'TOKEN';
+  const flat = (value: unknown): string => {
+    if (typeof value === 'string') {
+      return value;
+    }
+    const intrinsic = (value ?? {}) as Record<string, unknown>;
+    if (Array.isArray(intrinsic['Fn::Join'])) {
+      const [delimiter, parts] = intrinsic['Fn::Join'] as [string, unknown[]];
+      return parts.map(flat).join(delimiter);
+    }
+    if (intrinsic['Fn::Sub'] !== undefined) {
+      const sub = intrinsic['Fn::Sub'];
+      const [body, variables] = Array.isArray(sub) ? [String(sub[0]), (sub[1] ?? {}) as Record<string, unknown>] : [String(sub), {}];
+      return body.replace(/\$\{([^}]*)\}/g, (_, name: string) => (name in variables ? flat(variables[name]) : TOKEN));
+    }
+    return TOKEN;
+  };
+  const WILD = /[*?]/;
+  // A resource that covers more than named functions or APIs: `*`, or a `*` or `?` in the
+  // partition, service, Region or account of an ARN, in a Lambda function name
+  // (`function:*`, `function:Demo*`, `function:${AWS::StackName}-*`) or in an API id. A wildcard
+  // only in a Lambda qualifier (`<arn>:*`) or an API's stage, method or path (`<api>/*`) is
+  // allowed. A string that is not an ARN, such as `<GetAtt Arn>:*`, is broad if it has a
+  // wildcard before its last `:`.
+  const broadResource = (resource: unknown): boolean => {
+    const arn = flat(resource);
+    if (!WILD.test(arn)) {
+      return false;
+    }
+    const segments = arn.split(':');
+    if (segments[0] !== 'arn' || segments.length < 6) {
+      const last = arn.lastIndexOf(':');
+      return last < 0 || WILD.test(arn.slice(0, last));
+    }
+    const [, partition, service, region, account, ...rest] = segments;
+    if ([partition, service, region, account].some((segment) => WILD.test(segment))) {
+      return true;
+    }
+    if (service === 'lambda') {
+      return WILD.test(rest[0]) || (rest[0] === 'function' && WILD.test(rest[1] ?? ''));
+    }
+    if (service === 'execute-api') {
+      return WILD.test(rest.join(':').split('/')[0]);
+    }
+    return false;
+  };
   const broad = (s: Statement): boolean => {
     const resources = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
-    return resources.some((r) => BROAD_RESOURCE.test(JSON.stringify(r ?? '')));
+    return resources.some((r) => broadResource(r ?? ''));
   };
 
   test('no identity statement grants invoke on every function or API', () => {
@@ -91,8 +132,36 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
     expect(notAction).toEqual([]);
   });
 
+  // AWS-managed policies the stack may attach. Their documents are not in the template, so any
+  // other one (e.g. `service-role/AWSLambdaRole`, invoke on `*`) would get past the checks above.
+  const ALLOWED_AWS_MANAGED = new Set(['service-role/AWSLambdaBasicExecutionRole']);
+  // A `Ref` to an in-stack managed policy (its statements are checked above) or an allowlisted AWS one.
+  const allowedManaged = (arn: unknown, inStack: Set<string>): boolean => {
+    const ref = (arn as { Ref?: string } | undefined)?.Ref;
+    if (ref !== undefined && inStack.has(ref)) {
+      return true;
+    }
+    const name = /^arn:[^:]+:iam::aws:policy\/(.+)$/.exec(flat(arn))?.[1];
+    return name !== undefined && ALLOWED_AWS_MANAGED.has(name);
+  };
+  test('roles, users and groups attach only in-stack or allowlisted managed policies', () => {
+    const managed = new Set(Object.keys(template.findResources('AWS::IAM::ManagedPolicy')));
+    const attached = PRINCIPAL_TYPES.flatMap((type) =>
+      Object.entries(template.findResources(type)).flatMap(([id, resource]) =>
+        ((resource.Properties.ManagedPolicyArns ?? []) as unknown[]).map((arn) => ({ id, arn })),
+      ),
+    );
+    expect(attached.length).toBeGreaterThan(0);
+    expect(attached.filter(({ arn }) => !allowedManaged(arn, managed))).toEqual([]);
+    // Self-test (review v5 #2): an AWS-managed policy that grants invoke, or an unknown ARN, fails.
+    expect(allowedManaged({ 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':iam::aws:policy/service-role/AWSLambdaRole']] }, managed)).toBe(false);
+    expect(allowedManaged('arn:aws:iam::111122223333:policy/Anything', managed)).toBe(false);
+    expect(allowedManaged({ 'Fn::Sub': 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole' }, managed)).toBe(true);
+  });
+
+  const allow = (Action: string, Resource: unknown): Statement => ({ Effect: 'Allow', Action, Resource });
+
   test('the wildcard check catches the broad shapes (review v3 #1)', () => {
-    const allow = (Action: string, Resource: unknown): Statement => ({ Effect: 'Allow', Action, Resource });
     const fnArn = { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':lambda:eu-central-1:111122223333:function:*']] };
     expect(invokes(allow('lambda:Invoke*', 'x')) && broad(allow('lambda:Invoke*', fnArn))).toBe(true);
     expect(broad(allow('lambda:InvokeFunction', '*'))).toBe(true);
@@ -102,7 +171,6 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
   });
 
   test('the wildcard check catches prefix, partial and case shapes (review v4 #2, #3)', () => {
-    const allow = (Action: string, Resource: unknown): Statement => ({ Effect: 'Allow', Action, Resource });
     const fn = (resource: unknown) => broad(allow('lambda:InvokeFunction', resource));
     expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:TenantUsageMetering-*')).toBe(true);
     expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:Demo*')).toBe(true);
@@ -116,6 +184,30 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
       expect(invokes(allow(action, 'x'))).toBe(true);
     }
     expect(invokes(allow('lambda:GetFunction', 'x'))).toBe(false);
+  });
+
+  test('the wildcard check sees through join pieces and Fn::Sub (review v5 #1)', () => {
+    const fn = (resource: unknown) => broad(allow('lambda:InvokeFunction', resource));
+    const join = (...parts: unknown[]) => ({ 'Fn::Join': ['', parts] });
+    const lambdaArn = 'arn:aws:lambda:eu-central-1:111122223333:function:';
+    expect(fn(join(lambdaArn, { Ref: 'AWS::StackName' }, '-*'))).toBe(true);
+    expect(fn(join(lambdaArn, '*'))).toBe(true);
+    expect(fn(join(lambdaArn, 'Demo*'))).toBe(true);
+    expect(fn(join('arn:aws:lambda:', { Ref: 'AWS::Region' }, ':', '*', ':function:x'))).toBe(true);
+    expect(fn(join('arn:aws:lambda:', '*', ':111122223333:function:x'))).toBe(true);
+    expect(fn({ 'Fn::Sub': 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-*' })).toBe(true);
+    expect(fn({ 'Fn::Sub': ['arn:aws:lambda:eu-central-1:111122223333:function:${Name}', { Name: '*' }] })).toBe(true);
+    expect(fn('arn:aws:lambda:eu-central-1:111122223333:*')).toBe(true);
+    expect(fn(join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, '*'))).toBe(true);
+    const api = (resource: unknown) => broad(allow('execute-api:Invoke', resource));
+    expect(api(join('arn:aws:execute-api:eu-central-1:111122223333:', '*'))).toBe(true);
+    expect(api(join('arn:aws:execute-api:eu-central-1:', { Ref: 'AWS::AccountId' }, ':*/prod/POST/x'))).toBe(true);
+    // Allowed: a qualifier wildcard on one function, and stage/method/path wildcards on one API.
+    expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:x:*')).toBe(false);
+    expect(fn({ 'Fn::Sub': 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${Fn}:*' })).toBe(false);
+    expect(fn(join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, ':live'))).toBe(false);
+    expect(api(join('arn:aws:execute-api:eu-central-1:111122223333:', { Ref: 'Api' }, '/*'))).toBe(false);
+    expect(api(join('arn:aws:execute-api:eu-central-1:111122223333:', { Ref: 'Api' }, '/prod/*'))).toBe(false);
   });
 
   test('without integHttpReceiver there is no function URL at all', () => {
