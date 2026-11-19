@@ -157,11 +157,13 @@ run_checks() {
   cleanup() {
     load_sigv4
     for t in "${TENANTS[@]}"; do signed DELETE "${IDENTITY_API}platform/tenants/$t" >/dev/null || true; done
+    local routed=()
     for t in "$A" "$B"; do
       [[ -n "$t" ]] || continue
+      routed+=("$t")
       aws ssm delete-parameter --name "/application-plane/tenants/$t/$APPLICATION_ID/smoke" >/dev/null 2>&1 || true
-      npx ts-node -P test/tsconfig.json test/smoke/seed.ts delete "$kvs" "$CELL_ID" "$t" >/dev/null || true
     done
+    (( ${#routed[@]} == 0 )) || npx ts-node -P test/tsconfig.json test/smoke/seed.ts delete "$kvs" "$CELL_ID" "${routed[@]}" >/dev/null || true
   }
   trap 'cleanup; rm -f "$TMP"/*; rmdir "$TMP"' EXIT
   load_sigv4
@@ -181,9 +183,9 @@ run_checks() {
   local settle=$(( 60 - $(elapsed "$t0") ))
   (( settle > 0 )) && sleep "$settle"
   if [[ -n "${SMOKE_SOAK_WAIT:-}" ]]; then note "soak: waiting ${SMOKE_SOAK_WAIT} s more"; sleep "$SMOKE_SOAK_WAIT"; fi
-  for i in $(seq 1 "${SMOKE_SOAK_COUNT:-60}"); do st="$(edge GET /api/whoami A_TOKEN)"; counts+="$st:$(head -c 40 "$BODY" | tr -d '\n ')"$'\n'; done
-  note "soak GETs for a after propagation: $(printf '%s' "$counts" | sort | uniq -c | tr '\n' ';')"
-  check "soak GETs for a all 200" "${SMOKE_SOAK_COUNT:-60}" "$(printf '%s' "$counts" | grep -c '^200:' || true)"
+  for i in $(seq 1 "${SMOKE_SOAK_COUNT:-60}"); do st="$(edge GET /api/whoami A_TOKEN)"; counts+="$st"$'\n'; done
+  note "soak GETs for a after propagation, by status: $(printf '%s' "$counts" | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+  check "soak GETs for a all 200" "${SMOKE_SOAK_COUNT:-60}" "$(printf '%s' "$counts" | grep -c '^200$' || true)"
 
   echo "2. the SPA and router answers (§7.1 headers)"
   st="$(edge GET /)"; check "GET / 200" 200 "$st"
