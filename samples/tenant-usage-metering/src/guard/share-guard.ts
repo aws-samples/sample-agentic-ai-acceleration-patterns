@@ -29,15 +29,17 @@ type EmitterProjection = Pick<EmitterItem, 'accountId' | 'cellId' | 'status' | '
 
 /**
  * Whether an emitter can still send: `ACTIVE`, or `CLOSING` with `closesAt`
- * still ahead or with no `closesAt` at all (the cautious reading of an item
- * the registry never writes). Past `closesAt` ingest admits nothing from it
- * (spec §4.2), so a deleted cell stops counting at its close time, not at TTL.
+ * still ahead, or with a `closesAt` that is missing or unreadable (the
+ * cautious reading of an item the registry never writes). Past `closesAt`
+ * ingest admits nothing from it (spec §4.2), so a deleted cell stops
+ * counting at its close time, not at TTL.
  */
 export function canStillSend(item: Pick<EmitterItem, 'status' | 'closesAt'>, nowMs: number): boolean {
   if (item.status === 'ACTIVE') {
     return true;
   }
-  return item.closesAt === undefined || Date.parse(item.closesAt) > nowMs;
+  const closes = item.closesAt === undefined ? Number.NaN : Date.parse(item.closesAt);
+  return Number.isNaN(closes) || closes > nowMs;
 }
 
 /**

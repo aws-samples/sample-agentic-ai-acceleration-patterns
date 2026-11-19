@@ -188,6 +188,14 @@ describe('bus share guard (ADR-0006)', () => {
     expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([{ accountId: VENDOR_A, cellId: 'C1', status: 'CLOSING' }]);
   });
 
+  test('a CLOSING emitter with an unreadable closesAt counts', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, 'C1', 'not-a-date')] });
+    const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
+    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([
+      { accountId: VENDOR_A, cellId: 'C1', status: 'CLOSING', closesAt: 'not-a-date' },
+    ]);
+  });
+
   test.each(['Create', 'Update'] as const)('%s fails when a listed account holds a cell, naming the account, the cell and its state', async (type) => {
     ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, '01JD00000000000000000000C1')] });
     await expect(handler(event(type, [VENDOR_A]))).rejects.toThrow(`account ${VENDOR_A} (cell 01JD00000000000000000000C1, ACTIVE)`);

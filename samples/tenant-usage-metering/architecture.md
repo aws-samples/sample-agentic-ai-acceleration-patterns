@@ -19,7 +19,7 @@ SPDX-License-Identifier: MIT-0
 > update through the raw bucket's configuration deny. The two paths differ
 > only before the raw store; the `BUS` run is on the current code. A
 > delete leaves only the CDK provider log groups (§11). Unit tests:
-> 187.
+> 188.
 > **Not exercised live:** `StartIngestRedrive` with messages in the queue,
 > the close of an hour after `recountWindowHours`, a cell or a bus
 > subscriber in a second account (the AWS RAM shares and the share guard
@@ -133,13 +133,13 @@ synth) and `usageSubscriberAccountIds` name the vendor accounts that read
 a bus (ADR-0006). Neither list may name the metering account, which reads
 its buses directly; synth refuses it when the stack's account is known.
 For a non-empty list the construct creates an AWS RAM resource share of
-that bus with those
-accounts and the managed permission
-`AWSRAMEventBridgeEventBusV2SubscribeOnly`: the account may create, update
-and describe its own subscribers, and may not publish. External principals
-are allowed, so an account outside the metering account's organization
-can be listed; it accepts the resource share invitation before it can use
-the bus. Every subscriber account then attaches a `UsageSubscriber`.
+that bus with those accounts and the managed permission
+`AWSRAMEventBridgeEventBusV2SubscribeOnly`: the account may create,
+update and describe its own subscribers, and may not publish. External
+principals are allowed, so an account outside the metering account's
+organization can be listed; it accepts the resource share invitation
+before it can use the bus. Every subscriber account then attaches a
+`UsageSubscriber`.
 
 No account may hold cells and read a bus. The check runs at both ends:
 `PutCellEmitter` refuses a cell in a listed account or the metering
