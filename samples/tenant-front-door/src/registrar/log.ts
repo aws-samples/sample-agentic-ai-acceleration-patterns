@@ -10,11 +10,20 @@ import { METRIC_NAMESPACE, METRIC_ROUTE_TABLE_BYTES } from '../shared/route-tabl
  */
 export type LogFields = Record<string, string | number | boolean | undefined>;
 
+/**
+ * One JSON record per line on stdout. Not `console.log`: under the
+ * function's JSON log format Lambda wraps a `console.log` line as the
+ * `message` string of its own record, so the fields would arrive
+ * double-encoded and CloudWatch would extract no EMF metric from it.
+ */
+function write(record: object): void {
+  process.stdout.write(`${JSON.stringify(record)}\n`);
+}
+
 export function logLine(level: 'INFO' | 'WARN' | 'ERROR', message: string, fields: LogFields = {}): void {
   const out: LogFields = {};
   for (const [k, v] of Object.entries(fields)) if (v !== undefined) out[k] = v;
-  // eslint-disable-next-line no-console
-  console.log(JSON.stringify({ level, message, ...out }));
+  write({ level, message, ...out });
 }
 
 /**
@@ -23,12 +32,11 @@ export function logLine(level: 'INFO' | 'WARN' | 'ERROR', message: string, field
  * dimensions, unit Bytes. The alarm reads its maximum.
  */
 export function emitRouteTableBytes(bytes: number, now: number = Date.now()): void {
-  // eslint-disable-next-line no-console
-  console.log(JSON.stringify({
+  write({
     _aws: {
       Timestamp: now,
       CloudWatchMetrics: [{ Namespace: METRIC_NAMESPACE, Dimensions: [[]], Metrics: [{ Name: METRIC_ROUTE_TABLE_BYTES, Unit: 'Bytes' }] }],
     },
     [METRIC_ROUTE_TABLE_BYTES]: bytes,
-  }));
+  });
 }

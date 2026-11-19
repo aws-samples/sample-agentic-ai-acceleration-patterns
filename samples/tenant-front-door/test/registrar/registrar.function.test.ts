@@ -29,7 +29,7 @@ describe('the Lambda entry', () => {
       [REGISTRAR_ENV.dedicatedDomains]: 'off',
       AWS_REGION: 'eu-central-1',
     });
-    const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    const log = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const { handler } = await import('../../src/registrar/registrar.function');
     const res = await handler(restEvent('DELETE', '/cells/01HZX8K9P0QRST7VWXYZ1A2B3D', {
       userArn: `arn:aws:sts::${EDGE_ACCOUNT}:assumed-role/Admin/s`,

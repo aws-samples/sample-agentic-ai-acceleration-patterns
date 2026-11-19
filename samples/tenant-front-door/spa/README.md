@@ -49,9 +49,5 @@ the calls the old session started and drops their late answers.
 
 ## Known limitations
 
-- The SPA reads the tenant from the default claim (`tenant_id`, or
-  `tenants` for a multi-tenant token). `/config.json` does not carry the
-  `tenantClaim` input (spec §3.6), so a deployment that changes it signs
-  every user out until `/config.json` carries the claim name.
 - `main.ts` and `agent-view.ts` (the DOM glue) have no automated test;
   they are checked in a browser.

@@ -71,6 +71,7 @@ const app = {
   tokenEndpoint: 'https://auth.example.com/oauth2/token',
   clientId: 'exampleclientid',
   scopes: 'openid sample/read',
+  tenantClaim: 'tenant_id',
   exchangeEndpoint: 'https://api.example.com/prod/oauth2/token',
 };
 const tenant = { tenantId: '01HZX8K9P0QRST7VWXYZ1A2B3C', displayName: 'Acme Corp', rev: 1795080000000 };

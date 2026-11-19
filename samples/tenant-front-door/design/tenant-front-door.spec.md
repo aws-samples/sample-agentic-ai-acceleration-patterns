@@ -283,7 +283,9 @@ registrar pins its form and lets the global hook role set it only once
 
 `/config.json` gives the SPA its public settings: the issuer's authorize
 and token endpoints, the token-exchange endpoint when the `issuer` input
-names one (`exchangeEndpoint`, §3.5), client id and scopes, plus the
+names one (`exchangeEndpoint`, §3.5), client id and scopes, the
+`tenantClaim` name, so the SPA reads the tenant from the same claim as the
+router and the cell (§3.6), plus the
 tenant id (upper-cased back to its control-plane form, which the token
 exchange expects), display name and `redirectUri`
 (`https://login.<appDomain>/callback`) in `host` mode. Wherever the file

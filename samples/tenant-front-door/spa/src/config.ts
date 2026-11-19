@@ -43,6 +43,7 @@ export function parseConfig(raw: unknown): ConfigJson {
     tokenEndpoint: httpsUrl(o, 'tokenEndpoint')!,
     clientId: str(o, 'clientId')!,
     scopes: str(o, 'scopes')!,
+    tenantClaim: str(o, 'tenantClaim')!,
   };
   const optional: [string, string | undefined][] = [
     ['exchangeEndpoint', httpsUrl(o, 'exchangeEndpoint', true)],

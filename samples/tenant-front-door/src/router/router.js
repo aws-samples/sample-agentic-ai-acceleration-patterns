@@ -197,7 +197,7 @@ async function handler(event) {
   if (config) {
     const app = await get('app', 'app');
     if (!app) return fail(503);
-    const c = { authorizeEndpoint: app.az, tokenEndpoint: app.tk, clientId: app.cid, scopes: app.sc };
+    const c = { authorizeEndpoint: app.az, tokenEndpoint: app.tk, clientId: app.cid, scopes: app.sc, tenantClaim: CLAIM };
     if (app.ex !== undefined) c.exchangeEndpoint = app.ex;
     if (te) {
       c.tenantId = tenant.toUpperCase();
