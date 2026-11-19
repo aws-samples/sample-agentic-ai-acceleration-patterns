@@ -8,6 +8,12 @@
  * fixed clock. The fake KeyValueStore is a Map loaded from
  * `test/fixtures/route-table.json`; `get` rejects for a missing key, as
  * `cf.kvs().get` does.
+ *
+ * Limits: the router runs in `vm`, so jest reports no coverage for it. Two
+ * runtime facts are proven here only in Node and need the deployed
+ * function (`cloudfront:TestFunction`, spec §10): that `crypto.createHmac`
+ * takes a Buffer key, and that query string values arrive still
+ * percent-encoded, as the sign-in host forwards them.
  */
 
 import * as crypto from 'crypto';

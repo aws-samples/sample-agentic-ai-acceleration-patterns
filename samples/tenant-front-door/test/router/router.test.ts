@@ -58,6 +58,12 @@ describe('step 2: host handling', () => {
     expect(r.logs).toEqual([]);
   });
 
+  test.each([['single', single], ['host', hostMode]] as const)('step 2 (%s): a request with no Host header gets 404', async (_m, make) => {
+    const e = event({ host: '', uri: '/' });
+    delete e.request.headers.host;
+    expect((await make().run(e)).statusCode).toBe(404);
+  });
+
   test('step 2 (host): the apex appDomain gets 404', async () => {
     expect((await run(hostMode(), { host: HOST_DOMAIN, uri: '/' })).statusCode).toBe(404);
   });
@@ -270,6 +276,7 @@ describe('step 5: find the tenant', () => {
     ['host', hostMode, ACME_HOST, '/api/items'],
     ['host', hostMode, ACME_HOST, '/config.json'],
     ['host', hostMode, ACME_HOST, '/signin-state'],
+    ['single', single, DEDICATED_HOST, '/config.json'],
   ] as const)('step 5 (%s): an Authorization header over 8,192 bytes on %s %s gets 401 before any decode', async (_m, make, host, uri) => {
     const r = make();
     const a = await run(r, { host, uri, headers: { authorization: authOfLength(8193) }, query: { nonce: 'A'.repeat(16) } });
@@ -381,7 +388,7 @@ describe('step 6: the tenant route (§4.2)', () => {
   });
 });
 
-describe('route table values the router refuses (route-table.json invalid cases)', () => {
+describe('§4.1 and step 6: route table values the router refuses (route-table.json invalid cases)', () => {
   const rt: { invalid: { kind: string; why: string; value: string }[] } = readFixture('route-table.json');
   const cases: Record<string, [() => Router, string, string, string, number]> = {
     tenant: [single, `tenant#${T_ACME}`, SINGLE_DOMAIN, '/api/items', 403],
@@ -391,12 +398,36 @@ describe('route table values the router refuses (route-table.json invalid cases)
     signin: [hostMode, 'signin', ACME_HOST, '/signin-state', 503],
   };
 
-  test.each(rt.invalid.map((c) => [c.kind, c.why, c] as const))('%s value with %s is treated as no entry', async (kind, _why, c) => {
-    const [make, key, host, uri, expected] = cases[kind];
-    const r = make();
-    r.store.set(key, c.value);
-    const a = await run(r, { host, uri, token: tokenFor(T_ACME), query: { nonce: 'A'.repeat(16) } });
-    expect(a.statusCode).toBe(expected);
+  /** Pairing rules on fields the router never reads (§4.1): the registrar refuses them, the router routes on. */
+  const unread = ['dk without d', 'd without dk'];
+
+  test.each(rt.invalid.filter((c) => !unread.includes(c.why)).map((c) => [c.kind, c.why, c] as const))(
+    '§4.1: a %s value with %s is treated as no entry', async (kind, _why, c) => {
+      const [make, key, host, uri, expected] = cases[kind];
+      const r = make();
+      r.store.set(key, c.value);
+      const a = await run(r, { host, uri, token: tokenFor(T_ACME), query: { nonce: 'A'.repeat(16) } });
+      expect(a.statusCode).toBe(expected);
+    });
+
+  test.each(unread)('§4.1: a tenant value with %s still routes, the router never reads d or dk', async (why) => {
+    const r = single();
+    const value = JSON.parse(rt.invalid.find((c) => c.why === why)!.value);
+    r.store.set(`tenant#${T_ACME}`, JSON.stringify({ ...value, c: '01hzx8k9p0qrst7vwxyz1a2b3d' }));
+    const a = await run(r, { host: SINGLE_DOMAIN, uri: '/api/items', token: tokenFor(T_ACME) });
+    expect(header(a, 'x-tenant-route')).toBe(T_ACME);
+  });
+
+  test('§4.1: a signin key that is not 32 bytes makes the entry no entry', async () => {
+    const r = hostMode();
+    r.store.set('signin', '{"v":1,"cur":"k1","k":{"k1":"AAAA"}}');
+    expect((await run(r, { host: ACME_HOST, uri: '/signin-state', query: { nonce: 'A'.repeat(16) } })).statusCode).toBe(503);
+  });
+
+  test('step 2 and 6: a host# entry with an empty t gets 403 on /config.json, not a tenant-less file', async () => {
+    const r = hostMode();
+    r.store.set(`host#empty.${HOST_DOMAIN}`, '{"v":1,"t":"","ac":"111111111111"}');
+    expect((await run(r, { host: `empty.${HOST_DOMAIN}`, uri: '/config.json' })).statusCode).toBe(403);
   });
 
   test('every valid route-table.json entry is accepted by the parser the router uses', async () => {
@@ -495,6 +526,11 @@ describe('step 8: /logout (§3.5)', () => {
   test('step 8 (single): /logout on a dedicated domain also signs out through appDomain', async () => {
     const a = await run(single(), { host: DEDICATED_HOST, uri: '/logout' });
     expect(header(a, 'location')).toContain('logout_uri=https%3A%2F%2Fapp.example.com%2F');
+  });
+
+  test('step 3 and 8 (host): /logout needs only the host# entry, so a suspended tenant can still sign out', async () => {
+    const a = await run(withSuspendedHost(hostMode()), { host: SUSPENDED_HOST, uri: '/logout' });
+    expect(a.statusCode).toBe(302);
   });
 
   test('step 8 (host): /logout on a dedicated domain gets 400', async () => {
