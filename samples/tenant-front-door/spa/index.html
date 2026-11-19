@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
+<!-- SPDX-License-Identifier: MIT-0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+{{callback}}
+{{importmap}}
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tenant front door demo</title>
+{{stylesheet}}
+{{entry}}
+</head>
+<body>
+<main>
+<h1>Tenant front door demo</h1>
+<p id="tenant"></p>
+<p id="status" role="status"></p>
+<button id="signin" type="button" hidden>Sign in</button>
+<button id="retry" type="button" hidden>Try again</button>
+<div id="picker" hidden></div>
+<section id="actions" hidden>
+<button id="whoami" type="button">Who am I</button>
+<pre id="whoami-out"></pre>
+<form id="agent-form">
+<label>Backend <input id="backend" value="default" pattern="[a-z0-9-]{1,32}" required></label>
+<label>Prompt <input id="prompt" required></label>
+<button type="submit">Send</button>
+</form>
+<pre id="agent-out"></pre>
+<button id="switch-tenant" type="button" hidden>Switch tenant</button>
+<button id="signout" type="button">Sign out</button>
+</section>
+</main>
+</body>
+</html>
