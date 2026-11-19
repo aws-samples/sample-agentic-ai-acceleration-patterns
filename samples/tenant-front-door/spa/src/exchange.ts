@@ -6,8 +6,8 @@
  * §5.4.1): narrow a `tenants` token to one tenant with RFC 8693.
  */
 
-import type { ConfigJson } from '../../src/shared/contracts';
 import type { FetchLike, Sleep } from './http';
+import type { ConfigJson } from '../../src/shared/contracts';
 
 export const GRANT_TYPE_TOKEN_EXCHANGE = 'urn:ietf:params:oauth:grant-type:token-exchange';
 export const TOKEN_TYPE_REFRESH = 'urn:ietf:params:oauth:token-type:refresh_token';

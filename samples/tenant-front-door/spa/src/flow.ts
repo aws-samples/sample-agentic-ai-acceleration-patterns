@@ -7,13 +7,13 @@
  * and settle on one tenant, narrowing a `tenants` token first.
  */
 
-import type { ConfigJson } from '../../src/shared/contracts';
 import { ConfigError, Here, parseConfig, signInPlan } from './config';
 import { narrowToken } from './exchange';
 import type { FetchLike, KeyValueStorage, Sleep } from './http';
 import { codeChallenge, makeVerifier } from './pkce';
 import { authorizeUrl, clearPending, makeNonce, parseSigninState, savePending, signinStatePath, stateMatches, takePending } from './signin';
 import { decodeClaims, namesTenant, redeemCode, sameTenant, tenantView, TokenSet } from './token';
+import type { ConfigJson } from '../../src/shared/contracts';
 
 export interface Env {
   readonly fetch: FetchLike;

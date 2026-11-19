@@ -20,11 +20,11 @@ The build writes `build/spa/`:
 |---|---|
 | `index.html` | the inline callback script first, then the import map, the stylesheet and the entry, each script pinned by hash or `integrity` |
 | `assets/<hash>.js`, `assets/<hash>.css` | content-hashed, so `/assets/*` can be cached as immutable |
-| `csp.json` | `{"script-src": [...], "style-src": [...]}`: the hash sources the stack puts into the §7.1 policy |
+| `csp.json` | `{"script-src": ["'sha384-…'", ...], "style-src": []}`: the hash sources the stack puts into the §7.1 policy; `style-src` stays empty because the policy is `style-src 'self'` |
 
 The same sources build the same bytes. The build fails when a chunk has no
-`integrity` entry in the import map, or when the HTML holds something a
-hash cannot allow (an inline event handler, a `style` attribute, a
+`integrity` entry in the import map, or when the HTML holds something the
+policy refuses (an inline event handler, a `style` attribute or `<style>`, a
 `javascript:` URL).
 
 ## Layout
