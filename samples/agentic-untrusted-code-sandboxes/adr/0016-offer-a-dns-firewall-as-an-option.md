@@ -49,8 +49,9 @@ stays blocked: it is a third-party zone, and no spike saw a failure
 without it. Synth refuses the option with a supplied `vpc`, because the
 association would block names for every other workload in that VPC. The construct owns the rule group, its
 VPC association (mutation protection off), the query-log configuration and
-its log group, and any Logs resource policy that query-log delivery needs,
-so `cdk destroy` removes them all.
+its log group, and its own Logs resource policy for that group, so
+`cdk destroy` removes them all. It never declares the account's shared
+delivery policy; a change delivery makes there is a stated leftover.
 
 ## Consequences
 

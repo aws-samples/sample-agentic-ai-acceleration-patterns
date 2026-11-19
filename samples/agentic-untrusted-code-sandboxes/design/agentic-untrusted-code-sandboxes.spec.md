@@ -508,10 +508,15 @@ domains for every other workload in it, so synth refuses `dnsFirewall`
 together with `vpc`; a vendor with their own VPC associates their own
 rule group with the §3.9 allow list.
 
-Query logging to CloudWatch Logs may add an account-level Logs resource
-policy outside the stack. The integration run checks for one after
-deploy; if delivery creates it, the construct declares that policy
-itself, so `cdk destroy` removes it.
+Query logging to CloudWatch Logs may add to an account-level Logs
+resource policy that other log deliveries in the account share. The
+construct never declares that shared policy, because deploy would
+overwrite it and destroy would delete it. It declares its own policy,
+under a construct-path name, that lets `delivery.logs.amazonaws.com`
+write to the query-log group only. The integration driver diffs
+`DescribeResourcePolicies` (names and documents) from before deploy to
+after destroy; any remaining change to a shared policy is a known
+leftover of C-6.
 
 What it does not cover: the tool Lambda, which has NAT egress and can
 query a public resolver directly (it is trusted code); and names under
@@ -795,8 +800,10 @@ matches its charset when two instances share a stack.
   registry rows only under its key; IAM refuses any other key even if the
   tool's code is wrong.
 - C-6: `cdk destroy` leaves no sandbox, task, MicroVM, session, instance,
-  log group, DNS Firewall resource or Logs resource policy behind,
-  including sandboxes started at run time.
+  log group, DNS Firewall resource or construct-owned Logs resource policy
+  behind, including sandboxes started at run time. An entry that query-log
+  delivery adds to a shared, account-level Logs resource policy, if any,
+  is the one known leftover (§3.9).
 
 ### 6.3 Composition (standard §1.1)
 
@@ -913,7 +920,7 @@ touched.
 | iam-wall | `iam:SimulatePrincipalPolicy` on the tool tenant role with `aws:PrincipalTag/TenantId` = `A` denies `inputs/B/*`, the `TENANT#B` row, and `StopTask` on B's task |
 | limits | a 6 MiB input returns `input_too_large`; a 1 MiB print returns `truncated` = true |
 | no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no answer within the script's own 3 s timeout), and the `GetObject` fails. `agentcore`: credentials load, and every call outside C-2 is denied |
-| no-egress | A's script tries HTTPS to `example.com`, HTTPS to a public IP address with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy; all fail within 5 s |
+| no-egress | A's script tries HTTPS to `example.com`, a TCP connect to a public IP address on port 443 with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy. Every request fails within 5 s, and for the IP-literal probe the TCP connect itself must not complete (a TLS error after a completed connect is a failure of the step) |
 | runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, and a disk fill: each returns `timedOut` or a non-zero exit, nothing of the job survives into A's next call, and A's next call works |
 | dead-handle | stop A's sandbox out of band; A's next call returns `sandbox` = `started` |
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
@@ -929,7 +936,7 @@ touched.
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
-| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or Logs resource policy of the sample, and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
+| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or construct-owned Logs resource policy of the sample, and `DescribeResourcePolicies` matches its state before deploy (any difference is reported as the §3.9 known leftover), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
 
 Preconditions, checked by the driver before it deploys: the account's
 "maximum allocated ARM_64 MicroVM memory" quota (Service Quotas, looked up
