@@ -4,7 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Amended by: ADR-0015
+- Amended by: ADR-0015, ADR-0019
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -58,3 +58,5 @@ expired row first. Offboarding does not delete
 tenant objects (spec §1.2).
 
 Note 2026-11-18: amended by ADR-0015. The drain waits until every task is `STOPPED` and every MicroVM of the image is `TERMINATED` before the stack's resources are deleted, and the log cleanup resource also deletes the MicroVM image build log group.
+
+Note 2026-11-19: amended by ADR-0019. An idle ECS managed instance blocks the capacity provider delete, so once every task has stopped the drain deregisters the cluster's container instances with `force` and waits until none is left, within its 10-minute bound.

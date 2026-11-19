@@ -4,7 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Amended by: ADR-0015, ADR-0018
+- Amended by: ADR-0015, ADR-0018, ADR-0019
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -66,3 +66,5 @@ second user, the threat model records the gap for `microvm`.
 Note 2026-11-18: amended by ADR-0015. On `microvm` and `agentcore` the runner makes `bootId` and adopts the nonce when the sandbox first serves a tenant (the `/run` hook, the session's first job), because sandboxes start from a shared snapshot. The AgentCore backend is a container, because a direct-code runtime cannot drop code to a second user.
 
 Note 2026-11-19: amended by ADR-0018. Every job carries a MAC bound to the nonce, which the runner checks before it writes the input or runs code; start calls carry only a hash of the nonce, and the nonce travels on the data channel.
+
+Note 2026-11-19: amended by ADR-0019. The job's memory cap is chosen per backend (rlimits on `microvm`, the platform's task limit plus the watchdog on `nitro`, a session-long job cgroup on `agentcore`), and no runner can set its own `oom_score_adj` to -1000.

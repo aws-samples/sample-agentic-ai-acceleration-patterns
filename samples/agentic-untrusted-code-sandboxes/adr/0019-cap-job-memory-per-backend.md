@@ -4,15 +4,15 @@
 
 - Status: Proposed
 - Date: 2026-11-19
-- Amends: ADR-0010, ADR-0016, ADR-0018
+- Amends: ADR-0010, ADR-0011, ADR-0016, ADR-0018
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
 
-ADR-0010 capped a job's memory with a cgroup v2 group where the runner
-could create one, else a 200 ms watchdog, and relied on the runner's
-`oom_score_adj` of -1000 and the job's 1000 so a kernel kill took the job
-first. Spikes S-14 and S-15 (spec §7.3) measured each backend:
+Spec §3.5, under ADR-0010, capped a job's memory with a cgroup v2 group
+where the runner could create one, else a 200 ms watchdog, and relied on
+the runner's `oom_score_adj` of -1000 and the job's 1000 so a kernel kill
+took the job first. Spikes S-14 and S-15 (spec §7.3) measured each backend:
 
 - No backend grants `CAP_SYS_RESOURCE`, so no runner can set -1000. The
   runner starts at 1000 on `microvm` and `agentcore` and at -998 on
@@ -20,7 +20,8 @@ first. Spikes S-14 and S-15 (spec §7.3) measured each backend:
 - `microvm` has no cgroup mount and the runner cannot make one. Its guest
   is about four times `MinimumMemoryInMiB`. `RLIMIT_AS`, set with
   soft = hard before the drop to uid 1001, makes every allocation past
-  the cap fail inside the job in under 0.1 s, and code cannot raise it.
+  the cap fail inside the job at once (0.09 to 0.13 s), and code cannot
+  raise it.
   `RLIMIT_DATA` is bypassed by a shared `mmap`.
 - `nitro` has a read-only cgroup mount, but the platform already caps
   the task group at the task size, and a kernel kill there took only
@@ -33,9 +34,11 @@ S-14 also answered the ADR-0018 checks. With management events only,
 CloudTrail Event history holds no `RunMicrovm` and no
 `InvokeAgentRuntime` event, and `RunTask` events hide the override
 `environment`. The AgentCore container gets the session id header
-unchanged. No path was found between two sessions of one runtime. And
-the AgentCore ready time of about 550 s that ADR-0016 left open recurred
-without the DNS Firewall.
+unchanged. No path was found between two sessions of one runtime. The
+AgentCore ready time of about 550 s that ADR-0016 left open recurred
+without the DNS Firewall, so the firewall is not its cause; why S-9
+saw about 200 s is still unknown. And an idle ECS managed instance
+blocks the capacity provider delete until it scales in.
 
 ## Options considered
 
@@ -63,24 +66,30 @@ Option 1 (spec §3.5 memory cap). Every backend sets `RLIMIT_AS` = A and
 `microvm`: A = 256 MiB and N = ⌊0.7 × `MemTotal` / A⌋, so the rlimits are
 the total cap. `nitro`: the platform's task limit plus the watchdog,
 with `oom_kill` in the runner's scope as the record of a kernel kill.
-`agentcore`: one cgroup per job with `memory.max` = `MemAvailable` less
-256 MiB and `memory.oom.group` = 1, after the runner has moved into
-`/runner`, enabled `+memory` and written 0 to the root's
-`memory.oom.group`.
+`agentcore`: one job cgroup for the session's life with `memory.max` =
+`MemAvailable` less 256 MiB and `memory.oom.group` = 1, after the runner
+has moved into `/runner`, enabled `+memory` and written 0 to the root's
+`memory.oom.group`. On every backend the runner makes `/tmp` and
+`/dev/shm` unwritable to uid 1001, so files that outlive a job hold no
+memory. The drain deregisters the cluster's container instances once
+every task has stopped (ADR-0011).
 
 ADR-0018 stands as written: its design did not depend on what
 CloudTrail records. ADR-0016 keeps the firewall off by default for the
-allow-list upkeep alone, since the ready-time question is now answered.
+allow-list upkeep alone, since the firewall is ruled out as the cause of
+the ready time.
 
 ## Consequences
 
 A memory fill no longer depends on an `oom_score_adj` value on any
 backend. `microvm` jobs are limited to 256 MiB per process and about ten
-processes at the default size, which rules out runtimes that reserve
+processes and threads at the default size, which rules out runtimes that reserve
 large address space, such as Node (344 MiB to start); the sample runs
 Python only. A larger `microvm.memoryMiB` raises N, not A. The runner
 needs unit tests for all three setups. `memoryExceeded` is never set on
-`microvm`: the job sees the error itself. Open: memory that `RLIMIT_AS`
-does not count on `microvm` (tmpfs files, `memfd_create`), and CloudTrail
-with data events. Revisit if `microvm` gains a cgroup mount, or if a
+`microvm`: the job sees the error itself. Open until S-16: whether
+`/work` is tmpfs, an unmapped `memfd` filled during a job, the
+`agentcore` setup under a global out-of-memory, and whether a forced
+deregister ends a managed instance at once. Also open: CloudTrail with
+data events. Revisit if `microvm` gains a cgroup mount, or if a
 platform grants `CAP_SYS_RESOURCE`.

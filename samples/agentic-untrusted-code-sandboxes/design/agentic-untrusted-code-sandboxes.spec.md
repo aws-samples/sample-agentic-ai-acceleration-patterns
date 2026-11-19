@@ -269,7 +269,7 @@ no unsigned entry.
 | `microvm.memoryMiB` | `number` | 1024 | MicroVM image `MinimumMemoryInMiB`; the guest gets about four times this (S-15: 1024 gives 3998 MiB and 2 vCPUs, 2048 gives 8016 MiB and 4) |
 | `nitro.cpu`, `nitro.memoryMiB` | `number` | 512, 1024 | task size |
 | `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements, and the architecture of the `nitro` runner image. The default is the one type run end to end; `m7g.large` (Graviton, 2 vCPU) reports Nitro Enclaves support and is likely cheaper, but has not been run on ECS. Synth checks each type against a static table of types with Nitro Enclaves support (Intel types need 4 vCPU or more, so `m7i.large` is refused) |
-| `nitro.minInstances` | `number` | 0 | 0 keeps idle cost at zero; after scale-in a new sandbox takes about 30 s, and calls return `sandbox_starting` until it is ready. Warm starts of 11 to 18 s also often exceed `startWait` |
+| `nitro.minInstances` | `number` | 0 | 0 keeps idle cost at zero; an idle instance scales in 120 s after its last task (`ScaleInAfter`), and a new sandbox then takes about 30 s, and calls return `sandbox_starting` until it is ready. Warm starts of 11 to 18 s also often exceed `startWait` |
 | `agentcore.sessionFiles` | `boolean` | `false` | grant the runtime role `sessions/${aws:AgentCoreRuntimeSourceSid}/*` on the input bucket (ADR-0007) |
 
 Timing budget: the tool Lambda timeout is set to
@@ -447,10 +447,15 @@ with `busy`. The runner:
    `RLIMIT_NOFILE` = 256. A, N and what caps the job's total memory depend
    on the backend (memory cap, below). The runner sets the job's
    `oom_score_adj` to 1000, which needs no capability, and tries to set
-   its own to -1000, ignoring `EACCES`. The design relies on neither
-   score: S-14 found the runner starting at 1000 on `microvm` and
-   `agentcore` and at -998 on `nitro`, and no backend grants
-   `CAP_SYS_RESOURCE`.
+   its own to -1000, ignoring `EACCES`. No backend grants
+   `CAP_SYS_RESOURCE`, and S-14 found the runner starting at 1000 on
+   `microvm` and `agentcore` and at -998 on `nitro`. The design relies on
+   neither score on `microvm` and `agentcore`. On `nitro` the runner's
+   survival of a kernel kill was measured only at the platform's -998;
+   the watchdog, which fires at L below the task limit, is the cover if
+   that changes. On `microvm` the job's environment also sets
+   `MALLOC_ARENA_MAX` = 2, so each thread does not reserve a 64 MiB
+   allocator arena out of A.
 3. At `runTimeout` wall time, or when the job ends, kills the process group
    and then every remaining uid 1001 process, so nothing the code forked
    survives into the next job.
@@ -465,14 +470,21 @@ one tenant's, and L = M less 256 MiB.
 
 | Backend | M | Total cap | A, N | `memoryExceeded` when |
 |---|---|---|---|---|
-| `microvm` | `MemTotal` (about four times `microvm.memoryMiB`: 3998 MiB at the default, S-15) | the rlimits. No cgroup is mounted and the runner cannot mount one (S-14), so N × A stays at or below 70 % of M, which S-15 found keeps the kernel's out-of-memory killer out of reach. An allocation past A fails inside the job with `MemoryError` or `ENOMEM` in under 0.1 s | A = 256 MiB, N = ⌊0.7 × M / A⌋ (10 at the default) | never: the job sees the error itself, and its exit code and `stderr` show it |
+| `microvm` | `MemTotal` (about four times `microvm.memoryMiB`: 3998 MiB at the default, S-15) | the rlimits, for memory counted in address space. No cgroup is mounted and the runner cannot mount one (S-14), so N × A stays at or below 70 % of M, which S-15 found keeps the kernel's out-of-memory killer out of reach. An allocation past A fails inside the job with `MemoryError` or `ENOMEM` at once (0.09 to 0.13 s for a 512 MiB cap in S-15). Data in an unmapped `memfd` is not counted (residual, T-51) | A = 256 MiB, N = ⌊0.7 × M / A⌋ (10 at the default) | never: the job sees the error itself, and its exit code and `stderr` show it |
 | `nitro` | the smaller of `MemTotal` and the task group's `memory.max` (the task size) | the platform's task group limit; the cgroup mount is read-only (S-14). The kernel kills only uid 1001 processes there, and the runner survived every run (S-14). The watchdog kills the job's processes above L first | A = L, N = 64 | the watchdog killed the job, or `oom_kill` in the runner's own scope's `memory.events` grew during the job |
-| `agentcore` | `MemAvailable` (about 7625 of 8016 MiB at idle): a cap at `MemTotal` less 256 MiB lies above it, and the global killer would act first (S-14) | a cgroup v2 group per job with `memory.max` = L and `memory.oom.group` = 1, so the kernel kills the whole job and nothing else | A = L, N = 64 | `oom_kill` in the job group's `memory.events` grew |
+| `agentcore` | `MemAvailable` (about 7625 of 8016 MiB at idle): a cap at `MemTotal` less 256 MiB lies above it, and the global killer would act first (S-14) | one cgroup v2 job group for the session's life, reused by every job, with `memory.max` = L and `memory.oom.group` = 1, so the kernel kills the whole job and nothing else, and memory one job leaves behind counts against the next | A = L, N = 64 | `oom_kill` in the job group's `memory.events` grew |
 
 `RLIMIT_NPROC` counts every process and thread of uid 1001 in the
 sandbox; jobs run one at a time and step 3 sweeps uid 1001, so the count
-is per job. The watchdog sums the resident memory of every uid 1001
-process every 200 ms and kills them all above L. On `agentcore` the
+is per job, threads included. The watchdog runs on `nitro` only: it sums
+the resident memory of every uid 1001 process every 200 ms and kills
+them all above L. Files are memory too where a mount is tmpfs, and they
+outlive the job. So when the sandbox becomes one tenant's, the runner
+makes `/tmp` and `/dev/shm` not writable by uid 1001 (it owns them as
+root, which needs no capability) and sets `TMPDIR` = `/work/tmp`; the
+job writes only under `/work`, where `RLIMIT_FSIZE` caps each file.
+Which of these mounts are tmpfs on each backend is checked in S-16. On
+`agentcore` the
 runner prepares the cgroup tree once, at the session's first job and
 before any code runs: it moves itself into a `/runner` group (once a
 controller is enabled the root may hold no process), writes `+memory`
@@ -488,7 +500,7 @@ that reason.
 
 Files in `/work` persist for the sandbox's life, so a tenant's second call
 can read what the first wrote. uid 1001 cannot signal the runner, open its
-file descriptors, or write outside `/work` and `/tmp`. The runner logs only
+file descriptors, or write outside `/work`. The runner logs only
 sizes, exit code and duration, never code, input or output. The tool's log
 line (§3.8) is the record of a run; the runner's log is secondary, because
 on `nitro` and `agentcore` it shares a stream with whatever the code prints
@@ -812,6 +824,10 @@ Output:
 ```
 
 `sandbox` is `started` or `reused`, so a caller can see a cold start.
+`memoryExceeded` is true when the runner or the kernel killed the job
+for its total memory (§3.5 memory cap). A single process that passes its
+own limit gets `MemoryError` in `stderr` on every backend, with
+`memoryExceeded` false, and `microvm` never sets the flag.
 
 Errors (tool error `code`, no stack, no tenant data):
 
@@ -854,12 +870,19 @@ minutes). A MicroVM image cannot be deleted while MicroVMs of it are live
 (running or suspended), and a capacity provider cannot be deleted while a
 task is still stopping; in both cases CloudFormation fails the delete, the
 second after a 20-minute stall. It also fails while an idle managed
-instance still runs (S-14), so the capacity provider's `ScaleInAfter` is
-120 s and the drain also waits until the cluster has no container
-instance. A `StopTask` takes 45 to 78 s, so the runner
+instance still runs (S-14). So once every task is `STOPPED`, the drain
+deregisters each of the cluster's container instances with `force`,
+which also covers `nitro.minInstances` above 0, and waits until none is
+left; whether this ends an ECS managed instance at once is checked in
+S-16. The 10-minute bound covers every wait, and a capacity provider
+`ScaleInAfter` of 120 s keeps it short when the minimum is 0. A
+`StopTask` takes 45 to 78 s, so the runner
 exits at once on `SIGTERM`. AgentCore sessions in rows are stopped with
 `StopRuntimeSession`; sessions with no row end within about 20 s of the
-runtime's delete, which takes about 200 s.
+runtime's delete, which takes about 200 s. Creating a runtime took 548
+to 553 s in S-13 and S-14, with and without the DNS Firewall, against
+201 to 204 s in S-9, cause unknown; with `agentcore` enabled it sets
+the deploy time.
 
 Log groups. The construct owns the task log group and a log drain waits
 90 s on delete before it goes, as agentic-runtime-isolation ADR-0019 does.
@@ -913,8 +936,8 @@ matches its charset when two instances share a stack.
 - For `microvm`: a quota increase on "maximum allocated ARM_64 MicroVM memory" (one quota per architecture; the runner image is ARM_64)
   (2048 MiB per Region by default, running and suspended MicroVMs both
   count), which fits only two 1024 MiB sandboxes (S-4; S-15 ran 4096 MiB
-  of `MinimumMemoryInMiB` at once without a quota error, so what the quota
-  counts is unverified). A tenant holds
+  of `MinimumMemoryInMiB` at once in an account whose applied quota was
+  not read; S-16 reads it). A tenant holds
   `microvm.memoryMiB` of quota from its first call until 30 suspended
   minutes after `sandboxIdle`, so size the quota as `memoryMiB` × the
   tenants active within `sandboxIdle` + 30 minutes. `RunMicrovm` is
@@ -999,6 +1022,7 @@ deploy and destroy time, and cleans up on exit.
 | S-13 | Does a VPC-wide Route 53 Resolver DNS Firewall see and block each backend's lookups, and does each backend still work with it on? | §3.9, ADR-0016 |
 | S-14 | Runner checks: can code in one AgentCore session reach another session of the same runtime (by its address, by a listener on a known port, by anything the sessions share); can the runner create a cgroup v2 group and set `oom_score_adj` on each backend; do `RunTask` container overrides and `runHookPayload` appear in CloudTrail `requestParameters`, and does the `InvokeAgentRuntime` payload appear in any CloudTrail event; does the AgentCore container receive the runtime session id as a request header | C-1 and C-3 on `agentcore`, §3.5 memory cap, ADR-0018 |
 | S-15 | On `microvm`, which has no cgroup: do `RLIMIT_AS` and `RLIMIT_NPROC`, set before the drop to uid 1001, cap a job's memory, can code raise them, and do common runtimes start under them? | §3.5 memory cap on `microvm` |
+| S-16 | Planned: which of `/tmp`, `/dev/shm` and `/work` are tmpfs on each backend, and a tmpfs fill and an unmapped `memfd` fill against the §3.5 caps; the `agentcore` setup as a whole (runner in `/runner`, root `memory.oom.group` 0, job group 1) under a global out-of-memory; a thread-pool job under the `microvm` rlimits with `MALLOC_ARENA_MAX` = 2; whether a forced deregister ends an ECS managed instance at once; the account's applied MicroVM memory quota | §3.5 memory cap, §5.3 drain, §6.1 |
 
 ### 7.1 Spike results, S-1 to S-12 (2026-11-18, a non-production test account, eu-central-1)
 
@@ -1064,7 +1088,7 @@ S-15 (`microvm` only, guest 3998 MiB):
 
 | Check | Result |
 |---|---|
-| `RLIMIT_AS` 512 MiB | every allocation path (`bytearray`, `malloc`, private and shared `mmap`) fails with `MemoryError` or `ENOMEM` at 496 MiB in under 0.1 s; the job keeps running; forks and `exec` inherit the limit |
+| `RLIMIT_AS` 512 MiB | every allocation path (`bytearray`, `malloc`, private and shared `mmap`) fails with `MemoryError` or `ENOMEM` at 496 MiB, 0.09 to 0.13 s after the first allocation; the job keeps running; forks and `exec` inherit the limit |
 | `RLIMIT_DATA` 512 MiB | a shared anonymous `mmap` (Python's default) bypasses it and reached 1024 MiB |
 | uid 1001 raising its limits | soft up to hard only; the hard limit cannot be raised by any route tried |
 | Lowest `RLIMIT_AS` that starts | `sh` 8 MiB, `python3 -c 1` 16 MiB, a 32 MiB `bytearray` 48 MiB, `node -e 1` 344 MiB |
@@ -1072,9 +1096,12 @@ S-15 (`microvm` only, guest 3998 MiB):
 | `prlimit` on a live job | refused from the runner (`EPERM`); a helper at uid 1001 lowers it in 12 ms |
 | `MinimumMemoryInMiB` | 1024 gives 3998 MiB and 2 vCPUs; 2048 gives 8016 MiB and 4 |
 
-Not tested: the `agentcore` and `microvm` checks in a 1 GiB sandbox (the
-sizes are fixed by the platform); memory that `RLIMIT_AS` does not count
-(tmpfs files, `memfd_create`); threads against `RLIMIT_NPROC`; scanning
+Not tested (S-16 covers the first four): memory that `RLIMIT_AS` does
+not count (tmpfs files, `memfd_create`); the `agentcore` setup as a whole
+under a global out-of-memory (its two parts ran separately); threads
+against the `microvm` rlimits; the applied MicroVM quota; the
+`agentcore` and `microvm` checks in a 1 GiB sandbox (the sizes are fixed
+by the platform); scanning
 address ranges for other sessions, and whether two sessions share a host;
 session ids under 33 characters; a trail with data events for any of the
 three services; the 200 ms watchdog itself.
@@ -1112,7 +1139,7 @@ touched.
 | limits | a 6 MiB input returns `input_too_large`; a 1 MiB print returns `truncated` = true |
 | no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no answer within the script's own 3 s timeout), and the `GetObject` fails. `agentcore`: credentials load, and every call outside C-2 is denied |
 | no-egress | A's script tries HTTPS to `example.com`, a TCP connect to a public IP address on port 443 with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy. Every request fails within 5 s, and for the IP-literal probe the TCP connect itself must not complete (a TLS error after a completed connect is a failure of the step) |
-| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and N processes that each allocate up to their `RLIMIT_AS` (on `nitro` and `agentcore` a total far above the sandbox memory): each returns `timedOut`, `memoryExceeded` (the memory fill on `nitro` and `agentcore`) or a non-zero exit (on `microvm` with `MemoryError` in `stderr`), the runner is still the one that answers (same `bootId`), nothing of the job survives into A's next call, and A's next call works |
+| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and N processes that each allocate up to their `RLIMIT_AS` (on `nitro` and `agentcore` a total far above the sandbox memory): each returns `timedOut`, `memoryExceeded` (the memory fill on `nitro` and `agentcore`) or a non-zero exit (on `microvm` with `MemoryError` in `stderr`); one process filled past its own `RLIMIT_AS` returns `memoryExceeded` false and `MemoryError` in `stderr` on every backend; on `microvm` a job of four threads that each allocate 32 MiB completes; the runner is still the one that answers (same `bootId`), nothing of the job survives into A's next call, and A's next call works |
 | dead-handle | stop A's sandbox out of band; A's next call returns `sandbox` = `started` |
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
 | idle | after `sandboxIdle` (2 min) idle the driver invokes the reaper; A's `nitro` task is stopped, and the stop line carries `sandboxSeconds` |

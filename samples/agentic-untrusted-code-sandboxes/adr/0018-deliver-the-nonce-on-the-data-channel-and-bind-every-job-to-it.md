@@ -5,6 +5,7 @@
 - Status: Proposed
 - Date: 2026-11-19
 - Amends: ADR-0010
+- Amended by: ADR-0019
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -60,3 +61,5 @@ S-14 checks that the AgentCore container receives the session id and
 that CloudTrail records none of the nonce carriers. The
 registry still holds the nonce, readable by the vendor's roles. Spike
 S-14 checks what CloudTrail records for the start calls.
+
+Note 2026-11-19: amended by ADR-0019. S-14 ran the checks named above. With management events only, CloudTrail Event history held no `RunMicrovm` and no `InvokeAgentRuntime` event and showed `RunTask` override `environment` as hidden; no dummy nonce appeared in any event. The AgentCore container receives the session id header unchanged on every job.

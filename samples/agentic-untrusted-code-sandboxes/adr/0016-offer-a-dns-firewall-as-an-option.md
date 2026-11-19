@@ -5,6 +5,7 @@
 - Status: Proposed
 - Date: 2026-11-19
 - Amends: ADR-0003
+- Amended by: ADR-0019
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -66,3 +67,5 @@ still resolve; a narrower list of exact names is a later option. The
 AgentCore ready time is measured again on the integration run; if the
 firewall causes it, the README says so next to the prop. Revisit the
 default once the allow list has held through several runs.
+
+Note 2026-11-19: amended by ADR-0019. S-14 measured the same AgentCore ready time (552 s) without the firewall, so the firewall does not cause it and the README needs no note next to the prop; the cause of the difference from S-9 is unknown. The default stays off for the allow-list upkeep.
