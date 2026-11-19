@@ -611,7 +611,12 @@ given below):
    3. Challenge passed (`dk` without `dx`): find what exists and create
       only what is missing. The certificate is an ACM certificate in
       `us-east-1`, which CloudFront requires, requested by the registrar across Regions with DNS validation and
-      tagged with the tenant id and the distribution id. A request past
+      tagged with the tenant id (`tenant-front-door:tenant`, lower-case),
+      the distribution id (`tenant-front-door:distribution`) and the cost
+      allocation tag `TenantId`, the tenant id in the control plane's
+      upper-case form, so Cost Explorer and CUR split the domain's
+      certificate and distribution tenant by tenant once the deployer
+      activates the tag (standard §4.4). A request past
       ACM's certificate quota fails with `LimitExceededException`, and
       the call answers 429 with `reason: certificate-quota` (§5.1). The
       registrar finds it among its own certificates by domain name and tags,
@@ -1046,10 +1051,21 @@ existing origin. It serves two cases:
 Besides the store, the registrar's role holds the CloudFront actions
 a domain call needs (`CreateDistributionTenant`, with tagging on
 create, `GetDistributionTenantByDomain`, `ListTagsForResource` on
-distribution tenants and `UpdateDistributionTenant`) and, in `us-east-1`, the ACM actions
-`RequestCertificate`, `DescribeCertificate`, `ListCertificates`,
-`ListTagsForCertificate` and `AddTagsToCertificate`, the ACM writes
-conditioned on the registrar's tag. It uses them only on the edge
+distribution tenants and `UpdateDistributionTenant`) and, in
+`us-east-1`, the ACM actions `RequestCertificate`,
+`DescribeCertificate`, `ListCertificates`, `ListTagsForCertificate` and
+`AddTagsToCertificate`. The creates (`CreateDistributionTenant`,
+`RequestCertificate`) and the tag grants (`cloudfront:TagResource`,
+`acm:AddTagsToCertificate`, which CloudFront and ACM authorise for the
+tags of a create) require `aws:RequestTag/tenant-front-door:distribution`
+to be this distribution's id and allow no tag keys but the registrar's
+three. The tag grants also require the resource to carry no
+`tenant-front-door:distribution` tag yet (an IAM `Null` condition on
+`aws:ResourceTag`), so the role cannot put the tag on a resource another
+front door tagged; tagging a resource with no such tag remains possible
+(threat model AR-33). `UpdateDistributionTenant` requires
+`aws:ResourceTag/tenant-front-door:distribution` to be this
+distribution's id. It uses them only on the edge
 operator role's domain calls and on deletes and replacements of an
 entry that has a `d`, and never deletes a distribution tenant or a
 certificate. The sweeper runs as an execution role of its own. It
@@ -1062,7 +1078,7 @@ per-entry reads (ADR-0022), the CloudFront actions `ListDistributionTenants`,
 `ListTagsForCertificate`, `DescribeCertificate` and
 `DeleteCertificate`, the ACM delete conditioned on the registrar's
 tag. For the daily re-check it also holds `dynamodb:GetItem`,
-`Query`, `UpdateItem`, `DeleteItem` and `BatchWriteItem` on the
+`Query`, `UpdateItem` and `BatchWriteItem` on the
 sweeper's table (`BatchWriteItem` for the lister's batch delete, an
 IAM action of its own, ADR-0022), `sqs:SendMessage` on
 the on-failure queue and, for the lister's fan-out of one asynchronous
@@ -1075,8 +1091,13 @@ metric format log lines, so no role needs `cloudwatch:PutMetricData`.
 The log group keeps its lines for 14 days. Where IAM cannot narrow a CloudFront action to this
 distribution's tenants, the registrar and the sweeper check a
 distribution tenant's distribution and tags before they change it. The
-stack's teardown custom resource holds both roles' CloudFront and ACM
-actions (§6.2).
+stack's teardown custom resource holds only the removal actions:
+`ListDistributionTenants`, `GetDistributionTenant`,
+`ListTagsForResource` on distribution tenants, `UpdateDistributionTenant`
+and `DeleteDistributionTenant` conditioned on the registrar's tag and, in
+`us-east-1`, `ListCertificates`, `ListTagsForCertificate` and
+`DeleteCertificate` conditioned on the registrar's tag (§6.2). It
+creates nothing and requests nothing.
 
 While `dedicatedDomains` is off the registrar role holds none of its
 CloudFront or ACM actions, and the sweeper, its role, its table, its

@@ -28,7 +28,7 @@ import {
 } from './domains-support';
 import { CELL, CELL_ACCOUNT, DT, harness, type Harness, json, restEvent, TENANT, TENANT_2, testConfig } from './support';
 import { AwsDedicatedDomains, distributionTenantName, MAX_ROUNDS, newChallengeToken, RECORD_READS } from '../../src/registrar/dedicated-domains';
-import { CHALLENGE_TTL_SECONDS, TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../../src/shared/contracts';
+import { CHALLENGE_TTL_SECONDS, TAG_COST_TENANT_ID, TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../../src/shared/contracts';
 import {
   cellEntry,
   cellKey,
@@ -257,7 +257,7 @@ describe('§3.4 step 5 sub-step 2: the open challenge', () => {
       DomainName: D,
       ValidationMethod: 'DNS',
       IdempotencyToken: expect.stringMatching(/^[0-9a-f]{32}$/),
-      Tags: [{ Key: TAG_TENANT_ID, Value: t }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION_ID }],
+      Tags: [{ Key: TAG_TENANT_ID, Value: t }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION_ID }, { Key: TAG_COST_TENANT_ID, Value: TENANT }],
     });
   });
 
@@ -433,7 +433,7 @@ describe('§3.4 step 5 sub-step 5: the certificate issued', () => {
       Name: distributionTenantName(DISTRIBUTION_ID, t, D),
       Domains: [{ Domain: D }],
       Customizations: { Certificate: { Arn: arn } },
-      Tags: { Items: [{ Key: TAG_TENANT_ID, Value: t }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION_ID }] },
+      Tags: { Items: [{ Key: TAG_TENANT_ID, Value: t }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION_ID }, { Key: TAG_COST_TENANT_ID, Value: TENANT }] },
       Enabled: true,
     });
     expect(h.kvs.items.get(hostKey(D))).toBe(encodeEntry(hostEntry({ t, ac: CELL_ACCOUNT })));
@@ -656,7 +656,7 @@ test('§5.1: the operator\'s repeats walk the domain from challenge to routed', 
   h.acm.certificates.get(arn)!.status = 'ISSUED';
   h.dns.script([[[record(TOKEN_1)]]]);
   expect((await put(h)).statusCode).toBe(200);
-  expect(h.cf.tenants.get(D)!.tenant.Tags).toEqual(dtTags(t));
+  expect(h.cf.tenants.get(D)!.tenant.Tags).toEqual({ Items: [...dtTags(t).Items, { Key: TAG_COST_TENANT_ID, Value: TENANT }] });
   expect(h.kvs.items.has(hostKey(D))).toBe(true);
   expect(acmMock.commandCalls(RequestCertificateCommand)).toHaveLength(1);
 

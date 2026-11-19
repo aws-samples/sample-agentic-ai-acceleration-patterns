@@ -256,6 +256,13 @@ export const TAG_TENANT_ID = 'tenant-front-door:tenant';
 export const TAG_DISTRIBUTION_ID = 'tenant-front-door:distribution';
 
 /**
+ * The cost allocation tag on the same resources (standard §4.4): the
+ * tenant id in the control plane's own upper-case form, so Cost Explorer
+ * and CUR split a dedicated domain's cost by the control plane's tenant.
+ */
+export const TAG_COST_TENANT_ID = 'TenantId';
+
+/**
  * ACM statuses that never become `ISSUED`. The registrar counts such a
  * certificate as absent and requests a new one; the sweeper deletes a
  * registrar certificate in one of them that nothing uses, whatever its

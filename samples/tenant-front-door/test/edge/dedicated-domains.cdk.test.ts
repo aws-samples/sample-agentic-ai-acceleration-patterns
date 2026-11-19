@@ -5,7 +5,7 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { BASE_PROPS, EDGE_ACCOUNT, FULL_HOST_PROPS, only, synth } from './helpers';
 import { REGISTRAR_DRAIN_MS } from '../../src/custom-resources/dedicated-domains-guard.function';
 import { REGISTRAR_TIMEOUT } from '../../src/edge/main.cdk';
-import { REGISTRAR_ENV, SWEEPER_ENV, SWEEPER_METRIC_NAMESPACE, SWEEPER_METRICS, SWEEPER_RECHECK_INPUT, SWEEPER_REMOVE_INPUT, TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../../src/shared/contracts';
+import { REGISTRAR_ENV, SWEEPER_ENV, SWEEPER_METRIC_NAMESPACE, SWEEPER_METRICS, SWEEPER_RECHECK_INPUT, SWEEPER_REMOVE_INPUT, TAG_COST_TENANT_ID, TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../../src/shared/contracts';
 
 const off = synth(BASE_PROPS);
 const on = synth({ ...BASE_PROPS, dedicatedDomains: true });
@@ -18,8 +18,10 @@ const DISTRIBUTION = { Ref: 'Distribution' };
 const DISTRIBUTION_TAG = { StringEquals: { [`aws:ResourceTag/${TAG_DISTRIBUTION_ID}`]: DISTRIBUTION } };
 const TAGS_ON_CREATE = {
   'StringEquals': { [`aws:RequestTag/${TAG_DISTRIBUTION_ID}`]: DISTRIBUTION },
-  'ForAllValues:StringEquals': { 'aws:TagKeys': [TAG_TENANT_ID, TAG_DISTRIBUTION_ID] },
+  'ForAllValues:StringEquals': { 'aws:TagKeys': [TAG_TENANT_ID, TAG_DISTRIBUTION_ID, TAG_COST_TENANT_ID] },
 };
+/** The tag grants: as on create, and only on a resource with no distribution tag yet (AR-33). */
+const TAGS_ON_UNTAGGED = { ...TAGS_ON_CREATE, Null: { [`aws:ResourceTag/${TAG_DISTRIBUTION_ID}`]: 'true' } };
 const IN_US_EAST_1 = { StringEquals: { 'aws:RequestedRegion': 'us-east-1' } };
 
 type Resources = Record<string, { Type: string; Properties: Record<string, any>; DependsOn?: string[] }>;
@@ -103,7 +105,7 @@ describe('dedicatedDomains on: registrar (spec §3.4)', () => {
       Resource: TENANT_ARNS,
     });
     expect(bySid(list, 'DistributionTenantCreate')).toEqual({ Action: 'cloudfront:CreateDistributionTenant', Resource: '*', Condition: TAGS_ON_CREATE });
-    expect(bySid(list, 'DistributionTenantTagOnCreate')).toEqual({ Action: 'cloudfront:TagResource', Resource: TENANT_ARNS, Condition: TAGS_ON_CREATE });
+    expect(bySid(list, 'DistributionTenantTagOnCreate')).toEqual({ Action: 'cloudfront:TagResource', Resource: TENANT_ARNS, Condition: TAGS_ON_UNTAGGED });
     expect(bySid(list, 'DistributionTenantUpdate')).toEqual({ Action: 'cloudfront:UpdateDistributionTenant', Resource: TENANT_ARNS, Condition: DISTRIBUTION_TAG });
     expect(bySid(list, 'CertificateList')).toEqual({ Action: 'acm:ListCertificates', Resource: '*', Condition: IN_US_EAST_1 });
     expect(bySid(list, 'CertificateRequest')).toEqual({
@@ -111,7 +113,7 @@ describe('dedicatedDomains on: registrar (spec §3.4)', () => {
       Resource: '*',
       Condition: { ...TAGS_ON_CREATE, StringEquals: { ...TAGS_ON_CREATE.StringEquals, ...IN_US_EAST_1.StringEquals } },
     });
-    expect(bySid(list, 'CertificateTagOnRequest')).toEqual({ Action: 'acm:AddTagsToCertificate', Resource: CERT_ARNS, Condition: TAGS_ON_CREATE });
+    expect(bySid(list, 'CertificateTagOnRequest')).toEqual({ Action: 'acm:AddTagsToCertificate', Resource: CERT_ARNS, Condition: TAGS_ON_UNTAGGED });
     expect(bySid(list, 'CertificateRead')).toEqual({ Action: ['acm:DescribeCertificate', 'acm:ListTagsForCertificate'], Resource: CERT_ARNS });
   });
 
@@ -186,7 +188,7 @@ describe('dedicatedDomains on: sweeper (spec §3.1, §3.4 step 5, ADR-0020, ADR-
     expect(bySid(list, 'CertificateRead')).toEqual({ Action: ['acm:ListTagsForCertificate', 'acm:DescribeCertificate'], Resource: CERT_ARNS });
     expect(bySid(list, 'CertificateDelete')).toEqual({ Action: 'acm:DeleteCertificate', Resource: CERT_ARNS, Condition: DISTRIBUTION_TAG });
     expect(bySid(list, 'Table')).toEqual({
-      Action: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem'],
+      Action: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:UpdateItem', 'dynamodb:BatchWriteItem'],
       Resource: table,
     });
     expect(bySid(list, 'OnFailure')).toEqual({ Action: 'sqs:SendMessage', Resource: { 'Fn::GetAtt': [logicalId(on.main, 'AWS::SQS::Queue', 'SweeperOnFailure'), 'Arn'] } });
@@ -196,7 +198,7 @@ describe('dedicatedDomains on: sweeper (spec §3.1, §3.4 step 5, ADR-0020, ADR-
       'cloudfront-keyvaluestore:DescribeKeyValueStore', 'cloudfront-keyvaluestore:GetKey', 'cloudfront-keyvaluestore:ListKeys',
       'cloudfront:DeleteDistributionTenant', 'cloudfront:GetDistributionTenant', 'cloudfront:ListDistributionTenants', 'cloudfront:ListTagsForResource',
       'cloudfront:UpdateDistributionTenant',
-      'dynamodb:BatchWriteItem', 'dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:UpdateItem',
+      'dynamodb:BatchWriteItem', 'dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:UpdateItem',
       'lambda:InvokeFunction', 'sqs:SendMessage',
     ]);
   });
