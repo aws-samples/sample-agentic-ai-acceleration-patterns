@@ -365,9 +365,21 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
     const names: string[] = [];
     let token: string | undefined;
     do {
-      const result = await this.cognito.send(
-        new ListUsersInGroupCommand({ UserPoolId: this.userPoolId, GroupName: groupName, Limit: PAGE_LIMIT, NextToken: token }),
-      );
+      let result;
+      try {
+        result = await this.cognito.send(
+          new ListUsersInGroupCommand({ UserPoolId: this.userPoolId, GroupName: groupName, Limit: PAGE_LIMIT, NextToken: token }),
+        );
+      } catch (error) {
+        // A deprovision that was throttled after it deleted this group leaves
+        // the tenant DELETING; its retry finds no group, and no member listed
+        // by it. Stop here instead of failing the retry for good (found by the
+        // platform stress test's create-tenant-burst, ADR-0040).
+        if (isCognitoError(error, COGNITO.resourceNotFound)) {
+          return names;
+        }
+        throw error;
+      }
       for (const user of (result.Users ?? []) as UserType[]) {
         if (user.Username !== undefined) {
           names.push(user.Username);
