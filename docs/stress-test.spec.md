@@ -117,7 +117,7 @@ it first shows.
 
 | Component | Where | What it is |
 |---|---|---|
-| Contract | `stress/` at the repository root | `tiers.ts`, the k6 library (`stress/k6/`), the result schema, the quota budget, the runner |
+| Contract | `stress/` at the repository root | `src/`: tiers, slice declaration, quota budget, result records, runner (`run.sh`); the k6 library (`stress/k6/`) |
 | Driver host | `stress/driver/` (the runtime-isolation `StressDriver`, moved) | one EC2 instance, no inbound rule, no public IP, SSM Session Manager, k6 and the AWS CLI |
 | Stress application | `stress/application/` | a control-plane application whose cell scripts deploy one runtime-isolation cell and whose tenant scripts onboard one tenant (§3.3) |
 | Slice: `control-plane` | `samples/control-plane/scripts/stress/` | deploy the control plane, register accounts and the stress application, onboarding and churn scenarios |
@@ -191,11 +191,11 @@ a declaration, `scripts/stress/slice.json`.
 | Verb | Does | Must |
 |---|---|---|
 | `budget` | prints the slice's draw on each account-wide quota at the tier, as JSON | run without credentials |
-| `deploy` | deploys the slice's stacks, or reuses them | report deploy seconds; publish what the next slice needs through the sample's published parameters (P-2) |
+| `deploy` | deploys the slice's stacks, or reuses them | publish what the next slice needs through the sample's published parameters (P-2); the runner times it (P-6) |
 | `seed` | creates the slice's data for the tier, or reuses the manifest | be safe to rerun; never write a token or a password to disk |
 | `run <scenario>` | runs one scenario | write one result record per scenario (§4.3); exit non-zero on a pass-criterion failure |
-| `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6) |
-| `teardown` | removes what the slice deployed | report destroy seconds; keep fixtures unless `--fixtures` is passed; verify nothing it owned is left |
+| `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6); write the late fields (`refusals`, `cost`) into its own slice's records, only those nobody else changed since `run`; any other change after `run` fails the run |
+| `teardown` | removes what the slice deployed | keep fixtures unless `--fixtures` is passed; verify nothing it owned is left; the runner times it (P-6) |
 
 `slice.json` names the slice, the slices it needs (by published interface),
 its scenarios, and the quotas it draws on. The runner orders slices by
@@ -212,21 +212,37 @@ Inputs every verb reads from the environment:
 | `STRESS_PREFIX` | stack and resource name prefix |
 | `STRESS_HOME` | the manifest folder outside the repository |
 | `STRESS_MODE` | `slice` (alone) or `platform` (composed) |
+| `STRESS_TIER_JSON` | the whole tier from `stress/src/tiers.ts`, as JSON |
+| `STRESS_RESULTS` | the folder `run <scenario>` writes its record to |
+| `STRESS_REPO` | the repository root |
+| `STRESS_COMMIT` | the commit the run is built from |
+
+`budget` runs without credentials: no `AWS_*` variable from the runner,
+an empty `HOME`, and `AWS_EC2_METADATA_DISABLED=true`. Each verb runs in
+its own session and process group with no stdin; SIGINT, SIGTERM or SIGHUP
+to the runner reaches the whole group, and anything a verb leaves running
+is stopped when it exits.
 
 ### 3.5 Runner
 
-`stress/run.sh --tier <tier> [--slices <a,b,...>] [--scenarios <x,y>]`:
+`stress/run.sh run --tier <tier> --slices <a,b,...> [--scenarios <x,y>] [--limits <file>]`:
 
-1. Reads every named `slice.json` and checks the needs are present.
+1. Reads every named `slice.json`, checks the needs are present, and
+   refuses a `--scenarios` entry that no named slice declares.
 2. Sums `budget` per account and refuses to start when a sum is over its
-   quota or another run holds the account.
+   quota or another run holds the lock for the prefix.
 3. Runs `deploy` and `seed` in dependency order, then the scenarios in the
    order of §5, then `collect`, then `teardown` in reverse order. Teardown
-   runs from the exit trap, also on failure.
-4. Writes the run's result file (§4.3).
+   runs on failure and after SIGINT, SIGTERM or SIGHUP too.
+4. Writes the run's result file (§4.3). Runner lines and all verb output
+   go to `run.log` in the run folder, which only the runner's user can read.
 
 With one slice named, the runner is that sample's stress test. With all of
 them, it is the platform run.
+
+The lock is per prefix on the runner's host. A second run from another host
+against the same accounts is not detected; one run per set of accounts at a
+time is an operating rule (`stress/README.md`, known limitations).
 
 ### 3.6 Deployment inputs
 
@@ -269,7 +285,7 @@ and `iam:GetRole` give all of it.
 
 ## 4. Data model
 
-### 4.1 Tiers (`stress/tiers.ts`)
+### 4.1 Tiers (`stress/src/tiers.ts`)
 
 | | `small` | `medium` | `large` |
 |---|---|---|---|

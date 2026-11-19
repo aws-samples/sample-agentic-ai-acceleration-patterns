@@ -136,8 +136,11 @@ stress/
 ├── k6/             # the shared k6 library
 ├── results/        # one committed summary per run, no account or tenant ids
 ├── spikes/<name>/  # one folder per spike: README with question, steps, results, teardown
-├── run.sh          # the runner
-├── *.ts            # the contract: tiers (tiers.ts), result schema, quota budget
+├── src/            # the contract: tiers.ts, slice.ts, budget.ts, result.ts, runner.ts, cli.ts
+├── test/           # its unit tests (§5.1)
+├── .projenrc.ts    # the only hand-edited project file (§4.1)
+├── run.sh          # the runner: check, plan, run, report, quotas
+├── README.md       # the slice contract and how to run
 └── LICENSE         # MIT-0
 ```
 
