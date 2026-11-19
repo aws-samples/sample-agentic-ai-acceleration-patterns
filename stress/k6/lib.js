@@ -89,7 +89,7 @@ const ENTRY_BYTES = 6 * 1024;
 export const isolationAssertions = new Counter('isolation_assertions');
 export const isolationMismatch = new Counter('isolation_mismatch');
 export const tenant429 = new Counter('tenant_429');
-/** Every 4xx and 5xx the driver saw: the refusals P-7 wants attributed. */
+/** Every refusal the driver saw (a 4xx or 5xx, or a refusal inside a 200): the ones P-7 wants attributed. */
 const refusalsSeen = new Counter('refusals_seen');
 /** Client time per timed request, milliseconds: the record's `client` hop. */
 export const clientMs = new Trend('client_ms', true);
@@ -120,10 +120,14 @@ export function countStatus(status, tenantId) {
 
 /**
  * A refusal the HTTP status does not show, such as a tool call refused inside a 200: it counts
- * under the record's `refusals`, as a 4xx does (P-7, stress ADR-0010).
+ * under the record's `refusals`, as a 4xx does, and one `body_refusal` line on stdout names
+ * its tenant and reason (TENANT_ID, REASON), because no hop's log shows a refusal inside a 200
+ * and only the driver can attribute it. `collect` moves these into `byTenantReason` (P-7,
+ * stress ADR-0010). REASON is a short code (a status or an error name), never a body.
  */
-export function countRefusal() {
+export function countRefusal(tenantId, reason) {
   refusalsSeen.add(1);
+  console.log(JSON.stringify({ kind: 'body_refusal', epochMinute: Math.floor(Date.now() / 60000), tenantId, reason: String(reason).slice(0, 64) }));
 }
 
 /** The timings of one timed request, in the `client` and `client-ttfb` hops. */

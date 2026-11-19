@@ -144,8 +144,10 @@ STRESS_PREFIX="$PREFIX" STRESS_TIER="$SCALE" STRESS_PARAMETER_PREFIXES="/applica
 # The script's own figure: the wall time of the call would include a first `npm ci`.
 secs="$(sed -n "s/^stack=${DRIVER_STACK} deploy_seconds=\([0-9][0-9]*\)$/\1/p" "${LIB_TMP}/driver.log" | tail -1)"
 [[ -n "$secs" ]] || fail "stress/driver/deploy.sh printed no deploy_seconds line"
-echo "stack=${DRIVER_STACK} deploy_seconds=${secs}"
-echo "$(date -u +%F) scale=${SCALE} stack=${DRIVER_STACK} deploy_seconds=${secs}" >>"$TIMINGS"
+ready="$(sed -n "s/^stack=${DRIVER_STACK} ready_seconds=\([0-9][0-9]*\)$/\1/p" "${LIB_TMP}/driver.log" | tail -1)"
+[[ -n "$ready" ]] || fail "stress/driver/deploy.sh printed no ready_seconds line"
+echo "stack=${DRIVER_STACK} deploy_seconds=${secs} ready_seconds=${ready}"
+echo "$(date -u +%F) scale=${SCALE} stack=${DRIVER_STACK} deploy_seconds=${secs} ready_seconds=${ready}" >>"$TIMINGS"
 merge_outputs "$DRIVER_STACK"
 
 echo "deployed $(( ${#AGENT_STACKS[@]} + 2 )) stacks in ${SECONDS}s; outputs in ${OUTPUTS}"

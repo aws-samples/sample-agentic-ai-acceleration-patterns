@@ -1,6 +1,10 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { execFileSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { App, Validations } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
@@ -145,4 +149,22 @@ describe('StressDriverStack inputs', () => {
   it.each(['identity', '/x/identity/', '/a b', ''])('refuses the identity parameter %p', (name) => {
     expect(() => stackOf({ instanceType: 't3.large', identityParameterName: name })).toThrow(/identity parameter/);
   });
+});
+
+describe('driver/app.ts, as deploy.sh synthesises it', () => {
+  it('sets the launch-template flag and grants the stress identity of its prefix', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'driver-app-'));
+    try {
+      execFileSync(process.execPath, ['-r', 'ts-node/register/transpile-only', 'driver/app.ts'], {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, STRESS_PREFIX: 'AppTest', STRESS_TIER: 'small', CDK_OUTDIR: out, CDK_DEFAULT_REGION: 'eu-central-1', CDK_DEFAULT_ACCOUNT: '111111111111' },
+        stdio: 'pipe',
+      });
+      const template = fs.readFileSync(path.join(out, 'AppTest-driver.template.json'), 'utf8');
+      expect(template).toMatch(/"LaunchTemplateName": "AppTestdriverHostLaunchTemplate[0-9A-F]+"/);
+      expect(template).toContain(':parameter/AppTest/identity"');
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

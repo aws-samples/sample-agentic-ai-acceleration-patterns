@@ -277,8 +277,9 @@ function promptOf(kind, entry, opts) {
 /**
  * One probe with its §6 assertions. KIND: report | read-own | read-other | tool | stream.
  * PHASE `warm` requests are asserted too but are not timed nor in the ledger.
- * P-1 (`isolationCheck`) counts answered probes only: a 200 is one assertion, a mismatch when
- * its report or tool payload does not parse; a non-200 makes no assertion (it is a refusal).
+ * P-1 (`isolationCheck`) makes one assertion per answered probe: a 200 is one assertion, a
+ * mismatch when its report or tool payload does not parse. A refusal makes no assertion and
+ * counts under `refusals`: a non-200, or a tool refused inside a 200 (stress ADR-0010).
  */
 export function probe(entry, kind, opts = {}) {
   const phase = opts.phase || 'main';
@@ -356,8 +357,9 @@ function toolAssertions(entry, r) {
   if (!result || result.error !== undefined || event.error !== undefined) {
     // A refusal inside a 200: no tenant answered, so no isolation assertion, but the record
     // counts it under `refusals` as it does a 4xx (stress ADR-0010).
-    toolRefused.add(1, { status: String(result && result.status !== undefined ? result.status : 'error') });
-    countRefusal();
+    const status = String(result && result.status !== undefined ? result.status : 'error');
+    toolRefused.add(1, { status });
+    countRefusal(entry.tenantId, `tool-${status}`);
     check(r, { 'tool admitted': () => false });
     return r;
   }

@@ -20,6 +20,9 @@
 #   the instance metadata service), so IssueToken calls can be signed. k6 keeps that one copy
 #   for the whole run and cannot refresh it, so the host refuses to start k6 when the copy
 #   expires sooner than K6_TIMEOUT plus 5 minutes (stress/k6/README.md, "Limits worth knowing").
+# K6_TIMEOUT is also host.sh's HOST_TIMEOUT, and host.sh refuses to start when your own
+# credentials expire sooner than that plus 180 s: with the default 3600 s, a one-hour session
+# is refused.
 # The host runs `k6 <K6_COMMAND> <script>` in the script's folder. Its stdout and stderr, and
 # the files k6 wrote to STRESS_RESULTS, come back: the records to $STRESS_RESULTS, and into
 # <parent of STRESS_RESULTS>/k6/ the text as <script>.k6-stdout.txt and k6's summary (SUMMARY_PATH,

@@ -13,7 +13,7 @@ import { TIERS, type Tier } from '../../../../stress/src/tiers';
  * load here and in the platform run. What is below is what only this sample's
  * single-ingress stress stack needs: how many agents, tool targets and gateways one
  * ingress holds, the stage throttle and the reserved concurrencies. The platform run
- * sizes cells per tier instead (`agentsPerCell`, `toolTargetsPerCell`), see W-3.
+ * sizes cells per tier instead (`agentsPerCell`, `toolTargetsPerCell`, docs/stress-test.spec.md).
  *
  * Why the shared `large` figures are what they are (2026-11 runs of this sample):
  * - 4,000 tenants seeded: tenant-identity holds two Cognito groups per tenant and a user

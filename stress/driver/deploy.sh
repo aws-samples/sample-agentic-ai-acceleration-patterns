@@ -42,9 +42,15 @@ echo "stack=${STACK} deploy_seconds=$((SECONDS - start))"
 # the host: the agent online (at most 5 minutes), then cloud-init finished and k6 present.
 INSTANCE="$(jq -r --arg s "$STACK" '.[$s].InstanceId' "$OUTPUTS")"
 ready_start=$SECONDS
+POLL_ERR="$(mktemp)"
+trap 'rm -f "$OUTPUTS" "$POLL_ERR"' EXIT
 until [[ "$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${INSTANCE}" \
-  --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)" == Online ]]; do
-  (( SECONDS - ready_start < 300 )) || { echo "the SSM Agent on ${INSTANCE} did not come online in 5 minutes" >&2; exit 1; }
+  --query 'InstanceInformationList[0].PingStatus' --output text 2>"$POLL_ERR")" == Online ]]; do
+  if (( SECONDS - ready_start >= 300 )); then
+    echo "the SSM Agent on ${INSTANCE} did not come online in 5 minutes" >&2
+    [[ ! -s "$POLL_ERR" ]] || { echo "last error from describe-instance-information:" >&2; tail -3 "$POLL_ERR" >&2; }
+    exit 1
+  fi
   sleep 10
 done
 HOST_TIMEOUT=900 "${HERE}/host.sh" 'cloud-init status --wait >/dev/null 2>&1; k6 version' >&2 \

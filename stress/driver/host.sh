@@ -24,7 +24,8 @@
 # This script polls and cancels with the caller's own credentials, so it refuses to start a
 # command that would outlive them: when they carry an expiration, it must be at least
 # HOST_TIMEOUT + 180 s away (the wait, the read budget and the cancel). Credentials with no
-# expiration (long-lived keys) are not checked.
+# expiration (long-lived keys) are not checked; a CLI that cannot export them (AWS CLI v1)
+# gets a warning and no check.
 
 set -euo pipefail
 
@@ -45,8 +46,11 @@ BUCKET="$(jq -r '.[] | select(.OutputKey == "ResultsBucketName") | .OutputValue'
 
 TIMEOUT="${HOST_TIMEOUT:-600}"
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] && (( TIMEOUT >= 10 && TIMEOUT <= 14400 )) || { echo "HOST_TIMEOUT must be 10 to 14400 seconds" >&2; exit 2; }
-EXPIRES="$(aws configure export-credentials --format process 2>/dev/null | jq -r '.Expiration // empty')" || EXPIRES=""
-if [[ -n "$EXPIRES" ]]; then
+EXPORTED=1
+EXPIRES="$(aws configure export-credentials --format process 2>/dev/null | jq -r '.Expiration // empty')" || { EXPORTED=0; EXPIRES=""; }
+if (( EXPORTED == 0 )); then
+  echo "warning: the AWS CLI could not export your credentials (it needs AWS CLI v2), so their expiry is not checked; a command that outlives them cannot be read or cancelled" >&2
+elif [[ -n "$EXPIRES" ]]; then
   expires_at="$(date -d "$EXPIRES" +%s 2>/dev/null)" \
     || { echo "your credentials carry an expiration this script cannot read (${EXPIRES}); refusing to start" >&2; exit 3; }
   left=$((expires_at - $(date +%s)))

@@ -85,7 +85,8 @@ driver/host.sh 'k6 version'
 driver/teardown.sh
 ```
 
-`deploy.sh` prints the deploy seconds and the stack outputs (`InstanceId`, `ResultsBucketName`);
+`deploy.sh` prints the deploy seconds, waits until the SSM Agent is online and the user data has
+installed k6, prints those seconds as `ready_seconds`, then the stack outputs (`InstanceId`, `ResultsBucketName`);
 `teardown.sh` prints the destroy seconds and checks nothing is left. The host reads the stress
 identity, `/<STRESS_PREFIX>/identity` (ADR-0002), and `STRESS_PARAMETER_PREFIXES` lists further
 SSM paths it may read (a slice's registry prefix). Its role holds no AWS managed policy (ADR-0009). `host.sh` runs one command on

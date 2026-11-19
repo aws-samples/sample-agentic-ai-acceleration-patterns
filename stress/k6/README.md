@@ -26,8 +26,8 @@ them, and fails the scenario without them. What a record holds from k6:
 |---|---|
 | `requests` | `status_<code>` counters (`countStatus`); `other` for a code the library does not list |
 | `latency.client`, `latency['client-ttfb']` | the `client_ms` and `ttfb_ms` trends (`timed`), p50, p95, p99 in seconds; the ingress, router and origin hops come from the slices' logs |
-| `isolation` | `isolation_assertions` and `isolation_mismatch` (`isolationCheck`, P-1): one assertion per answered request, and a mismatch when the slice cannot parse its answer; a refusal makes no assertion and is counted under `refusals` instead, whether its status shows it (400 or more, `countStatus`) or only its body does (`countRefusal`, such as a tool refused inside a 200). So `assertions` plus `refusals` accounts for every answered request ([ADR-0010](../adr/0010-count-an-isolation-assertion-per-answered-request.md)) |
-| `refusals` | `unattributed` is the count of 4xx and 5xx the driver saw; `byTenantReason` is empty. The slice's `collect` attributes them from the hops' logs (it may join the `tenant_minute` lines the library prints) and moves attributed refusals across (P-7) |
+| `isolation` | `isolation_assertions` and `isolation_mismatch` (`isolationCheck`, P-1): one assertion per answered request, and a mismatch when the slice cannot parse its answer; a refusal makes no assertion and is counted under `refusals` instead, whether its status shows it (400 or more, `countStatus`) or only its body does (`countRefusal`, such as a tool refused inside a 200). So every request is either an assertion or a refusal, apart from requests that got no answer (a network error) ([ADR-0010](../adr/0010-count-an-isolation-assertion-per-answered-request.md)) |
+| `refusals` | `unattributed` is the count of refusals the driver saw: 4xx and 5xx, and refusals inside a 200; `byTenantReason` is empty. The slice's `collect` attributes them and moves them across (P-7): status refusals from the hops' logs (it may join the `tenant_minute` lines the library prints), refusals inside a 200 from the library's `body_refusal` lines, which name the tenant and the reason, since no hop logs them as refusals |
 | `quotas` | empty; a slice's `collect` fills it from its own measurements |
 | `window` | the end of the test and its duration |
 
@@ -68,6 +68,12 @@ Tuning, all optional: `ISSUE_RPS` (8), `REFRESH_RPS` (17), `REFRESH_MARGIN_S` (9
   most 14400 s) plus 300 s. A run is therefore bounded by the copy's remaining lifetime: keep
   `K6_TIMEOUT` to the longest scenario plus its setup, and rerun after a few minutes when the
   check refuses (the host rotates the credentials well before they expire).
+- Your own credentials poll for the output and cancel the command, so `stress/driver/host.sh`
+  refuses to start (exit 3) when they expire sooner than its `HOST_TIMEOUT` plus 180 s;
+  `k6.sh` passes `K6_TIMEOUT` as `HOST_TIMEOUT`. With the default 3600 s that is 3,780 s, so a
+  fresh one-hour session is refused: use a longer session, or set `K6_TIMEOUT` to the
+  scenario's length. Credentials with no expiration are not checked, and a CLI that cannot
+  export credentials gets a warning and no check.
 - The library imports `jslib.k6.io` (SigV4 signing, the text summary) when k6 starts, so the
   driver host needs outbound HTTPS to it, which its security group allows.
 - Written for k6 v1.x and checked on v2.4 (ES modules, `k6/execution`). `stress/driver/k6.sh` runs a script on the

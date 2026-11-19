@@ -36,14 +36,21 @@ token) fails P-1 for the right answer, and every 429 under load fails the run.
 ## Decision
 Option 1. `isolationCheck` (`stress/k6/lib.js`) makes one assertion per
 answered request; a 2xx without a parsable answer is a mismatch. `countStatus`
-counts a status of 400 or more under `refusals`, and `countRefusal` counts a
-refusal the status does not show, such as a tool refused inside a 200. A probe
+counts a status of 400 or more under `refusals`, and `countRefusal(tenant,
+reason)` counts a refusal the status does not show, such as a tool refused
+inside a 200. Because every hop logs such a call as a 200, only the driver can
+attribute it: `countRefusal` prints one `body_refusal` line with the tenant and
+a short reason code, which the slice's `collect` moves into `byTenantReason`
+as it does the status refusals it attributes from the hops' logs. A probe
 that must be refused is asserted by the slice itself, as a mismatch when it is
 served. Each scenario still fails when it made no assertion at all.
 
 ## Consequences
-Every request is either checked for its tenant or counted as a refusal, and
-P-7 attributes the refusals. A reader compares `assertions + refusals` with
-`requests` (the gap is requests that got neither, such as a network error).
+Every request is either checked for its tenant or counted as a refusal. A
+reader compares `assertions + refusals` with `requests` (the gap is requests
+that got neither, such as a network error). Until a slice's `collect` reads the
+`body_refusal` lines, its refusals inside a 200 stay unattributed and fail the
+record, as any unattributed refusal does: for runtime-isolation, an S4 run that
+reaches the gateway's per-tenant limit fails on attribution, not on isolation.
 The k6 README states the rule. Revisit if the spec's P-1 wording changes to
 count refusals.
