@@ -243,10 +243,15 @@ describe('functions, recounter and alarms (spec §3.1)', () => {
     const actions = statementsOf(template, 'AWS::IAM::Policy', (id) => id.startsWith('MeteringJobsRole'))
       .flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]) as string[])
       .filter((action) => action.startsWith('dynamodb:'));
-    expect(actions).toEqual(expect.arrayContaining(['dynamodb:Scan', 'dynamodb:UpdateItem', 'dynamodb:Query', 'dynamodb:GetItem']));
-    for (const denied of ['dynamodb:PutItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem', 'dynamodb:PartiQLDelete']) {
-      expect(actions).not.toContain(denied);
-    }
+    // The exact set, so any later broadening fails here.
+    expect([...new Set(actions)].sort()).toEqual([
+      'dynamodb:BatchGetItem',
+      'dynamodb:ConditionCheckItem',
+      'dynamodb:GetItem',
+      'dynamodb:Query',
+      'dynamodb:Scan',
+      'dynamodb:UpdateItem',
+    ]);
   });
 
   test('the alarms of the specification exist, the heartbeat breaching on missing data', () => {

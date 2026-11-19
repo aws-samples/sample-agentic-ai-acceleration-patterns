@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The jobs that run under the admin role (spec §4.6, §4.7): `RECOUNT`,
+ * The jobs that run under the jobs role (spec §4.6, §4.7): `RECOUNT`,
  * `SINK_REDRIVE` and `RESEND_BLOCKED`.
  *
  * - `RECOUNT` adds one to `generation` of each hour in range, the path a new

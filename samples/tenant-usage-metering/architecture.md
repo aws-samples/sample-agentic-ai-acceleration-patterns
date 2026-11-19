@@ -92,7 +92,7 @@ its own log group, its own role with no managed policy.
 |---|---|---|
 | ingest | table counters; `error/`; ingest bus or Firehose | registry, meters |
 | admin | table (registrations, meters, sinks, jobs); invokes the three job workers | table |
-| jobs | `generation` items, sink states, revision-2 records; the delivery queue | table (scan for `SINK_REDRIVE`) |
+| jobs | `generation` items, job items, sink states, revision-2 records; the delivery queue | table (scan for `SINK_REDRIVE`) |
 | readmission | `readmitted/`, `error/`, job items | `error/`, registry, meters |
 | redrive | Firehose, `error/`, job items | the ingest dead-letter queue |
 | tracker | hour items | hour items |

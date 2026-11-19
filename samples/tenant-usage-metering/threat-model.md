@@ -53,10 +53,12 @@ Run on the synthesised tree (`npx cdk synth` with a test account and
 Region, `cdk.out` present): ProtoShield v0.18 (MIT-0 license-header config
 in `.protoshield/config.yaml`) and ASH in local mode. cdk-nag
 `AwsSolutionsChecks` runs in every synth and passes; every suppression
-carries a reason in code. ProtoShield reports 0 critical, 1 high, 4
-medium and 1 low; every finding is in the table below. The scanner grades
-the same IAM statements differently from run to run, so a changed count
-alone is not a new finding.
+carries a reason in code. The last ProtoShield scan of the code reports
+0 critical, 0 high, 2 medium (the `minimatch` and `glob` CVEs) and 0 low.
+The scanner grades the same IAM statements differently from run to run,
+from nothing to one high, so the table below lists every finding any scan
+of this code raised, with its disposition; a changed count alone is not a
+new finding.
 
 | Finding | Scanner | Disposition |
 |---|---|---|

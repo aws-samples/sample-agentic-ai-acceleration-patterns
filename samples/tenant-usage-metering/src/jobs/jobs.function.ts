@@ -5,7 +5,7 @@
  * Lambda entries of the job workers (spec §4.6), each invoked
  * asynchronously by the admin function with `{ jobId }`:
  *
- * - `handler`: `RECOUNT`, `SINK_REDRIVE`, `RESEND_BLOCKED` (the admin role);
+ * - `handler`: `RECOUNT`, `SINK_REDRIVE`, `RESEND_BLOCKED` (the jobs role);
  * - `readmissionHandler`: `READMIT` (the re-admission role, the only writer of `readmitted/`);
  * - `redriveHandler`: `INGEST_REDRIVE` (the redrive role, which reads the dead-letter queue).
  */
