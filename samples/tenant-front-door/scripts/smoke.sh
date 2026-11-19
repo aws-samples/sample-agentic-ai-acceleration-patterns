@@ -125,10 +125,14 @@ header() { grep -i "^$1:" "$HEAD" | head -1 | cut -d: -f2- | tr -d '\r' | sed 's
 has_header() { [[ -n "$(header "$1")" ]] && echo yes || echo no; }
 
 wait_for() { # NAME WANT TOKEN_VAR — polls /api/whoami for up to 180 s until five answers in a row match
-  local i st run=0
+  local i st run=0 start
+  start=$(date +%s); WAIT_FIRST=""
   for i in $(seq 1 90); do
     st="$(edge GET /api/whoami "$3")"
-    if [[ "$st" =~ ^($2)$ ]]; then run=$((run + 1)); (( run >= 5 )) && break; else run=0; fi
+    if [[ "$st" =~ ^($2)$ ]]; then
+      (( run == 0 )) && WAIT_FIRST="$(elapsed "$start")"
+      run=$((run + 1)); (( run >= 5 )) && break
+    else run=0; fi
     sleep 2
   done
   check "$1" "$2" "$st"
@@ -171,18 +175,21 @@ run_checks() {
   create_tenant "tfd-smoke-b-$$"; B="$TENANT_ID"; B_USER="$ADMIN_USER"; issue_token "$B" "$B_USER" B_TOKEN
   create_tenant "tfd-smoke-c-$$"; C="$TENANT_ID"; issue_token "$C" "$ADMIN_USER" C_TOKEN
   for t in "$A" "$B"; do aws ssm put-parameter --name "/application-plane/tenants/$t/$APPLICATION_ID/smoke" --type String --value smoke --overwrite >/dev/null; done
-  t0=$(date +%s)
   npx ts-node -P test/tsconfig.json test/smoke/seed.ts put "$kvs" "$CELL_ID" "$account" "$cell_domain" "$A=Smoke A" "$B=Smoke B"
-  note "waiting for the route table to reach the edge"
-  wait_for "a routed after seed" 200 A_TOKEN
-  note "route propagation: $(elapsed "$t0") s"
-  local i counts=""
-  # The first 200 means some edge servers have the route, not all: wait
-  # until 90 s after the write, then check that every request is routed.
-  # Spec §10 waits 60 s (ADR-0003, spike S-2); smoke runs saw the last
-  # unrouted request 65 s after the write (design/spikes.md, Smoke run).
-  local settle=$(( 90 - $(elapsed "$t0") ))
-  (( settle > 0 )) && sleep "$settle"
+  t0=$(date +%s)
+  # Propagation, from the end of the write: one GET a second for
+  # SMOKE_PROPAGATION_WINDOW seconds (default 120), noting the first 200
+  # and the last answer that was not 200.
+  local i counts="" first="" last_miss="-" window="${SMOKE_PROPAGATION_WINDOW:-120}"
+  note "measuring route propagation for ${window} s"
+  while (( $(elapsed "$t0") < window )); do
+    st="$(edge GET /api/whoami A_TOKEN)"
+    if [[ "$st" == 200 ]]; then [[ -n "$first" ]] || first="$(elapsed "$t0")"; else last_miss="$(elapsed "$t0")"; fi
+    sleep 1
+  done
+  note "route propagation: first 200 at ${first:-never} s, last miss at ${last_miss} s after the write"
+  check "a routed within ${window} s" yes "$([[ -n "$first" ]] && echo yes || echo no)"
+  check "no miss in the last 25 s of the window" yes "$([[ "$last_miss" == - ]] || (( last_miss < window - 25 )) && echo yes || echo no)"
   if [[ -n "${SMOKE_SOAK_WAIT:-}" ]]; then note "soak: waiting ${SMOKE_SOAK_WAIT} s more"; sleep "$SMOKE_SOAK_WAIT"; fi
   for i in $(seq 1 "${SMOKE_SOAK_COUNT:-60}"); do st="$(edge GET /api/whoami A_TOKEN)"; counts+="$st"$'\n'
     [[ "$st" == 200 ]] || note "soak miss: ${st} at $(elapsed "$t0") s after the write"; done
@@ -242,7 +249,7 @@ run_checks() {
   st="$(signed PUT "${registrar}tenants/${B}/status" '{"status":"suspended"}')"
   check "operator suspends b with no control plane (ADR-0025) 200" 200 "$st"
   wait_for "b suspended at the edge 503" 503 B_TOKEN
-  note "suspension propagation: $(elapsed "$t0") s"
+  note "suspension propagation: first 503 of a run of five at ${WAIT_FIRST:-never} s after the call"
   st="$(edge GET /api/whoami A_TOKEN)"; check "a still served 200" 200 "$st"
   st="$(signed PUT "${registrar}tenants/${C}/status" '{"status":"suspended"}')"
   check "status change for tenant with no route 409" 409 "$st"

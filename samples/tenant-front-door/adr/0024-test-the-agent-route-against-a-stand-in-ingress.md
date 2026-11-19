@@ -55,7 +55,7 @@ what covers its resource tree.
   test.
 - Step 23 also tests `/agents/entitlements/invocations` on the router,
   which shows that the router forwards a static-resource name, and
-  checks a suspended tenant's 503 on the route (two 60 s propagation
+  checks a suspended tenant's 503 on the route (two 90 s propagation
   waits).
 - A deployer who puts an `agentcore-gateway` ingress behind `/agents/*`
   runs step 23's assertions against it, after checking its URL form
