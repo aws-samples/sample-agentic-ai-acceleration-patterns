@@ -77,6 +77,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-cloudformation@3.1154.0',
     '@aws-sdk/client-ssm@3.1154.0', // e2e: R-6 parameter check
     '@aws-sdk/client-iam@3.1154.0', // e2e: ADR-0026 policy simulation
+    '@aws-sdk/client-cloudwatch@3.1154.0', // stress slice: API Gateway metrics (test/stress/driver.ts)
     '@aws-sdk/credential-providers@3.1154.0',
     '@aws-crypto/sha256-js@5.2.0',
     '@smithy/signature-v4@5.7.4',
