@@ -154,7 +154,7 @@ export interface Draw {
 /**
  * The slice's draw on each budgeted quota (spec §4.4, tenant-identity column).
  * Declared in `slice.json`: lambda-concurrency, cognito-groups,
- * cognito-user-authentication-rps. ADR-0040 gives the reasoning for each.
+ * cognito-user-authentication-rps. ADR-0041 gives the reasoning for each.
  */
 export function drawsOf(plan: Plan): Draw[] {
   const { tier } = plan;

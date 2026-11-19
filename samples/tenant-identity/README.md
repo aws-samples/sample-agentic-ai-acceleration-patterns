@@ -665,7 +665,7 @@ The sample is a slice of the repository's platform stress test
 [`stress/`](../../stress/README.md)). The slice runs on a `shared-pool` stack
 of its own, `<STRESS_PREFIX>-identity`, so thousands of stress tenants never
 crowd the pool the integration tests share, and it never touches a
-`TenantIdentity-*` stack ([ADR-0040](./adr/0040-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)).
+`TenantIdentity-*` stack ([ADR-0041](./adr/0041-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)).
 
 ```bash
 export AWS_REGION=eu-central-1 STRESS_PREFIX=stress-ti
