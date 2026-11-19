@@ -160,8 +160,8 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
   shared one.
 
 Amended 2026-11-18 by ADR-0018, which decides how a tenant proves it
-controls a dedicated domain: the tenant shows control of the domain's DNS with a registrar-issued token before
-the domain is routed. The challenge confirms that the tenant controls
+controls a dedicated domain: the tenant shows control of the domain's
+DNS with a registrar-issued token before the domain is routed. The challenge confirms that the tenant controls
 the domain's DNS and can point it at a server of its own, so an
 authorization code sent there could leave the vendor's edge. A
 dedicated domain therefore stays out of the sign-in path, and one with

@@ -1146,10 +1146,11 @@ operator role's `DeleteTenantRoute` or `DeleteCellRoute`. Until then a
 leftover tenant route keeps its status and points either at its old
 cell, whose hosts check refuses the tenant once the delete script has
 removed its namespace, or at a cell route that is gone. A
-later `CreateDeployment` for the same tenant does not inherit it: the
-new deployment's `createdAt` differs from the entry's `dt`, so the
-hook's put replaces the entry, routed to the new cell and with the
-status the leftover held (step 5).
+later `CreateDeployment` for the same tenant does not inherit the
+leftover's cell, `dt`, `host#` keys or domain: the new deployment's
+`createdAt` differs from the entry's `dt`, so the hook's put replaces
+the entry, routed to the new cell. Only the status the leftover held
+carries over (step 5).
 
 ### 3.5 Identity model
 
@@ -1542,7 +1543,7 @@ Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 |---|---|---|---|
 | `PutCellRoute` | `PUT /cells/{cellId}` | global hook role (route hook, cell create and update); edge operator role, for backfill and origin changes (§3.4) | Body `{apiDomain}`, from the cell script's `frontDoorApiDomain` output, or from the operator. A Lambda function URL host in the control plane's Region (400 otherwise). Account taken from the control plane, never the body. For the global hook role, 409 while the cell is neither `CREATING` nor `UPDATING`, and 409 when `cell#` holds another origin: the origin is write-once for it. Checks §3.4. 200 |
 | `DeleteCellRoute` | `DELETE /cells/{cellId}` | global hook role (route hook, cell delete); edge operator role, to clear a route a skipped hook left | For the global hook role, 409 while the cell is neither missing nor `DELETING` (§3.4). It does not look for tenant routes that name the cell (§3.4). 200, also when absent |
-| `PutTenantRoute` | `PUT /tenants/{tenantId}` | global hook role (route hook, deployment create and update); edge operator role to set `customDomain` | Body `{customDomain?}`, which only the edge operator role may send (below). The display name and the cell come from the control plane, never the body. The entry records the deployment's `createdAt` as `dt`. A new `tenant#` entry gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. A hook put whose deployment `createdAt` differs from the stored `dt` replaces the entry as a new one (§3.4 step 5). Checks §3.4. 200 with `dt`, or 202 while the challenge is open (`domain-challenge`), the certificate is pending (`certificate`) or the record is gone after the certificate issued (`challenge-recheck`) |
+| `PutTenantRoute` | `PUT /tenants/{tenantId}` | global hook role (route hook, deployment create and update); edge operator role to set `customDomain` | Body `{customDomain?}`, which only the edge operator role may send (below). The display name and the cell come from the control plane, never the body. The entry records the deployment's `createdAt` as `dt`. A `tenant#` entry with no entry before it gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. A hook put whose deployment `createdAt` differs from the stored `dt` replaces the entry and keeps its `s` (§3.4 step 5). Checks §3.4. 200 with `dt`, or 202 while the challenge is open (`domain-challenge`), the certificate is pending (`certificate`) or the record is gone after the certificate issued (`challenge-recheck`) |
 | `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | global hook role (route hook, deployment delete); edge operator role, to clear a route a skipped hook left | Removes the `tenant#` key, the pooled host's `host#` key and the `host#<d>` key its `d` names, each `host#` key only when its `t` names the tenant (§3.4). It disables the distribution tenant of that `d`, and the sweeper deletes it and its certificate, each only when its tags name this tenant (§3.4 step 5). For the global hook role, 409 while the deployment is neither missing nor `DELETING`. 200, also when absent |
 | `DeleteHostRoute` | `DELETE /hosts/{host}` | edge operator role | Removes one `host#` key whatever its `t` and `ac`, and the `d` of the tenant it names when `d` is that host, to clear a key left behind. That domain's distribution tenant and certificate then go in two phases (§3.4 step 5). 200, also when absent |
 | `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role | Body `{status}` |
@@ -1605,6 +1606,12 @@ the control plane cannot be read or returns a `createdAt` that does not
 parse (the write is refused, never made unchecked), or when the store's
 ETag still conflicts after five
 attempts (§3.4 step 5).
+
+Every registrar error body is `{message, reason?}`. `reason` is set only
+where a status alone does not tell the caller what to do, which is
+only `certificate-quota` on 429. A 429 from the registrar's API Gateway
+stage throttle carries no `reason` and is retried with backoff; a 429
+with `reason: certificate-quota` is not.
 
 ### 5.2 Script and construct forms
 
@@ -2115,9 +2122,9 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0014](../adr/0014-run-one-front-door-per-control-plane-application.md) | One front door per control-plane application | one per application; one shared front door keyed by application |
 | [ADR-0015](../adr/0015-read-the-control-plane-with-a-reader-token.md) | Read the control plane with a reader token | reader role (control-plane ADR-0042); operator app client; an IAM-authorised read stage |
 | [ADR-0016](../adr/0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in and out through one shared host in `host` mode | shared sign-in host with a signed `state`; a callback URL per tenant; a wildcard callback URL |
-| [ADR-0017](../adr/0017-register-routes-from-a-control-plane-global-hook.md) | Proposed. Register routes from a control-plane global hook; the registrar admits no cell account role, still checks the control plane, and takes a cell's origin once | provisioning role in the cell account calls the registrar; tombstones and operator-only rules; the control plane writes the store directly; a global hook calls the registrar |
-| [ADR-0018](../adr/0018-prove-a-dedicated-domain-with-a-per-tenant-dns-challenge.md) | Keep dedicated domains in the sample, off unless `dedicatedDomains` is on; route one only after a TXT record holds a token the registrar issued for the tenant and domain, resolved by the function's default resolver and re-checked daily | validated ACM certificate only; TXT record with a registrar-issued per-tenant token; HTTP file challenge on the domain; operator attestation only |
-| [ADR-0019](../adr/0019-strip-agents-before-the-agent-ingress.md) | The router strips `/agents` from `/agents/<backend>/invocations` before the agent ingress, and answers 404 for any other `/agents` path | router `uri` rewrite; an `/agents` base path on the ingress side; no prefix |
+| [ADR-0017](../adr/0017-register-routes-from-a-control-plane-global-hook.md) | Proposed. Register routes from a control-plane global hook; the registrar admits no cell account role, still checks the control plane, and takes a cell's origin once; amends ADR-0002, ADR-0003, ADR-0012, ADR-0014, ADR-0015 | provisioning role in the cell account calls the registrar; tombstones and operator-only rules; the control plane writes the store directly; a global hook calls the registrar |
+| [ADR-0018](../adr/0018-prove-a-dedicated-domain-with-a-per-tenant-dns-challenge.md) | Keep dedicated domains in the sample, off unless `dedicatedDomains` is on; route one only after a TXT record holds a token the registrar issued for the tenant and domain, resolved by the function's default resolver and re-checked daily; amends ADR-0002, ADR-0012, ADR-0016 | validated ACM certificate only; TXT record with a registrar-issued per-tenant token; HTTP file challenge on the domain; operator attestation only |
+| [ADR-0019](../adr/0019-strip-agents-before-the-agent-ingress.md) | The router strips `/agents` from `/agents/<backend>/invocations` before the agent ingress, and answers 404 for any other `/agents` path; amends ADR-0011 | router `uri` rewrite; an `/agents` base path on the ingress side; no prefix |
 | [ADR-0020](../adr/0020-keep-the-re-check-state-in-a-sweeper-owned-dynamodb-table.md) | Keep the dedicated-domain re-check state in a sweeper-owned DynamoDB table: one item for each tenant and domain, one for each daily run | the log as the record (Logs Insights); a sweeper-owned DynamoDB table; fields in the route table |
 | [ADR-0021](../adr/0021-add-a-per-ip-rate-rule-ahead-of-the-per-host-rule.md) | In `host` mode, a rate rule aggregated on `Host` and client IP, `ipRequestsPer5Min` (500, chosen, not measured), ahead of the per-host rule; amends ADR-0009 | no per-IP rule; an IP-only rule; a `Host`-and-IP aggregate |
 | [ADR-0022](../adr/0022-pin-each-sweeper-page-to-the-listers-date-and-re-read-the-route-table.md) | Pin each sweeper page to the lister's date, which it must match to today and then uses for every read and write; count three misses only on a miss; re-read each passed tenant's entry with `GetKey`, 10 at a time, with no scan (page bound 842 s); grant `BatchWriteItem`; amends ADR-0020 | no date passed; a date the page trusts; a date the page must match to today; a `ListKeys` scan with a deadline; a `GetKey` per passed id |

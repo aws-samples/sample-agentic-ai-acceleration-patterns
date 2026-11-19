@@ -193,10 +193,11 @@ printing the registrar's message.
   the control plane refuses `DeleteCell` while the cell holds a
   deployment, and a leftover tenant route answers 503 once its cell
   route is gone. A later
-  `CreateDeployment` for the tenant does not inherit a leftover entry:
-  its `createdAt` differs from the entry's `dt`, so the hook's put
-  replaces it, routed to the new cell, and keeps its `s`: a suspended
-  leftover stays suspended.
+  `CreateDeployment` for the tenant does not inherit a leftover entry's
+  cell, `dt`, `host#` keys or domain: its `createdAt` differs from the
+  entry's `dt`, so the hook's put replaces the entry, routed to the new
+  cell. It keeps the entry's `s`, so a suspended leftover stays
+  suspended.
 - `dt` adds 19 bytes to every `tenant#` entry, so the ADR-0012 ceilings
   fall to 16,949 tenants in `single` mode and 8,583 in `host` mode.
 - A control-plane read outage now also fails hooks: creates and updates
