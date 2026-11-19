@@ -26,6 +26,7 @@ import {
   adminGetUserToView,
   adminPasswordSignIn,
   adminRefresh,
+  assertRefreshedFor,
   attr,
   COGNITO,
   findUserByEmail,
@@ -270,8 +271,14 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
   }
 
   async refreshToken(tenant: TenantRecord, username: string, refreshToken: string): Promise<TokenSet> {
+    // R-12, then bind the refreshed token to the path's user and tenant
+    // (ADR-0042). Group membership does not carry `sub`, so one
+    // AdminGetUser reads it.
     await this.assertMember(tenant, username);
-    return adminRefresh(this.cognito, this.userPoolId, this.appClientId, refreshToken);
+    const user = await adminGetUser(this.cognito, this.userPoolId, username);
+    const tokens = await adminRefresh(this.cognito, this.userPoolId, this.appClientId, refreshToken);
+    assertRefreshedFor(tokens, attr(user.attributes, 'sub'), tenant.tenantId, 'tenants');
+    return tokens;
   }
 
   /** Deletes the Cognito user when no `t-*` group remains (P-4); true when deleted. */
@@ -365,9 +372,25 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
     const names: string[] = [];
     let token: string | undefined;
     do {
-      const result = await this.cognito.send(
-        new ListUsersInGroupCommand({ UserPoolId: this.userPoolId, GroupName: groupName, Limit: PAGE_LIMIT, NextToken: token }),
-      );
+      let result;
+      try {
+        result = await this.cognito.send(
+          new ListUsersInGroupCommand({ UserPoolId: this.userPoolId, GroupName: groupName, Limit: PAGE_LIMIT, NextToken: token }),
+        );
+      } catch (error) {
+        // A deprovision that was throttled after it deleted this group leaves
+        // the tenant DELETING; its retry finds no group, and no member listed
+        // by it. Stop here instead of failing the retry for good (found by the
+        // platform stress test's create-tenant-burst, ADR-0042).
+        // Cognito answers the same error for a missing user pool, so a wrong
+        // pool id would also land here and DeleteTenant would "succeed"
+        // having deleted nothing. Accepted: the pool id comes from the stack
+        // that owns this function, not from the caller.
+        if (isCognitoError(error, COGNITO.resourceNotFound)) {
+          return names;
+        }
+        throw error;
+      }
       for (const user of (result.Users ?? []) as UserType[]) {
         if (user.Username !== undefined) {
           names.push(user.Username);

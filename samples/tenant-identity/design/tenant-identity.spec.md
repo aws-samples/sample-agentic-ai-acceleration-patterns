@@ -383,7 +383,7 @@ recover a tenant that has locked itself out.
 | R-4 | **Pre-token-generation function** | Cognito Lambda trigger, version 2 event (`V2_0`), adds the claim(s) and scopes of P-6 to the access token, enforces tenant status (P-2), and applies narrowing requests (P-10, §8; ADR-0003). Attached to every pool the sample creates. Pools MUST use the **Essentials** feature plan (the default for new pools); access-token customisation is not available on Lite without advanced security features. |
 | R-5 | **User pool(s)** | `shared-pool*`: exactly one pool created by the stack. `pool-per-tenant`: zero pools at deploy time; one pool, one app client, and the trigger attachment per tenant at onboarding. Every pool: self sign-up off, admin-create only, e-mail as username, admin-only account recovery, access token lifetime 5 minutes (N-1), refresh token rotation off (ADR-0009), no hosted UI domain. Every pool: `email` immutable (R-17). |
 | R-6 | **Parameter publication** | The stack publishes `/application-plane/shared/identity/{apiUrl,topology}` and, for `shared-pool*`, `/application-plane/shared/identity/userPoolId` and `appClientId`, so the sample mounts into the `control-plane` sample's shared namespace. |
-| R-7 | **Token-exchange function** | Implements `POST /oauth2/token` (§5.4). It parses the form and calls `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`. It returns the access token only and discards the ID token. Its role holds logging permissions and one `dynamodb:Query` on the registry table bound to the catalogue's partition key (`dynamodb:LeadingKeys = SCOPE`, §8.1), no `cognito-idp` action and no other registry read, because `GetTokensFromRefreshToken` is authorised by the refresh token, not by IAM (P-10). |
+| R-7 | **Token-exchange function** | Implements `POST /oauth2/token` (§5.4). It parses the form and calls `GetTokensFromRefreshToken` with the narrowing request in `ClientMetadata`. It returns the access token only and discards the ID token. Its role holds logging permissions and one `dynamodb:Query` on the registry table bound to the catalogue's partition key (`dynamodb:LeadingKeys = SCOPE`, §8.1), no `cognito-idp` action and no other registry read, because `GetTokensFromRefreshToken` is authorised by the refresh token, not by IAM (P-10). It adds the §5.4.1 CORS headers for a listed `Origin`, read from its environment (`ALLOWED_ORIGINS`). |
 | R-8 | **Tenant-user function** | Implements `/tenant/users` (§5.2) through the topology's provisioner, with the tenant taken only from the authoriser context. Its role holds `AdminCreateUser`, `AdminGetUser`, `AdminUpdateUserAttributes` (for `custom:scopes` only, §8.1), `AdminDeleteUser`, `AdminAddUserToGroup`, `AdminRemoveUserFromGroup`, `AdminListGroupsForUser`, `ListUsers`, and `ListUsersInGroup`, scoped as N-3, plus registry reads. It holds no `CreateUserPool`, `DeleteUserPool`, `CreateGroup`, or `DeleteGroup` (P-8). |
 | R-9 | **Tenant authoriser** | REST API Lambda (request) authoriser on `/tenant/*`, with result caching off. Verifies the access token as ADR-0007 states, refuses a tenant that is not `ACTIVE`, and passes `tenantId` and `sub` as context. On Allow it returns the tenant's API key value as `usageIdentifierKey` (R-19); it refuses a tenant with no key. Its role reads the registry and nothing else. |
 | R-18 | **Tenant-scoped role** (`pool-per-tenant` only) | Every pool the platform function creates is tagged `tenant-identity:tenant=<tenantId>`. One role grants the R-8 user actions on `userpool/*` only where that tag equals the session tag `TenantId`; it trusts only the tenant-user function's role, for `sts:AssumeRole` and `sts:TagSession`, with exactly one ULID-shaped `TenantId` tag. The tenant-user function's own role then holds no `cognito-idp` action: it assumes this role per tenant with the authoriser's `tenantId` (900-second sessions, cached per tenant, refreshed before expiry) and keeps the R-12 and R-13 checks. Shared pools: no such role; IAM cannot scope users inside a pool (ADR-0026). |
@@ -425,11 +425,15 @@ recover a tenant that has locked itself out.
 | Context key | Required | Values / default | Effect |
 |---|---|---|---|
 | `topology` | yes | `pool-per-tenant` \| `shared-pool` \| `shared-pool-multi-tenant` \| `tiered` | selects the provisioner (P-7); `tiered` deploys `shared-pool` and `pool-per-tenant` side by side and each tenant's `tier` at `CreateTenant` selects between them (ADR-0027) |
+| `publishSharedParameters` | no | `true` \| `false`; default `true` | whether the stack publishes the R-6 parameters; one stack per account and Region may own them (ADR-0017) |
+| `allowedOrigins` | no | origins separated by `,`, each `https://<host>[:<port>]` or `https://*.<domain>`; stack prop `allowedOrigins?: string[]`; default none | the browser origins that may read the token exchange's answer (§5.4.1, ADR-0040); when set, the stack outputs `AllowedOrigins` |
 
 Synthesis MUST fail on an unknown `topology` with the accepted values in the
 message. The stack name MUST embed the topology
 (`TenantIdentity-<topology>`) so all four can coexist in one account and
-Region, which the integration test relies on. No other input exists. Every
+Region, which the integration test relies on. Synthesis MUST also fail on an
+`allowedOrigins` entry §5.4.1 does not accept, naming the entry. No other
+input exists. Every
 function receives the deployment value in its environment (`TOPOLOGY`); in
 `tiered` the stack is expressed as two flags, "has a shared pool" and
 "creates per-tenant pools", both true, rather than a third branch.
@@ -546,7 +550,7 @@ setup, before the first operation is modelled.
 | `CreateMembership` | `PUT /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminAddUserToGroup`. 1, 2: 400 `UnsupportedInTopology`. |
 | `DeleteMembership` | `DELETE /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminRemoveUserFromGroup`; 409 if it is the user's last tenant (use `DeleteUser`); if the user holds the first-admin slot, release it after the removal, as `DeleteUser` does (ADR-0032). 1, 2: 400 `UnsupportedInTopology`. |
 | `IssueToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token` `{password}` → 200 `{accessToken, idToken, refreshToken, expiresIn}` | `AdminSetUserPassword` (permanent) then `AdminInitiateAuth` with `ADMIN_USER_PASSWORD_AUTH` against the topology's pool. §3.2. |
-| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` `{refreshToken}` → 200 `{accessToken, idToken, expiresIn}` | `AdminInitiateAuth` with `REFRESH_TOKEN_AUTH`, so the test can show that refresh re-runs the trigger (P-2, §10 steps 6 and 9). Same labelling as `IssueToken`. |
+| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` `{refreshToken}` → 200 `{accessToken, idToken, expiresIn}` | `AdminInitiateAuth` with `REFRESH_TOKEN_AUTH`, so the test can show that refresh re-runs the trigger (P-2, §10 steps 6 and 9). The refreshed access token MUST belong to the path's user and tenant (R-12 binding, below); otherwise 404 and no token is returned. Same labelling as `IssueToken`. |
 
 A User is `{username, email, admin, status, scopes, createdAt}`: `status` is
 Cognito's user status, `admin` is membership of `admin-<id>`, and `scopes` is
@@ -563,6 +567,18 @@ belongs to `{tenantId}`: 1: the user exists in the tenant's pool. 2:
 If not, the call fails with `ResourceNotFoundError` (404) and changes
 nothing. `CreateUser`, `CreateTenantUser`, and `CreateMembership` are exempt: adding a user to a
 tenant is the vendor's intent (ADR-0013).
+
+**R-12 binding (`RefreshToken`):** the refresh token names no user, so the
+membership check alone does not keep the call in the tenant. After
+`REFRESH_TOKEN_AUTH`, the provisioner MUST check that the returned access
+token's `sub` equals the path user's `sub` (from `AdminGetUser`) and that its
+tenant claim names `{tenantId}` (1, 2: `tenant_id`; 3: `tenants` contains it).
+On a mismatch the call fails with the same `ResourceNotFoundError` (404) and
+fixed text as a non-member, and the tokens are discarded, never returned. The
+claims are read without a signature check because the token came back from
+Cognito in that same call, not from the caller (ADR-0041). In topology 1 a foreign tenant's refresh token is already
+refused by the tenant's own app client (409, as any refused refresh); the
+binding covers another user's refresh token from the same pool.
 
 Platform mutations are **synchronous**. The slowest, creating a user pool, is
 seconds, not minutes; a 202/polling model would add machinery without adding
@@ -680,6 +696,117 @@ Errors, `{error, error_description}`, 400 unless marked:
 `error_description` is fixed text per code and never echoes Cognito's
 message or the token.
 
+#### 5.4.1 Browser callers (CORS)
+
+A single-page app on another origin posts the exchange from the browser
+(ADR-0040). The API has no `OPTIONS` route, so the request MUST be a CORS
+simple request, which the browser sends without a preflight:
+
+- method `POST`;
+- `Content-Type: application/x-www-form-urlencoded`, with or without
+  parameters (`;charset=UTF-8`, which a `URLSearchParams` body adds), and no
+  other request header the page sets;
+- `credentials` not `include` (the exchange uses no cookie, and no answer
+  carries `Access-Control-Allow-Credentials`).
+
+A preflight, caused for example by a tracing header that browser
+instrumentation adds to every `fetch`, reaches no route and gets API
+Gateway's 403 with no CORS header. The browser lets the page read the
+answer only if it names the page's origin.
+
+**The list.** `allowedOrigins` (§3.3) lists the origins whose pages may read
+the answer. As a context value it is one string, entries separated by `,`
+with no whitespace; as a stack prop it is `allowedOrigins?: string[]`. A
+missing context value, an empty string and the prop `[]` all mean no list,
+so every deploy must pass the value: a deploy without it clears the list.
+Each entry is one of:
+
+| Form | Matches | Example |
+|---|---|---|
+| `https://<host>` or `https://<host>:<port>` | that origin only | `https://app.example.com` |
+| `https://*.<domain>` | `https://<label>.<domain>`: exactly one label, no port | `https://*.app.example.com` matches `https://acme.app.example.com`, not `https://app.example.com` or `https://a.b.app.example.com` |
+
+A `<label>` is 1 to 63 of `a-z`, `0-9` and `-`, not starting or ending with
+`-`. A `<host>` and a `<domain>` are two or more labels joined by `.`, at
+most 253 characters, with no trailing `.`; a non-ASCII name is given in its
+`xn--` form, as browsers send it. A `<port>` is 1 to 65535 with no leading
+zero, and not `443`, which browsers leave out of `Origin`.
+
+Synthesis refuses, naming the entry: any entry outside those forms (another
+scheme, a path, query, fragment or trailing `/`, upper case, an IP literal,
+`*` anywhere but as the whole first label, a port on a pattern, `*` or
+`null` alone, an empty entry); a pattern whose `<domain>` is a public suffix
+under the Public Suffix List rules, wildcard and exception rules applied and
+the private section included (`https://*.co.uk`,
+`https://*.cloudfront.net`, `https://*.s3.amazonaws.com`, and
+`https://*.us-east-1.elb.amazonaws.com`, which only a wildcard rule
+catches); a pattern whose `<domain>` is or ends in `amazonaws.com` or
+`amazonaws.com.cn`, where other customers' pages sit one label down even
+when the domain is not a public suffix (S3 path-style URLs on
+`https://s3.amazonaws.com` and `https://s3.eu-central-1.amazonaws.com`),
+so a vendor's own AWS hostname goes in as an exact entry, unless it is an
+S3 path-style host (`s3` followed by `.` or `-` labels with no later label
+that is `s3` or starts with `s3-`, under `amazonaws.com` or `amazonaws.com.cn`, such as
+`https://s3.amazonaws.com`), which serves every bucket's path-style pages
+from one origin; a repeated entry;
+more than 20 entries; more than 1,024 characters in total, so the list fits
+the function's environment beside its other variables.
+
+A pattern trusts every host one label under its domain, whoever serves it: a
+marketing site, a status page on another vendor's service, a CNAME left
+pointing at a deleted resource. The suffix rules do not know every domain where other
+parties host pages. Use a pattern only under a domain that
+serves the app's tenant hosts and nothing else (`tenant-front-door`'s
+`appDomain`). An exact entry likewise trusts every page its host serves,
+so list an exact entry only for a host that serves only the app's pages.
+
+The grammar has no `http` and no single-label host, so `http://localhost:5173`
+cannot be listed. A local dev server reaches the exchange through its own
+same-origin proxy instead.
+
+The stack passes the list to the exchange function as `ALLOWED_ORIGINS` and
+outputs it as `AllowedOrigins`, both the entries joined with `,` in input
+order. With no list there is neither.
+
+**The match.** The exchange function's entry reads `Origin` from the event's
+`multiValueHeaders`, matching the header name case-insensitively. (The
+event's `headers` map keeps only the last value, and `convertEvent` reads
+`multiValueHeaders` only.)
+
+- One `Origin` value equal to an exact entry, or equal to
+  `https://<label>.<domain>` for a pattern entry, matches. The comparison is
+  on the string the browser sent; nothing is lower-cased or trimmed.
+- On a match, every answer the function returns carries
+  `Access-Control-Allow-Origin: <the request's Origin>`: the 200, every
+  §5.4 error, and every error the request framework makes before the service
+  runs (unsupported media type, a malformed body). The entry adds the
+  headers to the `HttpResponse` the service handler returns, before
+  `convertVersion1Response`, outside the model.
+- No `Origin`, `Origin: null`, more than one `Origin` value, or no match: no
+  `Access-Control-Allow-Origin`.
+- When the list is not empty, every answer carries `Vary: Origin`, matched
+  or not. An empty list sends no CORS header on any answer.
+- No answer carries `Access-Control-Allow-Credentials`,
+  `Access-Control-Allow-Methods` or `Access-Control-Allow-Headers`. The page
+  reads the JSON body and `Cache-Control`, which the browser exposes without
+  `Access-Control-Expose-Headers`.
+
+Before dispatch the entry also drops any parameters from a form `Content-Type` on
+the `HttpRequest` that `convertEvent` returns, header name matched
+case-insensitively (`application/x-www-form-urlencoded;charset=UTF-8`
+becomes `application/x-www-form-urlencoded`), because the generated
+deserializer accepts only the bare type. The body is still parsed as UTF-8.
+
+An unmatched `Origin` is never a reason to refuse: it still gets the
+exchange, because CORS controls what a page may read, not who may call.
+
+**Answers the page cannot read.** API Gateway's own answers (throttle 429, a
+resource-policy refusal, an integration failure or timeout, 502 when the
+function fails to start) carry no CORS header, so the page sees a network
+error and no status. The page keeps its refresh token, retries at most
+twice with backoff (reference: 1 s, then 3 s), and then shows a fixed
+"try again later" error. `/platform/*` and `/tenant/*` send no CORS header.
+
 ---
 
 ## 6. Contracts
@@ -688,6 +815,8 @@ message or the token.
 
 - The `topology` context value (P-7): one topology, or `tiered`.
 - In `tiered`, a `tier` for every tenant at `CreateTenant` (ADR-0027).
+- Optionally, `allowedOrigins` (§3.3): the origins of browser apps that
+  call the token exchange from another origin (§5.4.1).
 - Credentials with `execute-api:Invoke` on `/platform/*` for whoever operates
   tenants.
 - Nothing else. No pre-existing pool, no domain, no certificate.
@@ -711,6 +840,8 @@ message or the token.
   first: the stack drains its registry on delete (ADR-0022), and the integration
   driver removes a REST API shell if CloudFormation failed before recording its
   physical id (T-33/M-32).
+- A page on a listed origin can read the token exchange's answers; a page
+  on any other origin cannot (§5.4.1).
 - Parameters under `/application-plane/shared/identity/*` (R-6).
 
 ### 6.3 Parameter namespace
@@ -964,6 +1095,12 @@ step 12.
    user created directly in pool B (bypassing the platform API) still
    receives `tenant_id = B`, because the claim comes from the pool, not the
    caller.
+   6a. **`RefreshToken` binding (R-12), all topologies, run before step 6.**
+   `RefreshToken` on A's path naming u1, with u2's (tenant B's) refresh
+   token → 404 with no token in the body (topology 1: A's app client
+   refuses the foreign pool's token first, 409, also with no token).
+   `RefreshToken` on A's path naming u1, with a1's refresh token (another
+   user of A) → 404 with no token in every topology (ADR-0041).
 6. **Refresh re-runs the trigger (3):** `DeleteMembership` u1 from B;
    `RefreshToken` with u1's refresh token → verify → `tenants = [A]`.
    `DeleteMembership` u1 from A → 409 (last tenant). `CreateMembership` u1 → B
@@ -983,6 +1120,21 @@ step 12.
      `invalid_scope` (ADR-0035).
    - no `resource` in topology 3: `invalid_target`.
    - `subject_token_type` = access token: `invalid_request`.
+   CORS (§5.4.1). The integration app gives every stack the prop
+   `allowedOrigins: ['https://app.example.com', 'https://*.tenants.example.com']`,
+   and the stack outputs `AllowedOrigins`. Against a stack whose
+   `AllowedOrigins` is exactly
+   `https://app.example.com,https://*.tenants.example.com`:
+   u1's `scope=sample/read` narrowing sent with `Origin: https://app.example.com` and
+   `Content-Type: application/x-www-form-urlencoded;charset=UTF-8`, and u2's
+   `resource=A` refusal sent with `Origin: https://acme.tenants.example.com`,
+   each answer `Access-Control-Allow-Origin` equal to that origin and
+   `Vary: Origin`; the same narrowing with `Origin: https://evil.example.com`,
+   `Origin: https://a.b.tenants.example.com` or no `Origin` succeeds with no
+   `Access-Control-Allow-Origin` and with `Vary: Origin`. Against any other
+   stack (no output, or another list, such as a fixture deployed by hand
+   for a real app) the suite skips these checks and logs the stack name and
+   its list.
    Bypass the endpoint: call `GetTokensFromRefreshToken` directly with u2's
    refresh token and the §8.2 keys naming A. Cognito fails the request, which
    proves the trigger enforces the rule, not the endpoint. A plain
@@ -1092,7 +1244,22 @@ those of R-18; the trigger never puts `tenant-admin/users` on an un-narrowed
 token, and puts it on a narrowed one only for a member of `admin-<T>`
 (ADR-0015); the tenant-user role holds no pool or group lifecycle action
 (R-8); the form parser rejects every
-RFC 8693 parameter not listed in §5.4; the binding rule holds for every
+RFC 8693 parameter not listed in §5.4; synthesis refuses every
+`allowedOrigins` form §5.4.1 refuses (a public-suffix pattern, `:443`, a
+port on a pattern, an empty or repeated entry, the count and length caps
+among them), while a missing or empty `allowedOrigins` context value and the
+prop `[]` synthesise with no list, no `ALLOWED_ORIGINS` and no
+`AllowedOrigins` output, and the origin matcher accepts and refuses the §5.4.1 cases
+(exact, port, one label, two labels, the bare domain, upper case, `http`,
+`null`, two `Origin` values, the header name in either case, no `Origin`,
+and the look-alikes `https://app.example.com.evil.test`,
+`https://xapp.example.com`, `https://app.example.com:443` and
+`https://app.example.com/` against an exact `https://app.example.com`, none
+of which match), the synth check refuses a pattern under a wildcard rule
+(`https://*.us-east-1.elb.amazonaws.com`); the exchange
+entry adds the CORS headers to a 200, an OAuth error, a `server_error` and a
+framework error alike, none when the list is empty, and dispatches a
+`Content-Type` with `;charset=UTF-8` as the bare type (ADR-0040); the binding rule holds for every
 (row topology, arrival) pair and the trigger's sources and the authoriser
 refuse `pool_mismatch` on each mismatch (`test/topology/binding.test.ts`,
 `test/topology/tenant-source.test.ts`, `test/tenant-api/tenant-authorizer.test.ts`,
@@ -1113,6 +1280,7 @@ rather than falling back.
 | Federation to a tenant's own IdP | Topology 1: an IdP per pool, the natural fit. Topologies 2 and 3: an IdP per tenant in the shared pool with attribute/group mapping, bounded by the 300-IdP quota. |
 | Narrowing at sign-in | Pass the §8.2 keys to `InitiateAuth` to narrow the session's first token. Not built: exchange (§5.4) narrows per call with no new sign-in (ADR-0009, Option 4). |
 | Delegation (`act`, RFC 8693 §4.1) and audience narrowing | A service exchanging a token it received, to act for the user downstream, needs an access-token subject and a signer of its own. Out of scope by ADR-0009. Cognito token exchange (`GetDerivedToken`) takes an access-token subject, signs with the pool and adds `act` and one audience, but cannot carry the tenant and needs a trigger change first (ADR-0039); AgentCore Identity on-behalf-of is the other managed fit. |
+| Preflighted browser calls | A page that adds a non-safelisted header to the exchange (a tracing header included), or calls `/tenant/*` from another origin, makes the browser send an `OPTIONS` preflight. Add an `OPTIONS` route per path, proxied to a function that answers from the same `allowedOrigins` matcher with `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` for exactly what the page sends; `/tenant/*` also needs `Authorization` allowed. A preflight carries no bearer token and no API key, so `OPTIONS` methods have no authoriser and require no key (`requireApiKey` skips them), and each gets its route family's throttle. The API's resource policy lets any principal call only `POST/oauth2/token` and `*/tenant/*`, so the seam also adds `OPTIONS/oauth2/token` there, or the preflight is refused with 403. Not built: the exchange is a simple request (§5.4.1, ADR-0040). |
 | Hosted UI / managed login | Add a domain and OAuth flows to the app client; nothing in the trigger changes. |
 | Async onboarding | Wrap `CreateTenant` in the control-plane sample's workflow when onboarding grows beyond Cognito calls (e.g. also provisioning tenant storage). |
 | Control-plane mounting | A `scripts/control-plane/` lifecycle set that calls `CreateTenant`/`DeleteTenant` so this sample runs as a cell's identity component. |

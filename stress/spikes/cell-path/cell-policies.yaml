@@ -1,0 +1,198 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Path spike (docs/stress-test.spec.md §8, decision 7; stress ADR-0006):
+# the cell execution policy and the cell permissions boundary with IAM scoped
+# to the /cell/ role path, for a standalone cell account. The boundary sits
+# on the cell bootstrap's CloudFormation execution role and on every role a
+# cell creates.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Path spike, cell policies scoped to the /cell/ role path
+Resources:
+  CellPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cell-permissions-boundary
+      Description: Caps the cell bootstrap execution role and every cell role; IAM on role/cell/* only
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CellServices
+            Effect: Allow
+            Action:
+              - apigateway:*
+              - application-autoscaling:*
+              - execute-api:*
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+              - bedrock:Converse
+              - bedrock:ConverseStream
+              - bedrock-agentcore:*
+              - cloudwatch:*
+              - dynamodb:*
+              - kms:*
+              - lambda:*
+              - logs:*
+              - ssm:*
+              - sts:TagSession
+              - sts:GetCallerIdentity
+              - xray:*
+              - iam:Get*
+              - iam:List*
+            Resource: '*'
+          - Sid: CellAssets
+            Effect: Allow
+            Action: [s3:GetObject, s3:GetBucketLocation, s3:ListBucket]
+            Resource:
+              - !Sub arn:${AWS::Partition}:s3:::cdk-cell-assets-${AWS::AccountId}-${AWS::Region}
+              - !Sub arn:${AWS::Partition}:s3:::cdk-cell-assets-${AWS::AccountId}-${AWS::Region}/*
+          - Sid: CellRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:PutRolePermissionsBoundary
+              - iam:PassRole
+              - sts:AssumeRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cell/*
+          - Sid: CellServiceLinkedRoles
+            Effect: Allow
+            Action: iam:CreateServiceLinkedRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/*
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - ops.apigateway.amazonaws.com
+                  - runtime-identity.bedrock-agentcore.amazonaws.com
+          - Sid: DenyRoleWithoutTheBoundary
+            Effect: Deny
+            Action: [iam:CreateRole, iam:PutRolePermissionsBoundary]
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/cell-permissions-boundary
+          - Sid: DenyIamOutsideCell
+            Effect: Deny
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:PutRolePermissionsBoundary
+              - iam:PassRole
+              - sts:AssumeRole
+            NotResource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cell/*
+          - Sid: DenyOtherServiceLinkedRoles
+            Effect: Deny
+            Action: iam:CreateServiceLinkedRole
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                iam:AWSServiceName:
+                  - ops.apigateway.amazonaws.com
+                  - runtime-identity.bedrock-agentcore.amazonaws.com
+          - Sid: DenyBoundaryRemovalAndIdentityWrites
+            Effect: Deny
+            Action:
+              - iam:DeleteRolePermissionsBoundary
+              - iam:DeleteServiceLinkedRole
+              - iam:CreateUser
+              - iam:CreateAccessKey
+              - iam:CreatePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicy
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+            Resource: '*'
+          - Sid: DenyOwnerParameterWrites
+            Effect: Deny
+            Action:
+              - ssm:PutParameter
+              - ssm:DeleteParameter
+              - ssm:DeleteParameters
+              - ssm:LabelParameterVersion
+              - ssm:UnlabelParameterVersion
+              - ssm:AddTagsToResource
+              - ssm:RemoveTagsFromResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/application-plane/shared/identity/*
+              - !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/cdk-bootstrap/cell/*
+          - Sid: DenyApiGatewayAccountSettings
+            Effect: Deny
+            Action: [apigateway:PATCH, apigateway:PUT, apigateway:DELETE]
+            Resource: !Sub arn:${AWS::Partition}:apigateway:*::/account
+  CellExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: cell-execution-policy
+      Description: What the cell bootstrap's CloudFormation execution role may create (bounded by cell-permissions-boundary)
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CellResources
+            Effect: Allow
+            Action:
+              - apigateway:*
+              - application-autoscaling:*
+              - bedrock-agentcore:*
+              - cloudwatch:*
+              - dynamodb:*
+              - kms:*
+              - lambda:*
+              - logs:*
+              - ssm:*
+              - iam:Get*
+              - iam:List*
+            Resource: '*'
+          - Sid: CellAssets
+            Effect: Allow
+            Action: [s3:GetObject, s3:GetBucketLocation, s3:ListBucket]
+            Resource:
+              - !Sub arn:${AWS::Partition}:s3:::cdk-cell-assets-${AWS::AccountId}-${AWS::Region}
+              - !Sub arn:${AWS::Partition}:s3:::cdk-cell-assets-${AWS::AccountId}-${AWS::Region}/*
+          - Sid: CellRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:PassRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cell/*
+          - Sid: CellServiceLinkedRoles
+            Effect: Allow
+            Action: iam:CreateServiceLinkedRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/*
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - ops.apigateway.amazonaws.com
+                  - runtime-identity.bedrock-agentcore.amazonaws.com
+Outputs:
+  BoundaryArn:
+    Value: !Ref CellPermissionsBoundary
+  ExecutionPolicyArn:
+    Value: !Ref CellExecutionPolicy

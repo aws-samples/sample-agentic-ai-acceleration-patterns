@@ -117,7 +117,7 @@ it first shows.
 
 | Component | Where | What it is |
 |---|---|---|
-| Contract | `stress/` at the repository root | `tiers.ts`, the k6 library (`stress/k6/`), the result schema, the quota budget, the runner |
+| Contract | `stress/` at the repository root | `src/`: tiers, slice declaration, quota budget, result records, runner (`run.sh`); the k6 library (`stress/k6/`) |
 | Driver host | `stress/driver/` (the runtime-isolation `StressDriver`, moved) | one EC2 instance, no inbound rule, no public IP, SSM Session Manager, k6 and the AWS CLI |
 | Stress application | `stress/application/` | a control-plane application whose cell scripts deploy one runtime-isolation cell and whose tenant scripts onboard one tenant (§3.3) |
 | Slice: `control-plane` | `samples/control-plane/scripts/stress/` | deploy the control plane, register accounts and the stress application, onboarding and churn scenarios |
@@ -191,11 +191,11 @@ a declaration, `scripts/stress/slice.json`.
 | Verb | Does | Must |
 |---|---|---|
 | `budget` | prints the slice's draw on each account-wide quota at the tier, as JSON | run without credentials |
-| `deploy` | deploys the slice's stacks, or reuses them | report deploy seconds; publish what the next slice needs through the sample's published parameters (P-2) |
+| `deploy` | deploys the slice's stacks, or reuses them | publish what the next slice needs through the sample's published parameters (P-2); the runner times it (P-6) |
 | `seed` | creates the slice's data for the tier, or reuses the manifest | be safe to rerun; never write a token or a password to disk |
 | `run <scenario>` | runs one scenario | write one result record per scenario (§4.3); exit non-zero on a pass-criterion failure |
-| `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6) |
-| `teardown` | removes what the slice deployed | report destroy seconds; keep fixtures unless `--fixtures` is passed; verify nothing it owned is left |
+| `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6); write the late fields (`refusals`, `cost`) into its own slice's records, only those nobody else changed since `run`; any other change after `run` fails the run |
+| `teardown` | removes what the slice deployed | keep fixtures unless `--fixtures` is passed; verify nothing it owned is left; the runner times it (P-6) |
 
 `slice.json` names the slice, the slices it needs (by published interface),
 its scenarios, and the quotas it draws on. The runner orders slices by
@@ -212,21 +212,37 @@ Inputs every verb reads from the environment:
 | `STRESS_PREFIX` | stack and resource name prefix |
 | `STRESS_HOME` | the manifest folder outside the repository |
 | `STRESS_MODE` | `slice` (alone) or `platform` (composed) |
+| `STRESS_TIER_JSON` | the whole tier from `stress/src/tiers.ts`, as JSON |
+| `STRESS_RESULTS` | the folder `run <scenario>` writes its record to |
+| `STRESS_REPO` | the repository root |
+| `STRESS_COMMIT` | the commit the run is built from |
+
+`budget` runs without credentials: no `AWS_*` variable from the runner,
+an empty `HOME`, and `AWS_EC2_METADATA_DISABLED=true`. Each verb runs in
+its own session and process group with no stdin; SIGINT, SIGTERM or SIGHUP
+to the runner reaches the whole group, and anything a verb leaves running
+is stopped when it exits.
 
 ### 3.5 Runner
 
-`stress/run.sh --tier <tier> [--slices <a,b,...>] [--scenarios <x,y>]`:
+`stress/run.sh run --tier <tier> --slices <a,b,...> [--scenarios <x,y>] [--limits <file>]`:
 
-1. Reads every named `slice.json` and checks the needs are present.
+1. Reads every named `slice.json`, checks the needs are present, and
+   refuses a `--scenarios` entry that no named slice declares.
 2. Sums `budget` per account and refuses to start when a sum is over its
-   quota or another run holds the account.
+   quota or another run holds the lock for the prefix.
 3. Runs `deploy` and `seed` in dependency order, then the scenarios in the
    order of §5, then `collect`, then `teardown` in reverse order. Teardown
-   runs from the exit trap, also on failure.
-4. Writes the run's result file (§4.3).
+   runs on failure and after SIGINT, SIGTERM or SIGHUP too.
+4. Writes the run's result file (§4.3). Runner lines and all verb output
+   go to `run.log` in the run folder, which only the runner's user can read.
 
 With one slice named, the runner is that sample's stress test. With all of
 them, it is the platform run.
+
+The lock is per prefix on the runner's host. A second run from another host
+against the same accounts is not detected; one run per set of accounts at a
+time is an operating rule (`stress/README.md`, known limitations).
 
 ### 3.6 Deployment inputs
 
@@ -246,13 +262,19 @@ A cell account holds only:
 |---|---|
 | `CDKToolkit-cell` | the cell bootstrap (§8, decision 7) |
 | the role pair | `control-plane`'s `CellAccountStack`, deployed by the account owner as plain CloudFormation without a service role; its roles are on the default path `/` and carry no cell boundary |
+| account base | the account owner's stacks, each with the stack tag `stress:part=account-base`, deployed without a service role and listed by stack ARN for the check (below) (one or more; the policies deploy first, since the cell bootstrap names the boundary): the cell execution policy and boundary, the API Gateway account's CloudWatch Logs role, and the identity parameters a cell reads (`/application-plane/shared/identity/*`, naming the platform's issuer) |
 | cells | the stacks the cell script deploys |
 
 It has no default CDK bootstrap, no control plane, no driver host and no
-stacks of other samples. The cell bootstrap and its boundary scope a cell
+stacks of other samples. The owner's stacks deploy with the CDK's legacy
+synthesizer, which deploys an asset-free template inline with the
+owner's credentials, so the account never needs the default bootstrap. The cell bootstrap and its boundary scope a cell
 build's IAM writes to cell roles; the account boundary scopes everything
 else. A compromised cell build can change any cell in its account, and
-nothing else in it. It can still give a cell role a trust to another
+nothing else in it: the boundary also denies SSM writes to the owner's
+identity and bootstrap parameters, so it cannot pick the issuer the next
+cell trusts, and changes to the API Gateway account setting, so it cannot
+repoint the owner's logs role. It can still give a cell role a trust to another
 account (`iam:UpdateAssumeRolePolicy` on `role/cell/*`); that role stays
 under the boundary, but it is a way in from outside, and a redeploy that
 does not change the role leaves it. The check below reads each `/cell/`
@@ -261,7 +283,13 @@ account and the AWS services the cell uses.
 
 The `control-plane` slice's `deploy` enforces it before the first cell
 build: it lists the account's CloudFormation stacks in every Region the run
-uses and refuses an account with any stack but the three kinds above, a
+uses and refuses an account with any stack but the four kinds above
+(`CDKToolkit-cell` and the role pair by name, the account base by its
+tag together with no service role and a stack ARN on the list the
+account owner gives the check (W-11; an ARN pins the Region and the
+stack id, so the same name in another Region or a recreated stack does
+not pass), cells by their service role, the
+cell bootstrap's execution role), a
 stack whose service role is set and is not the cell execution role, a
 `cdk-hnb659fds-*` role, a role pair on `/cell/` or under the cell
 boundary, or a `/cell/` role trusted from outside (above). The stack list
@@ -269,7 +297,7 @@ and `iam:GetRole` give all of it.
 
 ## 4. Data model
 
-### 4.1 Tiers (`stress/tiers.ts`)
+### 4.1 Tiers (`stress/src/tiers.ts`)
 
 | | `small` | `medium` | `large` |
 |---|---|---|---|
@@ -427,8 +455,8 @@ permissions boundary:
 |---|---|
 | Bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy ARN> --custom-permissions-boundary cell-permissions-boundary`, run once by the account owner |
 | Cell roles | every role a cell creates is on the IAM path `/cell/`; the stress application's cell app sets it with a CDK aspect that matches every `CfnResource` of type `AWS::IAM::Role` (custom resource provider roles are not `CfnRole`) and sets `Path` with a property override |
-| Cell execution policy | a managed policy shipped in `stress/application/`: API Gateway, Application Auto Scaling (a DynamoDB global table deregisters its scalable targets on delete), AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM, read of `cdk-cell-assets-*`, IAM role writes and `iam:PassRole` on `role/cell/*` only, and `iam:CreateServiceLinkedRole` on `role/aws-service-role/*` only when `iam:AWSServiceName` is `replication.dynamodb.amazonaws.com` and `dynamodb.application-autoscaling.amazonaws.com`, whose trust IAM fixes to the service |
-| Cell permissions boundary | a managed policy on the execution role and on every cell role: the same services plus what cell roles call at run time (`execute-api`, the Bedrock model calls, `sts:TagSession`, X-Ray), `sts:AssumeRole` on `role/cell/*` only, and the same `iam:CreateServiceLinkedRole` allow as the execution policy; it denies `iam:CreateRole` without itself or outside `/cell/`, any other IAM write or `iam:PassRole` on a role outside `/cell/` (the deny's `NotResource` is `role/aws-service-role/*`), `iam:CreateServiceLinkedRole` for any other service, removing a boundary, users, access keys and policy writes |
+| Cell execution policy | a managed policy shipped in `stress/application/`: API Gateway, Application Auto Scaling (a DynamoDB global table deregisters its scalable targets on delete), AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM, read of `cdk-cell-assets-*`, IAM role writes and `iam:PassRole` on `role/cell/*` only, and `iam:CreateServiceLinkedRole` on `role/aws-service-role/*` only when `iam:AWSServiceName` is `ops.apigateway.amazonaws.com` and `runtime-identity.bedrock-agentcore.amazonaws.com`, whose trust IAM fixes to the service |
+| Cell permissions boundary | a managed policy on the execution role and on every cell role: the same services plus what cell roles call at run time (`execute-api`, the Bedrock model calls, `sts:TagSession`, X-Ray), `sts:AssumeRole` on `role/cell/*` only, and the same `iam:CreateServiceLinkedRole` allow as the execution policy; it denies `iam:CreateRole` without itself or outside `/cell/`, any other IAM write or `iam:PassRole` on a role outside `/cell/` (the deny's `NotResource` is `role/cell/*`), `iam:CreateServiceLinkedRole` for any other service, removing a boundary, users, access keys, policy writes, SSM writes to the account owner's parameters (`/application-plane/shared/identity/*`, `/cdk-bootstrap/cell/*`), and changes to the API Gateway account setting (`apigateway:PATCH`, `PUT`, `DELETE` on `/account`) |
 | Cell synth | `@aws-cdk/core:bootstrapQualifier` `cell` and `@aws-cdk/core:permissionsBoundary` `{"name":"cell-permissions-boundary"}` as object context (`cdk.json` or `CDK_CONTEXT_JSON`); a CLI `--context` passes the boundary as a string, which the CDK ignores |
 | Role pair | `control-plane`'s `cellBuildManagedPolicyArns` (ADR-0047); the cell account owner attaches one policy that allows `sts:AssumeRole` on the deploy, file-publishing and image-publishing `cdk-cell-*` roles of its own account and Region, and nothing else (not the lookup role, which holds `ReadOnlyAccess` without the boundary) |
 
@@ -438,8 +466,14 @@ writing to, passing or assuming any role that is not a cell role: the
 account's own administrator roles, the role pair and the bootstrap roles.
 The standalone account (§3.7) leaves no other stack or data for the service
 grants to reach. The boundary spike (`stress/spikes/cell-boundary/`)
-proved the boundary wall; open questions Q-5 and Q-6 prove the path and
-account walls.
+proved the boundary wall. The path spike (`stress/spikes/cell-path/`)
+proved the path wall in two standalone cell accounts: 18 escalation
+probes refused by an explicit deny in the boundary in each (IAM, policy
+versions, a boundary swap, SSM writes to the owner's parameters, and the
+API Gateway account setting), and
+a runtime-isolation cell
+deployed with 27 of 27 roles on `/cell/`. The request path in a cell
+account is Q-5.
 
 ## 9. Work items and parallel readiness
 
@@ -450,7 +484,7 @@ account walls.
 | W-3 runtime-isolation slice on the contract | W-1, W-2 | yes, after W-1 and W-2 |
 | W-4 control-plane build-limit prop | decision 2 | yes, now |
 | W-5 control-plane slice and the stress application | W-1, W-4, W-10; W-11 for Q-1 and the account check | after W-1, W-4 and W-10; Q-1 after W-11 |
-| W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, `/cell/` path aspect and the cell bootstrap | decision 7; W-11 for the Q-5 and Q-6 probes | yes, now; the probes after W-11 |
+| W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, `/cell/` path aspect and the cell bootstrap | decision 7; the deny probes ran in the path spike (`stress/spikes/cell-path/`); W-10 also decides whether the roles a cell creates get a second boundary without IAM writes (ADR-0006) | yes, now |
 | W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair | §3.7; W-10's policies and prop for the bootstrap and the role pair | accounts yes, now; the bootstrap after W-10's policies |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
 | W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1 | no: blocked on the front door |
@@ -465,5 +499,5 @@ account walls.
 | Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
 | Q-3 | Does the platform run keep the `large` fleet in every account between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
-| Q-5 | Does the `/cell/` path scope refuse a cell role's `iam:UpdateAssumeRolePolicy` on the role pair, `iam:PutRolePolicy` on a `cdk-cell-*` role, `iam:PassRole` of a role outside `/cell/` and `sts:AssumeRole` of the account's administrator role, while `iam:CreateServiceLinkedRole` for the cell's services succeeds in a fresh account and the integration test still passes under it? Proven by deny probes and one integration run in a standalone cell account | W-10 |
-| Q-6 | Does runtime-isolation deploy with every role on `/cell/` (resource policies and conditions that name role ARNs) and does its demo stack export what the stress cell app needs to instantiate it from the sample's package entry? | W-10 |
+| Q-5 | Does the request path work in a standalone cell account with every role on `/cell/` (authoriser, TVM `sts:AssumeRole` of a `/cell/` tenant role, the model call, tools)? Proven by the first platform run at `small` | W-9 |
+| Q-6 | Does runtime-isolation's package entry export what the stress cell app needs (`RuntimeIsolationDemoStack`, `parseDemoContext`, `bundleAgent`)? The path spike imports them from `src/` by path | W-5 |

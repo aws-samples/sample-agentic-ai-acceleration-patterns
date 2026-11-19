@@ -416,6 +416,27 @@ Region. The deployed stack publishes
 sample mounts into the `control-plane` sample's shared namespace. The last two
 are the control-plane mount's inputs (ADR-0030, ADR-0033, next section).
 
+A browser app on another origin that narrows a token with `POST /oauth2/token`
+needs its origins listed, so the browser lets the page read the answer
+(spec §5.4.1, ADR-0040):
+
+```bash
+npx cdk deploy --context topology=shared-pool-multi-tenant --context 'allowedOrigins=https://app.example.com,https://*.tenants.example.com'
+```
+
+Each entry is an exact `https` origin or `https://*.<domain>`, which matches
+one host label under the domain. Synthesis refuses `http`, a pattern under a
+public suffix such as `*.cloudfront.net` or under `amazonaws.com`, an S3
+path-style host such as `https://s3.amazonaws.com`, and anything else §5.4.1
+refuses, naming the entry. The checks do not know every host where other
+parties serve pages, so list a pattern only under a domain you run, and an
+exact entry only for a host that serves only your pages. With no list, the
+API sends no CORS header. Every deploy must pass the value: a deploy without
+it, such as the generic command above, clears the list. To keep it, add
+`context: { allowedOrigins: '<the list>' }` to the project options in
+`.projenrc.ts` and run `npx projen` (`cdk.json` is generated). The list then
+applies to every topology deployed from this folder.
+
 Teardown:
 
 ```bash
@@ -649,6 +670,34 @@ minutes for well under 1 USD. A second test, `npx projen integ:control-plane`,
 proves the control-plane mount end to end. What each test stands up, its
 steps, knobs and shortcuts are in [integration-test.md](./integration-test.md).
 
+## Platform stress slice
+
+The sample is a slice of the repository's platform stress test
+([`docs/stress-test.spec.md`](../../docs/stress-test.spec.md),
+[`stress/`](../../stress/README.md)). The slice runs on a `shared-pool` stack
+of its own, `<STRESS_PREFIX>-identity`, so thousands of stress tenants never
+crowd the pool the integration tests share, and it never touches a
+`TenantIdentity-*` stack ([ADR-0042](./adr/0042-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)).
+
+```bash
+export AWS_REGION=eu-central-1 STRESS_PREFIX=stress-ti
+cd ../../stress
+./run.sh run --tier small --slices tenant-identity --remove-fixtures
+```
+
+The runner calls [`scripts/stress/slice.sh`](./scripts/stress/slice.sh) with
+the verbs `budget`, `deploy`, `seed`, `run <scenario>`, `collect` and
+`teardown`; `--remove-fixtures` also destroys the stack. Without it the stack
+stays for the next run. Scenarios: `PS-1` (onboarding at the tier's churn
+count), `token-rate` (issue, refresh and exchange at the tier's steady rate)
+and `create-tenant-burst` (`CreateTenant` beyond what Cognito's control plane
+takes). Each asserts that every token names the tenant it was issued for and
+that a token or path of tenant A is refused for tenant B, including tenant
+A's refresh token on tenant B's platform path with the name of a real user
+of B ([ADR-0041](./adr/0041-bind-refreshtoken-result-to-the-path-user-and-tenant.md), [ADR-0042](./adr/0042-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)). The driver is
+[`test/stress/`](./test/stress/); its manifest and logs stay outside the
+repository and hold no token or password.
+
 ## End-to-end demo
 
 [`scripts/demo.sh`](./scripts/demo.sh) walks the primary flow against one
@@ -710,7 +759,7 @@ Three Smithy services ([`model/`](./model/)) merged into one REST API
 | `CreateMembership` | `PUT /platform/tenants/{tenantId}/users/{username}/membership` | 204 — topology 3 only; 400 `UnsupportedInTopology` otherwise |
 | `DeleteMembership` | `DELETE /platform/tenants/{tenantId}/users/{username}/membership` | 204 — topology 3 only; 409 on last tenant; releases the first-admin slot when it removes the holder, as `DeleteUser` does (ADR-0032) |
 | `IssueToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token` | 200 — sets a password, signs in; remove before production (ADR-0006) |
-| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` | 200 — refresh re-runs the trigger; remove before production (ADR-0006) |
+| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` | 200 — refresh re-runs the trigger; 404 when the refresh token belongs to another user or tenant than the path (ADR-0041; `pool-per-tenant` answers 409 for another tenant's token, which the tenant's app client refuses); remove before production (ADR-0006) |
 
 ### Tenant admin (`/tenant/*`, narrowed admin token)
 

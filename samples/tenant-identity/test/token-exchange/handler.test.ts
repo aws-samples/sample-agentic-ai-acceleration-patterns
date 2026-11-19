@@ -225,3 +225,21 @@ describe('handler logging hygiene (N-6)', () => {
     expect(joined).not.toContain(ACCESS);
   });
 });
+
+describe('handler with no allowedOrigins (ADR-0040)', () => {
+  it('sends no CORS header, even for an Origin', async () => {
+    cognitoMock.on(GetTokens).resolves({ AuthenticationResult: { AccessToken: ACCESS, ExpiresIn: 300 } });
+    const e = event(formBody(), false);
+    e.multiValueHeaders.origin = ['https://app.example.com'];
+    const h = headers(await handler(e));
+    expect(h['access-control-allow-origin']).toBeUndefined();
+    expect(h.vary).toBeUndefined();
+  });
+
+  it('accepts a form Content-Type with ;charset=UTF-8 (§5.4.1)', async () => {
+    cognitoMock.on(GetTokens).resolves({ AuthenticationResult: { AccessToken: ACCESS, ExpiresIn: 300 } });
+    const e = event(formBody(), false);
+    e.multiValueHeaders = { 'Content-Type': ['application/x-www-form-urlencoded;charset=UTF-8'] };
+    expect((await handler(e)).statusCode).toBe(200);
+  });
+});

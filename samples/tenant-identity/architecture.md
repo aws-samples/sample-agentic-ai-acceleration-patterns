@@ -1,15 +1,19 @@
 # Tenant Identity with Amazon Cognito — Architecture
 
 > Status: **Implemented and verified.** Last green deployment integration
-> test: 2026-11-10, eu-central-1, all four stacks (the three topologies and
-> `tiered`, ADR-0027) deployed as `TenantIdentityScopes-*`
-> (`E2E_STACK_PREFIX=TenantIdentityScopes E2E_PUBLISHER=none`, beside a
-> standing deployment), spec §10 steps 1b and 2–9 including 8b, 11 and the
-> ADR-0027 tiered scenario (step 12), with the scope catalogue, entitlement
-> and grant checks of ADR-0034..0036: 51/51 e2e assertions passed in 11.5
-> minutes, all 8 alarm actions published, and the leftover check found no
-> pool, REST API or log group. The
-> previous green run (2026-10-23, 45/45, with the R-6 parameter check and all
+> test: 2026-11-19 12:27–12:37 UTC, eu-central-1, all four stacks (the three
+> topologies and `tiered`, ADR-0027) deployed as `TenantIdentityRtb-*`
+> (`E2E_STACK_PREFIX=TenantIdentityRtb E2E_PUBLISHER=none`, beside a
+> standing deployment), spec §10 steps 1b and 2–9 including 6a, 8b, 11 and
+> the ADR-0027 tiered scenario (step 12), with the scope catalogue,
+> entitlement and grant checks of ADR-0034..0036, the step 7 CORS checks of
+> ADR-0040 and the step 6a `RefreshToken` binding of ADR-0041 in every
+> stack: 57/57 e2e assertions passed in 10 minutes (deploy 2.3, e2e 2.7,
+> destroy 4), all 8 alarm actions published, and the leftover check found no
+> pool, REST API or log group. The green run before it (2026-11-19, 51/51 in
+> 10.5 minutes) covered the same steps without 6a; the one before that
+> (2026-11-10, 51/51 in 11.5 minutes) also without CORS. The
+> run before that (2026-10-23, 45/45, with the R-6 parameter check and all
 > 8 alarm actions published to the SNS topic, M-31) verified teardown leaves
 > no stack, pool, table, parameter, role or log group: the destroy's
 > leftover check reported no tagged pool and no owned log group 90 s after
@@ -18,7 +22,7 @@
 > mounting spec §10 steps 1–12 including 5b and 9b: 11/11 e2e assertions
 > passed in about 11 minutes, and teardown left no stack, parameter, pool,
 > REST API or log group. ADRs: see
-> [`adr/`](./adr/README.md) (ADR-0001..0037).
+> [`adr/`](./adr/README.md) (ADR-0001..0042).
 
 This document describes what the sample deploys and runs, not the plan. Where
 the code and the specification diverge, the code and its ADRs win; the
@@ -488,6 +492,19 @@ no such comparison: each premium tenant has its own client, so the form's
 client goes to Cognito as is, and a client of a pool the registry does not
 know fails the trigger's GSI lookup (M-5), so no token with a tenant claim is
 issued (ADR-0027).
+
+A browser page on another origin can post the exchange as a CORS simple
+request (ADR-0040). The function's entry wraps the generated handler: before
+dispatch it drops `;charset=...` from a form `Content-Type`, and after the
+handler has built the answer it adds `Vary: Origin` and, when the request's
+one `Origin` matches the stack's `allowedOrigins` (exact, or one label under
+a pattern's domain), `Access-Control-Allow-Origin` with that origin. Every
+answer the function makes carries them, errors included; an unmatched
+`Origin` still gets the exchange. The list is checked at synth
+(`src/shared/allowed-origins.ts`, Public Suffix List rules from `tldts`) and
+reaches the function as `ALLOWED_ORIGINS`; the matcher
+(`src/token-exchange/cors.ts`) imports nothing. There is no `OPTIONS` route,
+and API Gateway's own answers (429, 403, 502) carry no CORS header.
 
 ### 6.4 Tenant admin calls through the authoriser
 
