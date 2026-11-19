@@ -1266,10 +1266,9 @@ hook's put replaces the entry, `s: active` and routed to the new cell
     deployer sets `exchangeEndpoint` in the `issuer` input (§3.6). It
     reaches the SPA through the `app` key and `/config.json` (§3.2, §4.1),
     its origin is in `connect-src` (§7.1), and the exchange API must
-    answer with CORS headers (§7.2). `tenant-identity` has no input for
-    the origins its exchange API allows, so the narrowing flow with the
-    demo issuer waits on Q-8 (§6.3). Until then the SPA can narrow a
-    `tenants` token only against an issuer that sends those headers.
+    answer with CORS headers (§7.2). The deployer lists the app's origins
+    in `tenant-identity`'s `allowedOrigins` input (`tenant-identity`
+    §5.4.1, ADR-0040, §6.3).
   - The request is `tenant-identity`'s: a form-encoded `POST` with
     `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
     `client_id`, `subject_token` (the user's refresh token),
@@ -1681,8 +1680,12 @@ All with a small static HTML or JSON body and `no-store`:
 - For an issuer whose multi-tenant exchange runs on its own API
   (`tenant-identity` `shared-pool-multi-tenant`): `exchangeEndpoint`
   (§3.6). That API must also send CORS headers for the app's origins
-  (§7.2), which only the issuer can configure; for `tenant-identity`
-  that waits on Q-8.
+  (§7.2), which only the issuer can configure. For `tenant-identity`,
+  deploy its `shared-pool-multi-tenant` stack with `allowedOrigins`
+  set to `https://<appDomain>` in `single` mode, or `https://*.<appDomain>`
+  in `host` mode (`tenant-identity` §5.4.1, ADR-0040). Its synth refuses a
+  pattern under a public suffix or `amazonaws.com`, so `appDomain` must be
+  a domain the vendor runs.
 - With `dedicatedDomains` on, an ACM certificate quota in the edge
   account's `us-east-1` raised before the dedicated domains near 2,500
   (§4.1).
@@ -1857,7 +1860,7 @@ Limits of these promises:
 | Sample | How | Needed for |
 |---|---|---|
 | `control-plane` | its API (`GetCell`, `GetDeployment`, `GetTenant`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its global hooks (R-39 to R-46, control-plane ADR-0044): `PutHook`, the `<fleet>-global-hook` role and `globalHookManagedPolicyArns`, the hook environment and `SCRIPT_OUTPUTS`. A prerequisite: without hooks the front door registers no route, and ADR-0044 is on `main` but still Proposed (Q-5) | placement checks, route registration, the integration test |
-| `tenant-identity` `shared-pool` and `shared-pool-multi-tenant` | its published parameters; the second topology also mints the `tenants` token and serves the token exchange (§3.5). Its exchange API sends no CORS headers and takes no allowed-origins input, so the SPA's narrowing of a `tenants` token with this issuer waits on Q-8. Step 5 of §10 uses a `tenants` token only to check the edge's 401 and calls no exchange, so it is not blocked; an end-to-end run of the exchange is blocked until Q-8 is answered | the demo issuer and the integration test |
+| `tenant-identity` `shared-pool` and `shared-pool-multi-tenant` | its published parameters; the second topology also mints the `tenants` token and serves the token exchange (§3.5), whose `allowedOrigins` input lists the app's origins (`tenant-identity` §5.4.1, ADR-0040, §6.3). Step 5 of §10 uses a `tenants` token only to check the edge's 401 and calls no exchange | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter: `baseUrl` gives the `agentIngress` origin's domain and origin path | `/agents/*`, optional |
 
 What the front door assumes of the agent ingress's paths (ADR-0019):
@@ -1990,12 +1993,20 @@ the 1,783.
 - Trusted Types enforced, with no pass-through policy.
 - Same-origin API and agent calls, so they need no CORS. The one
   cross-origin call is the multi-tenant token exchange to
-  `exchangeEndpoint`, when set (§3.5). It is a simple request: a
-  form-encoded `POST` with no cookie and no custom header, so the browser
-  sends no preflight, but it reads the answer, so the exchange API must
-  send `Access-Control-Allow-Origin` and `Vary: Origin`. It echoes an
+  `exchangeEndpoint`, when set (§3.5). It MUST stay a CORS simple
+  request, because the exchange API has no `OPTIONS` route: a `POST`
+  whose only header the SPA sets is
+  `Content-Type: application/x-www-form-urlencoded` (a `URLSearchParams`
+  body, which adds `;charset=UTF-8`), with `credentials` not `include`.
+  Browser instrumentation that adds a tracing header to every `fetch`
+  excludes this URL, or the browser sends a preflight that API Gateway
+  refuses. The browser reads the answer only if the exchange API sends
+  `Access-Control-Allow-Origin` and `Vary: Origin`. It echoes an
   `Origin` equal to `https://<appDomain>` in `single` mode or one label
-  under `appDomain` in `host` mode, and no other.
+  under `appDomain` in `host` mode, and no other. A network error on
+  the exchange (API Gateway's own 429, 403 or 502 carry no CORS header)
+  is retried at most twice with backoff (1 s, then 3 s); then the SPA
+  keeps the refresh token and shows a fixed "try again later" error.
 - `PUT` and `POST` calls to `/api/*` send the body's SHA-256 in
   `x-amz-content-sha256`, which origin access control needs to sign a
   request with a body to a Lambda function URL (ADR-0011).
@@ -2501,8 +2512,9 @@ origin rate limit (the demo cell API's unit test); the edge operator's
 `PutCellRoute` backfill and origin change, `DeleteHostRoute`, the 503 for
 a missing `cell#` and the 507 answers; a `host#` entry with no `tenant#`
 entry (a router test on a stubbed store); the SPA's token exchange to
-`exchangeEndpoint`, CORS headers included (a browser test against a stub
-endpoint; a run against `tenant-identity`'s exchange API waits on Q-8); and the per-IP rate rule's block (the web ACL template test
+`exchangeEndpoint`, CORS headers and the bounded retry included (a
+browser test against a stub endpoint; `tenant-identity`'s own §10 step 7
+checks its exchange's CORS answers); and the per-IP rate rule's block (the web ACL template test
 checks its priority, its Host-and-IP key and each rule's
 `x-tfd-rate-rule` header, and the test has one source address). The alarms' notifications are not checked; a template test checks that
 every alarm names `alarmTopicArn` when it is set, and
@@ -2515,4 +2527,3 @@ step 14 checks the metric count the re-check alarm watches.
 | Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? Until then step 23 runs against a stand-in. | integration test |
 | Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are on `main` and Proposed. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted | build start |
 | Q-7 | The deployment record holds `createdAt`, but the control plane's `GetDeployment` output does not list it (control-plane §5.2) and its spec states no timestamp format. The registrar needs it as `dt` (§4.1) to tell a new deployment from a leftover entry. Does the control plane add `createdAt` to `GetDeployment`, with a stated format (ISO 8601 or epoch)? Raised as [issue #55](https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns/issues/55) | build start |
-| Q-8 | The SPA's token exchange to `tenant-identity`'s `POST /oauth2/token` is a cross-origin call, so that API must send `Access-Control-Allow-Origin` and `Vary: Origin` for the app's origins (§7.2). `tenant-identity`'s spec has no CORS and no input for it. Does `tenant-identity` add an allowed-origins input to its exchange API (exact origins, plus one label under a domain for `host` mode)? Until it does, narrowing a `tenants` token with the demo issuer does not work (§3.5, §6.3). Raised as [issue #56](https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns/issues/56) | build start |
