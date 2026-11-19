@@ -27,7 +27,9 @@ export type ExchangeResult =
    * refresh token and shows "try again later". `tenant-refused`: a 400
    * `invalid_target`, the user does not hold the tenant or it is not
    * ACTIVE. `refused`: any other 4xx (such as `invalid_grant` for an
-   * expired refresh token) or an answer with no token. `aborted`: the
+   * expired refresh token) or an answer with no token. `invalid_scope` is
+   * `refused` on purpose: the SPA cannot tell a scope the user lacks in the
+   * picked tenant from one missing in the catalogue, a deployment error. `aborted`: the
    * caller's signal ended the call; nothing is retried.
    */
   | { readonly ok: false; readonly reason: 'unavailable' | 'tenant-refused' | 'refused' | 'aborted' };
