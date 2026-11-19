@@ -513,10 +513,13 @@ resource policy that other log deliveries in the account share. The
 construct never declares that shared policy, because deploy would
 overwrite it and destroy would delete it. It declares its own policy,
 under a construct-path name, that lets `delivery.logs.amazonaws.com`
-write to the query-log group only. The integration driver diffs
-`DescribeResourcePolicies` (names and documents) from before deploy to
-after destroy; any remaining change to a shared policy is a known
-leftover of C-6.
+write to the query-log group only. The query-log configuration and its
+VPC association depend on that policy, so the grant exists before
+delivery starts and outlives it on delete; the `synth` test asserts the
+dependency. The integration driver compares, from before deploy to after
+destroy, the `DescribeResourcePolicies` statements that name the
+query-log group's ARN, so other runs in the account do not show; any
+remaining statement in a shared policy is the one known leftover of C-6.
 
 What it does not cover: the tool Lambda, which has NAT egress and can
 query a public resolver directly (it is trusted code); and names under
@@ -747,6 +750,7 @@ truncates, and appends 8 hex characters of a hash of the path:
 | Usage-log `DeliverySource` and `DeliveryDestination` | `[\w-]`, 60, unique per account and Region |
 | Three Contributor Insights rules (the third with `dnsFirewall`) | `RuleName`, 128 |
 | DNS Firewall domain lists, rule group, association, query-log config and its log group | Resolver names `[\w-]`, 64; log group `[\w./#-]`, 512 |
+| Query-log Logs resource policy | `policyName`, unique per account and Region, 255 |
 
 The `synth` unit test asserts that every one of these names is unique and
 matches its charset when two instances share a stack.
@@ -942,7 +946,9 @@ Preconditions, checked by the driver before it deploys: the account's
 "maximum allocated ARM_64 MicroVM memory" quota (Service Quotas, looked up
 by quota code, not by name) is at least
 5 × `microvm.memoryMiB` (tenants A, B, C and E, plus a restart), and the
-driver fails early naming the quota if not. Every behaviour step runs
+account has a free CloudWatch Logs resource policy slot (10 per Region,
+not adjustable) for the `dnsFirewall` instance; the driver fails early
+naming the quota if not. Every behaviour step runs
 once per backend unless it names one. `cold-from-zero` records the
 `nitro` start time and fails if it comes within half of the start cap. The run
 records cold and warm latency per backend and the deploy and destroy time.
