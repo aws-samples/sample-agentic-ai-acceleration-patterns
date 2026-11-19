@@ -48,4 +48,5 @@ junit.xml
 src/smithy/
 TODO.md
 .kiro/
+/build/
 !/.projenrc.ts

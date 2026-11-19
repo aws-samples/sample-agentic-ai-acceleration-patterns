@@ -65,15 +65,28 @@ project.gitignore.exclude('.kiro/');
 // Regenerate the registrar SSDK and OpenAPI document from the model before every compile
 project.preCompileTask.exec('smithy build');
 
+// The demo SPA (spa/, build slice S4) builds into build/spa, the default
+// spaSource, before the synth reads its csp.json (spec §7.1, ADR-0008).
+const spaBuild = project.addTask('spa:build', {
+  description: 'Build the demo SPA into build/spa (index.html, hashed assets, csp.json)',
+  exec: 'ts-node -P tsconfig.json spa/build.ts',
+});
+project.postCompileTask.prependSpawn(spaBuild);
+project.gitignore.exclude('/build/');
+
+// jose 6 ships only ES modules; ts-jest runs CommonJS, so jest needs Node's
+// VM modules to load it (the demo cell API's token check, build slice S5).
+project.testTask.env('NODE_OPTIONS', '--experimental-vm-modules');
+
 // ---------------------------------------------------------------------------
 // BUILD-ONLY placeholder context. `npx projen build` synthesises the app
 // with cdk-nag, and the app refuses to synthesise without its spec §3.6
 // inputs. These values let it run: reserved example.com names, an
 // all-zero account (never an AWS account) and a zone id no zone has. They
 // NEVER reach a deployment: `npx cdk deploy` runs its own synth with the
-// real `--context` values. The last three point the router, registrar and
-// SPA seams at the test stand-ins until build slices S1, S3 and S4 land;
-// drop each one when its slice's file exists.
+// real `--context` values. The router, the registrar and the SPA are the
+// real ones: src/router/router.js, src/registrar/registrar.function.ts and
+// build/spa, which spa:build writes before the synth.
 // ---------------------------------------------------------------------------
 const buildOnlyPlaceholderContext = [
   '--context appDomain=app.build-placeholder.example.com',
@@ -86,9 +99,6 @@ const buildOnlyPlaceholderContext = [
   '--context fleet=build-placeholder',
   '--context edgeOperatorRoleArn=arn:aws:iam::000000000000:role/build-placeholder-operator',
   '--context \'issuer={"clientId":"build-placeholder","scopes":"openid","cognitoDomain":"https://auth.build-placeholder.example.com"}\'',
-  '--context routerSourcePath=test/edge/fixtures/router-stub.js',
-  '--context registrarEntry=test/edge/fixtures/registrar-stub.function.ts',
-  '--context spaSource=test/edge/fixtures/spa',
 ].join(' ');
 // Only the build's quiet synth: `npx projen synth` stays a plain `cdk synth`,
 // so it reads a deployer's own cdk.json inputs.

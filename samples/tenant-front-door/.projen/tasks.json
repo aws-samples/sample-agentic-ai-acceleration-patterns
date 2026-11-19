@@ -198,6 +198,9 @@
       "description": "Runs after successful compilation",
       "steps": [
         {
+          "spawn": "spa:build"
+        },
+        {
           "spawn": "synth:silent"
         }
       ]
@@ -212,6 +215,15 @@
       "steps": [
         {
           "exec": "smithy build"
+        }
+      ]
+    },
+    "spa:build": {
+      "name": "spa:build",
+      "description": "Build the demo SPA into build/spa (index.html, hashed assets, csp.json)",
+      "steps": [
+        {
+          "exec": "ts-node -P tsconfig.json spa/build.ts"
         }
       ]
     },
@@ -232,13 +244,16 @@
       "description": "Synthesizes your cdk app into cdk.out and suppresses the template in stdout (part of \"yarn build\")",
       "steps": [
         {
-          "exec": "cdk synth -q --context appDomain=app.build-placeholder.example.com --context 'hostedZone={\"zoneId\":\"ZBUILDPLACEHOLDER\",\"zoneName\":\"build-placeholder.example.com\"}' --context applicationId=build-placeholder --context 'controlPlane={\"apiUrl\":\"https://control-plane.build-placeholder.example.com\",\"accountId\":\"000000000000\",\"region\":\"eu-central-1\",\"vendorIdp\":{\"tokenUrl\":\"https://idp.build-placeholder.example.com/oauth2/token\",\"clientId\":\"build-placeholder\",\"clientSecretArn\":\"arn:aws:secretsmanager:eu-central-1:000000000000:secret:build-placeholder-AAAAAA\"}}' --context fleet=build-placeholder --context edgeOperatorRoleArn=arn:aws:iam::000000000000:role/build-placeholder-operator --context 'issuer={\"clientId\":\"build-placeholder\",\"scopes\":\"openid\",\"cognitoDomain\":\"https://auth.build-placeholder.example.com\"}' --context routerSourcePath=test/edge/fixtures/router-stub.js --context registrarEntry=test/edge/fixtures/registrar-stub.function.ts --context spaSource=test/edge/fixtures/spa"
+          "exec": "cdk synth -q --context appDomain=app.build-placeholder.example.com --context 'hostedZone={\"zoneId\":\"ZBUILDPLACEHOLDER\",\"zoneName\":\"build-placeholder.example.com\"}' --context applicationId=build-placeholder --context 'controlPlane={\"apiUrl\":\"https://control-plane.build-placeholder.example.com\",\"accountId\":\"000000000000\",\"region\":\"eu-central-1\",\"vendorIdp\":{\"tokenUrl\":\"https://idp.build-placeholder.example.com/oauth2/token\",\"clientId\":\"build-placeholder\",\"clientSecretArn\":\"arn:aws:secretsmanager:eu-central-1:000000000000:secret:build-placeholder-AAAAAA\"}}' --context fleet=build-placeholder --context edgeOperatorRoleArn=arn:aws:iam::000000000000:role/build-placeholder-operator --context 'issuer={\"clientId\":\"build-placeholder\",\"scopes\":\"openid\",\"cognitoDomain\":\"https://auth.build-placeholder.example.com\"}'"
         }
       ]
     },
     "test": {
       "name": "test",
       "description": "Run tests",
+      "env": {
+        "NODE_OPTIONS": "--experimental-vm-modules"
+      },
       "steps": [
         {
           "execArgs": [
