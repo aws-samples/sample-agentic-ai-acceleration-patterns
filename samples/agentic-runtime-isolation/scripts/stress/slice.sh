@@ -62,9 +62,26 @@ export STRESS_STATE_DIR="${STRESS_HOME}/${STRESS_PREFIX}/agentic-runtime-isolati
 # Installs on a fresh checkout and again when node_modules lacks a declared dependency
 # (`npm ls` exits non-zero on a missing or wrong version). `budget` runs with an empty
 # HOME; npm's cache goes there.
+# The packages package.json declares that node_modules lacks, one per line. Extraneous
+# packages (a linked node_modules in a worktree) do not count.
+missing_packages() {
+  (cd "$SAMPLE_DIR" && node -e '
+    const fs = require("fs");
+    const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    for (const n of Object.keys(Object.assign({}, p.dependencies, p.devDependencies))) {
+      if (!fs.existsSync(`node_modules/${n}/package.json`)) console.log(n);
+    }')
+}
+
+# ensure_installed [--no-install]: npm ci only when a declared package is missing. With
+# --no-install (budget: no credentials, maybe no network) it fails instead.
 ensure_installed() {
-  if [[ -d "${SAMPLE_DIR}/node_modules/.bin" ]] && (cd "$SAMPLE_DIR" && npm ls --depth=0 >/dev/null 2>&1); then
-    return 0
+  local missing
+  missing="$(missing_packages)" || { echo "slice.sh: cannot read ${SAMPLE_DIR}/package.json" >&2; exit 1; }
+  [[ -n "$missing" ]] || return 0
+  if [[ "${1:-}" == --no-install ]]; then
+    echo "slice.sh: ${SAMPLE_DIR}/node_modules lacks $(wc -l <<<"$missing") declared packages (first: $(head -n 1 <<<"$missing")); run npm ci there first" >&2
+    exit 1
   fi
   (cd "$SAMPLE_DIR" && npm ci --silent)
 }
@@ -99,7 +116,7 @@ need() { local v; v="$(output "$1")"; [[ -n "$v" ]] || { echo "slice.sh: output 
 
 case "$verb" in
   budget)
-    ensure_installed
+    ensure_installed --no-install
     slice_cli budget
     ;;
 
@@ -166,22 +183,27 @@ case "$verb" in
     # flushed, and 60 s of no traffic lets the old instances go. The marker is put back
     # when the scenario ends (a stack left with it drifts from its template). S2 reuses
     # the conversations S1 opened: every scenario of a run shares the run id that names them.
+    # marker_restore holds FUNCTION|FILE, FILE the environment to put back (a mode-600 temp
+    # file, passed as file:// so no value shows in the process list).
     marker_restore=()
     restore_instances() {
       local r
       for r in "${marker_restore[@]:-}"; do
         [[ -n "$r" ]] || continue
-        aws lambda update-function-configuration --function-name "${r%%|*}" --environment "${r#*|}" >/dev/null 2>&1 \
+        aws lambda update-function-configuration --function-name "${r%%|*}" --environment "file://${r#*|}" >/dev/null 2>&1 \
           && aws lambda wait function-updated --function-name "${r%%|*}" 2>/dev/null \
           || echo "cleanup: restore the environment of ${r%%|*} failed; redeploy the stack to clear STRESS_INSTANCE_MARKER" >&2
+        rm -f "${r#*|}"
       done
       marker_restore=()
     }
     new_instances() { # FUNCTION
-      local before envfile
+      local before envfile restorefile
       envfile="$(mktemp)"
+      restorefile="$(mktemp)"
       before="$(aws lambda get-function-configuration --function-name "$1" --query 'Environment.Variables' --output json)"
-      marker_restore+=("$1|$(jq -c '{Variables: (. // {})}' <<<"$before")")
+      jq -c '{Variables: (. // {})}' <<<"$before" >"$restorefile"
+      marker_restore+=("$1|${restorefile}")
       jq -c --arg m "${STRESS_RUN_ID}-${scenario}" '{Variables: ((. // {}) + {STRESS_INSTANCE_MARKER: $m})}' <<<"$before" >"$envfile"
       aws lambda update-function-configuration --function-name "$1" --environment "file://${envfile}" >/dev/null \
         || { rm -f "$envfile"; echo "update-function-configuration $1 failed" >&2; exit 1; }

@@ -14,7 +14,7 @@ on the driver host (W-2); `slice.sh run` runs them against an ingress (W-3, ADR-
 | `probe.js` | this sample's part: `invoke` (with the correlation header), `probe` with the §6 assertions, `pickProbe` (70/20/10), the warm-up and `step` helpers; re-exports the shared library's tier, manifest and pacing helpers, and wraps its `setupTokens`, `buildOptions` and `summarize` with this sample's fields |
 | `s1-steady.js` | active tenants x users, steady rate, §6 probe mix, tier length (large 600 s) |
 | `s2-herd.js` | token prime only (ingress idle), then 0 to 1.6 x steady in 5 s, held (large 120 s); no warm-up |
-| `s3-noisy.js` | S1 minus one tenant, plus scenario `noisy`: that tenant at 10 x `tenantLimitRpm` a minute |
+| `s3-noisy.js` | S1 minus one tenant, plus that tenant at 10 x `tenantLimitRpm` a minute; one self-paced `constant-vus` scenario, VU ids 1..VUS steady and the rest noisy, so every steady tenant gets `steadyRps` / tenants (the header says why) |
 | `s4-tools.js` | `tool t01/tool_001 {}` at 0.4 x steady |
 | `s5-streams.js` | `stream 60` (small: `stream 10`) over half the active tenants at 90 % of the reserved concurrency |
 | `s6-peak.js` | the S1 shape at `peakRps` for 60 s |

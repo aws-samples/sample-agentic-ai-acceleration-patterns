@@ -60,14 +60,18 @@ each also runs by hand with the runner's `STRESS_*` variables set
 |---|---|
 | `budget` | prints the tier's draws on six quotas, no credentials (`test/stress/slice-cli.ts`) |
 | `deploy` | `deploy.sh`: checks the identity deployment; deploys `<prefix>-ingress`, then the agents stacks one at a time, then `<prefix>-driver` through `stress/driver/deploy.sh`; prints `stack=<name> deploy_seconds=<n>` and the `PolicySecondsToActive*` outputs |
-| `seed` | `seed.sh`: reuses or creates the tier's tenants at 8 rps, subscribes the active ones to every agent and tool target, creates their users, writes one demo-table row per tenant; prints counts, wall seconds and the status histogram |
+| `seed` | `seed.sh`: reuses or creates the tier's tenants at 4 a second, subscribes the active ones to every agent and tool target, creates their users, writes one demo-table row per tenant; prints counts, wall seconds and the status histogram |
 | `run S1..S7` | `stress/driver/k6.sh` runs the scenario's k6 script on the driver host; the script writes `agentic-runtime-isolation.S<n>.json`; `S2` first retires every warm Lambda instance, flushes the authoriser cache and idles 60 s |
-| `collect` | `collect.sh`: for each record, Logs Insights, CloudWatch metrics and the k6 summary over the record's window; fills `refusals` (P-7), `latency.ingress` and `quotas` in the record; appends the pass table to `design/stress-results/<YYYY-MM-DD>-<tier>.md` after a redaction check that refuses any 12-digit number, any tenant id, tenant name or user name from the manifest, `eyJ` and `https://`; exits 1 on a failed row |
+| `collect` | `collect.sh`: for each record, Logs Insights, CloudWatch metrics and the k6 summary over the record's window; fills `refusals` (P-7), `latency.ingress` and `quotas` in the record; appends the pass table to `design/stress-results/<YYYY-MM-DD>-<tier>.md` in this checkout (so a run leaves that file new or changed; commit it with the run, as earlier runs' files are; "Commit tested" is the runner's `STRESS_COMMIT`) after a redaction check that refuses any 12-digit number, any tenant id, tenant name or user name from the manifest, `eyJ` and `https://`; exits 1 on a failed row |
 | `teardown [--fixtures]` | `teardown.sh`: deletes the seeded tenants (at `small` and `medium`, or with `--fixtures`), destroys driver, agents and ingress stacks in that order, removes the Runtime, function and API log groups a late line recreated, and fails if a stack, a log group, an agent runtime or a registry parameter with the prefix is left |
 
 `attribute.jq` is the P-7 step of `collect`: the refusals the hops log with a
-tenant, matched with the 4xx and 5xx the driver counted. What no line accounts
-for is `unattributed`, and one unattributed refusal fails the run.
+tenant, matched by count with the 4xx and 5xx the driver counted. Each tenant's
+429 lines count at most up to the driver's own 429 count for that tenant
+(`tenant_429{tenant:<id>}` in the k6 summary). What no line accounts for is
+`unattributed`, and one unattributed refusal fails the run. `noisy.jq` is S3's
+row: the noisy tenant (named by `s3-noisy.js` on k6's stderr) is refused, and
+every other tenant has 0 429.
 
 State lives in `$STRESS_HOME/$STRESS_PREFIX/agentic-runtime-isolation/` (default
 `~/.aaa-stress/<prefix>/agentic-runtime-isolation/`): `outputs.json` (stack
@@ -139,7 +143,7 @@ Estimates from the plan; the scripts print the measured figures.
 | `count.sh` | about 2 min | about 3 min | about 6 min |
 | `run`, each scenario | 1 min plus token set-up | 3 min plus token set-up | the plan's §5 figures, 5 to 10 min plus warm-up |
 | `collect` | 150 s settle plus about 1 min a scenario | the same | a few minutes a scenario |
-| `teardown` | about 10 min | about 15 min | about 30 min; the tenants add 21 min |
+| `teardown` | about 14 min (832 s measured 2026-11-19, tenants included) | about 15 min | about 30 min; the tenants add 21 min |
 | `cost.sh` | seconds, the next day | seconds, the next day | seconds, the next day |
 
 ## Also

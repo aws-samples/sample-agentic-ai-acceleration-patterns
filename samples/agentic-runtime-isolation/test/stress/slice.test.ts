@@ -128,12 +128,13 @@ describe('slice.sh', () => {
 });
 
 (hasJq ? describe : describe.skip)('attribute.jq (P-7)', () => {
-  function attribute(seen: number, rows: object[]): { byTenantReason: { tenant: string; reason: string; count: number }[]; unattributed: number } {
+  type Attribution = { byTenantReason: { tenant: string; reason: string; count: number }[]; unattributed: number };
+  function attribute(seen: number, rows: object[], caps: Record<string, number> = {}): Attribution {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attribute-'));
     try {
       const file = path.join(dir, 'rows.json');
       fs.writeFileSync(file, JSON.stringify(rows));
-      const r = spawnSync('jq', ['-n', '-c', '--argjson', 'seen', String(seen), '--slurpfile', 'rows', file, '-f', path.join(STRESS_DIR, 'attribute.jq')], { encoding: 'utf8' });
+      const r = spawnSync('jq', ['-n', '-c', '--argjson', 'seen', String(seen), '--argjson', 'caps', JSON.stringify(caps), '--slurpfile', 'rows', file, '-f', path.join(STRESS_DIR, 'attribute.jq')], { encoding: 'utf8' });
       expect(r.status).toBe(0);
       return JSON.parse(r.stdout);
     } finally {
@@ -172,5 +173,70 @@ describe('slice.sh', () => {
   it('names a refusal with no reason `unknown` and handles no rows at all', () => {
     expect(attribute(1, [{ tenantId: 'a', n: '1' }]).byTenantReason).toEqual([{ tenant: 'a', reason: 'unknown', count: 1 }]);
     expect(attribute(3, [])).toEqual({ byTenantReason: [], unattributed: 3 });
+  });
+
+  it("caps a tenant's 429 lines at the driver's 429 count for it, so its excess cannot hide another tenant's refusal", () => {
+    // The driver saw 5 for a and 5 for b; the window caught 8 lines for a and only 2 for b.
+    const rows = [
+      { tenantId: 'a', reason: 'tenant_rate_limited', status: '429', n: '8' },
+      { tenantId: 'b', reason: 'tenant_rate_limited', status: '429', n: '2' },
+    ];
+    const out = attribute(10, rows, { a: 5, b: 5 });
+    expect(out.unattributed).toBe(3);
+    // byTenantReason stays what was logged.
+    expect(out.byTenantReason).toEqual([
+      { tenant: 'a', reason: 'tenant_rate_limited', count: 8 },
+      { tenant: 'b', reason: 'tenant_rate_limited', count: 2 },
+    ]);
+  });
+
+  it('credits no 429 line for a tenant the driver counted no 429 for (fail closed)', () => {
+    expect(attribute(3, [{ tenantId: 'a', reason: 'tenant_rate_limited', status: '429', n: '3' }]).unattributed).toBe(3);
+  });
+
+  it('credits lines with another status as logged', () => {
+    const rows = [
+      { tenantId: 'a', reason: 'entitlement_denied', status: '403', n: '2' },
+      { tenantId: 'a', reason: 'tenant_rate_limited', status: '429', n: '4' },
+    ];
+    expect(attribute(6, rows, { a: 4 }).unattributed).toBe(0);
+    expect(attribute(6, rows, { a: 1 }).unattributed).toBe(3);
+  });
+});
+
+(hasJq ? describe : describe.skip)('noisy.jq (S3 noisy neighbour)', () => {
+  function noisy(id: string, rows: object[]): { noisy429: number; others429: number; otherTenants: number; pass: boolean } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'noisy-'));
+    try {
+      const file = path.join(dir, 'rows.json');
+      fs.writeFileSync(file, JSON.stringify(rows));
+      const r = spawnSync('jq', ['-n', '-c', '--arg', 'noisy', id, '--slurpfile', 'rows', file, '-f', path.join(STRESS_DIR, 'noisy.jq')], { encoding: 'utf8' });
+      expect(r.status).toBe(0);
+      return JSON.parse(r.stdout);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const m1 = '2026-11-19 16:24:00.000';
+  const m2 = '2026-11-19 16:25:00.000';
+
+  it('passes when only the noisy tenant is refused', () => {
+    expect(noisy('n', [{ tenantId: 'n', minute: m1, n: '149' }, { tenantId: 'n', minute: m2, n: '323' }]))
+      .toEqual({ noisy429: 472, others429: 0, otherTenants: 0, pass: true });
+  });
+
+  it('fails when any other tenant got a 429 (the 2026-11-19 run)', () => {
+    const out = noisy('n', [{ tenantId: 'n', minute: m1, n: '472' }, { tenantId: 's', minute: m2, n: '17' }]);
+    expect(out).toEqual({ noisy429: 472, others429: 17, otherTenants: 1, pass: false });
+  });
+
+  it('counts untagged 429 lines against the others', () => {
+    expect(noisy('n', [{ tenantId: 'n', minute: m1, n: '5' }, { minute: m1, n: '1' }]).pass).toBe(false);
+  });
+
+  it('fails when the noisy tenant is unknown or was never refused', () => {
+    expect(noisy('', [{ tenantId: 'n', minute: m1, n: '5' }]).pass).toBe(false);
+    expect(noisy('', [{ minute: m1, n: '5' }])).toEqual({ noisy429: 0, others429: 5, otherTenants: 1, pass: false });
+    expect(noisy('n', []).pass).toBe(false);
   });
 });

@@ -5,7 +5,7 @@
 # The slice's `collect` verb (docs/stress-test.spec.md §3.4, ADR-0052; stress-test plan §4, §7, §7.1, §11).
 # slice.sh calls it after the last scenario with the runner's environment:
 #
-#   STRESS_RESULTS STRESS_RUN_ID STRESS_SCALE STRESS_STATE_DIR AWS_REGION  (the runner's, through slice.sh)
+#   STRESS_RESULTS STRESS_RUN_ID STRESS_SCALE STRESS_STATE_DIR STRESS_COMMIT AWS_REGION  (the runner's, through slice.sh)
 #   [STRESS_BASELINE_TTFB_P90_MS=<perf.sh p90 TTFB of the day, ms>]
 #
 # For each record this run's `run` verb wrote (`agentic-runtime-isolation.S<n>.json`),
@@ -26,7 +26,8 @@
 # later, cost.sh reads it then.
 #
 # It also appends one section per scenario to design/stress-results/<YYYY-MM-DD>-<scale>.md
-# after a redaction check (no 12-digit number, no tenant id, tenant name or user name
+# in this checkout (a run leaves that file changed or new, to commit with the run's result;
+# "Commit tested" is STRESS_COMMIT, the commit the runner tested) after a redaction check (no 12-digit number, no tenant id, tenant name or user name
 # from the manifest, no `eyJ`, no `https://`), prints the pass table, and exits 1 when
 # a row fails, so the run fails with it. Raw query results stay in the run folder
 # (`<run folder>/agentic-runtime-isolation/<scenario>/`). Conventions: scripts/CONVENTIONS.md.
@@ -36,13 +37,13 @@
 
 set -euo pipefail
 
-for name in STRESS_RESULTS STRESS_RUN_ID STRESS_SCALE STRESS_STATE_DIR; do
+for name in STRESS_RESULTS STRESS_RUN_ID STRESS_SCALE STRESS_STATE_DIR STRESS_COMMIT; do
   [[ -n "${!name:-}" ]] || { echo "collect.sh: ${name} is not set (slice.sh sets it; run this through the runner)" >&2; exit 2; }
 done
 REGION="${AWS_REGION:-}"
 : "${REGION:?Set AWS_REGION to the Region the stress stacks are deployed in}"
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
-for tool in aws jq git awk; do
+for tool in aws jq awk; do
   command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
 done
 
@@ -172,7 +173,7 @@ collect_one() {
   # P-7: every refusal the driver saw is a `request refused` line with a tenant, from the
   # authoriser (entitlement, grant, limit) or the ingress (limit, backend, mint). A refusal
   # no line accounts for is unattributed (attribute.jq).
-  insights refused_by_reason 'filter message = "request refused" | stats count(*) as n by tenantId, reason | limit 10000' "$LOG_GROUP" "$AUTHORIZER_LOG_GROUP"
+  insights refused_by_reason 'filter message = "request refused" | stats count(*) as n by tenantId, reason, status | limit 10000' "$LOG_GROUP" "$AUTHORIZER_LOG_GROUP"
   # Per-tenant cost attribution (P-10, plan §11.2): the figures the `request served` line
   # carries per tenant, summed, so the run's Runtime seconds can be split by tenant and the
   # sum compared with the Cost Explorer line (cost.sh).
@@ -270,10 +271,16 @@ collect_one() {
   # `seen` is every 4xx and 5xx the driver counted: the record's own `refusals.unattributed`
   # as k6 wrote it, before this step. A collect run twice would read the first answer, so the
   # k6 summary's own count wins when it is there.
-  local SEEN ATT LAT Q
+  local SEEN CAPS ATT LAT Q
   SEEN="$(v '.k6.refusalsSeen // empty')"
   [[ -n "$SEEN" ]] || SEEN="$(jq -r '.refusals.unattributed' "$record")"
-  ATT="$(jq -n --argjson seen "$SEEN" --slurpfile rows "${OUT}/insights-refused_by_reason.json" -f "${SCRIPT_DIR}/attribute.jq")"
+  # The driver's 429s per tenant (`tenant_429{tenant:<id>}`, one threshold per tenant in
+  # probe.js buildOptions). A summary without them caps every tenant at 0: fail closed.
+  CAPS="$(jq -c '.metrics // {} | to_entries
+    | map(select(.key | test("^tenant_429\\{tenant:[^}]+\\}$"))
+          | {key: (.key | capture("^tenant_429\\{tenant:(?<t>[^}]+)\\}$").t), value: ((.value.values // .value).count // 0)})
+    | from_entries' "$SUMMARY")"
+  ATT="$(jq -n --argjson seen "$SEEN" --argjson caps "$CAPS" --slurpfile rows "${OUT}/insights-refused_by_reason.json" -f "${SCRIPT_DIR}/attribute.jq")"
   LAT="$(jq -c '
     def sec: ((. // "0") | tonumber) / 1000;
     def ord($a; $b; $c): {p50: ($a | sec), p95: ([($b | sec), ($a | sec)] | max)} | . + {p99: ([($c | sec), .p95] | max)};
@@ -313,11 +320,10 @@ collect_one() {
     row "5xx from the ingress" "API Gateway 5xx ${E5}; refusals naming a tenant ${R5T} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")'))" \
       "$(pf awk -v a="$E5" -v b="$R5T" 'BEGIN { exit !(a <= b) }')"
   elif [[ "$SCENARIO" == S2 ]]; then
-    # The herd is the one scenario that may throttle the ingress Lambda; each
-    # throttle is one API Gateway 500 with no tenant (finding F-1 in the plan).
-    # Every other 5xx must name a tenant and a reason.
-    row "5xx from the ingress" "API Gateway 5xx ${E5}; refusals naming a tenant ${R5T}; Lambda throttles ${LT} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")'))" \
-      "$(pf awk -v a="$E5" -v b="$R5T" -v c="$LT" 'BEGIN { exit !(a <= b + c) }')"
+    # The herd may throttle the ingress Lambda (finding F-1 in the plan); each throttle is an
+    # API Gateway 500 with no log line. The P-7 row is the binding check: it fails on any 5xx
+    # no line names a tenant for, so this row only reports the counts.
+    row "5xx from the ingress" "API Gateway 5xx ${E5}; refusals naming a tenant ${R5T}; Lambda throttles ${LT} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")')); P-7 is the check" INFO
   else
     row "5xx from the ingress" "API Gateway 5xx ${E5} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")'))" "$(pf zero "$E5")"
   fi
@@ -329,6 +335,18 @@ collect_one() {
   if [[ "$(v .refused429Untagged)" == 0 && "$(v .refused429UnderLimit)" == 0 ]] \
     && { [[ "$K429" == n/a ]] || awk -v k="$K429" -v r="$R429" 'BEGIN { d = k - r; if (d < 0) d = -d; t = r / 100; if (t < 2) t = 2; exit !(d <= t) }'; }; then verdict=PASS; fi
   row "429 attribution" "logged 429 ${R429} over $(v .tenants429) tenants, untagged $(v .refused429Untagged), tenant-minutes under the limit $(v .refused429UnderLimit), k6 429 ${K429}" "$verdict"
+  if [[ "$SCENARIO" == S3 ]]; then
+    # Plan §5: the noisy tenant is refused, every other tenant gets 0 429. setup() in
+    # s3-noisy.js names the noisy tenant on k6's stderr.
+    local NOISY="" NOISY_OUT K6_OUT="${K6_DIR}/$(k6_name S3).k6-stdout.txt"
+    if [[ -s "$K6_OUT" ]]; then
+      NOISY="$(sed -n 's/.*msg="\(.*\)".*/\1/p' "$K6_OUT" | sed 's/\\"/"/g' \
+        | jq -rR 'fromjson? | select(.kind? == "noisy_tenant") | .tenantId // empty' | awk 'NR == 1')"
+    fi
+    NOISY_OUT="$(jq -nc --arg noisy "$NOISY" --slurpfile rows "${I}/insights-refused_429.json" -f "${SCRIPT_DIR}/noisy.jq")"
+    row "429 only on the noisy tenant (S3)" "noisy tenant $([[ -n "$NOISY" ]] && echo named || echo 'not named by k6'), its 429 $(jq .noisy429 <<<"$NOISY_OUT"); 429 on other tenants $(jq .others429 <<<"$NOISY_OUT") over $(jq .otherTenants <<<"$NOISY_OUT") tenants" \
+      "$([[ "$(jq .pass <<<"$NOISY_OUT")" == true ]] && echo PASS || echo FAIL)"
+  fi
   row "Refusals attributed to a tenant (P-7)" "driver saw ${SEEN}; logged with a tenant $(jq '[.byTenantReason[].count] | add // 0' <<<"$ATT") over $(jq '[.byTenantReason[].tenant] | unique | length' <<<"$ATT") tenants; unattributed $(jq .unattributed <<<"$ATT")" \
     "$(pf zero "$(jq .unattributed <<<"$ATT")")"
   local STS KMS
@@ -367,7 +385,7 @@ collect_one() {
   {
     printf '\n## %s %s\n\n' "$STRESS_RUN_ID" "$SCENARIO"
     printf -- '- Commit tested: `%s`\n- Scale: %s\n- Scenario: %s\n- Run window (UTC): %s to %s (%s s)\n\n' \
-      "$(git rev-parse --short HEAD)" "$SCALE" "$SCENARIO" "$(iso "$W_START")" "$(iso "$W_END")" "$((W_END - W_START))"
+      "${STRESS_COMMIT:0:7}" "$SCALE" "$SCENARIO" "$(iso "$W_START")" "$(iso "$W_END")" "$((W_END - W_START))"
     printf '| Check | Measured | Result |\n|---|---|---|\n'
     awk -F'|' '{ printf "| %s | %s | %s |\n", $1, $2, $3 }' "$ROWS"
     printf '\n| Counter | Value |\n|---|---|\n'

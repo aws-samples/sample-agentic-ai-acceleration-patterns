@@ -28,6 +28,7 @@ import {
   iterationSkipped,
   isolationCheck,
   ledger,
+  loadManifest as loadManifestShared,
   loadTier as loadTierShared,
   pacing,
   RUN_ID,
@@ -91,9 +92,19 @@ export function loadTier() {
   });
 }
 
-/** options common to every scenario file. */
+/**
+ * Options common to every scenario file. One `tenant_429{tenant:<id>}` threshold per manifest
+ * tenant makes k6 keep each tenant's 429 count in the summary; collect.sh caps each tenant's
+ * logged 429 lines at it (attribute.jq, P-7).
+ * shortcut: k6 matches every submetric on every 429 sample; past a few thousand tenants, move
+ * the per-tenant count to the tenant_minute ledger instead.
+ */
 export function buildOptions(scenarios, p, mode) {
-  return buildOptionsShared(scenarios, p, mode, { positive_control_fail: ['count==0'] });
+  const thresholds = { positive_control_fail: ['count==0'] };
+  for (const t of loadManifestShared().tenants) {
+    thresholds[`tenant_429{tenant:${t.tenantId}}`] = ['count>=0'];
+  }
+  return buildOptionsShared(scenarios, p, mode, thresholds);
 }
 
 /** handleSummary: SCENARIO is the plan's id (`S1` ... `S7`). */

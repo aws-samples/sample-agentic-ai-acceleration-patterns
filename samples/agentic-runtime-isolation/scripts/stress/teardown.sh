@@ -248,7 +248,8 @@ while read -r rt; do
 done <"$RUNTIMES"
 echo "runtime log groups: $(wc -l <"$RUNTIMES") runtimes, ${REMOVED} leftover groups removed"
 # The function and API log groups the stacks own (ADR-0019) can come back with a late line too.
-OWN_LOG_PREFIXES=("/aws/lambda/${PREFIX}-")
+# Only this slice's three stacks: another run's prefix may start with `${PREFIX}-`.
+OWN_LOG_PREFIXES=("/aws/lambda/${PREFIX}-ingress-" "/aws/lambda/${PREFIX}-agents-" "/aws/lambda/${PREFIX}-driver-")
 [[ -z "$REST_API_ID" ]] || OWN_LOG_PREFIXES+=("API-Gateway-Execution-Logs_${REST_API_ID}")
 REMOVED=0
 for lp in "${OWN_LOG_PREFIXES[@]}"; do
@@ -262,7 +263,7 @@ echo "function and API log groups: ${REMOVED} leftover groups removed"
 LEFT=""
 left_stacks="$(aws cloudformation list-stacks --output text \
   --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED DELETE_FAILED UPDATE_ROLLBACK_FAILED ROLLBACK_FAILED DELETE_IN_PROGRESS \
-  --query "StackSummaries[?starts_with(StackName, '${PREFIX}-')].StackName" 2>/dev/null | tr '\t' ' ' || true)"
+  --query "StackSummaries[?StackName == '${PREFIX}-ingress' || StackName == '${PREFIX}-driver' || starts_with(StackName, '${PREFIX}-agents-')].StackName" 2>/dev/null | tr '\t' ' ' || true)"
 [[ -z "$left_stacks" || "$left_stacks" == None ]] || LEFT="${LEFT}; stacks ${left_stacks}"
 while read -r rt; do
   [[ -n "$rt" && "$rt" != None ]] || continue
