@@ -79,7 +79,10 @@ export interface TenantFrontDoorInputs {
   readonly spaSource?: string;
   /** Agent ingress base URL (`https://<host>/<stage>`); omit to leave `/agents/*` off. */
   readonly agentIngress?: string;
-  /** Default off. On arrives with build slice S6. */
+  /**
+   * Default off. On lets the edge operator role set a tenant's
+   * `customDomain` and deploys the sweeper (§3.4 step 5, ADR-0018).
+   */
   readonly dedicatedDomains?: boolean;
   /** Default 2,000. */
   readonly tenantRequestsPer5Min?: number;
@@ -125,6 +128,7 @@ export interface ResolvedInputs {
   readonly tenantClaim: string;
   readonly spaSource: string;
   readonly agentIngress?: { readonly domainName: string; readonly originPath?: string };
+  readonly dedicatedDomains: boolean;
   readonly tenantRequestsPer5Min: number;
   readonly ipRequestsPer5Min: number;
   readonly reportingEndpoint?: string;
@@ -169,9 +173,6 @@ export function validateInputs(inputs: TenantFrontDoorInputs): ResolvedInputs {
 
   if (inputs.dedicatedDomains !== undefined && typeof inputs.dedicatedDomains !== 'boolean') {
     throw new InputError('dedicatedDomains', 'must be true or false');
-  }
-  if (inputs.dedicatedDomains) {
-    throw new InputError('dedicatedDomains', 'is not available yet: dedicated domains arrive in build slice S6. Leave it off');
   }
 
   const appDomain = hostname('appDomain', inputs.appDomain);
@@ -271,6 +272,7 @@ export function validateInputs(inputs: TenantFrontDoorInputs): ResolvedInputs {
     tenantClaim,
     spaSource,
     agentIngress,
+    dedicatedDomains: inputs.dedicatedDomains ?? false,
     tenantRequestsPer5Min,
     ipRequestsPer5Min,
     reportingEndpoint,
