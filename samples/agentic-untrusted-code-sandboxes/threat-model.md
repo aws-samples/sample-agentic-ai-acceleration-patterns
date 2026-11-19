@@ -1,0 +1,165 @@
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
+<!-- SPDX-License-Identifier: MIT-0 -->
+# Threat model
+
+Status: design only. Nothing is built, so every "Planned:" entry names a
+test, step or check that does not exist yet. Unit test file names are
+proposals. Integration step names are the ones in spec §8. Claims marked
+with an `S-n` come from the 2026-11-18 and 2026-11-19 spikes (spec §7), not
+from the built sample.
+
+Scope and assumptions:
+
+- The attacker is code that runs in a sandbox (written by a tenant, or by
+  an agent acting for one) and a tenant that calls the tool.
+- The vendor's components are trusted: the tool, the reaper, the drain, the
+  offboard function and the consumed ingress. The ingress authenticates the
+  tenant and signs the tenant context (agentic-runtime-isolation).
+- The hypervisor of each AWS boundary (Lambda MicroVM, Nitro Sandbox,
+  AgentCore session) is the wall between tenants; the sample does not
+  re-test it.
+- "Enforced" means IAM refuses the call even when the tool's code is wrong.
+  "Filtered" means the tool's code decides and IAM has no key for it
+  (spec §3.4, P-6).
+
+## Cross-tenant execution
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-1: Tenant A's call lands in tenant B's `nitro` task because ECS gave B's task A's old private IP | M-1: Per-start 32-byte nonce. The tool sends no job byte until the task answers a TLS `/hello` challenge with `HMAC(nonce, challenge ‖ certFingerprint)` that matches the connection's certificate. A failure marks the row dead and starts a fresh task. S-7 saw no IP reuse (not ruled out); the check does not depend on it | ADR-0010; spec §3.4 Identity check; Planned: integ `recycled-address`; `runner/test_runner.py` "hello refuses a challenge answered with another nonce" |
+| T-2: A MicroVM or AgentCore session is not the one the row names (handle replaced, session restarted under the same id) | M-2: Every result carries `HMAC(nonce, runId)` and the tool checks it. A changed `bootId` means a restart: the row is rewritten and the call reports `sandbox` = `started`. A failed check, "not found" or a refused connection marks the row dead, and the address is never retried | ADR-0010; spec §3.4, §4.1 step 3; Planned: integ `dead-handle`, `reuse`, `apart`; `test/tool.test.ts` "dead handle takes over with the version just read" |
+| T-3: Two concurrent first calls start two sandboxes for one tenant, or a call takes over a start another call still owns | M-3: Conditional put on `attribute_not_exists(PK) OR version = :seen` gives one winner. The start lease equals the start cap. `clientToken` is the first 32 hex of SHA-256("start" ‖ nonce), so a retried start launches nothing new. The loser returns `sandbox_starting`. Each write uses the version of the call's own last write | ADR-0005; spec §4.1; Planned: `test/registry.test.ts` "one winner under concurrent takeover"; integ `race`, `cold-from-zero` |
+| T-4: A sandbox is shared or handed from one tenant to another | M-4: One row per tenant per backend, key `TENANT#<t>` / `SANDBOX#<backend>`, read with the tenant-scoped role. A replaced handle is stopped before the new start. No sandbox is started per call or reused across tenants | P-4; ADR-0005; spec §4.1, C-1; Planned: integ `apart` |
+| T-5: Session-id guessing on `agentcore`: anyone who knows a tenant id can compute its session id | Accepted: the id is `rc-` + hex SHA-256 of the tenant id, so it is derivable. Knowing it adds no reach, because only the tool role may invoke the runtime and the tool takes the tenant from the signed context. M-5: `InvokeAgentRuntime` is granted to the tool role only, `StopRuntimeSession` to the tool and reaper roles only | ADR-0009; spec §3.4, §3.6; Planned: `test/backends.test.ts` "session id is 67 characters, `rc-` plus 64 hex"; `test/construct.test.ts` "only the tool role may invoke the runtime" |
+| T-6: A defect in the tool's code starts, calls or stops another tenant's MicroVM or AgentCore session (filtered start and call) | Accepted: IAM cannot stop it. MicroVM actions authorize against the image only (S-3), and AgentCore invoke and stop have no session-id key (S-8). Compensating: the tenant comes only from the signed context (M-38), and the session id comes from the tenant alone (M-5). On `microvm` and `agentcore` the identity check (M-2) reads the result, so a wrong target has already received the job; only `nitro` proves identity first. The spec does not say whether the runner refuses a job whose nonce is not its own | P-6; ADR-0009, ADR-0014 consequences; spec §3.4 enforced or filtered rows; revisit when AWS adds MicroVM tags or an AgentCore session key (ADR-0015) |
+
+## Cross-tenant data access
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-7: A defect in the tool reads or writes another tenant's input, output or registry row | M-6: The tool role holds no data action. It assumes the tool tenant role with a `TenantId` session tag, which allows only `inputs/${TenantId}/*` read, `outputs/${TenantId}/*` write and `dynamodb:LeadingKeys` = `TENANT#${TenantId}`. IAM refuses any other key | ADR-0005, ADR-0006; spec §3.6, C-5; Planned: integ `iam-wall` (simulated denial of `inputs/B/*`, row `TENANT#B`); `test/construct.test.ts` "tool role has no s3 or dynamodb data action" |
+| T-8: A `nitro` task is started, stopped or retagged for another tenant | M-7: `RunTask` needs `aws:RequestTag/TenantId` = principal tag and `ecs:cluster`. `StopTask` needs the same on `aws:ResourceTag`. `ecs:TagResource` needs the request tag and `ecs:CreateAction` = `RunTask`, so existing tasks cannot be retagged. Enforced | ADR-0014; spec §3.6; Planned: `test/construct.test.ts` "every condition key is supported by its action"; integ `iam-wall` (`StopTask` on B's task) |
+| T-9: A call starts a task from another definition, another cluster, or with a role passed in | M-8: `RunTask` is allowed on the pinned task definition revision ARN only. The definition has no `taskRoleArn`. `iam:PassRole` covers the execution role only, with `iam:PassedToService` = `ecs-tasks.amazonaws.com` | ADR-0014; spec §3.6, §4.1; Planned: `test/construct.test.ts` "RunTask allowed on one ARN", "task definition has no task role" |
+| T-10: The `input` name reaches outside the caller's prefix (traversal, absolute path, long name) | M-9: Name matches `[A-Za-z0-9._/-]{1,256}`, no `..`, no leading `/`; the key is built as `inputs/<tenantId>/<name>` from the verified tenant. IAM on the prefix is the second wall | spec §5.1, §3.6; Planned: integ `prefix`; `test/tool.test.ts` "refuses `../B/invoice.csv` and absolute names" |
+| T-11: Code in one `agentcore` session reads or writes another session's files (`sessionFiles` on) | M-10: Off by default. The grant is `sessions/${aws:AgentCoreRuntimeSourceSid}/*` with an `s3:prefix` condition on `ListBucket`. The S3 endpoint admits every `sessions/*` key, so the role policy does the separating | ADR-0007; spec §3.6, §3.7; S-10; Planned: integ `session-files` (own prefix allowed, B's denied) |
+| T-12: Session files outlive the session and the tenant: they persist across restarts and offboarding, and a later tenant that reuses a tenant id inherits the prefix | Accepted: by design, because the session id comes from the tenant (ADR-0009). Deleting the prefix is the vendor's (spec §1.2). The README says what the `AgentCoreRuntimeSourceSid` key proves and what it does not | ADR-0007, ADR-0009; spec §1.2, §4.2 |
+| T-13: Users of one tenant share a sandbox: one user's code reads files another user's code left in `/work` | Accepted: R-4 is one sandbox per tenant, not per user. Jobs run one at a time and `/work` persists for the sandbox's life, so the next turn can read the last | ADR-0009 Option 3; spec §3.5; per-user sandboxes are a later option |
+
+## Credential theft inside the sandbox
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-14: `agentcore` code reads the runtime role's credentials from IMDSv2 and uses them | M-11: The role reaches only ECR pull on the runner repository, Logs write on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` and, with `sessionFiles`, its own session prefix. It holds no tenant data by default. The endpoint policies in M-20 narrow the same paths | ADR-0003, ADR-0007; spec §3.6, §6.2 C-2; S-10; Planned: integ `no-credentials` (credentials load, every call outside C-2 is denied) |
+| T-15: `agentcore` code uses those credentials inside their scope: creates extra log groups under the runtime prefix, writes log lines, pulls the runner image | Accepted: these are the paths the runtime needs. They reach no tenant data and the image holds only the runner. `ecr:GetAuthorizationToken` is granted on `*` (the action takes no resource) and is useless without a pull grant. The cleanup resource deletes every group under the prefix | spec §3.6, §3.7, §5.3 |
+| T-16: `microvm` code reads credentials from the link-local metadata service | M-12: `RunMicrovm` passes no `executionRoleArn`, so the service holds no credentials; `iam/security-credentials/` returns 404 | ADR-0003; spec §3.4 Code holds; S-2; Planned: `test/backends.test.ts` "RunMicrovm input has no execution role"; integ `no-credentials` |
+| T-17: `microvm` code reads what the metadata service does answer: Region, AZ id and a per-MicroVM key | Accepted: no credentials come with it. What the key authorizes is not documented and no spike used it, so this is unverified | ADR-0015; spec §3.4 Code holds, §7.1 S-2 |
+| T-18: `nitro` code reads credentials from the ECS credentials endpoint, IMDS or the execution role | M-13: The task definition has no `taskRoleArn`. S-5 found no credential variables, a 404 from the credentials endpoint and no IMDS answer. The ECS agent uses the execution role outside the sandbox | ADR-0003; spec §3.4, §3.6; S-5; Planned: integ `no-credentials` |
+| T-19: `nitro` code reads the task metadata endpoint | Accepted: it returns the task ARN, cluster, image and log group name, no credentials. The `ECS_AGENT_URI` address was not tested | spec §3.4 Code holds; S-5 |
+| T-20: Code reads the nonce inside the sandbox | M-14: The runner removes the nonce from the environment it hands to code. Code runs as uid 1001 and cannot read the runner's memory or open its file descriptors. Code that learns its own nonce gains only proof that it is its own tenant's sandbox | ADR-0010; spec §3.5; Planned: `runner/test_runner.py` "job environment has no nonce"; integ `runaway` |
+| T-21: A principal outside the sandbox reads the nonce: `ecs:DescribeTasks`, `lambda:GetMicrovm` or the registry (reaper, drain) | Accepted: a reader can impersonate a sandbox to the tool, not read tenant data. Those actions belong to the vendor's roles. `clientToken` is a hash of the nonce, so it never carries it. Whether CloudTrail records the `RUNNER_NONCE` override or `runHookPayload` was not checked | ADR-0010 consequences; spec §4.1, §3.6 |
+| T-22: Code replays the MicroVM auth token the tool sends | M-15: A fresh token per call, 5-minute expiry, port 8080 only. Code has no route out to replay it from. Whether the proxy forwards the header to the runner is unverified | spec §3.4 Address; S-2 |
+
+## Egress
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-23: `microvm` code opens a connection to the internet | M-16: `egressNetworkConnectors` = the sample's VPC connector into sandbox subnets with no route, with a security group that allows no egress. The tool role may pass only `HTTP_INGRESS` and that connector, so a start without it (which would get `INTERNET_EGRESS`) is refused | ADR-0003, ADR-0012; spec §3.4, §3.6, §3.7; S-2; Planned: `test/construct.test.ts` "`PassNetworkConnector` limited to two ARNs"; integ `no-egress` |
+| T-24: `nitro` code opens a connection to the internet | M-17: Task ENIs have no public IP and sit in subnets with no default route. The task group allows egress only to the Logs endpoint group, and ingress 8443 only from the tool group | ADR-0003, ADR-0004, ADR-0012; spec §3.7; S-6; Planned: integ `no-egress` |
+| T-25: `agentcore` code opens a connection to the internet | M-18: Sandbox subnets with no default route. The runtime group allows egress only to the ECR and Logs endpoint groups and the S3 prefix list on 443, and no ingress | ADR-0003, ADR-0012; spec §3.7; S-9; Planned: integ `no-egress` |
+| T-26: Code connects to another sandbox | M-19: No task group admits another task. The connector and runtime groups have no ingress. The tool reaches sandboxes from its own group | spec §3.7; S-2, S-6; Planned: integ `no-egress` (TCP to B's sandbox address) |
+| T-27: Code in one `agentcore` session reaches another session of the shared runtime (they share the runtime ENI, S-13) | Accepted: not tested. S-10 could not show whether one session can reach another's address. The runtime group has no ingress, which is the only control known | spec §3.7, §7.1 S-10; Planned: integ `no-egress` tries a peer address if one can be found, otherwise this row stays unverified |
+| T-28: Data leaves through an open endpoint: a presigned PUT to another bucket through the S3 endpoint, ECR or Logs calls to other repositories or groups | M-20: Endpoint policies name only the runner repository, the ECR layer bucket, the sample's log groups and, with `sessionFiles`, `sessions/` in the input bucket. The S3 gateway endpoint is on the sandbox route table only. S-9 saw 403 for a PUT outside the policy | ADR-0012; spec §3.7; S-9; Planned: `test/construct.test.ts` "endpoint policies name no `*` resource except `GetAuthorizationToken`"; integ `no-egress` (presigned PUT) |
+| T-29: With `dnsFirewall` off, code sends data out and reads replies in DNS lookups on every backend | Accepted: off by default, to avoid allow-list upkeep and an unexplained AgentCore ready-time (ADR-0016). Only resolution and TCP 53 reach were tested, not an actual tunnel (S-2). A vendor who must close it turns the option on (M-21). The README says so next to the prop | ADR-0015, ADR-0016; spec §1.2, §3.9, §6.2 C-3; S-2, S-9, S-13 |
+| T-30: With `dnsFirewall` on, code looks up a name outside the allow list | M-21: One Resolver DNS Firewall rule group on the VPC: ALLOW the §3.9 names, BLOCK `*` with NXDOMAIN, each block logged. Every backend's lookups reach the VPC resolver, and queries to public resolvers time out (S-13) | ADR-0016; spec §3.9; S-13; Planned: integ `dns` (`example.com`, a unique name, a 40-character label and TXT are NXDOMAIN and logged `BLOCK`) |
+| T-31: With `dnsFirewall` on, code encodes data in labels under an allowed AWS zone (`<anything>.s3.<region>.amazonaws.com`) | Accepted: the zone is answered by AWS, not by the script's owner, so the labels reach no server the attacker controls. A narrower list of exact names is a later option | ADR-0016; spec §3.9, §6.2 C-3 |
+| T-32: A vendor adds a name to `allowDomains` that the vendor does not control | Accepted: it is the vendor's own exception to C-3, and the README says so | spec §3.3, §3.9, §6.2 C-3 |
+| T-33: The NTP pool `*.amazon.pool.ntp.org` is left blocked, and sandbox clocks drift | Accepted: allowing it would show every label to third-party servers. No failure in 15 minutes with it blocked (S-13); behaviour over hours is unverified, and a sandbox lives at most 8 hours. `dns-platform` expects it as the only unexplained block | ADR-0016; spec §3.9; Planned: integ `dns-platform` |
+| T-34: The allow list misses a platform name, and a component retries it hundreds of times a minute | M-22: The list includes `*.api.aws`, `time.aws.com`, `*.compute.internal` and `*.on.aws`. After the run every `BLOCK` line must be a name a test script looked up, or the NTP pool, else the step fails | ADR-0016; spec §3.9; S-13; Planned: integ `dns-platform` |
+| T-35: A firewall fault blocks lookups, including the tool subnets' (`FirewallFailOpen` is `DISABLED`) | Accepted: failing closed keeps DNS from opening on a fault; the cost is availability for the tool and the ECS instances | ADR-0016; spec §3.9 |
+| T-36: The query log holds the names code looked up, which may carry tenant data | Accepted: only the vendor reads the log group. Retention is set and `cdk destroy` deletes it | spec §3.9; Planned: `test/construct.test.ts` "query-log group has retention" |
+| T-37: `dnsFirewall` on a supplied VPC blocks names for the vendor's other workloads | M-23: Synth refuses `dnsFirewall` together with `vpc`. A vendor with their own VPC attaches their own rule group | ADR-0016; spec §3.3, §3.9; Planned: `test/construct.test.ts` "refuses `dnsFirewall` with `vpc`" |
+| T-38: The tool Lambda has NAT egress and can query a public resolver, past the DNS Firewall | Accepted: the tool is vendor code, not tenant code. The firewall protects the sandboxes' lookups only | spec §3.9; S-13 tool side |
+| T-39: Code uses the vsock channel between a `nitro` sandbox and its host | Accepted: not tested. S-5 checked network paths and metadata endpoints, not vsock or other host channels. The runner uses none; the boundary is the hypervisor's | spec §7.1 S-5 |
+
+## Runner compromise
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-40: Code kills or replaces the runner, or forks a child that outlives the timeout (`setsid`, kill of PID 1) | M-24: Code runs as uid 1001 in a new session and process group. At `runTimeout` or job end the runner kills the group and then every uid 1001 process. uid 1001 cannot signal the runner, open its descriptors, or write outside `/work` and `/tmp`. The tool's own timeout stops the sandbox if the runner stops answering | ADR-0010; spec §3.5, C-4; S-4, S-5, S-10; Planned: integ `runaway`; `runner/test_runner.py` "kill reaps a `setsid` child" |
+| T-41: Code posts its own `/run` hook to port 9000 to set the nonce first (`microvm`) | M-25: No tenant code runs before the hook delivers the nonce. Until then `/ping` shows no `bootId` and the job route refuses. The 9000 listener accepts the hook once and serves no jobs. Tool tokens allow 8080 only | spec §3.5; S-2; Planned: `runner/test_runner.py` "second `/run` hook is ignored", "job refused before the hook" |
+| T-42: Values made at process start are shared by every sandbox restored from one snapshot (`microvm`, `agentcore`), so a nonce or `bootId` repeats | M-26: The runner makes `bootId` and adopts the nonce when the sandbox first serves a tenant (the `/run` hook, the session's first job). Every random value comes from `os.urandom` or `secrets`. On `nitro` the key pair is made in memory at process start | ADR-0010 and ADR-0015 notes; spec §3.5; S-10; Planned: `runner/test_runner.py` "`bootId` differs between two restores" |
+| T-43: A caller reaches an `agentcore` session first and plants its own nonce, which the runner adopts | M-27: Only the tool role may invoke the runtime (M-5). A result whose HMAC does not match marks the handle dead. `bootId`, not the nonce, shows a restart | ADR-0010; spec §3.4 Identity check; Planned: `test/tool.test.ts` "HMAC mismatch marks the row dead" |
+| T-44: Code forges a run record or an operator's view of one | M-28: The tool's log line is the record of a run and is written by the tool Lambda, not the sandbox. The runner logs only sizes, exit code and duration. MicroVM logging is disabled | ADR-0013; spec §3.5, §3.8; Planned: integ `telemetry` |
+| T-45: Code prints forged lines into the task or runtime log stream the runner shares on `nitro` and `agentcore` | Accepted: the lines are the tenant's own output and can only mislead an operator who reads the runner log. The tool line is the record, and the runner log is secondary | spec §3.5 |
+| T-46: Code gains root in its VM or escapes it | Accepted: the VM is the boundary (P-3). With root the code still sees only its own tenant's bytes. A hypervisor flaw is AWS's to fix | ADR-0010; spec §1 |
+| T-47: Confidential mode is not used, so no attestation or key release on image measurement | Accepted: `nitro` runs `ISOLATED_SANDBOX` only. It keeps tenants apart, not tenant bytes from the vendor or the host | spec §1.2, §3.1; ADR-0004 |
+
+## Resource exhaustion
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-48: A runaway job (loop, sleep) holds the sandbox | M-29: Three caps. The runner kills the group at `runTimeout` (`RLIMIT_CPU` too). The tool stops the sandbox at `runTimeout` + 5 s and returns `timedOut`. The platform or reaper ends the sandbox at `sandboxMaxLife`. Synth bounds `runTimeout` to 1 s to 60 s and sets the tool timeout to cover them | P-7; ADR-0010; spec §3.3, §3.5, §4.1 step 5, C-4; Planned: integ `runaway`, `max-life`; `test/construct.test.ts` "tool timeout equals the budget" |
+| T-49: A fork bomb | M-30: `RLIMIT_NPROC` = 64 for uid 1001; the group kill and the uid sweep end every child | ADR-0010; spec §3.5; Planned: integ `runaway`; `runner/test_runner.py` "process limit is applied" |
+| T-50: Code fills memory | M-31: `RLIMIT_AS` = sandbox memory less 256 MiB, and the VM's own memory is the outer bound | spec §3.5; Planned: `runner/test_runner.py` "address-space limit is applied" |
+| T-51: An out-of-memory kill takes the runner down (`RLIMIT_AS` is per process, not a total) | Accepted: the damage stays inside the tenant's own sandbox. The tool times out, stops the sandbox and the next call starts a fresh one. A memory fill is not yet in the `runaway` step. Planned: add one | spec §3.5, §8 `runaway` |
+| T-52: Code fills the disk | M-32: `RLIMIT_FSIZE` = 100 MiB per file; the disk belongs to one VM. `runaway` fills the disk and requires the next call to work | spec §3.5; Planned: integ `runaway` |
+| T-53: A job floods stdout or stderr | M-33: `maxOutputBytes` caps both together, stdout is cut first, `truncated` is set | spec §3.3, §3.5; Planned: integ `limits` (1 MiB print) |
+| T-54: A tenant's long job blocks its own later calls, or calls queue without bound | M-34: One job at a time; a second is refused at once with the retryable `sandbox_busy`. There is no queue, and the sandbox is the tenant's alone, so no other tenant waits | ADR-0010; spec §3.5, §5.1; Planned: `runner/test_runner.py` "second job returns `busy`" |
+| T-55: One tenant exhausts shared capacity or API quotas (`RunMicrovm` 5 calls per second, `RunTask`, tool concurrency, instances) | Accepted: fairness is not isolation. One sandbox per tenant per backend bounds each tenant's footprint. With `ingress` set, the consumed ingress's per-tenant limiter applies (agentic-runtime-isolation ADR-0020); the sample adds none | P-4; ADR-0005; spec §6.1 |
+| T-56: The MicroVM memory quota (2048 MiB per Region by default) runs out, and new tenants cannot start | Accepted: the quota is the deployer's (spec §6.1). The driver checks it before deploy and fails early naming it. A failed start becomes `FAILED`, backs off 30 s and carries the reason in the tool line | spec §4.1, §6.1, §8 preconditions; Planned: the driver's quota check |
+| T-57: The Logs resource policy slots (10 per Region, not adjustable) run out | M-35: The construct declares only its own policy, for the query-log group, and never the account's shared delivery policy. The driver checks for a free slot before deploy | ADR-0016; spec §3.9, §8 preconditions; Planned: `test/construct.test.ts` "query-log config depends on its own policy" |
+| T-58: A burst of new tenants outruns `nitro` capacity: a cold start takes 31 to 34 s and idle instances bill | M-36: Calls return the retryable `sandbox_starting` rather than hold the Lambda. The start lease is 5 minutes. `minInstances` 0 scales to zero. The reaper stops idle tasks | ADR-0004, ADR-0005, ADR-0015; spec §3.3, §3.4; Planned: integ `cold-from-zero`, `idle` |
+
+## Tool-side
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-59: A call carries a forged or tampered tenant context | M-37: `toolHandler` verifies the signed context with the key's public half (`kms:GetPublicKey`) and returns `context_invalid`; nothing starts. Only the gateway role may invoke the function | ADR-0001; spec §3.2, §3.6; Planned: integ `forged` (direct invoke is a test-only shortcut) |
+| T-60: The caller's arguments name a tenant, prefix, session or sandbox | M-38: No argument selects a tenant. `backend` picks among the caller's own sandboxes. The tenant, key prefix and session id are derived from the verified context | P-2, R-2; spec §5.1; Planned: `test/tool.test.ts` "tenant, prefix and session fields in the arguments are ignored" |
+| T-61: Without an `ingress`, the vendor's own tool passes `runCode` the wrong tenant id | Accepted: the sample cannot verify a tenant it did not sign. The vendor must pass an id they verified themselves; the README says so | ADR-0001 consequences; spec §3.2 |
+| T-62: Oversize code or input exhausts the tool or the sandbox | M-39: `code` is at most 64 KiB. `HeadObject` checks the input against `maxInputBytes` before any sandbox starts and returns `input_too_large`. A field that breaks its rule returns `invalid_argument` | ADR-0006; spec §3.3, §5.1; Planned: integ `limits` (6 MiB input) |
+| T-63: Errors or logs disclose tenant data or code | M-40: Tool errors carry a code, no stack and no tenant data. The tool line has fixed fields (ids, sizes, timings), never code, input or output | spec §3.8, §5.1; Planned: integ `telemetry` |
+
+## Lifecycle
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-64: A crashed start or lost row leaves a running sandbox (orphan) | M-41: A `STARTING` row with no handle is taken over at once and the sweep stops whatever it started. The reaper stops every tagged task and every MicroVM of the image with no row and writes an `orphan` stop line. Start tokens make a retry launch nothing new | ADR-0005, ADR-0011; spec §3.8, §4.1; Planned: integ `idle`, `teardown` |
+| T-65: An `agentcore` orphan session cannot be listed or stopped by the sweep | Accepted: no API lists a runtime's sessions. It ends at `idleRuntimeSessionTimeout`, at `maxLifetime` or when the runtime is deleted, and has no stop line | ADR-0011; spec §4.1 |
+| T-66: A `nitro` task outlives its intended life (ECS has no task life limit) | M-42: The reaper stops tasks idle past `sandboxIdle`, and any tagged task whose `startedAt` is older than `sandboxMaxLife`, with or without a row. A task lives up to `sandboxIdle` + 5 minutes after its last call | ADR-0011; spec §3.4, §4.1; Planned: integ `idle`, `max-life` |
+| T-67: A sandbox that always fails to start loops, restarting and billing | M-43: A failed start sets `FAILED` with `retryAt` 30 s ahead, whoever notices it. Calls before `retryAt` start nothing and return `sandbox_failed`. The reason goes in the tool line and one stop line is written | ADR-0005; spec §4.1; Planned: integ `failed-start` |
+| T-68: The reaper stops running, so `nitro` tasks and expired rows persist | Accepted: the row's TTL (an hour after expiry) removes rows only, not tasks. An alarm on reaper errors is the vendor's | ADR-0011; spec §4.1 |
+| T-69: `cdk destroy` leaves a sandbox, instance, log group, DNS Firewall resource or Logs resource policy | M-44: The drain stops every registry handle and every swept task and MicroVM, then waits until tasks are `STOPPED` and MicroVMs `TERMINATED` (10 minutes at most) before the cluster, runtime and image go. A cleanup resource deletes log groups under the runtime prefix and the MicroVM build group. Resource names are unique | ADR-0011, ADR-0016; spec §5.3, C-6; Planned: integ `teardown`; `test/construct.test.ts` "names are unique and match their charset" |
+| T-70: Query-log delivery changes the account's shared Logs resource policy, and destroy leaves the change | Accepted: the one known leftover of C-6. The driver compares the statements that name the query-log group before deploy and after destroy and reports any difference | ADR-0016; spec §3.9, §6.2 C-6; Planned: integ `teardown` |
+| T-71: A tenant is offboarded while its `run_code` grant still exists, so a call starts a new sandbox | M-45: The caller removes the grant first, then invokes `offboardTenant`, which sets each row `STOPPING` with a version condition, stops the sandbox and deletes the row. It is idempotent | ADR-0011; spec §5.2; Planned: integ `offboard` (second call returns the same result, stops nothing) |
+| T-72: Offboarding leaves the tenant's input, output and session objects | Accepted: deleting tenant data is the vendor's (spec §1.2) | spec §1.2, §5.2 |
+| T-73: The reaper, drain or offboard role is misused: it reads every registry row (handles, nonces) and can stop any sandbox | Accepted: these are vendor-operated roles. They cannot read the input bucket, and `offboardTenant` is invoked only with `lambda:InvokeFunction` | ADR-0011; spec §3.6 |
+
+## Observability gaps
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-74: A blocked lookup on `microvm` or `agentcore` cannot be tied to one tenant, because `srcaddr` is the shared connector or runtime ENI | Accepted: on `nitro` the task ENI names the tenant. Elsewhere the hit is joined by time to the tool's run lines, which narrows it to the tenants active in that window | ADR-0016; spec §3.9; Planned: integ `dns` (`BLOCK` `srcaddr` is A's task on `nitro`) |
+| T-75: Stop-line attribution is incomplete: a `microvm` orphan has `tenantId` = `unknown` (MicroVMs take no tags), an `agentcore` orphan session has no line, and the `microvm` running and suspended split is estimated | Accepted: the handle is in every tool line, `nitro` tasks carry the tag, and AgentCore's usage logs join to the tenant through `runtimeSessionId`. The `microvm` line is marked `estimated` | ADR-0013, ADR-0015; spec §3.8 |
+| T-76: `microvm` leaves no in-sandbox log, so there is no record from inside it | Accepted: logging is disabled so that code cannot write to the vendor's logs. The tool line is the record | ADR-0003; spec §3.4 Start, §3.8 |
+
+## Supply chain
+
+| Threat | Mitigation | Implemented by |
+| --- | --- | --- |
+| T-77: The MicroVM image build runs with `INTERNET_EGRESS` and pulls a base layer and packages | M-46: The Dockerfile pins its base image by digest and installs only `python3` at an exact version. The build is separate from runtime egress, which never reaches the internet | ADR-0015; spec §3.5 Build-time egress; Planned: `test/construct.test.ts` "Dockerfile `FROM` has a digest, one pinned package" |
+| T-78: The build's `FROM` pinning is unproven, and the build network is outside the VPC | Accepted: S-1 used a tag, so a digest-pinned `FROM` in the MicroVM build is untested. The DNS Firewall does not cover the build. The Dockerfile is the vendor's | spec §3.5, §3.9, §7.1 S-1 |
+| T-79: A redeploy picks up a new VM base (`al2023-1`) | M-47: `BaseImageVersion` is fixed to the version the integration test last passed on | spec §3.5; Planned: `test/construct.test.ts` "`BaseImageVersion` is set" |
+| T-80: A tampered or drifting container image reaches the `nitro` or `agentcore` runner | M-48: One `COPY`-only Dockerfile on a Python base image pinned by digest, with no package install. The `nitro` runner makes its key with the base image's `openssl`, so no compiled wheels are copied in. The execution and runtime roles may only pull from the sample's repository | spec §3.5, §3.6; Planned: build-time scans (see Security review) |
+| T-81: Anyone who can push to the runner repository can replace the image all tenants run | Accepted: write access to the repository is the vendor's deploy role, outside this sample | spec §3.6 |
+
+## Security review
+
+Not run: the sample is design only and has no code or synthesised tree.
+The scans run at build time on the synthesised tree with `cdk.out/`
+present (sample standard §6) and have not yet run: ProtoShield, the
+Automated Security Helper (ASH) and cdk-nag `AwsSolutionsChecks` in the
+build. Every finding will be dispositioned in this file, as fixed, accepted
+with a reason, or false positive with the evidence. Until then the
+`S-n` results above are spike measurements on throwaway stacks, and the
+"Planned:" tests and integration steps are the evidence still owed.
