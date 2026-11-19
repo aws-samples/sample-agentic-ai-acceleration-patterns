@@ -518,7 +518,7 @@ VPC association depend on that policy, so the grant exists before
 delivery starts and outlives it on delete; the `synth` test asserts the
 dependency. The integration driver compares, from before deploy to after
 destroy, the `DescribeResourcePolicies` statements that name the
-query-log group's ARN, so other runs in the account do not show; any
+query-log group's ARN (the group is named outside `/aws/vendedlogs/`, so delivery cannot use that prefix's wildcard; statements with the wildcard are compared too), so other runs in the account do not show; any
 remaining statement in a shared policy is the one known leftover of C-6.
 
 What it does not cover: the tool Lambda, which has NAT egress and can
@@ -750,7 +750,7 @@ truncates, and appends 8 hex characters of a hash of the path:
 | Usage-log `DeliverySource` and `DeliveryDestination` | `[\w-]`, 60, unique per account and Region |
 | Three Contributor Insights rules (the third with `dnsFirewall`) | `RuleName`, 128 |
 | DNS Firewall domain lists, rule group, association, query-log config and its log group | Resolver names `[\w-]`, 64; log group `[\w./#-]`, 512 |
-| Query-log Logs resource policy | `policyName`, unique per account and Region, 255 |
+| Query-log Logs resource policy | `[\w-]` (the sanitiser emits only these), 255, unique per account and Region |
 
 The `synth` unit test asserts that every one of these names is unique and
 matches its charset when two instances share a stack.
@@ -940,7 +940,7 @@ touched.
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
-| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or construct-owned Logs resource policy of the sample, and `DescribeResourcePolicies` matches its state before deploy (any difference is reported as the §3.9 known leftover), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
+| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or construct-owned Logs resource policy of the sample, and the `DescribeResourcePolicies` statements that name the query-log group's ARN, or a `/aws/vendedlogs/*` wildcard, match their state before deploy (any difference is reported as the §3.9 known leftover), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
 
 Preconditions, checked by the driver before it deploys: the account's
 "maximum allocated ARM_64 MicroVM memory" quota (Service Quotas, looked up
