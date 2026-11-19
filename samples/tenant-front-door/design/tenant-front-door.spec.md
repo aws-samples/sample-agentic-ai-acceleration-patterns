@@ -525,7 +525,7 @@ On every write:
    operator's `PutTenantRoute` changes only the domain of an existing
    tenant route: the `tenant#` entry must exist, the deployment
    record's `accountId` must be that entry's `ac` and its `createdAt`
-   that entry's `dt` (409 otherwise), and the entry keeps its `c`, `ac`
+   (as Unix ms, §4.1) that entry's `dt` (409 otherwise), and the entry keeps its `c`, `ac`
    and `dt`. A hook's call keeps the stored domain and its challenge, unless
    its record is a new deployment (step 5).
 4. A tenant route also needs its cell's route to exist, with the
@@ -1393,10 +1393,9 @@ Rules:
   `createdAt` as an RFC 3339 `date-time` in UTC with millisecond
   precision, which may omit a zero fraction (control-plane §4, §5.2). The
   registrar parses it to Unix milliseconds before it stores or compares
-  it, so `...:01Z` and `...:01.000Z` are the same `dt`, and refuses a
-  value that does not parse as a control plane it cannot read (503,
-  the write refused, §5.1). It never
-  compares the strings.
+  it, so `...:01Z` and `...:01.000Z` are the same `dt`. It treats a value
+  that does not parse like a control plane it cannot read (503, the
+  write refused, §5.1). It never compares the strings.
 - `d` is the tenant's dedicated domain, present only when the edge
   operator role has set one. It is written on the operator's first
   call for the domain, before the certificate validates, so a delete
@@ -1585,7 +1584,8 @@ expires and is issued again); 507
 when a write would exceed the route table's 5 MB (ADR-0012) or ACM
 refuses a certificate request for its quota (§4.1); 503 when
 the control plane cannot be read or returns a `createdAt` that does not
-parse (the write is refused, never made unchecked), or when the store's ETag still conflicts after five
+parse (the write is refused, never made unchecked), or when the store's
+ETag still conflicts after five
 attempts (§3.4 step 5).
 
 ### 5.2 Script and construct forms
@@ -2521,7 +2521,11 @@ dedicated distribution tenant (its creation, `CNAMEAlreadyExists`, its
 disable and delete, and the teardown resource's polling for a disable to
 deploy), because step 14 never lets a certificate issue and a real
 distribution tenant needs a validated certificate for a name in the test
-zone and a CloudFront deploy of minutes; the cell's hosts check on a
+zone and a CloudFront deploy of minutes; the registrar's `createdAt`
+parse (a stubbed `GetDeployment` returning `...:01Z` for an entry
+stored from `...:01.000Z` keeps the entry, and one that does not parse
+gets 503 with no write, §4.1), because the real control plane returns
+one form only; the cell's hosts check on a
 validly signed token routed to the wrong cell, and the origin's refusal
 of a route hint that differs from the verified claim (the demo cell API's
 unit tests; step 7 drives a forged signature only); the `single` mode
