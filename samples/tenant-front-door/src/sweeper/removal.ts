@@ -16,7 +16,9 @@
  *   domain was dropped or changed while the certificate was pending), or
  *   that is in a terminal status, whatever the tenant's `d`;
  * - logs a disabled distribution tenant whose domain is still routed for
- *   its tenant, which a removal racing the registrar's re-enable can leave.
+ *   its tenant: one disabled outside the registrar and this job, by hand
+ *   or by another tool. A removal cannot leave it, because `d` is read
+ *   after `GetDistributionTenant` and every write carries that read's ETag.
  *
  * Before it touches a distribution tenant or a certificate it checks that
  * the resource's tags name this distribution and a tenant, so it never
@@ -188,8 +190,8 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
 
       // The fresh read of d comes right before the disable or the delete.
       if (!(await isOrphan(tenantId, domains))) {
-        // Routed on a disabled distribution tenant: a removal raced the
-        // registrar's re-enable. Nothing repairs it; the operator does (§3.4 step 5).
+        // Routed on a disabled distribution tenant: disabled outside the
+        // registrar and the sweeper. Nothing repairs it; the operator does (§3.4 step 5).
         if (dt.Enabled === false && (await Promise.all(domains.map((x) => isRouted(tenantId, x)))).some(Boolean)) {
           counts.disabledRouted++;
           logLine('WARN', 'distribution tenant disabled on a routed domain', { tenantId, domain, distributionTenantId: dt.Id });
