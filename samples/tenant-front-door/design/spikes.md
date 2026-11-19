@@ -273,7 +273,7 @@ inside call arguments at load (`SyntaxError: await in arguments not
 supported`), which made every request 503 with `FunctionExecutionError`;
 the router reads the value first, and a source test refuses the pattern.
 
-**Result.** 38 of 38 checks passed: the SPA, `/config.json`, `/logout` and
+**Result.** 39 of 39 checks passed: the SPA, `/config.json`, `/logout` and
 `/signin-state` with the §7.1 headers; `/api/whoami` for two tenants through
 origin access control; 401 with no token and with an `Authorization` header
 over 8,192 bytes; 403 for an unrouted tenant, `Sec-Fetch-Site: same-site`, a
