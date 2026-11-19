@@ -56,8 +56,14 @@ describe('result records (spec §4.3)', () => {
     expect(renderResults([record()])).not.toContain('- Run:');
     expect(renderResults([record()], [])).toContain('- Run: PASSED');
     const failed = renderResults([record()], ['x deploy exited 1']);
-    expect(failed).toContain('- Run: FAILED (1 failures, see below)');
+    expect(failed).toContain('- Run: FAILED (1 failure, see below)');
     expect(failed).toContain('## Failures\n\n- x deploy exited 1\n');
+    expect(renderResults([record()], ['a', 'b'])).toContain('- Run: FAILED (2 failures, see below)');
+  });
+
+  it('does not call the pass criteria met when no scenario ran', () => {
+    const md = renderResults([record({ scenario: 'lifecycle', deploySeconds: 1, requests: {}, latency: {} })], ['x deploy exited 1']);
+    expect(md).toContain('Pass criteria (isolation, attribution): not evaluated (no scenario records)');
   });
 
   it('renders one run, with lifecycle times and the slowest hop', () => {

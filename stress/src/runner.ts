@@ -188,6 +188,9 @@ function logToStderr(text: string): void {
 }
 const ignore = (): void => undefined;
 
+/** Ends the run after a failure `verb` has already recorded, so it is counted once. */
+class Stopped extends Error {}
+
 const hashOf = (file: string): string | undefined =>
   fs.existsSync(file) ? createHash('sha256').update(fs.readFileSync(file)).digest('hex') : undefined;
 
@@ -232,6 +235,11 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   if (!ID.test(opts.runId)) throw new Error(`STRESS_RUN_ID must match ${ID}`);
   if (!ID.test(opts.prefix)) throw new Error(`STRESS_PREFIX must match ${ID}`);
   const { tier, slices, mode } = planRun(opts);
+  // A scenario no slice declares is refused before anything touches disk,
+  // so the corrected command can reuse the run id.
+  const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices))];
+  const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
+  if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
   const prefixDir = path.join(opts.home, opts.prefix);
   const runDir = path.join(prefixDir, opts.runId);
   const resultsDir = path.join(runDir, 'results');
@@ -320,11 +328,6 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     // Verb output lands in run.log: keep the run folder to its owner.
     fs.mkdirSync(resultsDir, { recursive: true, mode: 0o700 });
 
-    // A scenario no slice declares fails before anything runs.
-    const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices))];
-    const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
-    if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
-
     // Budget first: nothing is deployed when a sum is over a limit.
     const draws: Draw[] = [];
     for (const s of slices) {
@@ -352,12 +355,12 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     for (const s of slices) {
       const t0 = Date.now();
       started.set(s.name, { start: now().toISOString() });
-      if (!(await verb(s, 'deploy'))) throw new Error(`${s.name} deploy failed`);
+      if (!(await verb(s, 'deploy'))) throw new Stopped();
       started.get(s.name)!.deploySeconds = Math.round((Date.now() - t0) / 1000);
       stopIfAborted();
     }
     for (const s of slices) {
-      if (!(await verb(s, 'seed'))) throw new Error(`${s.name} seed failed`);
+      if (!(await verb(s, 'seed'))) throw new Stopped();
       stopIfAborted();
     }
     for (const sc of scenarios) {
@@ -388,7 +391,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
       stopIfAborted();
     }
   } catch (e) {
-    failures.push((e as Error).message);
+    if (!(e instanceof Stopped)) failures.push((e as Error).message);
   } finally {
     // Reverse order, every slice that started a deploy, also on failure or a
     // signal. Signals during teardown are logged, not forwarded, and one

@@ -51,7 +51,7 @@ run. The runner times `deploy` and `teardown` itself and writes one
 
 Scenarios run platform scenarios first (`PS-1`, `PS-2`, ... by number),
 then each slice's own scenarios in slice order. A scenario no slice
-declares fails the run before `budget`. A run fails when a
+declares is refused before the run starts, so the run id stays free. A run fails when a
 scenario's record is missing, does not parse, belongs to another run, or
 makes no isolation assertion, when a record names a slice or a scenario
 the run did not run, when a record is already there before its own `run`
@@ -97,8 +97,9 @@ interrupt them. `nohup` does not help: Node resets the ignored SIGHUP.
 
 The run writes `$STRESS_HOME/$STRESS_PREFIX/<run id>/results.md`, with the
 run's verdict (`PASSED` or `FAILED`) and every failure the runner found.
-`run.sh report` renders the same tables from the records alone, without
-the verdict. To keep a
+`run.sh report` renders every record in a results folder without checking
+it against a run, so it shows no verdict and includes records the runner
+refused; use `results.md` as the run's record. To keep a
 run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 (spec §4.3); the raw records and logs stay outside the repository.
 

@@ -174,7 +174,7 @@ describe('runner (spec §3.5)', () => {
     const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec });
     expect(calls.filter((c) => c.endsWith('teardown'))).toEqual(['control-plane teardown', 'tenant-identity teardown']);
     expect(calls.some((c) => c.includes(' run '))).toBe(false);
-    expect(summary.failures).toContain('control-plane deploy failed');
+    expect(summary.failures).toEqual(['control-plane deploy exited 1']);
   });
 
   it('stops after a failed seed and records a failed teardown without destroy seconds', async () => {
@@ -182,7 +182,7 @@ describe('runner (spec §3.5)', () => {
     const { calls, exec } = stub({ fail: ['tenant-identity seed', 'tenant-identity teardown'] });
     const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec });
     expect(calls).not.toContain('control-plane seed');
-    expect(summary.failures).toEqual(expect.arrayContaining(['tenant-identity seed failed', 'tenant-identity teardown exited 1']));
+    expect(summary.failures).toEqual(['tenant-identity seed exited 1', 'tenant-identity teardown exited 1']);
     const life = JSON.parse(fs.readFileSync(path.join(home, 'stress', base.runId, 'results', 'tenant-identity.lifecycle.json'), 'utf8'));
     expect(life.destroySeconds).toBeUndefined();
     expect(life.deploySeconds).toBeGreaterThanOrEqual(0);
@@ -347,9 +347,13 @@ describe('runner (spec §3.5)', () => {
   it('refuses an unknown scenario, a reused run id, a bad id and a second run on the same prefix', async () => {
     const { root, home } = fixture(slices);
     const { calls, exec } = stub();
-    const first = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], scenarios: ['PS-9'], exec });
-    expect(first.failures).toEqual(['no slice in the run declares PS-9']);
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], scenarios: ['PS-9'], exec })).rejects.toThrow(
+      /no slice in the run declares PS-9/,
+    );
     expect(calls).toEqual([]);
+    expect(fs.existsSync(path.join(home, 'stress', base.runId))).toBe(false);
+    const first = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec });
+    expect(first.failures).toEqual([]);
     await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec })).rejects.toThrow(/use a new STRESS_RUN_ID/);
     await expect(runStress({ ...base, runId: '../x', repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec })).rejects.toThrow(/STRESS_RUN_ID must match/);
     fs.writeFileSync(path.join(home, 'stress', 'run.lock'), 'other');

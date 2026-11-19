@@ -162,11 +162,15 @@ export function renderResults(records: readonly ResultRecord[], runFailures?: re
     '-->',
     `# Platform stress run ${first.runId}: ${first.tier}`,
     '',
-    ...(runFailures === undefined ? [] : [`- Run: ${runFailures.length === 0 ? 'PASSED' : `FAILED (${runFailures.length} failures, see below)`}`]),
+    ...(runFailures === undefined
+      ? []
+      : [`- Run: ${runFailures.length === 0 ? 'PASSED' : `FAILED (${runFailures.length} ${runFailures.length === 1 ? 'failure' : 'failures'}, see below)`}`]),
     `- Window: ${start} to ${end} (UTC)`,
     `- Mode: ${first.mode}`,
     `- Commits: ${[...commits].sort().map(([s, c]) => `${s} ${c.slice(0, 7)}`).join(', ')}`,
-    `- Pass criteria (isolation, attribution): ${failures.length === 0 ? 'met' : `not met: ${failures.join('; ')}`}`,
+    `- Pass criteria (isolation, attribution): ${
+      failures.length > 0 ? `not met: ${failures.join('; ')}` : records.some((r) => r.scenario !== 'lifecycle') ? 'met' : 'not evaluated (no scenario records)'
+    }`,
     '',
     ...(runFailures === undefined || runFailures.length === 0 ? [] : ['## Failures', '', ...runFailures.map((f) => `- ${f}`), '']),
     '## Deploy and destroy',
