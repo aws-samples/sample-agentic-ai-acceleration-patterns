@@ -19,3 +19,4 @@
 | [0013](0013-attribute-runs-and-sandbox-seconds-from-the-tool-log.md) | Attribute runs and sandbox seconds from the tool log | Proposed | 2026-11-18 |
 | [0014](0014-start-and-stop-nitro-tasks-with-the-tool-tenant-role.md) | Start and stop nitro tasks with the tool tenant role | Proposed | 2026-11-18 |
 | [0015](0015-apply-the-spike-results.md) | Apply the spike results | Proposed | 2026-11-18 |
+| [0016](0016-offer-a-dns-firewall-as-an-option.md) | Offer a DNS Firewall as an option | Proposed | 2026-11-19 |

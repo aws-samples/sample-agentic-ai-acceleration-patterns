@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Untrusted code sandboxes for agentic applications: specification
 
-Status: draft, not built. Spikes S-1 to S-12 ran on 2026-11-18 (§7.1).
+Status: draft, not built. Spikes S-1 to S-13 ran on 2026-11-18 (§7.1, §7.2).
 
 ## 1. Problem statement
 
@@ -37,7 +37,7 @@ script" case on all three backends and checks what each one refuses.
 | Decision | Which boundary a vendor should run tenant or agent-written code in |
 | Options | Lambda MicroVM, Nitro Sandbox on ECS, a second AgentCore Runtime, or the agent's own session |
 | Evidence that settles it | The same hostile script, run on each backend, with what it reached; cold and warm run latency; idle cost; deploy and destroy time |
-| Success criteria | 1/ Tenant B's data and sandbox are unreachable from tenant A's code on every backend. 2/ No backend lets the code open a connection to the internet (DNS lookups are the stated exception, C-3), and no backend lets it reach an AWS API beyond the per-backend limits in C-2. 3/ A runaway script is stopped within its cap. 4/ One `run_code` contract, the backend a deploy-time choice |
+| Success criteria | 1/ Tenant B's data and sandbox are unreachable from tenant A's code on every backend. 2/ No backend lets the code open a connection to the internet (DNS lookups are the stated exception unless `dnsFirewall` is on, C-3), and no backend lets it reach an AWS API beyond the per-backend limits in C-2. 3/ A runaway script is stopped within its cap. 4/ One `run_code` contract, the backend a deploy-time choice |
 | Risks | Lambda MicroVMs launched in 2026-06 and reached eu-central-1 in 2026-08 ([What's New, 2026-08](https://aws.amazon.com/about-aws/whats-new/2026/08/lambda-microvms-5-additional-regions/)); Nitro Sandboxes launched in 2026-11 ([What's New, 2026-11](https://aws.amazon.com/about-aws/whats-new/2026/11/nitro-sandboxes-eks-ecs-ec2/)). CDK has only L1 support for both, and some behaviour is documented in one line or not at all (§7). ECS Managed Instances bill for idle instances. A NAT gateway and interface endpoints bill per hour. |
 | The unasked question | Does the code need a second machine at all? Short snippets that may hold what the agent holds can run in the agent's own session with `InvokeAgentRuntimeCommand`. The sample says when that is enough (§1.2) and does not build it. |
 
@@ -71,11 +71,11 @@ instances are per-tenant.
 
 - Egress allowlists. Code reaches no internet host on any backend; a sandbox
   that must reach one host is a later option (ADR-0003).
-- DNS filtering. The resolver answers public names from every sandbox, so
-  data can leave in DNS lookups. A Route 53 Resolver DNS Firewall on the
-  VPC is the candidate fix; whether it covers the MicroVM connector's
-  lookups, the `nitro` tasks' lookups and the AgentCore runtime's resolver
-  is unverified on all three.
+- DNS filtering by default. With `dnsFirewall` off (the default), the
+  resolver answers public names from every sandbox, so data can leave in
+  DNS lookups. Turning it on closes that path on all three backends
+  (§3.9, ADR-0016). Narrowing the allow list to exact names, rather than
+  AWS zones, is not done.
 - Confidential mode and attestation (`CONFIDENTIAL_SANDBOX`, KMS key release
   on image measurement). The `nitro` backend runs `ISOLATED_SANDBOX` only.
 - EKS. Nitro Sandboxes on EKS need a 1.36 cluster (a sandbox node group, or
@@ -123,7 +123,8 @@ never whose. The sandbox knows its tenant only as a label for logs.
 **P-3. Code in a sandbox can reach nothing but its reply.** No connection
 to the internet or another sandbox, no credentials and no metadata beyond
 §3.4 "Code holds", and no AWS API beyond what the backend itself requires
-(C-2). DNS lookups are the stated exception (C-3). Where a backend cannot prove one of these,
+(C-2). DNS lookups are the stated exception unless `dnsFirewall` is on
+(C-3). Where a backend cannot prove one of these,
 the sample measures it in §7 and says so in the threat model; it never
 assumes.
 
@@ -172,6 +173,7 @@ claim in the README without a test row behind it is a defect.
 | `nitro` backend | ECS Managed Instances, `ISOLATED_SANDBOX` | VM per task, no task role | a cluster, a capacity provider, a task definition |
 | `agentcore` backend | AgentCore Runtime V2, VPC network mode | Session per tenant on a narrow runtime | a runtime, its role, its log group |
 | Network | VPC, two AZs (§3.7) | Dead-end sandbox subnets, endpoint policies | tool subnets with NAT, sandbox subnets with no route out, scoped endpoints |
+| DNS Firewall (optional) | Route 53 Resolver DNS Firewall | AWS-names-only DNS, blocked-lookup log | one rule group on the VPC, a query-log group (§3.9) |
 | Reaper | Lambda on a 5-minute schedule | Idle stop, orphan sweep | the reaper role (§3.6) |
 | Drain | CloudFormation custom resource | Stop everything on delete | the drain role (§3.6) |
 | Offboard | Lambda, invoked with IAM | Stop a tenant's sandboxes | the drain role |
@@ -216,6 +218,7 @@ path is the same (ADR-0001).
 | `sandboxMaxLife` | `Duration` | 8 h | hard life cap on every backend |
 | `perTenantMetrics` | `boolean` | `false` | emit CloudWatch metrics with a `TenantId` dimension (ADR-0013) |
 | `vpc` | `ec2.IVpc` | created (§3.7) | must have subnets tagged for the tool and the sandboxes |
+| `dnsFirewall` | `boolean \| { allowDomains?: string[] }` | `false` | associate a Route 53 Resolver DNS Firewall rule group with the VPC that allows only the §3.9 AWS names and blocks the rest with NXDOMAIN, plus VPC query logging; `allowDomains` adds names (ADR-0016) |
 | `createEndpoints` | `boolean` | `true` | create the §3.7 sandbox endpoints; `false` when a supplied `vpc` already has them, which then must meet §3.7 |
 | `inputBucket` | `s3.IBucket` | created | the bucket with `inputs/<tenant>/` |
 | `microvm.memoryMiB` | `number` | 1024 | MicroVM image minimum memory |
@@ -274,7 +277,7 @@ The tool, not the backend, decides reuse from the registry row (§4.1).
 | Call: enforced or filtered | filtered by address; the nonce check rejects a wrong MicroVM | filtered by address; the nonce check rejects a wrong task before any job bytes are sent | filtered by session id; `bootId` detects a restarted session |
 | Code holds | no credentials; the link-local metadata service answers with the Region, the AZ id and a per-MicroVM key, and holds no credentials without an execution role | no credentials: no task role; the execution role is used by the ECS agent outside the sandbox; the task metadata endpoint gives the task ARN, cluster, image and log group; IMDS does not answer | the runtime role's credentials from IMDSv2 (§6.2 C-2) |
 | Egress | VPC connector into sandbox subnets with no route and a security group with no egress | sandbox subnets with no route; task security group egress only to the Logs endpoint (`awslogs` leaves through the task ENI; the instance pulls the image) | sandbox subnets; runtime security group egress only to the ECR, S3 and Logs endpoints, each with a scoped endpoint policy (§3.7) |
-| DNS | the VPC resolver answers public names | the VPC resolver answers public names | the runtime's resolver answers public names |
+| DNS | the VPC resolver (through two local forwarders) answers public names; with `dnsFirewall`, only §3.9 names | the VPC resolver answers public names; with `dnsFirewall`, only §3.9 names | the VPC resolver (through two local forwarders) answers public names; with `dnsFirewall`, only §3.9 names |
 
 A call that fails the identity check is treated as a dead handle (§4.1
 step 2), never retried on the same address.
@@ -466,6 +469,39 @@ Cost attribution per backend:
 | `microvm` | `sandboxSeconds` per tenant from the registry (MicroVMs take no tags) | baseline rate × seconds running + suspended storage rate × seconds suspended | the image build |
 | `nitro` | `TenantId` task tag with ECS split cost allocation data turned on (account setting) | Cost Explorer split of instance cost by task reservation | idle instance capacity, NAT and endpoints, apportioned by `sandboxSeconds` |
 | `agentcore` | AgentCore's session-level usage logs, joined to the tenant through `runtimeSessionId` in the tool line | per-second vCPU and memory rates × the session's reported usage (consumption billing, no configured baseline) | none beyond the shared endpoints and NAT |
+
+### 3.9 DNS Firewall option (ADR-0016)
+
+With `dnsFirewall` on, the construct creates one Route 53 Resolver DNS
+Firewall rule group and associates it with the whole VPC
+(`MutationProtection` off, so `cdk destroy` can remove it). Every backend's
+lookups reach the VPC resolver, so one rule group covers all three
+(S-13). The rule group applies to the tool subnets too, so the allow list
+also carries the ECS Managed Instances' names.
+
+| Priority | Action | Domains |
+|---|---|---|
+| 100 | ALLOW | `amazonaws.com`, `*.amazonaws.com`, `*.on.aws` (MicroVM endpoints), `*.api.aws` (ECS Managed Instances), `time.aws.com`, `*.amazon.pool.ntp.org` (clock), `*.compute.internal`, plus `allowDomains` |
+| 200 | BLOCK, `NXDOMAIN` | `*` |
+
+Resolver query logging for the VPC goes to a log group the construct owns
+(retention set, deleted on destroy). Every blocked lookup is logged with
+`srcaddr`, `query_name` and `firewall_rule_action` = `BLOCK`; allowed
+lookups carry no action. `srcaddr` names one tenant only on `nitro` (each
+task has its own ENI); on `microvm` it is the shared connector ENI and on
+`agentcore` the shared runtime ENI, so a hit there is joined to a tenant
+by time against the tool's run lines (§3.8). A Contributor Insights rule
+ranks `srcaddr` by blocked lookups.
+
+What it does not cover: the tool Lambda, which has NAT egress and can
+query a public resolver directly (it is trusted code); and names under
+the allowed AWS zones, which resolve with wildcards
+(`<anything>.s3.<region>.amazonaws.com`). The MicroVM image build runs on
+Lambda's network, outside the VPC, so the firewall does not apply to it.
+
+Cost: per query processed, with no fixed charge, plus query-log storage.
+The S-13 network with the firewall deployed in 127 s and destroyed in
+212 s, no slower than the same network without it (157 s, 182 s).
 
 ## 4. Data model
 
@@ -726,9 +762,11 @@ matches its charset when two instances share a stack.
   Its only network paths are the reply to the tool, the scoped endpoints of
   §3.7 (the Logs endpoint on `nitro`; ECR, S3 and Logs on `agentcore`),
   the backend's metadata service (§3.4 "Code holds"), and DNS lookups
-  through the resolver. DNS resolves public names on every
-  backend, so a script can encode data in lookups; the sample does not
-  close that channel (§1.2, threat model).
+  through the resolver. With `dnsFirewall` off, DNS resolves public names
+  on every backend, so a script can encode data in lookups. With it on,
+  only the §3.9 names resolve and every other lookup returns NXDOMAIN
+  and is logged; names under the allowed AWS zones still resolve, but
+  AWS, not the script's owner, answers them.
 - C-4: A run ends within `runTimeout` plus 5 s with its process group
   killed, or the tool stops the sandbox and reports `timedOut`.
 - C-5: The tool reads inputs only under the caller's tenant prefix and
@@ -780,6 +818,7 @@ deploy and destroy time, and cleans up on exit.
 | S-10 | With the §3.6 runtime role, what can code do with the metadata endpoint's credentials, and does `aws:AgentCoreRuntimeSourceSid` scope the `sessionFiles` grant to one session? Does the container start as root and may the runner drop code to uid 1001? | C-2 on `agentcore`, ADR-0007, runner model |
 | S-11 | Does the tools gateway allow a tool Lambda timeout of 120 s, and what does the agent see past it? | timing budget |
 | S-12 | Can the integration test call `run_code` through the tools gateway with a transaction token without an agent in between, as a consumer could? | §8 drive path |
+| S-13 | Does a VPC-wide Route 53 Resolver DNS Firewall see and block each backend's lookups, and does each backend still work with it on? | §3.9, ADR-0016 |
 
 ### 7.1 Spike results, S-1 to S-12 (2026-11-18, a non-production test account, eu-central-1)
 
@@ -807,6 +846,20 @@ step that covers a gap is in brackets.
 | S-11 | The gateway allows a 15-minute invocation; a tool Lambda timeout reaches the caller as a generic `isError` result. `agentic-runtime-isolation`'s `api-gateway` ingress cuts every turn at a fixed 120 s | §3.3 timing budget | a tool Lambda that times out (the error shape is from the documentation's access-denied example) [`runaway`] |
 | S-12 | A direct `tools/call` works with a token minted by a test-only Lambda that the producer's own test grants `kms:Sign`. A consumer cannot sign for an ingress it does not own | §8 driver | whether a minted token naming an agent that is not deployed is accepted |
 
+### 7.2 Spike result, S-13 DNS Firewall (2026-11-18, a non-production test account, eu-central-1)
+
+One rule group on the §3.7 VPC (ALLOW `*.amazonaws.com`, `amazonaws.com`,
+`*.on.aws`; BLOCK `*` with NXDOMAIN) with VPC query logging. Each backend
+ran the same probe twice or more, with a unique token per run. The
+decision is recorded in ADR-0016.
+
+| Backend | Result | Blocked platform names | Not tested |
+|---|---|---|---|
+| `microvm` | The MicroVM's resolvers (127.0.0.2, 169.254.53.53) forward to the VPC resolver; 10.80.0.2 also answers. Every probe name, qtype (A, AAAA, TXT, ANY, MX, CNAME), case, trailing dot and TCP DNS was logged; blocked names returned NXDOMAIN, logged `BLOCK`; `logs.<region>.amazonaws.com` resolved to the endpoint. Public resolvers time out (security group). `srcaddr` is the connector ENI, shared by MicroVMs on one subnet. Start, `/run`, suspend, auto-resume, logs and terminate all worked; `RUNNING` in 1.6 to 1.8 s | `3.amazon.pool.ntp.org` (no failure in 15 min) | a customer-owned name under `on.aws`; clock drift over hours; firewall fail-open |
+| `nitro` | `resolv.conf` lists only the VPC resolver. All probe names logged; blocked ones NXDOMAIN in 1 to 3 ms; `srcaddr` is the task's own ENI. Cold start 30.4 s, warm 12.7 s, logs arrived, scale-in worked: no change from S-7 | from the instance (tool subnet): `ecs-d-<az>-<id>.<region>.api.aws`, about 2,900 times over the instance's life, rising to 424 a minute, no visible failure; `time.aws.com` 20 times; its own `ip-…compute.internal` name 4 times | the run with these names allowed; exfil under `*.amazonaws.com` |
+| `agentcore` | The session's resolvers (127.0.0.2, 169.254.53.53) and 10.80.0.2 all reach the VPC resolver; all probe rounds logged, blocked ones NXDOMAIN; `srcaddr` is the runtime ENI, shared by its sessions. Image pull and logs, under `*.amazonaws.com`, worked. `READY` took 548 and 549 s against 201 to 204 s in S-9; the ENI made no lookup until about 440 s, so the delay comes before DNS, cause unknown | `3.amazon.pool.ntp.org` | a control run without the firewall on the same network; clock without NTP |
+| tool side | A Lambda in the tool subnets resolved and reached a MicroVM endpoint (`*.on.aws`). It could also query 8.8.8.8 and 1.1.1.1 through the NAT, unseen by the firewall. A Lambda in the VPC adds about 20 minutes to the stack delete while its ENIs release | none | |
+
 ## 8. Integration test outline
 
 Driver: the CDK CLI in `scripts/integ.sh` (ADR-0008). It reuses the
@@ -820,9 +873,10 @@ gateway (`tools/call`, bearer = a minted token). The `parse` step also
 runs once through the producer's sample agent with its deterministic
 `tool <target>/<tool> {json}` probe, so the grant and the 120 s ingress
 path are exercised as a consumer would. It deploys one integration stack with two
-construct instances: `run-code` with all three backends and
-`sandboxIdle` = 2 min, and `run-code-files` with `agentcore` only and
-`sessionFiles` on. Both are destroyed at the end; the shared pool is never
+construct instances, each with its own VPC: `run-code` with all three
+backends, `sandboxIdle` = 2 min and `dnsFirewall` on, and
+`run-code-files` with `agentcore` only, `sessionFiles` on and
+`dnsFirewall` off. Both are destroyed at the end; the shared pool is never
 touched.
 
 | Step | Checks |
@@ -847,6 +901,8 @@ touched.
 | microvm-stop | A's MicroVM, idle past `sandboxIdle` (2 min in the integration stack), shows `SUSPENDED`; the driver then ends it with `TerminateMicrovm` out of band and invokes the reaper; a stop line for A's MicroVM carries `sandboxSeconds`, `runningSeconds`, `suspendedSeconds` and `estimated` |
 | synth | a unit test synthesises two construct instances in one stack and asserts that every §5.3 name is unique and matches its charset |
 | session-files | `run-code-files`: A's session writes and reads its own `sessions/<sid>/`; a `GetObject` on B's session prefix is denied |
+| dns | `run-code` (firewall on): A's script looks up a unique `<token>.example.com`, a 40-character exfil label and a TXT name, then `logs.<region>.amazonaws.com`; the first three return NXDOMAIN and appear in the query log as `BLOCK`, the last resolves to an endpoint address. `run-code-files` (firewall off): the same unique name resolves through the public DNS (it returns the real zone's answer, NXDOMAIN or not), and no `BLOCK` line exists for it. On `nitro` the `BLOCK` line's `srcaddr` is A's task address |
+| dns-platform | after the run, the query log for `run-code` holds no `BLOCK` line for a platform name (any name not sent by a probe), so the §3.9 allow list is complete |
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |

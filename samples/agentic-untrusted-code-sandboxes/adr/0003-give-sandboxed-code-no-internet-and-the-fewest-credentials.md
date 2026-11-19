@@ -4,7 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Amended by: ADR-0015
+- Amended by: ADR-0015, ADR-0016
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -62,3 +62,5 @@ close, the threat model records it against that backend and the README says
 so in the backend table.
 
 Note 2026-11-18: amended by ADR-0015. "No internet" holds for connections; DNS lookups resolve public names on every backend and are the stated exception. The `nitro` task group reaches only the Logs endpoint; ECR and S3 endpoints serve `agentcore` only. The MicroVM metadata service answers, without credentials.
+
+Note 2026-11-19: amended by ADR-0016. A `dnsFirewall` option closes the DNS exception: with it on, only AWS names resolve and every other lookup is blocked and logged.
