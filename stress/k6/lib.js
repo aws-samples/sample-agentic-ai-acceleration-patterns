@@ -563,8 +563,9 @@ export function isolationCheck(entry, probeKind, status, bad, requestId, correla
 }
 
 /**
- * Per-tenant sends and 429s per epoch minute, one stdout line each: what a slice's `collect`
- * may join with the hops' logs to attribute a refusal to a tenant (P-7).
+ * Per-tenant sends and 429s per epoch minute, one `tenant_minute` JSON line each (stderr, as
+ * `msg="<JSON>"`, kept in `<script>.k6-stdout.txt` by `k6.sh`): what a slice's `collect` may
+ * join with the hops' logs to attribute a refusal to a tenant (P-7).
  */
 export function ledger(tenantId, status) {
   const minute = Math.floor(Date.now() / 60000);

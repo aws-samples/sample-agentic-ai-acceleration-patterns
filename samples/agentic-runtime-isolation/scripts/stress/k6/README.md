@@ -60,7 +60,7 @@ Tuning, all optional: `ISSUE_RPS` (8), `REFRESH_RPS` (17), `REFRESH_MARGIN_S` (9
 - Setup data is copied into every VU. When tokens x VUs would pass
   `MEMORY_BUDGET_MB`, setup returns entries without tokens and each VU issues
   its own during the warm-up, at the same overall 8 a second.
-- The `tenant_minute` lines (stdout, one per tenant per minute per VU) are the
+- The `tenant_minute` lines (k6's stderr as `msg="<JSON>"`, one per tenant per minute per VU) are the
   per-tenant send counts for the 429 attribution. A VU's final minute is
   flushed per request in the last 1 % of the scenario.
 - Nothing logs a token, a password or a caller ARN. Never add `--http-debug`.
