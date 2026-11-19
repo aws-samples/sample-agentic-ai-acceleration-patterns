@@ -30,7 +30,11 @@ export const API_FORWARDED_HEADERS: readonly string[] = [
   HEADER_CONTENT_SHA256,
 ];
 
-/** The token claim that names one tenant (`tenant-identity` P-6). */
+/**
+ * The default of the `tenantClaim` input (§3.6): the token claim that names
+ * one tenant (`tenant-identity` P-6). The router and the cell read the
+ * configured value, never this constant directly.
+ */
 export const TENANT_CLAIM = 'tenant_id';
 
 /** The multi-tenant claim the edge refuses with 401 (§3.3 step 5). */
@@ -61,13 +65,17 @@ export interface ConfigJson {
   readonly tokenEndpoint: string;
   readonly clientId: string;
   readonly scopes: string;
-  readonly logoutEndpoint: string;
   /** Present when the `issuer` input names `exchangeEndpoint` (§3.5). */
   readonly exchangeEndpoint?: string;
   /** Upper-cased control-plane form, which the token exchange expects. */
   readonly tenantId?: string;
   readonly displayName?: string;
-  /** `https://login.<appDomain>/callback`, `host` mode. */
+  /**
+   * `https://login.<appDomain>/callback`, `host` mode only. Absent in
+   * `single` mode, where the SPA uses `https://<appDomain>/`. The SPA signs
+   * out through the router's `/logout`, so the issuer's logout endpoint is
+   * not in this file (§3.5).
+   */
   readonly redirectUri?: string;
   /** The route entry's `dt`, wherever a tenant is named; the SPA ignores it (§4.2). */
   readonly rev?: number;
@@ -81,6 +89,14 @@ export interface ConfigJson {
 
 /** The `state` lifetime. */
 export const SIGNIN_STATE_TTL_SECONDS = 600;
+
+/** The SPA's nonce for `/signin-state?n=` (§3.3 step 8). */
+export const SIGNIN_NONCE = /^[A-Za-z0-9_-]{16,64}$/;
+
+/** `/signin-state`'s answer. */
+export interface SigninStateResponse {
+  readonly state: string;
+}
 
 /**
  * The signed `state` payload: `base64url(JSON) + "." + base64url(HMAC-SHA256)`
@@ -153,3 +169,68 @@ export interface CellCopyParameter {
 export interface HookParameter {
   readonly registrarUrl: string;
 }
+
+/**
+ * The cell's own namespace for one tenant (§3.5): its hosts check reads
+ * it. Built from the verified claim in the control-plane form (upper case),
+ * never from the lower-case `x-tenant-route` hint, because SSM names are
+ * case-sensitive.
+ */
+export function paramTenantNamespace(verifiedTenantId: string, applicationId: string): string {
+  return `/application-plane/tenants/${verifiedTenantId.toUpperCase()}/${applicationId}/`;
+}
+
+// ---------------------------------------------------------------------------
+// Router build constants (S1 writes the function, S2 bundles it)
+// ---------------------------------------------------------------------------
+
+/**
+ * A CloudFront Function has no environment, so the stack replaces these
+ * literal tokens in the router's source before it creates the function.
+ * Each token appears in the source as a JavaScript string literal, for
+ * example `const APP_DOMAIN = '__TFD_APP_DOMAIN__';`, and is replaced with
+ * the JSON-escaped value. The KeyValueStore is the one associated with the
+ * function, read with `cf.kvs()`, so no id is compiled in.
+ */
+export const ROUTER_TOKENS = {
+  /** Lower-case `appDomain`. */
+  appDomain: '__TFD_APP_DOMAIN__',
+  /** `single` or `host`. */
+  addressing: '__TFD_ADDRESSING__',
+  /** The `tenantClaim` input. */
+  tenantClaim: '__TFD_TENANT_CLAIM__',
+  /** `on` when `agentIngress` is set, else `off` (§3.3 step 3). */
+  agentIngress: '__TFD_AGENT_INGRESS__',
+  /** Comma-separated `RESERVED_LABELS`. */
+  reservedLabels: '__TFD_RESERVED_LABELS__',
+} as const;
+
+// ---------------------------------------------------------------------------
+// Registrar environment (S2 sets it, S3 reads it)
+// ---------------------------------------------------------------------------
+
+/** The registrar function's environment variable names. */
+export const REGISTRAR_ENV = {
+  /** ARN of the route table KeyValueStore. */
+  routeTableArn: 'ROUTE_TABLE_ARN',
+  appDomain: 'APP_DOMAIN',
+  addressing: 'ADDRESSING',
+  applicationId: 'APPLICATION_ID',
+  /** The control plane API's base URL. */
+  controlPlaneUrl: 'CONTROL_PLANE_URL',
+  controlPlaneAccount: 'CONTROL_PLANE_ACCOUNT',
+  /** The one Region every cell origin must be in (§3.4 step 3). */
+  controlPlaneRegion: 'CONTROL_PLANE_REGION',
+  /** The vendor IdP's token endpoint for the reader token (ADR-0015). */
+  vendorIdpTokenUrl: 'VENDOR_IDP_TOKEN_URL',
+  vendorIdpClientId: 'VENDOR_IDP_CLIENT_ID',
+  /** Secrets Manager ARN of the client secret. */
+  vendorIdpSecretArn: 'VENDOR_IDP_SECRET_ARN',
+  /** Names the admitted `<fleet>-global-hook` role. */
+  fleet: 'FLEET',
+  edgeOperatorRoleArn: 'EDGE_OPERATOR_ROLE_ARN',
+  /** `on` or `off`. */
+  dedicatedDomains: 'DEDICATED_DOMAINS',
+  /** The multi-tenant distribution; dedicated distribution tenants attach to it. */
+  distributionId: 'DISTRIBUTION_ID',
+} as const;

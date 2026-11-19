@@ -20,11 +20,22 @@ export const ROUTE_TABLE_VERSION = 1;
 /** KeyValueStore's limit for one value (§4.1). */
 export const MAX_VALUE_BYTES = 1024;
 
-/** KeyValueStore's limit for the whole store (ADR-0012). */
-export const MAX_STORE_BYTES = 5 * 1024 * 1024;
+/**
+ * KeyValueStore's limit for the whole store, read as 5,000,000 bytes: the
+ * conservative reading of "5 MB", so the registrar's 507 comes before the
+ * store's own refusal (ADR-0012).
+ */
+export const MAX_STORE_BYTES = 5_000_000;
 
-/** The registrar's alarm and stated ceilings sit at 80 % of 5 MB (§4.1, ADR-0012). */
+/** The registrar's alarm and stated ceilings sit at 80 % of the store (§4.1, ADR-0012). */
 export const STORE_ALARM_BYTES = 4_000_000;
+
+/** The registrar's store-size metric (§4.1): EMF, maximum statistic, alarm at `STORE_ALARM_BYTES`. */
+export const METRIC_NAMESPACE = 'TenantFrontDoor';
+export const METRIC_ROUTE_TABLE_BYTES = 'RouteTableBytes';
+
+/** A `signin` key id (§3.6). */
+export const SIGNIN_KID = /^[a-z0-9]{1,8}$/;
 
 /** Host labels refused at registration (§4.1). */
 export const RESERVED_LABELS: readonly string[] = ['www', 'api', 'admin', 'auth', 'login', 'static', 'status'];
@@ -166,13 +177,41 @@ export function encodeEntry(entry: TenantEntry | HostEntry | CellEntry | AppEntr
   return value;
 }
 
-/** Builds a `tenant#` value with its fields in the §4.1 order. */
+// Builders: every writer goes through one of these, so each value's fields
+// are in the §4.1 order and the bytes match the golden fixtures.
+
+/** Builds a `tenant#` value with its fields in the §4.1 order. `dk` and `dx` come only with `d`. */
 export function tenantEntry(fields: Omit<TenantEntry, 'v'>): TenantEntry {
+  if (fields.d === undefined && (fields.dk !== undefined || fields.dx !== undefined)) {
+    throw new RouteTableError('dk and dx need d');
+  }
   const e: Record<string, unknown> = { v: 1, c: fields.c, ac: fields.ac, dt: fields.dt, s: fields.s, n: fields.n };
   if (fields.d !== undefined) e.d = fields.d;
   if (fields.dk !== undefined) e.dk = fields.dk;
   if (fields.dx !== undefined) e.dx = fields.dx;
   return e as unknown as TenantEntry;
+}
+
+export function hostEntry(fields: Omit<HostEntry, 'v'>): HostEntry {
+  return { v: 1, t: fields.t, ac: fields.ac };
+}
+
+export function cellEntry(fields: Omit<CellEntry, 'v'>): CellEntry {
+  return { v: 1, ac: fields.ac, o: fields.o };
+}
+
+export function appEntry(fields: Omit<AppEntry, 'v'>): AppEntry {
+  const e: Record<string, unknown> = { v: 1, az: fields.az, tk: fields.tk, cid: fields.cid, sc: fields.sc, lo: fields.lo };
+  if (fields.ex !== undefined) e.ex = fields.ex;
+  return e as unknown as AppEntry;
+}
+
+export function signinEntry(fields: Omit<SigninEntry, 'v'>): SigninEntry {
+  for (const kid of Object.keys(fields.k)) {
+    if (!SIGNIN_KID.test(kid)) throw new RouteTableError('signin key id is malformed');
+  }
+  if (!(fields.cur in fields.k)) throw new RouteTableError('field cur names no key');
+  return { v: 1, cur: fields.cur, k: fields.k };
 }
 
 function parseObject(value: string): Record<string, unknown> {
@@ -226,39 +265,34 @@ export function decodeTenantEntry(value: string): TenantEntry {
 
 export function decodeHostEntry(value: string): HostEntry {
   const o = parseObject(value);
-  return { v: 1, t: str(o, 't')!, ac: str(o, 'ac')! };
+  return hostEntry({ t: str(o, 't')!, ac: str(o, 'ac')! });
 }
 
 export function decodeCellEntry(value: string): CellEntry {
   const o = parseObject(value);
-  return { v: 1, ac: str(o, 'ac')!, o: str(o, 'o')! };
+  return cellEntry({ ac: str(o, 'ac')!, o: str(o, 'o')! });
 }
 
 export function decodeAppEntry(value: string): AppEntry {
   const o = parseObject(value);
-  const e: Record<string, unknown> = {
-    v: 1,
-    az: str(o, 'az'),
-    tk: str(o, 'tk'),
-    cid: str(o, 'cid'),
-    sc: str(o, 'sc'),
-    lo: str(o, 'lo'),
-  };
-  const ex = str(o, 'ex', true);
-  if (ex !== undefined) e.ex = ex;
-  return e as unknown as AppEntry;
+  return appEntry({
+    az: str(o, 'az')!,
+    tk: str(o, 'tk')!,
+    cid: str(o, 'cid')!,
+    sc: str(o, 'sc')!,
+    lo: str(o, 'lo')!,
+    ex: str(o, 'ex', true),
+  });
 }
 
 export function decodeSigninEntry(value: string): SigninEntry {
   const o = parseObject(value);
   const k = o.k;
   if (typeof k !== 'object' || k === null || Array.isArray(k)) throw new RouteTableError('field k is not an object');
-  for (const [kid, key] of Object.entries(k)) {
-    if (!/^[a-z0-9]{1,8}$/.test(kid) || typeof key !== 'string') throw new RouteTableError('field k holds a bad key');
+  for (const key of Object.values(k)) {
+    if (typeof key !== 'string') throw new RouteTableError('field k holds a bad key');
   }
-  const cur = str(o, 'cur')!;
-  if (!(cur in k)) throw new RouteTableError('field cur names no key');
-  return { v: 1, cur, k: k as Record<string, string> };
+  return signinEntry({ cur: str(o, 'cur')!, k: k as Record<string, string> });
 }
 
 // ---------------------------------------------------------------------------
@@ -271,9 +305,13 @@ export function decodeSigninEntry(value: string): SigninEntry {
  * UTF-8 bytes on a code-point boundary. No stored character then needs
  * JSON escaping.
  */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
 export function sanitiseDisplayName(name: string): string {
+  // An unpaired surrogate would be written as a six-byte \uXXXX escape, so
+  // replace it with U+FFFD first.
   // eslint-disable-next-line no-control-regex
-  const replaced = name.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/"/g, "'").replace(/\\/g, '/');
+  const replaced = name.replace(LONE_SURROGATE, '\ufffd').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/"/g, "'").replace(/\\/g, '/');
   let out = '';
   let bytes = 0;
   for (const ch of replaced) {
@@ -286,16 +324,26 @@ export function sanitiseDisplayName(name: string): string {
 }
 
 /** RFC 3339 `date-time` in UTC, with an optional fraction (control-plane §4). */
-const RFC3339_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+const RFC3339_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
 
 /**
  * Turns the control plane's `createdAt` into `dt`, Unix ms (§4.1). Both
- * `...:01Z` and `...:01.000Z` give the same value. Returns undefined for a
- * value that does not parse; the registrar then answers 503 (§5.1). The
- * strings are never compared.
+ * `...:01Z` and `...:01.000Z` give the same value. The fields are checked
+ * by hand, so an impossible date (`02-30`, `24:00`) is refused rather than
+ * rolled over. A fraction past milliseconds is cut off (the control plane
+ * stores milliseconds). A leap second (`:60`) and a time before 1970 are
+ * refused: the control plane writes neither. Returns undefined for a
+ * value it refuses; the registrar then answers 503 (§5.1). The strings are
+ * never compared.
  */
 export function parseCreatedAt(createdAt: unknown): number | undefined {
-  if (typeof createdAt !== 'string' || !RFC3339_UTC.test(createdAt)) return undefined;
-  const ms = Date.parse(createdAt);
-  return Number.isSafeInteger(ms) && ms >= 0 ? ms : undefined;
+  if (typeof createdAt !== 'string') return undefined;
+  const m = RFC3339_UTC.exec(createdAt);
+  if (m === null) return undefined;
+  const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
+  const ms = Number(((m[7] ?? '') + '000').slice(0, 3));
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > daysInMonth) return undefined;
+  if (hour > 23 || minute > 59 || second > 59) return undefined;
+  return Date.UTC(year, month - 1, day, hour, minute, second, ms);
 }

@@ -34,6 +34,11 @@
       "type": "build"
     },
     {
+      "name": "aws-sdk-client-mock",
+      "version": "4.1.0",
+      "type": "build"
+    },
+    {
       "name": "esbuild",
       "type": "build"
     },
@@ -76,8 +81,53 @@
       "type": "build"
     },
     {
+      "name": "@aws-sdk/client-acm",
+      "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/client-cloudfront-keyvaluestore",
+      "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/client-cloudfront",
+      "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/client-dynamodb",
+      "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/client-scheduler",
+      "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/client-secrets-manager",
+      "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/client-ssm",
+      "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
       "name": "@aws-sdk/core",
       "version": "3.977.9",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/lib-dynamodb",
+      "version": "3.1125.0",
+      "type": "runtime"
+    },
+    {
+      "name": "@aws-sdk/signature-v4a",
+      "version": "3.1138.0",
       "type": "runtime"
     },
     {

@@ -3,14 +3,6 @@
 
 $version: "2.0"
 
-metadata suppressions = [
-    {
-        id: "HttpMethodSemantics"
-        namespace: "tenantfrontdoor"
-        reason: "UpdateTenantRouteStatus is a PUT that replaces one field (spec §5.1); it is idempotent."
-    }
-]
-
 namespace tenantfrontdoor
 
 use aws.apigateway#integration
@@ -56,10 +48,10 @@ service RegistrarService {
 @pattern("^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$")
 string CellId
 
-/// A tenant id, in the control plane's upper-case form or lower-cased
-/// (§4.1). Stored ids are one DNS label: `[a-z0-9-]{1,63}`, not starting or
-/// ending with `-`.
-@pattern("^[0-9A-Za-z](?:[0-9A-Za-z-]{0,61}[0-9A-Za-z])?$")
+/// A tenant id as the control plane names it (an upper-case Crockford
+/// ULID), or its lower-case form. The registrar lower-cases it for the
+/// route table and upper-cases it to read the control plane (§4.1).
+@pattern("^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$")
 string TenantId
 
 /// A full host name, lower case, at most 253 characters.

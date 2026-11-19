@@ -4,6 +4,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+  appEntry,
+  cellEntry,
   cellKey,
   decodeAppEntry,
   decodeCellEntry,
@@ -11,12 +13,15 @@ import {
   decodeSigninEntry,
   decodeTenantEntry,
   encodeEntry,
+  hostEntry,
   hostKey,
   isReservedLabel,
   MAX_DISPLAY_NAME_BYTES,
+  MAX_STORE_BYTES,
   parseCreatedAt,
   RouteTableError,
   sanitiseDisplayName,
+  signinEntry,
   STORE_ALARM_BYTES,
   tenantEntry,
   tenantKey,
@@ -98,6 +103,12 @@ describe('display name (§4.1)', () => {
     expect(sanitiseDisplayName(emoji)).toBe('a'.repeat(62));
   });
 
+  test('replaces an unpaired surrogate, so it needs no escaping', () => {
+    const out = sanitiseDisplayName('a\ud800b\udc00c😀');
+    expect(out).toBe('a\ufffdb\ufffdc😀');
+    expect(JSON.stringify(out)).toBe(`"${out}"`);
+  });
+
   test('needs no JSON escaping once sanitised', () => {
     const out = sanitiseDisplayName('x"\\\u0001'.repeat(30));
     expect(JSON.stringify(out)).toBe(`"${out}"`);
@@ -111,10 +122,67 @@ describe('createdAt to dt (§4.1)', () => {
     expect(parseCreatedAt('2026-11-18T14:42:01.123Z')).toBe(Date.UTC(2026, 10, 18, 14, 42, 1, 123));
   });
 
-  test.each([undefined, 1795080000000, '', '2026-11-18', '2026-11-18T14:42:01+01:00', '2026-11-18 14:42:01Z', 'garbage'])(
-    'does not parse %p',
-    (v) => {
-      expect(parseCreatedAt(v)).toBeUndefined();
+  test.each([
+    ['2026-11-18T14:42:01.1Z', 100],
+    ['2026-11-18T14:42:01.12Z', 120],
+    ['2026-11-18T14:42:01.1239Z', 123],
+    ['2026-11-18T14:42:01.123456789Z', 123],
+  ])('cuts the fraction %s to milliseconds', (v, ms) => {
+    expect(parseCreatedAt(v)).toBe(Date.UTC(2026, 10, 18, 14, 42, 1, ms));
+  });
+
+  test('accepts 29 February in a leap year', () => {
+    expect(parseCreatedAt('2028-02-29T00:00:00Z')).toBe(Date.UTC(2028, 1, 29));
+  });
+
+  test.each([
+    undefined,
+    1795080000000,
+    '',
+    '2026-11-18',
+    '2026-11-18T14:42:01+01:00',
+    '2026-11-18 14:42:01Z',
+    '2026-11-18t14:42:01z',
+    'garbage',
+    '2026-02-30T00:00:00Z',
+    '2026-02-29T00:00:00Z',
+    '2026-13-01T00:00:00Z',
+    '2026-00-10T00:00:00Z',
+    '2026-11-00T00:00:00Z',
+    '2026-11-18T24:00:00Z',
+    '2026-11-18T23:60:00Z',
+    '2026-11-18T23:59:60Z',
+    '1969-12-31T23:59:59Z',
+    '2026-11-18T14:42:01.Z',
+  ])('does not parse %p', (v) => {
+    expect(parseCreatedAt(v)).toBeUndefined();
+  });
+});
+
+describe('store limits', () => {
+  test('the alarm sits at 80 % of the store', () => {
+    expect(STORE_ALARM_BYTES).toBe(0.8 * MAX_STORE_BYTES);
+  });
+});
+
+describe('builders fix the field order', () => {
+  test('whatever order the caller writes', () => {
+    expect(encodeEntry(hostEntry({ ac: '1', t: 'a' } as never))).toBe('{"v":1,"t":"a","ac":"1"}');
+    expect(encodeEntry(cellEntry({ o: 'h', ac: '1' } as never))).toBe('{"v":1,"ac":"1","o":"h"}');
+    expect(encodeEntry(appEntry({ lo: 'l', sc: 's', cid: 'c', tk: 't', az: 'a' } as never))).toBe(
+      '{"v":1,"az":"a","tk":"t","cid":"c","sc":"s","lo":"l"}',
+    );
+    expect(encodeEntry(signinEntry({ k: { k1: 'x' }, cur: 'k1' } as never))).toBe('{"v":1,"cur":"k1","k":{"k1":"x"}}');
+  });
+
+  test('dk and dx need d', () => {
+    expect(() => tenantEntry({ c: 'c', ac: '1', dt: 1, s: 'active', n: '', dk: 'k' })).toThrow(RouteTableError);
+  });
+
+  test.each([{ k: { K1: 'x' }, cur: 'K1' }, { k: { k1: 'x' }, cur: 'k2' }, { k: { abcdefghi: 'x' }, cur: 'abcdefghi' }])(
+    'refuses signin %p',
+    (fields) => {
+      expect(() => signinEntry(fields as never)).toThrow(RouteTableError);
     },
   );
 });
