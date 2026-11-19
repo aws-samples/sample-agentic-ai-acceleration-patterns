@@ -74,10 +74,9 @@ and the runner deletes uid 1001's files under `/tmp` and `/dev/shm`
 after each job; on `microvm`, where no group charges tmpfs pages, it
 also makes both unwritable to uid 1001, which takes `multiprocessing`
 locks, queues and pools from the job. Files in `/work` still outlive
-a job; whether `/work` is tmpfs is checked in S-16. With `nitro.minInstances` = 0, a 120 s `ScaleInAfter` empties
-the cluster before the capacity provider delete; the drain also
-deregisters the instances, whose effect with a minimum above 0 S-16
-checks (ADR-0011).
+a job; whether `/work` is tmpfs is checked in S-16. Once every task has
+stopped, the drain deregisters the `nitro` instances with `force`, which
+ends them, and waits until EC2 shows them `terminated` (ADR-0011).
 
 ADR-0018 stands as written: its design did not depend on what
 CloudTrail records. ADR-0016 keeps the firewall off by default for the
@@ -95,7 +94,8 @@ Python only. A larger `microvm.memoryMiB` raises N, not A. The runner
 needs unit tests for all three setups. `memoryExceeded` is never set on
 `microvm`: the job sees the error itself. Open until S-16: whether
 `/work` is tmpfs, an unmapped `memfd` filled during a job, the
-`agentcore` setup under a global out-of-memory, and whether the
-capacity provider delete succeeds with `nitro.minInstances` above 0. Also open: CloudTrail with
+`agentcore` setup under a global out-of-memory, and how long the
+drain's deregister takes and whether a `nitro.minInstances` above 0
+starts a replacement first. Also open: CloudTrail with
 data events. Revisit if `microvm` gains a cgroup mount, or if a
 platform grants `CAP_SYS_RESOURCE`.

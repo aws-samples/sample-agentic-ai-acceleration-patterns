@@ -59,4 +59,4 @@ tenant objects (spec §1.2).
 
 Note 2026-11-18: amended by ADR-0015. The drain waits until every task is `STOPPED` and every MicroVM of the image is `TERMINATED` before the stack's resources are deleted, and the log cleanup resource also deletes the MicroVM image build log group.
 
-Note 2026-11-19: amended by ADR-0019. An idle ECS managed instance blocks the capacity provider delete. With `nitro.minInstances` = 0 a 120 s `ScaleInAfter` empties the cluster inside the drain's 10-minute bound. Once every task has stopped the drain also deregisters the cluster's container instances with `force`; a deregister does not terminate an instance, so whether that lets the delete succeed with a minimum above 0 is checked in S-16.
+Note 2026-11-19: amended by ADR-0019. An idle ECS managed instance blocks the capacity provider delete. So once every task has stopped the drain deregisters the cluster's container instances with `force`, which on ECS Managed Instances terminates them, and waits until EC2 shows each one `terminated`. S-16 measures how long that takes and whether a minimum above 0 starts a replacement first.
