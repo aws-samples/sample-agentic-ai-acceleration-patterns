@@ -475,7 +475,7 @@ class RouteTableKeys extends Construct {
     const fn = new NodejsFunction(this, 'Function', {
       entry: path.join(__dirname, '..', 'custom-resources', 'route-table-keys.function.ts'),
       handler: 'handler',
-      runtime: lambda.Runtime.NODEJS_26_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       architecture: lambda.Architecture.ARM_64,
       memorySize: 256,
       timeout: Duration.minutes(2),
@@ -499,6 +499,7 @@ class RouteTableKeys extends Construct {
       resources: [props.routeTable.keyValueStoreArn],
     }));
     acknowledge(fn, BASIC_EXECUTION_ROLE_FINDING, 'Logs-only managed policy NodejsFunction attaches; a scoped copy changes no access (M-36).');
+    acknowledge(fn, 'AwsSolutions-L1', 'Node.js 24, the runtime the demo cell API uses too, so the sample runs on one runtime; move both when Node.js 26 is GA.');
 
     // A plain CustomResource the function answers itself (cfn-response.ts):
     // no provider framework, so no second function and no logged response.
@@ -560,7 +561,7 @@ class Registrar extends Construct {
     const fn = new NodejsFunction(this, 'Function', {
       entry: props.entry,
       handler: 'handler',
-      runtime: lambda.Runtime.NODEJS_26_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       architecture: lambda.Architecture.ARM_64,
       memorySize: 256,
       timeout: REGISTRAR_TIMEOUT,
@@ -605,6 +606,7 @@ class Registrar extends Construct {
       resources: [inputs.controlPlane.vendorIdp.clientSecretArn],
     }));
     acknowledge(fn, BASIC_EXECUTION_ROLE_FINDING, 'Logs-only managed policy NodejsFunction attaches; a scoped copy changes no access (M-36).');
+    acknowledge(fn, 'AwsSolutions-L1', 'Node.js 24, the runtime the demo cell API uses too, so the sample runs on one runtime; move both when Node.js 26 is GA.');
     acknowledge(
       fn,
       'AwsSolutions-IAM5[Resource::*]',

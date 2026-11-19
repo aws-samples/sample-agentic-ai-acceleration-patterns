@@ -67,10 +67,8 @@ export type TenantView =
   | { readonly kind: 'none' };
 
 /**
- * `claim` defaults to the `tenantClaim` input's default.
- * shortcut: `/config.json` does not carry `tenantClaim` (§3.6), so the SPA
- * reads only the default claim; carry it in `/config.json` before a
- * deployment changes it (spa/README.md, Known limitations).
+ * `claim` is the `tenantClaim` input, which `/config.json` carries (§3.2,
+ * §3.6); it defaults to the input's default.
  */
 export function tenantView(claims: Record<string, unknown> | undefined, claim: string = TENANT_CLAIM): TenantView {
   if (claims === undefined) return { kind: 'none' };

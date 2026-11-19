@@ -7,7 +7,7 @@
  * `test/fixtures/config-json.json`, which this module checks.
  */
 
-import { Addressing, ConfigJson, SIGNIN_HOST_LABEL } from '../../src/shared/contracts';
+import { Addressing, ConfigJson, SIGNIN_HOST_LABEL, TENANT_CLAIM } from '../../src/shared/contracts';
 import type { AppEntry, TenantEntry } from '../../src/shared/route-table';
 
 export interface ConfigInput {
@@ -16,6 +16,8 @@ export interface ConfigInput {
   /** The lower-cased request host. */
   readonly host: string;
   readonly app: AppEntry;
+  /** The `tenantClaim` input. Default `tenant_id`. */
+  readonly tenantClaim?: string;
   /** The tenant the host names (`host#` entry's `t`), when it names one. */
   readonly tenant?: { readonly id: string; readonly entry: TenantEntry };
 }
@@ -27,6 +29,7 @@ export function configJsonFor(input: ConfigInput): ConfigJson {
     tokenEndpoint: app.tk,
     clientId: app.cid,
     scopes: app.sc,
+    tenantClaim: input.tenantClaim ?? TENANT_CLAIM,
   };
   if (app.ex !== undefined) base.exchangeEndpoint = app.ex;
   if (input.tenant === undefined) return base as unknown as ConfigJson;

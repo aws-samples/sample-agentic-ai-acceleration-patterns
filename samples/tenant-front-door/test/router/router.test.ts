@@ -336,6 +336,9 @@ describe('step 5: find the tenant', () => {
     expect(header(a, 'x-tenant-route')).toBe(T_ACME);
     const b = await run(r, { host: SINGLE_DOMAIN, uri: '/api/items', token: tokenFor(T_ACME) });
     expect(b.statusCode).toBe(401);
+    // §3.2: /config.json carries the claim name, so the SPA reads the same claim.
+    const c = await run(r, { host: SINGLE_DOMAIN, uri: '/config.json' });
+    expect(JSON.parse(c.body!.data).tenantClaim).toBe('custom:tenant');
   });
 
   test('step 5 (host): a claim for another tenant than the host gets 403 on /api/* and /agents/*', async () => {
@@ -514,7 +517,13 @@ describe('step 8: /config.json (config-json.json)', () => {
     const r = single();
     r.store.set('app', '{"v":1,"az":"https://auth.example.com/a","tk":"https://auth.example.com/t","cid":"c","sc":"openid","lo":"https://auth.example.com/l"}');
     const body = JSON.parse((await run(r, { host: SINGLE_DOMAIN, uri: '/config.json' })).body!.data);
-    expect(body).toEqual({ authorizeEndpoint: 'https://auth.example.com/a', tokenEndpoint: 'https://auth.example.com/t', clientId: 'c', scopes: 'openid' });
+    expect(body).toEqual({
+      authorizeEndpoint: 'https://auth.example.com/a',
+      tokenEndpoint: 'https://auth.example.com/t',
+      clientId: 'c',
+      scopes: 'openid',
+      tenantClaim: 'tenant_id',
+    });
   });
 
   test('step 8 (single): a dedicated domain whose tenant is suspended gets 503 on /config.json', async () => {

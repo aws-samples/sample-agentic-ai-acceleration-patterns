@@ -59,7 +59,7 @@ function seedHost(h: Harness, host: string, tenantId = t, ac = CELL_ACCOUNT): vo
 
 let logSpy: jest.SpyInstance;
 beforeEach(() => {
-  logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+  logSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
 });
 afterEach(() => logSpy.mockRestore());
 
@@ -783,6 +783,11 @@ describe('route table limits', () => {
       Dimensions: [[]],
       Metrics: [{ Name: 'RouteTableBytes', Unit: 'Bytes' }],
     });
+    // One top-level JSON record per line on stdout, not console.log: under the
+    // JSON log format Lambda would wrap a console.log line and CloudWatch
+    // would extract no metric (ADR-0012's alarm would never fire).
+    expect(emf!.endsWith('}\n')).toBe(true);
+    expect(emf!.indexOf('\n')).toBe(emf!.length - 1);
   });
 
   function readyTenant(): Harness {

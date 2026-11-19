@@ -65,6 +65,8 @@ export interface ConfigJson {
   readonly tokenEndpoint: string;
   readonly clientId: string;
   readonly scopes: string;
+  /** The `tenantClaim` input (§3.6): the claim the SPA reads the tenant from, as the router and the cell do. */
+  readonly tenantClaim: string;
   /** Present when the `issuer` input names `exchangeEndpoint` (§3.5). */
   readonly exchangeEndpoint?: string;
   /** Upper-cased control-plane form, which the token exchange expects. */

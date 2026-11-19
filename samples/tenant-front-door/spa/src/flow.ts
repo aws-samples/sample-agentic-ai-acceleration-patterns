@@ -106,7 +106,7 @@ export async function completeSignIn(env: Env, config: ConfigJson, code: string,
  * step 4).
  */
 export async function settleTenant(env: Env, config: ConfigJson, subject: TokenSet, expected: string | undefined): Promise<Outcome> {
-  const view = tenantView(decodeClaims(subject.accessToken));
+  const view = tenantView(decodeClaims(subject.accessToken), config.tenantClaim);
   if (view.kind === 'none') return { kind: 'sign-out' };
   if (view.kind === 'single') {
     if (expected !== undefined && !sameTenant(view.tenantId, expected)) return { kind: 'sign-out' };
@@ -119,7 +119,7 @@ export async function settleTenant(env: Env, config: ConfigJson, subject: TokenS
   if (!r.ok && r.reason === 'tenant-refused' && config.tenantId === undefined) return { kind: 'pick-tenant', subject, tenants: view.tenants, refused: true };
   // `aborted` lands here too: a caller that passes a signal drops every outcome once it aborts (main.ts `settle`).
   if (!r.ok) return { kind: 'sign-out' };
-  if (!namesTenant(decodeClaims(r.accessToken), expected)) return { kind: 'sign-out' };
+  if (!namesTenant(decodeClaims(r.accessToken), expected, config.tenantClaim)) return { kind: 'sign-out' };
   return { kind: 'signed-in', session: { subject, accessToken: r.accessToken, tenantId: expected, tenants: view.tenants } };
 }
 

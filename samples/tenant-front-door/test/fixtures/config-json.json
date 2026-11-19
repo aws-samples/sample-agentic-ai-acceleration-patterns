@@ -10,6 +10,7 @@
         "tokenEndpoint": "https://auth.example.com/oauth2/token",
         "clientId": "exampleclientid",
         "scopes": "openid sample/read",
+        "tenantClaim": "tenant_id",
         "exchangeEndpoint": "https://api.example.com/prod/oauth2/token"
       }
     },
@@ -22,6 +23,7 @@
         "tokenEndpoint": "https://auth.example.com/oauth2/token",
         "clientId": "exampleclientid",
         "scopes": "openid sample/read",
+        "tenantClaim": "tenant_id",
         "exchangeEndpoint": "https://api.example.com/prod/oauth2/token",
         "tenantId": "01HZX8K9P0QRST7VWXYZ1A2B3E",
         "displayName": "Example 'Two' / Ltd",
@@ -38,6 +40,7 @@
         "tokenEndpoint": "https://auth.example.com/oauth2/token",
         "clientId": "exampleclientid",
         "scopes": "openid sample/read",
+        "tenantClaim": "tenant_id",
         "exchangeEndpoint": "https://api.example.com/prod/oauth2/token",
         "tenantId": "01HZX8K9P0QRST7VWXYZ1A2B3C",
         "displayName": "Acme Corp",
@@ -54,6 +57,7 @@
         "tokenEndpoint": "https://auth.example.com/oauth2/token",
         "clientId": "exampleclientid",
         "scopes": "openid sample/read",
+        "tenantClaim": "tenant_id",
         "exchangeEndpoint": "https://api.example.com/prod/oauth2/token",
         "tenantId": "01HZX8K9P0QRST7VWXYZ1A2B3E",
         "displayName": "Example 'Two' / Ltd",

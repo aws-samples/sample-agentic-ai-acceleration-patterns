@@ -179,6 +179,13 @@ describe('tokens (§3.5, ADR-0007)', () => {
     expect(decodeClaims('a.!!.c')).toBeUndefined();
   });
 
+  test('tenant claims: the tenantClaim /config.json names, not tenant_id (§3.2, §3.6)', () => {
+    const claims = decodeClaims(jwt({ 'custom:tenant': 'A1', 'tenant_id': 'B2' }));
+    expect(tenantView(claims, 'custom:tenant')).toEqual({ kind: 'single', tenantId: 'A1' });
+    expect(namesTenant(claims, 'A1', 'custom:tenant')).toBe(true);
+    expect(namesTenant(claims, 'B2', 'custom:tenant')).toBe(false);
+  });
+
   test('namesTenant compares case-insensitively and refuses a tenants list (§3.5 step 4)', () => {
     expect(namesTenant(decodeClaims(jwt({ tenant_id: '01hzx8k9p0qrst7vwxyz1a2b3c' })), '01HZX8K9P0QRST7VWXYZ1A2B3C')).toBe(true);
     expect(namesTenant(decodeClaims(jwt({ tenant_id: 'OTHER' })), '01HZX8K9P0QRST7VWXYZ1A2B3C')).toBe(false);
