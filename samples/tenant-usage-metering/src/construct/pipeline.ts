@@ -52,7 +52,7 @@ export function hourQuery(path: IngestPath): string {
 
 function publishOnlyBy(scope: Construct, id: string, bus: eventsv2.CfnEventBus, writer: iam.Role): void {
   // The deny only removes every other principal; the writer still needs an
-  // identity allow (pg, 2026-11-18: without it the writer was refused too).
+  // identity allow (test account, 2026-11-18: without it the writer was refused too).
   writer.addToPolicy(new iam.PolicyStatement({ actions: ['events:PutEvents'], resources: [bus.attrEventBusArn] }));
   new eventsv2.CfnResourcePolicy(scope, id, {
     eventBusArn: bus.attrEventBusArn,

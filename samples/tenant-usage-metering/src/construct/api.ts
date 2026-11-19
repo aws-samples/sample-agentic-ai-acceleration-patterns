@@ -180,7 +180,7 @@ export function createApi(scope: Construct, props: ApiProps): MeteringApi {
   );
   // One permission for the whole API: a permission per method (29, and as
   // many test permissions) overflows the function's 20 KB resource policy
-  // (pg, 2026-11-18). The function checks the route itself (src/api/handler.ts).
+  // (test account, 2026-11-18). The function checks the route itself (src/api/handler.ts).
   const admin = new apigateway.LambdaIntegration(props.adminFn, { allowTestInvoke: false, scopePermissionToMethod: false });
   for (const route of ADMIN_ROUTES) {
     resourceFor(route.path).addMethod(route.method, admin, iamMethod);
