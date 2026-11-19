@@ -6,6 +6,7 @@ import {
   type CertificateStatus,
   DeleteCertificateCommand,
   DescribeCertificateCommand,
+  type FailureReason,
   ListCertificatesCommand,
   ListTagsForCertificateCommand,
 } from '@aws-sdk/client-acm';
@@ -25,6 +26,7 @@ import {
   EDGE_ACCOUNT,
   kvs,
   logLines,
+  NOW,
   resetAll,
   ROUTE_TABLE_ARN,
   routeTable,
@@ -101,14 +103,25 @@ interface FakeCertificate {
   readonly tags: { Key: string; Value: string }[];
   readonly inUseBy?: string[];
   readonly status?: CertificateStatus;
+  readonly failureReason?: FailureReason;
+  /** Defaults to two hours before NOW, past ACM's idempotency window. */
+  readonly createdAt?: number;
 }
+
+const HOUR = 60 * 60 * 1000;
 
 function certificates(list: FakeCertificate[]): void {
   acm.on(ListCertificatesCommand).resolves({ CertificateSummaryList: list.map((c) => ({ CertificateArn: c.arn, DomainName: c.domain })) });
   for (const c of list) {
     acm.on(ListTagsForCertificateCommand, { CertificateArn: c.arn }).resolves({ Tags: c.tags });
     acm.on(DescribeCertificateCommand, { CertificateArn: c.arn }).resolves({
-      Certificate: { CertificateArn: c.arn, InUseBy: c.inUseBy ?? [], Status: c.status },
+      Certificate: {
+        CertificateArn: c.arn,
+        InUseBy: c.inUseBy ?? [],
+        Status: c.status,
+        FailureReason: c.failureReason,
+        CreatedAt: new Date(c.createdAt ?? NOW - 2 * HOUR),
+      },
     });
   }
 }
@@ -121,6 +134,7 @@ function deps(): RemovalDeps {
     routeTableArn: ROUTE_TABLE_ARN,
     distributionId: DISTRIBUTION_ID,
     pooledTenantId: POOLED,
+    now: () => NOW,
   };
 }
 
@@ -308,8 +322,36 @@ describe('two-phase removal (spec §3.4 step 5, ADR-0018, M-25)', () => {
     expect((await runRemoval(deps())).disabledRouted).toBe(0);
   });
 
-  it.each(['FAILED', 'VALIDATION_TIMED_OUT', 'REVOKED', 'EXPIRED'] as CertificateStatus[])('deletes an unused certificate %s even for the tenant\'s current d', async (status) => {
+  it.each(['FAILED', 'VALIDATION_TIMED_OUT', 'REVOKED', 'EXPIRED'] as CertificateStatus[])('deletes an unused certificate %s past its hour even for the tenant\'s current d', async (status) => {
     certificates([{ arn: cert(1), domain: DOMAIN_A, tags: tags(TENANT_A), status }]);
+    await runRemoval(deps());
+    expect(deletedCertificates()).toEqual([cert(1)]);
+  });
+
+  it('keeps a FAILED certificate of the tenant\'s current d within ACM\'s hour from its CreatedAt, so a repeat still gets the 422', async () => {
+    certificates([{ arn: cert(1), domain: DOMAIN_A, tags: tags(TENANT_A), status: 'FAILED', failureReason: 'CAA_ERROR', createdAt: NOW - HOUR + 1 }]);
+    const result = await runRemoval(deps());
+    expect(deletedCertificates()).toEqual([]);
+    expect(result.deletedCertificates).toBe(0);
+  });
+
+  it('deletes a FAILED certificate an hour after its CreatedAt and logs ACM\'s failure reason', async () => {
+    certificates([{ arn: cert(1), domain: DOMAIN_A, tags: tags(TENANT_A), status: 'FAILED', failureReason: 'CAA_ERROR', createdAt: NOW - HOUR }]);
+    await runRemoval(deps());
+    expect(deletedCertificates()).toEqual([cert(1)]);
+    expect(logLines()).toContainEqual({
+      level: 'INFO',
+      message: 'certificate deleted',
+      tenantId: TENANT_A,
+      domain: DOMAIN_A,
+      certificateArn: cert(1),
+      status: 'FAILED',
+      failureReason: 'CAA_ERROR',
+    });
+  });
+
+  it('deletes a FAILED certificate within its hour once its domain is no longer the tenant\'s d, as a pending one', async () => {
+    certificates([{ arn: cert(1), domain: OLD_DOMAIN, tags: tags(TENANT_A), status: 'FAILED', failureReason: 'CAA_ERROR', createdAt: NOW - 60_000 }]);
     await runRemoval(deps());
     expect(deletedCertificates()).toEqual([cert(1)]);
   });

@@ -266,7 +266,7 @@ export const TAG_COST_TENANT_ID = 'TenantId';
  * ACM statuses that never become `ISSUED`. The registrar counts such a
  * certificate as absent and requests a new one; the sweeper deletes a
  * registrar certificate in one of them that nothing uses, whatever its
- * tenant's `d` (spec §3.4 step 5 sub-step 6).
+ * tenant's `d`, an hour after its `CreatedAt` (spec §3.4 step 5 sub-step 6).
  */
 export const TERMINAL_CERTIFICATE_STATUSES: readonly string[] = ['FAILED', 'VALIDATION_TIMED_OUT', 'REVOKED', 'EXPIRED'];
 
