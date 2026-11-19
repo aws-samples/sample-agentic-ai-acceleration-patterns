@@ -970,11 +970,13 @@ export class ProvisioningWorkflow extends Construct {
    * resolved parameter set (`parametersPath`, a name to value map) to the
    * fixed variables, and only a JSONata Catch can drop the raw error Cause
    * before it enters state. The task `Output` plays the part of a
-   * `ResultSelector`: the state keeps its input plus `<resultField>.Build`
-   * with the build ARN and status, and the raw `SCRIPT_OUTPUTS` for the
-   * guard state that follows (R-43), only, because the CodeBuild result
-   * echoes the build's environment, values included, and a second copy of
-   * each parameter set would pass the 256 KiB state limit (§8.1).
+   * `ResultSelector`: the state keeps its input plus only
+   * `<resultField>.Build` (build ARN and status) and `scriptOutputsRaw`
+   * (the raw `SCRIPT_OUTPUTS`, or `false` when it is absent or longer than
+   * 4,096 characters) for the guard state that follows (R-43). It drops
+   * the rest because the CodeBuild result echoes the build's environment,
+   * values included, and a second copy of each parameter set would pass
+   * the 256 KiB state limit (§8.1).
    */
   private buildTask(
     id: string,

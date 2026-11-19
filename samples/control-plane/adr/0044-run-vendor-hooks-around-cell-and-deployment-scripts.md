@@ -131,9 +131,9 @@ again, by the same rule, in a state of its own after the script task
 from the task's), with a linear regular expression that admits only
 the compact form, and never `$parse`, which raises on bad input: an
 empty, over-long or malformed value fails a create or update and
-becomes `{}` on a delete. The pattern cannot see a repeated key, so a hook refuses
-an object that has one. The control plane never reads the outputs, and
-hooks treat them as untrusted data.
+becomes `{}` on a delete. The pattern cannot see a repeated key, so a
+hook refuses an object that has one. The control plane never reads
+the outputs, and hooks treat them as untrusted data.
 
 Hooks run in two hook build projects in the control plane account, one
 per scope, each with its own role (`<fleet>-global-hook`,
@@ -415,9 +415,10 @@ as a consumer of a global post hook.
   timeout and the API function's own timeout after (a) completes
   (90 s with the reference values; the API function's timeout stays at
   or below the 29 s integration timeout, because the function keeps
-  running after API Gateway stops waiting). Then, when `ListExecutions` with status
-  `RUNNING` on the old workflow is empty, deploy the upgrade with that
-  `allowedRoles` kept. (c) Redeploy with `allowedRoles` restored; a
+  running after API Gateway stops waiting). Then, when
+  `ListExecutions` with status `RUNNING` on the old workflow is empty,
+  deploy the upgrade with that `allowedRoles` kept. (c) Redeploy with
+  `allowedRoles` restored; a
   refusal cached during the drain can last one TTL after this.
   Deploy (b) must not restore the roles: CloudFormation may update
   the authorizer before the API function points at the new workflow,

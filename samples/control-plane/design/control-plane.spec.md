@@ -2013,9 +2013,10 @@ branch's error name and has one. The guard's `Output` drops
 `scriptOutputsRaw` and keeps an admitted value as `scriptOutputs`.
 It rejects a value that is absent or empty (the H-1 overflow, or a
 build that did not export), longer than 4,096 characters, or not a
-compact JSON object of printable ASCII string values. With printable ASCII, 4,096 characters
-are 4,096 bytes, so the guard and the buildspec enforce one rule. The
-last test is a regular expression over that grammar, and the pattern
+compact JSON object of printable ASCII string values. With printable
+ASCII, 4,096 characters are 4,096 bytes, so the guard and the
+buildspec enforce one rule. The last test is a regular expression
+over that grammar, and the pattern
 MUST be linear: no quantifier may hold another unbounded quantifier
 (the key's bounded `{0,63}` inside the `*` loop is allowed), and every
 choice the pattern makes MUST be decided by the next two characters,
@@ -3020,9 +3021,10 @@ name. A failed commit is told apart from a replay by a further write
 that changes nothing and succeeds only on the replay state: after an
 update commit, `REMOVE pending` conditioned on `status = UPDATING`,
 `operationId = :op` and `attribute_not_exists(pending)`; after a
-delete, a `DeleteItem` conditioned on `attribute_not_exists(PK)`. The cost is one Standard
-execution per operation, a few state transitions when no hook matches,
-plus each matching hook's build and polling (R-46, N-13).
+delete, a `DeleteItem` conditioned on `attribute_not_exists(PK)`.
+The cost is one Standard execution per operation, a few state
+transitions when no hook matches, plus each matching hook's build and
+polling (R-46, N-13).
 
 **R-51 (operation id and compensation):** every accepted record
 operation MUST generate an `operationId`, store it on the record in
@@ -3276,15 +3278,16 @@ and setting are expected leftovers, outside the per-run leftover
 check.
 
 1. **Deployment inputs and auth:** all four CodeBuild projects, the two
-   hook projects included, report a concurrent build limit of 50, and B's cell provisioning role carries
-   exactly the one test policy (ADR-0046, ADR-0047). An operation
-   without a JWT is rejected; with a valid vendor
-   IdP JWT it succeeds. A reader token (R-36) succeeds on every `GET`
-   operation and is refused with 403 on `POST`, `PUT` and `DELETE` alike,
-   nothing written; a token whose role is in neither set is refused on
-   every operation. The listed machine client's access token, which has
-   no `aud` (R-38), succeeds on `ListTenants` and `GetTenant` and is
-   refused with 403 on `CreateTenant`, nothing written; its token for
+   hook projects included, report a concurrent build limit of 50, and
+   B's cell provisioning role carries exactly the one test policy
+   (ADR-0046, ADR-0047). An operation without a JWT is rejected; with
+   a valid vendor IdP JWT it succeeds. A reader token (R-36) succeeds
+   on every `GET` operation and is refused with 403 on `POST`, `PUT`
+   and `DELETE` alike, nothing written; a token whose role is in
+   neither set is refused on every operation. The listed machine
+   client's access token, which has no `aud` (R-38), succeeds on
+   `ListTenants` and `GetTenant` and is refused with 403 on
+   `CreateTenant`, nothing written; its token for
    `control-plane/other` alone and the unlisted client's token are
    refused with 403 on `ListTenants`.
 2. **Applications:** `PutApplication` with a missing script path, a
