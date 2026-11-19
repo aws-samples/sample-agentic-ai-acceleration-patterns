@@ -284,3 +284,119 @@ export const REGISTRAR_ENV = {
   /** The multi-tenant distribution; dedicated distribution tenants attach to it. */
   distributionId: 'DISTRIBUTION_ID',
 } as const;
+
+// ---------------------------------------------------------------------------
+// Sweeper (S6b writes, S6c reads): spec §3.1, §3.4 step 5, ADR-0018,
+// ADR-0020, ADR-0022
+// ---------------------------------------------------------------------------
+
+/**
+ * The sweeper function's environment variable names. The lister starts its
+ * pages on its own function through `AWS_LAMBDA_FUNCTION_NAME`, which
+ * Lambda sets, so the stack sets no function name and the function's
+ * environment does not reference the function.
+ */
+export const SWEEPER_ENV = {
+  /** ARN of the route table KeyValueStore. */
+  routeTableArn: 'ROUTE_TABLE_ARN',
+  /** The multi-tenant distribution whose dedicated distribution tenants the removal job deletes. */
+  distributionId: 'DISTRIBUTION_ID',
+  /** Name of the sweeper's own DynamoDB table (ADR-0020). */
+  tableName: 'SWEEPER_TABLE_NAME',
+} as const;
+
+/** The jobs one sweeper function runs, chosen by the invocation's `job`. */
+export const SWEEPER_JOB = {
+  /** Two-phase removal of dedicated distribution tenants and certificates, every 15 minutes. */
+  remove: 'remove',
+  /** The daily re-check's lister: the daily schedule, the starter and a run by hand. */
+  recheck: 'recheck',
+  /** One page of the daily re-check, started by the lister only. */
+  page: 'page',
+} as const;
+
+/** The 15-minute schedule's input. */
+export const SWEEPER_REMOVE_INPUT = JSON.stringify({ job: SWEEPER_JOB.remove });
+
+/** The daily schedule's input, which the starter also sends. It names no date (ADR-0022). */
+export const SWEEPER_RECHECK_INPUT = JSON.stringify({ job: SWEEPER_JOB.recheck });
+
+/** What the lister sends each page: its UTC date, the page number from 1 and the page's stored tenant ids. */
+export interface SweeperPageEvent {
+  readonly job: typeof SWEEPER_JOB.page;
+  /** `YYYY-MM-DD`, the lister's UTC date. */
+  readonly runDay: string;
+  readonly page: number;
+  readonly tenantIds: readonly string[];
+}
+
+export type SweeperEvent =
+  | { readonly job: typeof SWEEPER_JOB.remove }
+  | { readonly job: typeof SWEEPER_JOB.recheck }
+  | SweeperPageEvent;
+
+/** Entries per page (§3.4 step 5): 500 ids of at most 63 characters, about 33 KB of payload. */
+export const SWEEPER_PAGE_SIZE = 500;
+
+/** The sweeper table's keys and time-to-live attribute: string `pk` and `sk`, on demand, PITR. */
+export const SWEEPER_TABLE = {
+  partitionKey: 'pk',
+  sortKey: 'sk',
+  timeToLiveAttribute: 'expiresAt',
+  /** `pk` of an entry item; its `sk` is `<tenantId>#<d>`. */
+  entryPk: 'ENTRY',
+  /** `pk` of a run item; its `sk` is the run's UTC date. */
+  runPk: 'RUN',
+} as const;
+
+/** The sweeper table's item attributes. */
+export const SWEEPER_ATTR = {
+  /** Entry item: the UTC date of the last outcome recorded. */
+  lastCheckedDay: 'lastCheckedDay',
+  /** Entry item: `pass`, `miss` or `error`. */
+  lastOutcome: 'lastOutcome',
+  /** Entry item: consecutive checks after that day's outcome. */
+  missStreak: 'missStreak',
+  errorStreak: 'errorStreak',
+  /** Entry item: the same counts before that day's outcome. */
+  missBefore: 'missBefore',
+  errorBefore: 'errorBefore',
+  /** Run item: the number of pages the lister started, zero included. */
+  pagesStarted: 'pagesStarted',
+  /** Run item: a number set of the pages that recorded their last entry. */
+  pagesFinished: 'pagesFinished',
+  /** Run item: Unix seconds, 14 days out. */
+  expiresAt: 'expiresAt',
+} as const;
+
+/** How long a run item is kept. */
+export const SWEEPER_RUN_TTL_SECONDS = 14 * 24 * 60 * 60;
+
+/**
+ * The re-check's counts: embedded metric format lines in the sweeper's log,
+ * namespace `TenantFrontDoor` (the registrar's `METRIC_NAMESPACE`), no
+ * dimensions, unit Count.
+ */
+export const SWEEPER_METRIC_NAMESPACE = 'TenantFrontDoor';
+export const SWEEPER_METRICS = {
+  /** 1 for each write that records a miss and leaves `missStreak` at 3 or more. Three-miss alarm. */
+  threeMiss: 'DomainChallengeThreeMiss',
+  /** 1 for each write that leaves `errorStreak` at 3 or more. `unverifiable` alarm. */
+  unverifiable: 'DomainChallengeUnverifiable',
+  /** One value per lister run: the previous day's missing pages. Missing-pages and no-lister alarms. */
+  missingPages: 'SweeperMissingPages',
+} as const;
+
+/** The `message` of the sweeper's log lines that the alarms' runbook and the integration test read. */
+export const SWEEPER_LOG = {
+  threeMiss: 'three-miss',
+  unverifiable: 'unverifiable',
+  stalePage: 'stale-page',
+  entryGone: 'tenant entry gone',
+  pageReads: 'page reads',
+} as const;
+
+/** The starter custom resource's one property: the sweeper function it invokes on Create. */
+export interface SweeperStarterProperties {
+  readonly SweeperFunctionName: string;
+}
