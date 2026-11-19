@@ -70,8 +70,8 @@ dropped, and the drain stays as ADR-0011's note describes.
 
 `microvm` jobs lose `memfd_create`, SysV IPC, mounts, `unshare`, `setns`,
 new namespaces through `clone`, `vmsplice` and socket buffer sizing,
-have at most 64 open files per process and N processes and threads (9 at the default),
-and the tool description says so. The filter list must be revisited when
+have at most 64 open files per process and N processes and threads
+(9 at the default), and the tool description says so. The filter list must be revisited when
 the guest kernel changes, and a new route found by a test is a new list
 entry. The floor catches only fills slower than about 1.3 GiB/s, and it,
 the `clone` entries, the job-wide Unix socket total and the 20 ordinary
