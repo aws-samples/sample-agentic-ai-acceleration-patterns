@@ -43,8 +43,9 @@ construct that names the producer, an accepted exception to standard
 `runCodeFunction` is granted through `grantInvokeRunCode`, or by an
 identity policy on its published ARN; same-account identity policies
 that allow invoke on `*` also reach it (threat T-82).
-A lint rule and a unit test keep the producer import inside
-`src/gateway/`.
+A lint rule and a unit test keep the producer out of everything the
+core entry (`src/index.ts`) reaches; only `src/gateway/` and the demo app
+files import it.
 
 ## Consequences
 
@@ -66,27 +67,41 @@ resolution. The core is the first sample meant to be installed outside
 the repository, so it ships compiled JavaScript: a `.ts` entry under a
 consumer's `node_modules` is not compiled by the default ts-node and is
 refused by Node's type stripping there. Its constructs build their
-Lambdas from `path.join(__dirname, '….function.ts')`, so a post-compile
-projen task copies every `src/**/*.function.ts`, the modules they import,
-and the runner sources into `lib/` at the same relative paths, and the
-package's `files` keeps them. esbuild compiles those handler sources at
-the consumer's synth. A unit test asserts that every `__dirname` entry
-the constructs name exists under `lib/` after compile. No
+Lambdas from TypeScript handler sources, so a post-compile projen task
+copies every `src/**/*.function.ts`, the modules they import and the
+runner sources into a separate tree, `lib/handlers/`, at the same
+relative paths, and the package's `files` keeps it. Nothing in `lib/`
+outside `lib/handlers/` resolves into that tree, so no `.ts` file sits
+next to a compiled `.js`, which ts-node with `--prefer-ts-exts` and `tsc`
+would otherwise pick over the `.js` and `.d.ts`. The constructs name
+their entries through one helper, `handlerEntry(relativePath)`, which
+returns the `src/` path when the construct runs from `src/` (in the
+repository) and the `lib/handlers/` path when it runs from `lib/`.
+esbuild compiles those sources at the consumer's synth. Unit tests
+assert that every entry the constructs name exists under `lib/handlers/`
+after compile, and that no shipped `.ts` other than a `.d.ts` shares a
+base name with a `.js` outside `lib/handlers/`. No
 sample consumes another through `file:` yet, and the producer has no
 `main` or `exports`. The same pull request therefore changes
 `agentic-runtime-isolation`'s `.projenrc.ts` to set `main` and `types` to
 `src/index.ts`, and adds an `exports` map with `.` → `src/index.ts` and
 `./tools` → `src/tools/context.ts`, so the gateway handler imports
 `toolHandler` from `agentic-runtime-isolation/tools` and its bundle does
-not pull in the producer's constructs or `aws-cdk-lib`. A `lib/` target
-was rejected: tsc copies no `.function.ts` files into `lib/`, so every
-producer construct that builds a Lambda from `__dirname` would fail at
-synth, and `lib/` is not committed. That sample's build and tests run in
+not pull in the producer's constructs or `aws-cdk-lib`. The producer keeps
+a `src/` entry because it is only ever installed through `file:` from a
+checkout: the symlink resolves to a real path outside `node_modules`, so
+ts-node compiles it, and its `__dirname` handler entries stay valid.
+`./gateway` therefore works outside this repository only when the
+producer is a `file:` install of a checkout; a registry or tarball copy
+of the producer is not supported, and the README says so. A `lib/` entry
+for the producer would need the same handler-tree work as the core,
+which the producer does not need while it is only consumed through
+`file:`. That sample's build and tests run in
 the same pull request, and the integration app's synth is the check that
 the entry resolves.
 A deep import of the producer's source was rejected, because standard
 §1.1 asks for imports through the producer's package entry. The first
 build proves the gateway import from the integration app and from a stub
-consumer that has the producer, and the §8 `standalone-build` step installs the core
+consumer that installs the producer through `file:`, and the §8 `standalone-build` step installs the core
 from an `npm pack` tarball into a consumer without the producer and
 proves it installs, compiles and synths.

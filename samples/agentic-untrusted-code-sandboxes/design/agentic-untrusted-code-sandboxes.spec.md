@@ -873,7 +873,7 @@ Consumes:
 
 | Producer | Interface | Why |
 |---|---|---|
-| `agentic-runtime-isolation` | construct `ToolTarget` and `toolHandler` from its `src/index.ts` (local `file:../agentic-runtime-isolation`, dev and optional peer dependency), parameter `/application-plane/shared/agent-runtime/ingress` | the tools gateway, the signed tenant context; used only by the gateway entry |
+| `agentic-runtime-isolation` | construct `ToolTarget` from its package entry and `toolHandler` from its `./tools` subpath (local `file:../agentic-runtime-isolation`, dev and optional peer dependency; the gateway entry supports only a `file:` install of the producer, ADR-0017), parameter `/application-plane/shared/agent-runtime/ingress` | the tools gateway, the signed tenant context; used only by the gateway entry |
 | `tenant-identity` `shared-pool` | its parameters, through `agentic-runtime-isolation` only | users and tenants for the integration test |
 
 Publishes:
