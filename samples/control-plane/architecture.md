@@ -6,6 +6,7 @@ This sample has been verified as working via automated integration tests and end
 
 | Date | Commit | Test accounts | Region | Verified by | Notes |
 |------|--------|---------------|--------|-------------|-------|
+| 2026-11-19 | 93e7ae4 | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6359s`: every step of spec §10 passed, with the vendor hooks of ADR-044 in step 16 (global and application pre and post hooks around cell and deployment scripts, `SCRIPT_OUTPUTS` through the outputs guard, a failing pre and post hook, a skipped delete hook, the deny on the hook roles) and the asynchronous record operations of ADR-045 (202 and polling on every application, tenant and account call, hooks on tenant, application and account events in step 17, teardown through the API in step 18). Deploy about 5 min, assertions about 64 min, teardown about 37 min; nothing of the run left in either account. The later commits change docs only |
 | 2026-11-18 | 255aa7b | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3115s`: every step of spec §10 passed, with the deployment inputs in step 1: both CodeBuild projects carried the stack's `concurrentBuildLimit` of 50 (ADR-0046), and B's cell provisioning role carried exactly the policy its stack attached through `cellBuildManagedPolicyArns` (ADR-0047). Nothing left in the control plane account. The later commits change docs, a comment, and the assertion that names B's cell role, which now derives the name from the fleet name and gets the same name the run used; the deployed templates are those of the run |
 | 2026-11-16 | aa1221a | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3071s`: every step of spec §10 passed, with the required scope (R-38) in step 1: the listed machine client's `control-plane/read` token read and was refused on a write, its `control-plane/other` token was refused, and the unlisted client was refused. Deploy about 4 min, assertions 23 min, teardown about 24 min; nothing left in either account |
 | 2026-11-16 | d6f0fcb | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 2890s`: every step of spec §10 passed, with the client id path (R-38) in step 1: the listed machine client's token (no `aud`, `sub` equal to its client id) read and was refused on a write, and the unlisted client was refused. Nothing left in either account |
@@ -24,19 +25,13 @@ This sample has been verified as working via automated integration tests and end
 
 **Test harness:** `test/integ.tenant.ts` — documented in `integration-test.md`
 
-**Vendor hooks (ADR-044):** implemented and covered by unit tests
+**Vendor hooks (ADR-044) and hooks on application, tenant and account
+events (ADR-045):** covered by the 2026-11-19 run above and by unit tests
 (`test/tenant/hook*.test.ts`, `test/tenant/tenant.hooks.test.ts`,
-`test/shared/hook-transactions.test.ts`). The runs in the table above predate
-them: no green integration run with the hook steps (spec §10 step 16 and
-the hook checks of step 17) is recorded yet.
-
-**Hooks on application, tenant and account events (ADR-045):** implemented
-and covered by unit tests (`test/tenant/record-event.types.test.ts`,
+`test/shared/hook-transactions.test.ts`, `test/tenant/record-event.types.test.ts`,
 `test/tenant/record-writes.test.ts`, `test/tenant/record-event-workflow.test.ts`,
-`test/tenant/tenant.record-events.test.ts`). The runs in the table above
-predate them and called the seven record operations as synchronous; no
-green integration run of the asynchronous record operations is recorded
-yet.
+`test/tenant/tenant.record-events.test.ts`). The runs before it predate
+hooks and called the seven record operations as synchronous.
 
 ---
 
