@@ -141,23 +141,33 @@ run_checks() {
   edge_param="$(param "$PARAM_EDGE")"
   registrar="$(jq -r .registrarUrl <<<"$edge_param")"; [[ "$registrar" == */ ]] || registrar="$registrar/"
   dist="$(jq -r .distributionArn <<<"$edge_param")"
-  kvs="$(aws cloudfront list-key-value-stores --query "KeyValueStoreList.Items[?contains(Name, 'TenantFrontDoor')].ARN | [0]" --output text)"
+  # The route table of this deployment: the registrar function's own setting.
+  local registrar_fn
+  registrar_fn="$(aws cloudformation describe-stack-resources --stack-name TenantFrontDoor-main \
+    --query "StackResources[?ResourceType=='AWS::Lambda::Function' && starts_with(LogicalResourceId, 'RegistrarFunction')].PhysicalResourceId | [0]" --output text)"
+  kvs="$(aws lambda get-function-configuration --function-name "$registrar_fn" --query 'Environment.Variables.ROUTE_TABLE_ARN' --output text)"
+  [[ "$kvs" == arn:*:key-value-store/* ]] || { echo "no route table ARN on the registrar function"; exit 1; }
   cell_domain="$(out TfdSmoke-cell ApiDomain)"; cell_url="$(out TfdSmoke-cell FunctionUrl)"
   note "distribution ${dist##*/}, route table ${kvs##*/}, cell ${cell_domain}"
 
   echo "1. tenants a, b (routed) and c (no route) in tenant-identity"
-  load_sigv4
   A=""; B=""; C=""; A_TOKEN=""; B_TOKEN=""; C_TOKEN=""
-  create_tenant "tfd-smoke-a-$$"; A="$TENANT_ID"; issue_token "$A" "$ADMIN_USER" A_TOKEN
-  create_tenant "tfd-smoke-b-$$"; B="$TENANT_ID"; B_USER="$ADMIN_USER"; issue_token "$B" "$B_USER" B_TOKEN
-  create_tenant "tfd-smoke-c-$$"; C="$TENANT_ID"; issue_token "$C" "$ADMIN_USER" C_TOKEN
+  # Armed before the first tenant, so a failure at any later step removes
+  # what the run made: tenants, namespace parameters, seeded routes.
   cleanup() {
     load_sigv4
     for t in "${TENANTS[@]}"; do signed DELETE "${IDENTITY_API}platform/tenants/$t" >/dev/null || true; done
-    for t in "$A" "$B"; do aws ssm delete-parameter --name "/application-plane/tenants/$t/$APPLICATION_ID/smoke" >/dev/null 2>&1 || true; done
-    npx ts-node -P test/tsconfig.json test/smoke/seed.ts delete "$kvs" "$CELL_ID" "$A" "$B" >/dev/null || true
+    for t in "$A" "$B"; do
+      [[ -n "$t" ]] || continue
+      aws ssm delete-parameter --name "/application-plane/tenants/$t/$APPLICATION_ID/smoke" >/dev/null 2>&1 || true
+      npx ts-node -P test/tsconfig.json test/smoke/seed.ts delete "$kvs" "$CELL_ID" "$t" >/dev/null || true
+    done
   }
   trap 'cleanup; rm -f "$TMP"/*; rmdir "$TMP"' EXIT
+  load_sigv4
+  create_tenant "tfd-smoke-a-$$"; A="$TENANT_ID"; issue_token "$A" "$ADMIN_USER" A_TOKEN
+  create_tenant "tfd-smoke-b-$$"; B="$TENANT_ID"; B_USER="$ADMIN_USER"; issue_token "$B" "$B_USER" B_TOKEN
+  create_tenant "tfd-smoke-c-$$"; C="$TENANT_ID"; issue_token "$C" "$ADMIN_USER" C_TOKEN
   for t in "$A" "$B"; do aws ssm put-parameter --name "/application-plane/tenants/$t/$APPLICATION_ID/smoke" --type String --value smoke --overwrite >/dev/null; done
   t0=$(date +%s)
   npx ts-node -P test/tsconfig.json test/smoke/seed.ts put "$kvs" "$CELL_ID" "$account" "$cell_domain" "$A=Smoke A" "$B=Smoke B"
@@ -204,7 +214,8 @@ run_checks() {
   payload="$(printf '%s' "$payload" | tr '_-' '/+')"; while (( ${#payload} % 4 )); do payload+='='; done
   payload="$(printf '%s' "$payload" | base64 -d | jq -c --arg b "$B" '.tenant_id = $b' | base64 -w0 | tr '/+' '_-' | tr -d '=')"
   FORGED="${head}.${payload}.${sig}"
-  st="$(edge GET /api/whoami FORGED)"; check "forged payload naming b refused by cell 403" 403 "$st"
+  st="$(edge GET /api/whoami FORGED)"; check "forged payload naming b refused 403" 403 "$st"
+  check "that 403 is the cell's, not the router's" yes "$(grep -q '"status":403' "$BODY" && echo no || echo yes)"
   local BIG; BIG="$(head -c 8186 /dev/zero | tr '\0' a)"
   st="$(edge GET /api/whoami BIG)"; check "Authorization over 8,192 bytes 401" "401|494" "$st"
   st="$(curl -s -o /dev/null -w '%{http_code}' "${cell_url}api/whoami")"; check "cell function URL direct 403" 403 "$st"

@@ -26,17 +26,17 @@ const account = process.env.CDK_DEFAULT_ACCOUNT;
 const region = process.env.CDK_DEFAULT_REGION ?? 'eu-central-1';
 const env = { account, region };
 
-const OPERATOR_ROLE_NAME = 'tfd-smoke-edge-operator';
-
 const support = new Stack(app, 'TfdSmoke-support', { env, description: 'tenant-front-door smoke test: edge operator role and placeholder IdP secret' });
+// Assumed by the smoke driver's own identity in this account. The registrar's
+// resource policy is the gate; this policy names only the two routes the
+// smoke calls, on any API, because the registrar's API id does not exist yet.
 const operator = new iam.Role(support, 'EdgeOperator', {
-  roleName: OPERATOR_ROLE_NAME,
   assumedBy: new iam.AccountRootPrincipal(),
   description: 'tenant-front-door smoke test edge operator: calls the registrar',
 });
 operator.addToPolicy(new iam.PolicyStatement({
   actions: ['execute-api:Invoke'],
-  resources: [support.formatArn({ service: 'execute-api', resource: '*' })],
+  resources: ['*/*/PUT/cells/*', '*/*/PUT/tenants/*/status'].map((route) => support.formatArn({ service: 'execute-api', resource: route })),
 }));
 const secret = new secretsmanager.Secret(support, 'VendorIdpSecret', {
   description: 'tenant-front-door smoke test: placeholder vendor IdP client secret (no control plane exists)',
