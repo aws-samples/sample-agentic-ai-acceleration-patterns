@@ -20,7 +20,7 @@ import {
   ListUsersInGroupCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import 'aws-sdk-client-mock-jest';
-import { AnyMock, cognitoError, cognitoMock, depsFor, IDS, tenant } from './helpers';
+import { accessJwt, AnyMock, authResult, cognitoError, cognitoMock, depsFor, IDS, tenant } from './helpers';
 import { ConflictError, NotFoundError, UnsupportedInTopologyError } from '../../src/shared/errors';
 import { PoolPerTenantProvisioner } from '../../src/topology/pool-per-tenant';
 
@@ -209,10 +209,38 @@ describe('PoolPerTenantProvisioner (spec §7.1)', () => {
       await expect(provisioner().issueToken(tenantA(), 'u1', 'pw')).rejects.toMatchObject({ name: 'ConflictError', message: 'Token issuance refused' });
     });
 
-    it('refreshToken uses REFRESH_TOKEN_AUTH', async () => {
-      cognito.on(AdminInitiateAuthCommand).resolves({ AuthenticationResult: { AccessToken: 'a', IdToken: 'i', ExpiresIn: 300 } });
-      await provisioner().refreshToken(tenantA(), 'u1', 'rt');
-      expect(cognito.commandCalls(AdminInitiateAuthCommand)[0].args[0].input.AuthFlow).toBe('REFRESH_TOKEN_AUTH');
+  });
+
+  describe('refreshToken binds the result to the path\'s user and tenant (ADR-0013 amendment)', () => {
+    beforeEach(() =>
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: 'sub', Value: 'sub-u1' }], UserStatus: 'CONFIRMED' }),
+    );
+
+    it('serves the path user\'s own token (200) through REFRESH_TOKEN_AUTH on the tenant\'s pool', async () => {
+      const own = accessJwt({ sub: 'sub-u1', tenant_id: IDS.a });
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(own));
+      const tokens = await provisioner().refreshToken(tenantA(), 'u1', 'rt');
+      expect(tokens.accessToken).toBe(own);
+      const input = cognito.commandCalls(AdminInitiateAuthCommand)[0].args[0].input;
+      expect(input.AuthFlow).toBe('REFRESH_TOKEN_AUTH');
+      expect(input.UserPoolId).toBe(POOL);
+      expect(input.ClientId).toBe(CLIENT);
+      expect(cognito).toHaveReceivedCommandTimes(AdminGetUserCommand as AnyMock, 1);
+    });
+
+    it('refuses a foreign tenant\'s token on this tenant\'s path with the non-member 404', async () => {
+      // Live, the tenant's own client refuses another pool's token first
+      // (409); this pins the binding should Cognito ever serve it.
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-b1', tenant_id: IDS.b })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt-of-b')).rejects.toMatchObject({
+        name: 'NotFoundError',
+        message: 'User not found in tenant',
+      });
+    });
+
+    it('refuses another user\'s token from the same pool with 404', async () => {
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-u2', tenant_id: IDS.a })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt-of-u2')).rejects.toBeInstanceOf(NotFoundError);
     });
   });
 

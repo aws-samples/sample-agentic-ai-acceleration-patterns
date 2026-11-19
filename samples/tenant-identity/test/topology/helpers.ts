@@ -58,3 +58,18 @@ export function cognitoError(name: string, message = 'cognito'): Error {
   error.name = name;
   return error;
 }
+
+/**
+ * A JWT shaped like a Cognito access token, unsigned: the refresh binding
+ * (ADR-0013 amendment) reads the claims of a token Cognito returned in the
+ * same call, so the tests only need its payload.
+ */
+export function accessJwt(claims: Record<string, unknown>): string {
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${part({ alg: 'RS256', kid: 'test' })}.${part({ token_use: 'access', ...claims })}.sig`;
+}
+
+/** An AdminInitiateAuth answer carrying the given access token. */
+export function authResult(accessToken: string) {
+  return { AuthenticationResult: { AccessToken: accessToken, IdToken: 'i', ExpiresIn: 300 } };
+}

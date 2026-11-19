@@ -838,6 +838,24 @@ export function defineScenario(topology: Topology): void {
       }
     });
 
+    // -- step 6a: RefreshToken binds the refreshed token (ADR-0013) --------
+    // u2's refresh token (tenant B) on A's path naming u1, a real user of A.
+    // Before the 2026-11-19 amendment the shared topologies served it and
+    // returned u2's own new tokens. Now: the non-member 404, no token. In
+    // pool-per-tenant A's own app client refuses B's pool's token before the
+    // binding runs (409); either way no token comes back.
+    test('step 6a: RefreshToken refuses another tenant\'s refresh token (R-12 binding)', async () => {
+      const r = await platform.call<Record<string, unknown>>(
+        'POST',
+        `platform/tenants/${tenantIds.A}/users/${usernames.u1}/token/refresh`,
+        { refreshToken: tokens.u2.refreshToken },
+      );
+      coverage.record('RefreshToken');
+      expectStatus(r, topology === 'pool-per-tenant' ? 409 : 404, 'RefreshToken A/u1 with B/u2 refresh token');
+      expect(r.body?.accessToken).toBeUndefined();
+      expect(r.body?.idToken).toBeUndefined();
+    });
+
     // -- step 6: refresh re-runs the trigger (topology 3) -------------------
     test('step 6: refresh re-runs the trigger (shared-pool-multi-tenant)', async () => {
       if (topology !== 'shared-pool-multi-tenant') {

@@ -26,6 +26,7 @@ import {
   adminGetUserToView,
   adminPasswordSignIn,
   adminRefresh,
+  assertRefreshedFor,
   attr,
   COGNITO,
   findUserByEmail,
@@ -270,8 +271,14 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
   }
 
   async refreshToken(tenant: TenantRecord, username: string, refreshToken: string): Promise<TokenSet> {
+    // R-12, then bind the refreshed token to the path's user and tenant
+    // (ADR-0013 amendment). Group membership does not carry `sub`, so one
+    // AdminGetUser reads it.
     await this.assertMember(tenant, username);
-    return adminRefresh(this.cognito, this.userPoolId, this.appClientId, refreshToken);
+    const user = await adminGetUser(this.cognito, this.userPoolId, username);
+    const tokens = await adminRefresh(this.cognito, this.userPoolId, this.appClientId, refreshToken);
+    assertRefreshedFor(tokens, attr(user.attributes, 'sub'), tenant.tenantId, 'tenants');
+    return tokens;
   }
 
   /** Deletes the Cognito user when no `t-*` group remains (P-4); true when deleted. */

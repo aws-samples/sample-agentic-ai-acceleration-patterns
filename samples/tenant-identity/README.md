@@ -719,7 +719,7 @@ Three Smithy services ([`model/`](./model/)) merged into one REST API
 | `CreateMembership` | `PUT /platform/tenants/{tenantId}/users/{username}/membership` | 204 — topology 3 only; 400 `UnsupportedInTopology` otherwise |
 | `DeleteMembership` | `DELETE /platform/tenants/{tenantId}/users/{username}/membership` | 204 — topology 3 only; 409 on last tenant; releases the first-admin slot when it removes the holder, as `DeleteUser` does (ADR-0032) |
 | `IssueToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token` | 200 — sets a password, signs in; remove before production (ADR-0006) |
-| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` | 200 — refresh re-runs the trigger; remove before production (ADR-0006) |
+| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` | 200 — refresh re-runs the trigger; 404 when the refresh token belongs to another user or tenant than the path (ADR-0013); remove before production (ADR-0006) |
 
 ### Tenant admin (`/tenant/*`, narrowed admin token)
 

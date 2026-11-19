@@ -550,7 +550,7 @@ setup, before the first operation is modelled.
 | `CreateMembership` | `PUT /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminAddUserToGroup`. 1, 2: 400 `UnsupportedInTopology`. |
 | `DeleteMembership` | `DELETE /platform/tenants/{tenantId}/users/{username}/membership` → 204 | 3: `AdminRemoveUserFromGroup`; 409 if it is the user's last tenant (use `DeleteUser`); if the user holds the first-admin slot, release it after the removal, as `DeleteUser` does (ADR-0032). 1, 2: 400 `UnsupportedInTopology`. |
 | `IssueToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token` `{password}` → 200 `{accessToken, idToken, refreshToken, expiresIn}` | `AdminSetUserPassword` (permanent) then `AdminInitiateAuth` with `ADMIN_USER_PASSWORD_AUTH` against the topology's pool. §3.2. |
-| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` `{refreshToken}` → 200 `{accessToken, idToken, expiresIn}` | `AdminInitiateAuth` with `REFRESH_TOKEN_AUTH`, so the test can show that refresh re-runs the trigger (P-2, §10 steps 6 and 9). Same labelling as `IssueToken`. |
+| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` `{refreshToken}` → 200 `{accessToken, idToken, expiresIn}` | `AdminInitiateAuth` with `REFRESH_TOKEN_AUTH`, so the test can show that refresh re-runs the trigger (P-2, §10 steps 6 and 9). The refreshed access token MUST belong to the path's user and tenant (R-12 binding, below); otherwise 404 and no token is returned. Same labelling as `IssueToken`. |
 
 A User is `{username, email, admin, status, scopes, createdAt}`: `status` is
 Cognito's user status, `admin` is membership of `admin-<id>`, and `scopes` is
@@ -567,6 +567,19 @@ belongs to `{tenantId}`: 1: the user exists in the tenant's pool. 2:
 If not, the call fails with `ResourceNotFoundError` (404) and changes
 nothing. `CreateUser`, `CreateTenantUser`, and `CreateMembership` are exempt: adding a user to a
 tenant is the vendor's intent (ADR-0013).
+
+**R-12 binding (`RefreshToken`):** the refresh token names no user, so the
+membership check alone does not keep the call in the tenant. After
+`REFRESH_TOKEN_AUTH`, the provisioner MUST check that the returned access
+token's `sub` equals the path user's `sub` (from `AdminGetUser`) and that its
+tenant claim names `{tenantId}` (1, 2: `tenant_id`; 3: `tenants` contains it).
+On a mismatch the call fails with the same `ResourceNotFoundError` (404) and
+fixed text as a non-member, and the tokens are discarded, never returned. The
+claims are read without a signature check because the token came back from
+Cognito in that same call, not from the caller (ADR-0013, amendment
+2026-11-19). In topology 1 a foreign tenant's refresh token is already
+refused by the tenant's own app client (409, as any refused refresh); the
+binding covers another user's refresh token from the same pool.
 
 Platform mutations are **synchronous**. The slowest, creating a user pool, is
 seconds, not minutes; a 202/polling model would add machinery without adding
@@ -1087,7 +1100,10 @@ step 12.
    `RefreshToken` with u1's refresh token → verify → `tenants = [A]`.
    `DeleteMembership` u1 from A → 409 (last tenant). `CreateMembership` u1 → B
    again, refresh → `tenants = [A, B]`, so u1 enters step 9 as a
-   multi-tenant user.
+   multi-tenant user. **All topologies (R-12 binding):** `RefreshToken` on
+   A's path naming u1, with u2's (tenant B's) refresh token → 404 with no
+   token in the body (topology 1: Cognito refuses the foreign pool's token
+   first, 409, also with no token).
 7. **Narrowing (P-10), all topologies.** Exchange u1's refresh token with
    `scope=sample/read`, plus `resource=A` (required in 3), and verify.
    The result has `tenant_id = A`, no `tenants` claim,

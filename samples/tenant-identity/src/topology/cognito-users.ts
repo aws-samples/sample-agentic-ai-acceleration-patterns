@@ -25,6 +25,7 @@ import {
   ListUsersCommand,
   UserType,
 } from '@aws-sdk/client-cognito-identity-provider';
+import { decomposeUnverifiedJwt } from 'aws-jwt-verify/jwt';
 import type { UserView } from './provisioner';
 import { SCOPES_ATTRIBUTE } from '../shared/constants';
 import { ConflictError, InvalidInputError, NotFoundError } from '../shared/errors';
@@ -310,6 +311,56 @@ export async function adminRefresh(
     return readAuthResult(result.AuthenticationResult);
   } catch (error) {
     throw mapAuthError(error);
+  }
+}
+
+/**
+ * Which tenant claim the refreshed access token carries: `tenant_id` (one
+ * tenant per token: shared-pool, pool-per-tenant) or `tenants` (the sorted
+ * array of an un-narrowed shared-pool-multi-tenant token).
+ */
+export type TenantClaim = 'tenant_id' | 'tenants';
+
+/**
+ * ADR-0013 amendment (2026-11-19): REFRESH_TOKEN_AUTH takes only the refresh
+ * token, so Cognito serves whoever the token belongs to. The path's user was
+ * checked (R-12); this binds the result to that user. The access token's
+ * `sub` must equal the path user's `sub` (from AdminGetUser: immutable,
+ * unique, and independent of whether the path named the user by username or
+ * e-mail alias), and its tenant claim must name the path's tenant. On a
+ * mismatch: the same 404 a non-member gets, fixed text that does not say the
+ * token was someone else's, and the tokens are dropped, never returned.
+ *
+ * The claims are read without verifying the signature on purpose: the token
+ * is not caller input. It came back from Cognito in this call, over TLS, on
+ * the provisioner's own IAM-signed AdminInitiateAuth. Verifying it again
+ * would add a JWKS fetch per pool and prove nothing that channel does not.
+ * An unreadable token from Cognito is a server fault (500), never served.
+ */
+export function assertRefreshedFor(
+  tokens: { accessToken: string },
+  expectedSub: string | undefined,
+  tenantId: string,
+  claim: TenantClaim,
+): void {
+  let payload: Record<string, unknown>;
+  try {
+    payload = decomposeUnverifiedJwt(tokens.accessToken).payload as Record<string, unknown>;
+  } catch {
+    throw new Error('Refreshed access token is not readable');
+  }
+  const tenantMatches =
+    claim === 'tenant_id'
+      ? payload.tenant_id === tenantId
+      : Array.isArray(payload.tenants) && payload.tenants.includes(tenantId);
+  if (
+    expectedSub === undefined ||
+    expectedSub === '' ||
+    payload.token_use !== 'access' ||
+    payload.sub !== expectedSub ||
+    !tenantMatches
+  ) {
+    throw new NotFoundError('User not found in tenant');
   }
 }
 
