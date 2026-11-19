@@ -199,6 +199,23 @@ describe('demo cell API: token refusals (spec §3.5, §6.1, ARCHITECTURE.md §2.
     expect(ok.status).toBe(200);
   });
 
+  test('a token without exp is refused with 403 (ARCHITECTURE.md §2.1: exp is verified)', async () => {
+    const noExp = await new SignJWT({ client_id: CLIENT, token_use: 'access', sub: 'user-1', tenant_id: TENANT_A })
+      .setProtectedHeader({ alg: 'RS256', kid: 'k1' })
+      .setIssuer(ISSUER)
+      .sign(privateKey);
+    await refused({ 'x-tenant-token': noExp, 'x-tenant-route': TENANT_A }, 'invalid_token');
+  });
+
+  test('an unexpected verifier error answers 503 verify_failed with its class name only', async () => {
+    const verifier = { verify: async () => Promise.reject(new RangeError('secret detail')) } as unknown as TokenVerifier;
+    const s = setup({ verifier });
+    const res = await call(s.api, { 'x-tenant-token': await forA(), 'x-tenant-route': TENANT_A });
+    expect(res.status).toBe(503);
+    expect(s.records).toEqual([expect.objectContaining({ reason: 'verify_failed', error: 'RangeError', tenantId: '-' })]);
+    expect(JSON.stringify(s.records)).not.toContain('secret detail');
+  });
+
   test('a token without sub is refused', async () => {
     await refused({ 'x-tenant-token': await forA({ sub: '' }), 'x-tenant-route': TENANT_A }, 'no_subject');
   });
