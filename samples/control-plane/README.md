@@ -185,10 +185,11 @@ hook that names one. A record event's hook build gets `EVENT`, `PHASE`,
 `HOOK_ID`, `HOOK_SCOPE`, `HOOK_SCRIPT`, `OPERATOR_ID`, `EXECUTION_ID`,
 `ATTEMPT` and the record's fields: `APPLICATION_ID`; `TENANT_ID` and
 `TENANT_NAME`; or `ACCOUNT_ID`, `ACCOUNT_OWNER` and
-`ACCOUNT_APPLICATION_IDS` (comma-separated, empty for a shared account). It never gets an external id, a parameter, a
-source or a script. `GetApplication`, `GetTenant` and `GetAccount` report
-`status`, `statusReason`, `lastGlobalHooks` and `operationId`, the name of
-the last operation's execution and its hooks' `EXECUTION_ID`.
+`ACCOUNT_APPLICATION_IDS` (comma-separated, empty for a shared account). It
+never gets an external id, a parameter, a source or a script.
+`GetApplication`, `GetTenant` and `GetAccount` report `status`,
+`statusReason`, `lastGlobalHooks` and `operationId`, the name of the last
+operation's execution and its hooks' `EXECUTION_ID`.
 
 A `CREATE_FAILED` application or account is put again or deleted, a
 `CREATE_FAILED` tenant is deleted, an `UPDATE_FAILED` record takes another
@@ -528,16 +529,16 @@ context lookups commits them to `cdk.context.json` instead. Replace
 
 That policy is safe only in an account that holds nothing but cells, with a
 cell bootstrap whose execution role and every cell role carry a permissions
-boundary, and every cell role sits on a `/cell/` role path (ADR-0047).
-The control plane's own account never qualifies, because it holds the
-control plane: on the control plane stack, attach only policies scoped to
-the cell's own resources. There the cell role also carries the control
-plane's explicit deny (spec R-41, below), which overrides any attached
-policy that grants a denied action. A policy that reaches an administrator role, the
-default CDK bootstrap (`cdk-hnb659fds-*`), or any role other than the three
-`cdk-cell-*` roles above and the cell lookup role makes the cell build and
-the API role administrators of the account; one that reaches the cell
-lookup role lets both read the whole account. Without the lookup role, `cdk deploy` prints a
+boundary, and every cell role sits on a `/cell/` role path (ADR-0047). The
+control plane's own account never qualifies, because it holds the control
+plane: on the control plane stack, attach only policies scoped to the cell's
+own resources. There the cell role also carries the control plane's explicit
+deny (spec R-41, below), which overrides any attached policy that grants a
+denied action. A policy that reaches an administrator role, the default CDK
+bootstrap (`cdk-hnb659fds-*`), or any role other than the three `cdk-cell-*`
+roles above and the cell lookup role makes the cell build and the API role
+administrators of the account; one that reaches the cell lookup role lets
+both read the whole account. Without the lookup role, `cdk deploy` prints a
 warning that it could not assume it and goes on with the deploy role.
 
 `concurrentBuildLimit` (default 5, ADR-0046) caps concurrent builds on every
@@ -571,15 +572,16 @@ Without them a hook role can write its logs and nothing else. The stack
 grants no read on a hook source: when a hook's source needs one (an S3
 location, a private repository), grant it yourself, as for the provisioning
 projects (spec N-6), for example in a policy of one of these two lists.
-Every hook of a scope shares its role, so a policy attached for one
-hook is held by all of them. An explicit deny on both hook roles, both build
-roles and the home account's pair (spec R-41) keeps any attached policy from
+Every hook of a scope shares its role, so a policy attached for one hook is
+held by all of them. An explicit deny on both hook roles, both build roles
+and the home account's pair (spec R-41) keeps any attached policy from
 changing or starting the control plane's own workflow, projects, table, API,
 functions or roles; on the home pair that includes the policies of
-`tenantBuildManagedPolicyArns` and `cellBuildManagedPolicyArns`. It does not stop reads: table reads and
-`states:DescribeExecution` or `codebuild:BatchGetBuilds` on the control
-plane's executions and builds stay open to an attached policy, and those
-carry an account's `externalId` (spec N-10):
+`tenantBuildManagedPolicyArns` and `cellBuildManagedPolicyArns`. It does not
+stop reads: table reads and `states:DescribeExecution` or
+`codebuild:BatchGetBuilds` on the control plane's executions and builds stay
+open to an attached policy, and those carry an account's `externalId` (spec
+N-10):
 
 ```bash
 npx cdk deploy \

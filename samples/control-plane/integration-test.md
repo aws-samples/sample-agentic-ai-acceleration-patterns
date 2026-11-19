@@ -142,12 +142,13 @@ leftovers, outside the per-run leftover check.
 
 The two hook test policies exist before the stack under test, because the
 stack validates both hook inputs at synth. Each lets its hook role write SSM
-parameters under that scope's test path in A (under `/cp-integ/<fleet>/hooks/`) and nowhere else, which is
-where the hooks of steps 16 to 18 record what they saw. The application hook policy
-also allows `states:StartExecution` on the workflow, named by its computed
-ARN `arn:<partition>:states:<region>:<account>:stateMachine:<fleet>-workflow`,
-and `lambda:InvokeFunction` on every function of the account, so step 16
-can show the stack's deny overriding both allows.
+parameters under that scope's test path in A (under
+`/cp-integ/<fleet>/hooks/`) and nowhere else, which is where the hooks of
+steps 16 to 18 record what they saw. The application hook policy also allows
+`states:StartExecution` on the workflow, named by its computed ARN
+`arn:<partition>:states:<region>:<account>:stateMachine:<fleet>-workflow`,
+and `lambda:InvokeFunction` on every function of the account, so step 16 can
+show the stack's deny overriding both allows.
 
 The test reuses nothing that exists in either account. Its own steps delete
 every deployment, all four cells, every tenant, every global hook, both

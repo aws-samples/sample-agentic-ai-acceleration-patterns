@@ -170,10 +170,10 @@ break (ADR-012, ADR-032). A replaced application definition reaches only
 cells created afterwards.
 
 The design is one service: applications, accounts, cells, tenants,
-deployments and global hooks share one API, one table, one workflow. The deployment is the
-join between a tenant and the cells of its applications; it lives as
-`deployment.cellId` on a record keyed by tenant and application, not as a
-separate placement service (ADR-037).
+deployments and global hooks share one API, one table, one workflow. The
+deployment is the join between a tenant and the cells of its applications;
+it lives as `deployment.cellId` on a record keyed by tenant and application,
+not as a separate placement service (ADR-037).
 
 Out of scope: billing/metering, tenant tiers, cell rebalancing/migration
 (between cells or accounts), dependencies between applications,
@@ -308,21 +308,21 @@ before the script runs. The pair in each account is the provisioning blast
 radius and the hardening point; the account owner decides what it may do.
 One pair serves every application the account admits.
 
-The hook projects run in the control plane account under two roles of
-their own, `<fleet>-global-hook` and `<fleet>-app-hook`
+The hook projects run in the control plane account under two roles of their
+own, `<fleet>-global-hook` and `<fleet>-app-hook`
 (`src/tenant/tenant.cdk.ts`, `hookRole`). No pair trusts either role,
 neither is granted `sts:AssumeRole` on a pair, and each holds only its
 project's logs and the customer-managed policies the deployer attaches
 (`globalHookManagedPolicyArns`, `appHookManagedPolicyArns`); read on a hook
-source is the deployer's grant, as for the provisioning projects (N-6). Both build roles and both hook roles trust
-CodeBuild only on their own project's `aws:SourceArn`. Those four roles and
-the home account's pair carry one standalone explicit deny (`src/tenant/control-plane-deny.ts`, the
-`ControlPlaneDeny` policy) on every grant that would lead back to the
-pair: passing the stack's roles, writing their policies, starting or
-changing the four projects or the workflow, redriving its executions,
-changing the API or authorizer function, invoking the API function or
-changing its permissions, writing the REST API, and writing the table
-(spec R-41, §7 Vendor hooks).
+source is the deployer's grant, as for the provisioning projects (N-6). Both
+build roles and both hook roles trust CodeBuild only on their own project's
+`aws:SourceArn`. Those four roles and the home account's pair carry one
+standalone explicit deny (`src/tenant/control-plane-deny.ts`, the
+`ControlPlaneDeny` policy) on every grant that would lead back to the pair:
+passing the stack's roles, writing their policies, starting or changing the
+four projects or the workflow, redriving its executions, changing the API or
+authorizer function, invoking the API function or changing its permissions,
+writing the REST API, and writing the table (spec R-41, §7 Vendor hooks).
 
 ## 4. Data Model
 
@@ -535,8 +535,8 @@ it: a replay after the delete is a 409, not a silent re-create.
 ### GSI-1 / GSI-2 / GSI-3 — listing and per-cell / per-account / per-application lookup
 
 Three GSIs serve nine listing patterns; a tenant's deployments and the
-global hooks are base-table queries. Each item carries at most one partition attribute
-per index:
+global hooks are base-table queries. Each item carries at most one partition
+attribute per index:
 
 | Index | Item | PK | SK | Serves |
 |---|---|---|---|---|
@@ -554,11 +554,12 @@ per index:
 
 Account and application items carry GSI-1 attributes only, tenant items
 GSI-2 only; cells and deployments appear in all three; idempotency records,
-global hooks and the hook counter in none. A cell of one application holds at most one deployment per
-tenant, so `DEPLOYMENT#<tenantId>` is unique inside a cell or application
-partition. ULID sort keys give the cell, tenant and deployment listings
-creation order; accounts and applications list by id. The static
-partitions are a deliberate trade-off, fine at sample fleet sizes.
+global hooks and the hook counter in none. A cell of one application holds
+at most one deployment per tenant, so `DEPLOYMENT#<tenantId>` is unique
+inside a cell or application partition. ULID sort keys give the cell, tenant
+and deployment listings creation order; accounts and applications list by
+id. The static partitions are a deliberate trade-off, fine at sample fleet
+sizes.
 
 All three GSIs project **all attributes** (`ProjectionType: ALL`): the
 placement candidate scan needs `status`, `tenantCount`, and `maxTenants`,
@@ -1158,13 +1159,14 @@ Design points:
   `DeleteAccount` and `DeleteApplication` refuse while `cellCount > 0`.
 - Each script build Task has a catchable task-level timeout of one hour; a
   hook attempt is bounded by its own deadline (Vendor hooks, below). The
-  state-machine execution timeout, 26 hours, is greater than every build
-  and hook budget an execution can run at the caps plus terminal-write
-  recovery margin (a delete with ten hooks at 30 minutes, each spending its
-  three attempts, runs about 25 hours); it is a final safety net, not the
-  normal timeout path, and costs nothing on a Standard workflow. Terminal writes retry transient failures, and retry exhaustion
-  is caught so records do not remain indefinitely in an in-flight state.
-  `StartExecution` rejection is compensated as in §6.
+  state-machine execution timeout, 26 hours, is greater than every build and
+  hook budget an execution can run at the caps plus terminal-write recovery
+  margin (a delete with ten hooks at 30 minutes, each spending its three
+  attempts, runs about 25 hours); it is a final safety net, not the normal
+  timeout path, and costs nothing on a Standard workflow. Terminal writes
+  retry transient failures, and retry exhaustion is caught so records do not
+  remain indefinitely in an in-flight state. `StartExecution` rejection is
+  compensated as in §6.
 - The **account role pair** (`CellAccountRoles`, installed per account) carries
   the asymmetry: `<fleet>-cell-provisioning` reads `/application-plane/shared/*`
   and `/application-plane/applications/*` and gets/puts/deletes
