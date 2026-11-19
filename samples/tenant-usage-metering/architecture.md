@@ -21,8 +21,12 @@ SPDX-License-Identifier: MIT-0
 > queue; DIRECT: 400) and the `DeliveriesFailed` alarm. A run of
 > 2026-11-18 proved the stack update through the bucket configuration
 > deny (116 s). Unit tests: 107.
-> **Not exercised live yet:** an `HTTP` sink that answers 2xx (needs a
-> public receiver), `StartIngestRedrive` with messages in the queue, the
+> A third run on 2026-11-19 (`BUS`, after the filter fix and with
+> `AWS_IAM` HTTP sinks) passed all 54 checks: deploy 228 s, test 40
+> minutes, delete 183 s. It proved an `HTTP` sink `SENT` to an `AWS_IAM`
+> function URL (SigV4 as the dispatcher role), revision 2 `SENT` after the
+> resend, and the receiver's log of both records.
+> **Not exercised live yet:** `StartIngestRedrive` with messages in the queue, the
 > close of an hour after `recountWindowHours`, a cell in a second account,
 > and the hook script against a deployed API.
 
