@@ -34,7 +34,7 @@ SPDX-License-Identifier: MIT-0
 > 54 checks: deploy 229 s, test 50 minutes, delete 182 s. The receiver
 > refused an unsigned call with 403 `AccessDenied`, and signed deliveries
 > to its URL with a repeated query key (`?tag=a&tag=b`) reached `SENT`.
-> Unit tests (current build): 158.
+> Unit tests (current build): 159.
 > **Not exercised live yet:** `StartIngestRedrive` with messages in the queue, the
 > close of an hour after `recountWindowHours`, a cell in a second account,
 > and the hook script against a deployed API.

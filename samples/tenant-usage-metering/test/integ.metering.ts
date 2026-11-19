@@ -190,7 +190,7 @@ async function main(): Promise<void> {
       sinkId: 'httpok',
       type: 'HTTP',
       enabled: true,
-      // A repeated query key: the signature must cover every value (review v1 #5).
+      // A repeated query key: the signature must cover every value.
       endpoint: `${RECEIVER}?tag=a&tag=b`,
       auth: 'AWS_IAM',
       mapping: { account: { recordField: 'billingAccount' }, qty: { recordField: 'quantity' } },

@@ -193,6 +193,7 @@ describe('demo HTTP sink receiver (threat model T-17, M-17)', () => {
     ['an API id prefix', `${API}ab*/prod/POST/usage`, true],
     ['one function', `${FN}billing`, false],
     ['a qualifier on one function', `${FN}x:*`, false],
+    ['a qualifier in Fn::Sub', { 'Fn::Sub': 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${Fn}:*' }, false],
     ['a qualifier after a function ARN token', join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, ':*'), false],
     ['an alias of one function', join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, ':live'), false],
     ['every route of one API', join(API, { Ref: 'Api' }, '/*'), false],
