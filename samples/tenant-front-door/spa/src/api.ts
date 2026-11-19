@@ -8,9 +8,9 @@
  * origin access control needs to sign a body (ADR-0011).
  */
 
-import { HEADER_CONTENT_SHA256 } from '../../src/shared/contracts';
 import { hex, sha256 } from './encoding';
 import type { FetchLike, RequestInitLike, ResponseLike } from './http';
+import { HEADER_CONTENT_SHA256 } from '../../src/shared/contracts';
 
 export class ApiError extends Error {
   constructor(readonly status: number) {

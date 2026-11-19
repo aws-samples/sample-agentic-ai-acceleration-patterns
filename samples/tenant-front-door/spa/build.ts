@@ -9,8 +9,9 @@
  * - `index.html` with, in this order at the top of `<head>`, the inline
  *   callback script, an import map whose `integrity` pins every chunk the
  *   entry can import, the stylesheet and the entry, both with `integrity`;
- * - `csp.json`, the hash sources for `script-src` and `style-src`, which the
- *   stack (S2) places into the rest of the §7.1 policy.
+ * - `csp.json`, the `sha384` hash sources for `script-src` (and an empty
+ *   `style-src`, since §7.1 fixes `style-src 'self'`), which the stack (S2)
+ *   places into the rest of the §7.1 policy.
  *
  * Same input, same bytes. Run: `npx ts-node -P tsconfig.json spa/build.ts [outDir]`.
  */
@@ -24,8 +25,11 @@ const SPA_DIR = __dirname;
 const ENTRY = 'src/main.ts';
 export const DEFAULT_OUT_DIR = path.join(SPA_DIR, '..', 'build', 'spa');
 
-/** The hash algorithm of `csp.json` and of the entry's `integrity`, which must match a hash in `script-src` (CSP3 §6.7.2.3). */
-export const CSP_HASH_ALG = 'sha256';
+/**
+ * The hash algorithm of `csp.json` (§7.1 `script-src 'sha384-…'`, ADR-0008) and of the entry's
+ * `integrity`, which must match a hash in `script-src` (CSP3 §6.7.2.3).
+ */
+export const CSP_HASH_ALG = 'sha384';
 /** The algorithm of the import map's `integrity` entries and the stylesheet's (ADR-0023). */
 export const SRI_ALG = 'sha384';
 
@@ -40,6 +44,7 @@ export const CALLBACK_SCRIPT =
 
 export interface CspHashes {
   readonly 'script-src': string[];
+  /** Always empty: §7.1 fixes `style-src 'self'`, so the build refuses inline styles. */
   readonly 'style-src': string[];
 }
 
@@ -63,15 +68,17 @@ export function checkImportMap(importMap: { integrity: Record<string, string> },
 }
 
 /**
- * The hash sources of every inline `<script>` and `<style>` in `html`, plus
- * the `integrity` of each external script, which CSP3 matches against
- * `script-src`. Fails on what a hash cannot allow: an inline event handler,
- * a `style` attribute, a `javascript:` URL, or an external script with no
- * `integrity` in `CSP_HASH_ALG`.
+ * The hash sources of every inline `<script>` in `html`, plus the
+ * `integrity` of each external script, which CSP3 matches against
+ * `script-src`. Fails on what the §7.1 policy would refuse: an inline event
+ * handler, a `style` attribute or `<style>` element (`style-src 'self'`), a
+ * `javascript:` URL, or an external script with no `integrity` in
+ * `CSP_HASH_ALG`.
  */
 export function cspHashes(html: string): CspHashes {
   if (/<[^>]+\son[a-z]+\s*=/i.test(html)) throw new Error('spa build: inline event handler attribute');
   if (/<[^>]+\sstyle\s*=/i.test(html)) throw new Error('spa build: style attribute');
+  if (/<style\b/i.test(html)) throw new Error("spa build: inline <style> (the policy is style-src 'self')");
   if (/javascript:/i.test(html)) throw new Error('spa build: javascript: URL');
   const script: string[] = [];
   for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
@@ -86,8 +93,7 @@ export function cspHashes(html: string): CspHashes {
       script.push(`'${digest(CSP_HASH_ALG, body)}'`);
     }
   }
-  const style = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => `'${digest(CSP_HASH_ALG, m[1])}'`);
-  return { 'script-src': script, 'style-src': style };
+  return { 'script-src': script, 'style-src': [] };
 }
 
 function fill(template: string, slots: Record<string, string>): string {

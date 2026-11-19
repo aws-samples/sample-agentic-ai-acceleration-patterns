@@ -8,12 +8,12 @@
  * policy (spec §7.2, ADR-0008).
  */
 
-import type { ConfigJson } from '../../src/shared/contracts';
 import { whoami } from './api';
 import { beginSignIn, completeSignIn, Env, loadConfig, Outcome, Session, settleTenant, signOut } from './flow';
 import type { FetchLike } from './http';
 import { clearPending, parseCallback } from './signin';
 import type { TokenSet } from './token';
+import type { ConfigJson } from '../../src/shared/contracts';
 
 declare global {
   interface Window {

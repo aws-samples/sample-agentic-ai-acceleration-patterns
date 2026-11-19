@@ -20,7 +20,7 @@ export interface StreamEvent {
 export const BACKEND_NAME = /^[a-z0-9-]{1,32}$/;
 
 /** shortcut: a cap on one unfinished event, so a stream with no blank line cannot grow memory without bound; raise it for large events. */
-export const MAX_EVENT_CHARS = 1 << 20;
+export const MAX_EVENT_CHARS = 1_048_576;
 
 export class AgentError extends Error {
   constructor(readonly status: number) {

@@ -7,10 +7,10 @@
  * nothing here touches storage.
  */
 
-import type { ConfigJson } from '../../src/shared/contracts';
-import { MULTI_TENANT_CLAIM, TENANT_CLAIM } from '../../src/shared/contracts';
 import { base64UrlDecodeText } from './encoding';
 import type { FetchLike } from './http';
+import type { ConfigJson } from '../../src/shared/contracts';
+import { MULTI_TENANT_CLAIM, TENANT_CLAIM } from '../../src/shared/contracts';
 
 export interface TokenSet {
   readonly accessToken: string;

@@ -8,10 +8,10 @@
  * on the callback.
  */
 
-import type { ConfigJson, SigninStateResponse } from '../../src/shared/contracts';
-import { SIGNIN_NONCE, SIGNIN_STATE_QUERY_NONCE } from '../../src/shared/contracts';
 import { base64UrlDecodeText, randomBase64Url } from './encoding';
 import type { KeyValueStorage } from './http';
+import type { ConfigJson, SigninStateResponse } from '../../src/shared/contracts';
+import { SIGNIN_NONCE, SIGNIN_STATE_QUERY_NONCE } from '../../src/shared/contracts';
 
 /** The one `sessionStorage` key: the verifier and nonce, from the authorize redirect until the callback. No token is ever stored. */
 export const PENDING_KEY = 'tfd.pending-signin';

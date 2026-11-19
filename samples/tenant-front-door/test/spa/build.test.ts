@@ -50,7 +50,7 @@ describe('SPA build output', () => {
     expect(html.indexOf('<link')).toBeLessThan(html.indexOf('<script type="module"'));
   });
 
-  test('csp.json holds exactly the hash sources of the inline scripts and the entry, and no style (§7.1, ADR-0008)', () => {
+  test('csp.json holds the sha384 sources of the inline scripts and the entry, and an empty style-src (§7.1, ADR-0008)', () => {
     const csp = JSON.parse(a.files.get('csp.json')!.toString('utf8'));
     expect(Object.keys(csp)).toEqual(['script-src', 'style-src']);
     const inline = [...html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => `'${digest(CSP_HASH_ALG, m[1])}'`);
@@ -58,7 +58,7 @@ describe('SPA build output', () => {
     const entry = `'${digest(CSP_HASH_ALG, a.files.get(entrySrc())!)}'`;
     expect(csp['script-src']).toEqual([...inline, entry]);
     expect(csp['style-src']).toEqual([]);
-    for (const s of csp['script-src']) expect(s).toMatch(/^'sha256-[A-Za-z0-9+/]{43}='$/);
+    for (const s of csp['script-src']) expect(s).toMatch(/^'sha384-[A-Za-z0-9+/]{64}'$/);
     expect(csp).toEqual(a.csp);
   });
 
@@ -115,13 +115,11 @@ describe('build checks (§7.1, §10 step 10)', () => {
     ['a style attribute', '<p style="color:red">'],
     ['a javascript: URL', '<a href="javascript:x">'],
     ['an external script without integrity', '<script src="/a.js"></script>'],
-    ['an external script with two integrity values', '<script src="/a.js" integrity="sha256-a sha384-b"></script>'],
+    ['an external script with two integrity values', '<script src="/a.js" integrity="sha384-a sha384-b"></script>'],
+    ['an external script whose integrity is not sha384', '<script src="/a.js" integrity="sha256-a"></script>'],
+    ['an inline <style> (style-src \'self\')', '<style>p{}</style>'],
   ])('fails on %s', (_n, h) => {
     expect(() => cspHashes(h)).toThrow();
-  });
-
-  test('hashes an inline style when there is one', () => {
-    expect(cspHashes('<style>p{}</style>')['style-src']).toEqual([`'${digest('sha256', 'p{}')}'`]);
   });
 });
 
