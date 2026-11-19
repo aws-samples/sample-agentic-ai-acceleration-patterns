@@ -1,0 +1,47 @@
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
+<!-- SPDX-License-Identifier: MIT-0 -->
+# Demo SPA
+
+A small single-page app in plain TypeScript that exercises the front door
+from a browser: sign-in in both addressing modes, the token exchange for a
+`tenants` token, `GET /api/whoami`, one streamed agent call, and sign-out.
+It exists to show the browser half of the spec (§3.5, §7), not as an
+application.
+
+## Build
+
+```bash
+npx ts-node -P tsconfig.json spa/build.ts
+```
+
+The build writes `build/spa/`:
+
+| File | What |
+|---|---|
+| `index.html` | the inline callback script first, then the import map, the stylesheet and the entry, each script pinned by hash or `integrity` |
+| `assets/<hash>.js`, `assets/<hash>.css` | content-hashed, so `/assets/*` can be cached as immutable |
+| `csp.json` | `{"script-src": [...], "style-src": [...]}`: the hash sources the stack puts into the §7.1 policy |
+
+The same sources build the same bytes. The build fails when a chunk has no
+`integrity` entry in the import map, or when the HTML holds something a
+hash cannot allow (an inline event handler, a `style` attribute, a
+`javascript:` URL).
+
+## Layout
+
+| Module | Does |
+|---|---|
+| `src/config.ts` | parses `/config.json`, decides where sign-in happens (a dedicated domain goes to `signInHost`) |
+| `src/signin.ts` | nonce and PKCE verifier in `sessionStorage` across the redirect, `/signin-state`, the authorize URL, the callback checks |
+| `src/pkce.ts`, `src/encoding.ts` | PKCE `S256`, base64url, SHA-256 |
+| `src/token.ts` | the code exchange, the tenant claims, the tenant check |
+| `src/exchange.ts` | the RFC 8693 exchange as a CORS simple request, retried after 1 s and 3 s |
+| `src/api.ts` | `/api/*` calls with `x-amz-content-sha256` on `PUT` and `POST` |
+| `src/stream.ts` | `text/event-stream` over `fetch` and a `ReadableStream` |
+| `src/flow.ts` | the sign-in flow, with the browser effects passed in |
+| `src/main.ts`, `src/agent-view.ts` | DOM glue; the agent view is a lazily imported chunk |
+
+Everything but `main.ts` and `agent-view.ts` runs in Node, and
+`test/spa/` tests it there. Tokens live in memory only. Every DOM write is
+`textContent`, `append` of a string, or `createElement`, so the page runs
+under Trusted Types with no policy.
