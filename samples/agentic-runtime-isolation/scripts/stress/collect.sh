@@ -98,7 +98,12 @@ for r in "${RECORDS[@]}"; do
   e="$(epoch "$(jq -r .window.end "$r")")"
   (( e > LAST_END )) && LAST_END=$e
 done
-settle=$(( LAST_END + 150 - $(date +%s) ))
+# And until the last scenario's final CloudWatch minute (the API Gateway lag minute) is 90 s
+# closed, so its late datapoints are in.
+read -r _ LAST_MEND < <(metric_window "$LAST_END" "$LAST_END")
+until=$(( LAST_END + 150 ))
+(( LAST_MEND + 90 > until )) && until=$(( LAST_MEND + 90 ))
+settle=$(( until - $(date +%s) ))
 if (( settle > 0 )); then
   echo "waiting ${settle}s for the log groups to settle"
   sleep "$settle"
