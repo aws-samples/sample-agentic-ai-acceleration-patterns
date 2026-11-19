@@ -14,6 +14,7 @@
 import * as fs from 'node:fs';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { CloudWatchClient, DescribeAlarmsCommand } from '@aws-sdk/client-cloudwatch';
+import { CloudWatchLogsClient, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { ReceiveMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { fromNodeProviderChain, fromTemporaryCredentials } from '@aws-sdk/credential-providers';
@@ -175,6 +176,30 @@ async function main(): Promise<void> {
     meters: ['agent.tokens'],
   });
   check('operator creates an HTTP sink that needs billingAccount', httpSink.status === 201, httpSink);
+  // The test receiver is public while the stack exists: prove its gate first.
+  const RECEIVER = outputs.HttpReceiverUrl;
+  if (RECEIVER !== undefined) {
+    const anonymous = await fetch(RECEIVER, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const wrong = await fetch(RECEIVER, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'authorization': 'Bearer not-the-secret' },
+      body: '{}',
+    });
+    check('the public test receiver refuses a call without the sink secret (401)', anonymous.status === 401 && wrong.status === 401, [
+      anonymous.status,
+      wrong.status,
+    ]);
+    const okSink = await call(operator, 'POST', '/sinks', {
+      sinkId: 'httpok',
+      type: 'HTTP',
+      enabled: true,
+      endpoint: RECEIVER,
+      secretName: outputs.HttpSinkSecretName,
+      mapping: { account: { recordField: 'billingAccount' }, qty: { recordField: 'quantity' } },
+      meters: ['agent.tokens'],
+    });
+    check('operator creates an HTTP sink to the test receiver', okSink.status === 201, okSink);
+  }
   const badSink = await call(operator, 'POST', '/sinks', {
     sinkId: 'http',
     type: 'HTTP',
@@ -305,7 +330,8 @@ async function main(): Promise<void> {
   const recordOf = async (tenantId: string) => (await call(operator, 'GET', usagePath(tenantId, 'agent.tokens'))).body.records?.[0];
   const httpStates = await waitFor('HTTP sink states', 4 * 60_000, async () => {
     const [a, b] = [await recordOf('tenant-a'), await recordOf('tenant-b')];
-    return a?.sinks?.http?.status === 'FAILED' && b?.sinks?.http?.status === 'BLOCKED' ? [a, b] : undefined;
+    const okDone = RECEIVER === undefined || (a?.sinks?.httpok?.status === 'SENT' && b?.sinks?.httpok?.status === 'BLOCKED');
+    return a?.sinks?.http?.status === 'FAILED' && b?.sinks?.http?.status === 'BLOCKED' && okDone ? [a, b] : undefined;
   });
   check(
     'a refused HTTP send is FAILED at once (403)',
@@ -317,6 +343,10 @@ async function main(): Promise<void> {
     httpStates?.[1]?.sinks?.http?.reason === 'NO_BILLING_ACCOUNT',
     httpStates,
   );
+
+  if (RECEIVER !== undefined) {
+    check('an accepted HTTP send is SENT', httpStates?.[0]?.sinks?.httpok?.status === 'SENT', httpStates);
+  }
 
   const waitJob = async (name: string, jobId: string | undefined) =>
     waitFor(name, 5 * 60_000, async () => {
@@ -335,13 +365,31 @@ async function main(): Promise<void> {
   );
   const rev2 = await waitFor('revision 2 sent to the HTTP sink', 4 * 60_000, async () => {
     const b = await recordOf('tenant-b');
-    return b?.revision === 2 && b.sinks?.http?.status === 'FAILED' ? b : undefined;
+    return b?.revision === 2 && b.sinks?.http?.status === 'FAILED' && (RECEIVER === undefined || b.sinks?.httpok?.status === 'SENT')
+      ? b
+      : undefined;
   });
   check(
     'revision 2 carries acct-b and is sent again (FAILED by the refusing endpoint)',
     rev2?.billingAccount === 'acct-b',
     rev2 ?? (await recordOf('tenant-b')),
   );
+  if (RECEIVER !== undefined) {
+    check('revision 2 is SENT to the test receiver', rev2?.sinks?.httpok?.status === 'SENT', rev2);
+    const logsClient = new CloudWatchLogsClient({ region: REGION });
+    const received = await waitFor('receiver log lines', 3 * 60_000, async () => {
+      const out = await logsClient.send(
+        new FilterLogEventsCommand({ logGroupName: outputs.HttpReceiverLogGroup, filterPattern: '"usage received"' }),
+      );
+      const lines = (out.events ?? []).map((e) => JSON.parse(e.message ?? '{}') as { idempotencyKey?: string; account?: string });
+      const a = httpStates?.[0];
+      return lines.some((l) => l.idempotencyKey === a?.recordId && l.account === 'acct-a') &&
+        lines.some((l) => l.idempotencyKey === rev2?.recordId && l.account === 'acct-b')
+        ? lines
+        : undefined;
+    });
+    check('the receiver got both records with recordId as the idempotency key and the mapped account', received !== undefined, received);
+  }
   await waitFor('revision 2 on the unfiltered reader', 3 * 60_000, async () => {
     await drain(outputs.UsageAllQueueUrl, seenAll);
     return [...seenAll.values()].some((r) => r.tenantId === 'tenant-b' && r.revision === 2) ? true : undefined;

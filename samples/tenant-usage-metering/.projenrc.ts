@@ -80,6 +80,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-crypto/sha256-js@5.2.0',
     '@smithy/protocol-http@5.6.2',
     '@smithy/signature-v4@5.7.5',
+    '@aws-sdk/client-cloudwatch-logs@3.1154.0', // reads the test receiver's log lines
   ],
   jestOptions: {
     jestConfig: {

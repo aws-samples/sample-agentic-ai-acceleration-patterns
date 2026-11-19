@@ -27,7 +27,7 @@ stack=TenantUsageMetering
 out="cdk.integ.out"
 grace="${INTEG_LATE_GRACE_MINUTES:-6}"
 mkdir -p "$out"
-context=(-c integLocalCell=true -c "lateGraceMinutes=${grace}")
+context=(-c integLocalCell=true -c integHttpReceiver=true -c "lateGraceMinutes=${grace}")
 
 teardown() {
   if [[ "${INTEG_KEEP_STACK:-0}" == 1 ]]; then

@@ -6,6 +6,11 @@
       "type": "build"
     },
     {
+      "name": "@aws-sdk/client-cloudwatch-logs",
+      "version": "3.1154.0",
+      "type": "build"
+    },
+    {
       "name": "@aws-sdk/credential-providers",
       "version": "3.1154.0",
       "type": "build"

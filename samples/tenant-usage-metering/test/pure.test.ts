@@ -21,6 +21,7 @@ import { ingestDeduplicationId, publishShard, recordId } from '../src/shared/key
 import { closeAttributes, reactivation, updateExpression } from '../src/shared/registration';
 import { closeTimeMs, hoursBetween, nextWholeHour, pastCloseGuard } from '../src/shared/time';
 import type { EnrichedUsageEvent } from '../src/shared/usage-event';
+import { sameCredential } from '../src/test-aid/http-receiver.function';
 import { decodeS3Key, hourOfObjectKey } from '../src/tracker/track';
 
 const NOW = Date.parse('2026-11-18T12:30:00Z');
@@ -40,6 +41,15 @@ const event = (overrides: Partial<EnrichedUsageEvent> = {}): EnrichedUsageEvent 
 });
 
 const MODEL_OPERATIONS = [...fs.readFileSync(path.join(__dirname, '..', 'model', 'metering.smithy'), 'utf8').matchAll(/^operation (\w+)/gm)].map((match) => match[1]);
+
+describe('test receiver gate', () => {
+  test('only the exact bearer secret passes', () => {
+    const wanted = Buffer.from('Bearer s3cret');
+    expect(sameCredential('Bearer s3cret', wanted)).toBe(true);
+    expect(sameCredential('Bearer s3cre', wanted)).toBe(false);
+    expect(sameCredential(undefined, wanted)).toBe(false);
+  });
+});
 
 describe('routes (spec §3.2)', () => {
   test('every model operation but PutUsageEvents has exactly one admin route', () => {

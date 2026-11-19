@@ -18,12 +18,15 @@
 import { Aws, CfnOutput, Fn, RemovalPolicy, Stack, type StackProps, Validations } from 'aws-cdk-lib';
 import { Duration } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 import { ADMIN_ROUTES } from './api/routes';
 import { STAGE_NAME } from './construct/api';
+import { createFunction } from './construct/functions';
 import type { IngestPath } from './construct/props';
 import { emitterRoleName } from './shared/identity';
 import { acknowledgeWildcards } from './shared/nag';
@@ -43,6 +46,8 @@ export interface DemoContext {
   readonly integLocalCell: boolean;
   /** Write the published parameter; off for a second demo stack in the same account. */
   readonly publishServiceParameter: boolean;
+  /** TEST ONLY: a public stand-in billing API for the HTTP sink (needs integLocalCell). */
+  readonly integHttpReceiver: boolean;
 }
 
 export function parseDemoContext(get: (key: string) => unknown): DemoContext {
@@ -57,6 +62,7 @@ export function parseDemoContext(get: (key: string) => unknown): DemoContext {
     ...(grace !== undefined ? { lateGraceMinutes: Number(grace) } : {}),
     integLocalCell: String(get('integLocalCell') ?? 'false') === 'true',
     publishServiceParameter: String(get('publishServiceParameter') ?? 'true') === 'true',
+    integHttpReceiver: String(get('integHttpReceiver') ?? 'false') === 'true',
   };
 }
 
@@ -119,6 +125,8 @@ export class TenantUsageMeteringDemoStack extends Stack {
       const sinkSecretName = `${props.context.fleetName}/metering/sinks/integ-${runId}`;
       const sinkSecret = new secretsmanager.Secret(this, 'DemoHttpSinkSecret', {
         secretName: sinkSecretName,
+        // A header-safe value: the dispatcher sends it as `Authorization: Bearer <value>`.
+        generateSecretString: { excludePunctuation: true, passwordLength: 40 },
         description: 'TEST ONLY: credential of the integration test HTTP sink',
         removalPolicy: RemovalPolicy.DESTROY,
       });
@@ -127,6 +135,30 @@ export class TenantUsageMeteringDemoStack extends Stack {
         reason: 'A test-only credential that lives for one integration run.',
       });
       new CfnOutput(this, 'HttpSinkSecretName', { value: sinkSecretName });
+
+      if (props.context.integHttpReceiver) {
+        // TEST ONLY, and reachable from the internet while the stack exists: a
+        // stand-in billing API behind a function URL. It answers 401 to any
+        // call without the sink's bearer secret, stores nothing, and runs at
+        // most two at a time (src/test-aid/http-receiver.function.ts).
+        const receiverRole = new iam.Role(this, 'DemoHttpReceiverRole', {
+          assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+          description: 'TEST ONLY: the integration test HTTP sink receiver',
+        });
+        sinkSecret.grantRead(receiverRole);
+        const receiver = createFunction(this, 'DemoHttpReceiver', {
+          entry: 'test-aid/http-receiver.function.ts',
+          role: receiverRole,
+          timeout: Duration.seconds(5),
+          environment: { RECEIVER_SECRET_NAME: sinkSecretName },
+          logRetention: logs.RetentionDays.ONE_WEEK,
+          description: 'TEST ONLY: stand-in billing API for the HTTP sink',
+          reservedConcurrentExecutions: 2,
+        });
+        const url = receiver.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.NONE });
+        new CfnOutput(this, 'HttpReceiverUrl', { value: url.url });
+        new CfnOutput(this, 'HttpReceiverLogGroup', { value: receiver.logGroup.logGroupName });
+      }
     }
 
     // A reader of the usage bus (ADR-0006): UsageRecorded records of one

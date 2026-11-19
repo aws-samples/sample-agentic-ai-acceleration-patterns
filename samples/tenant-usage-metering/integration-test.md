@@ -41,7 +41,12 @@ One stack, `TenantUsageMetering`, from [`src/demo.cdk.ts`](src/demo.cdk.ts)
 with `-c integLocalCell=true`: the construct, stand-in registrar, operator
 and reader roles, one cell's emitter role in the same account, a reader
 queue on the usage bus through `UsageSubscriber` (meter `agent.tokens`
-only), and the published parameter. The run creates meters, a sink,
+only), and the published parameter. With `-c integHttpReceiver=true`
+(set by `scripts/integ.sh`) it also holds a test receiver: a Lambda
+function URL that stands in for a billing API, reachable from the internet
+while the stack exists. It answers 401 to any call without the sink's
+bearer secret, stores nothing, runs at most two at a time, and is deleted
+with the stack. The run creates meters, a sink,
 registrations and usage in it, and the destroy removes all of them.
 
 ## Steps
@@ -54,8 +59,8 @@ registrations and usage in it, and the destroy removes all of them.
 | The count | after the hour closes and its grace passes: tenant-a counted once per event id (15.5), with its billing account; tenant-b counted without one; the hour `COUNTED` |
 | Export sink | both records reach the export bucket as `UsageRecorded` lines; the record shows the delivery `SENT` |
 | Usage-bus readers | an unfiltered `UsageSubscriber` and one filtered to `agent.tokens` each receive both records; on a miss the check prints the reader's dead-letter queue |
-| HTTP sink | tenant-a's delivery is `FAILED` (`HTTP_403`); tenant-b's, with no billing account, is `BLOCKED` (`NO_BILLING_ACCOUNT`) |
-| Resend | a billing account for tenant-b starts `RESEND_BLOCKED`; the record becomes revision 2 with `acct-b`, is sent again, and revision 2 reaches the usage bus |
+| HTTP sink | the test receiver refuses an anonymous call and a wrong secret (401); to the refusing endpoint, tenant-a's delivery is `FAILED` (`HTTP_403`); to the receiver it is `SENT`; tenant-b's, with no billing account, is `BLOCKED` (`NO_BILLING_ACCOUNT`) on both |
+| Resend | a billing account for tenant-b starts `RESEND_BLOCKED`; the record becomes revision 2 with `acct-b`, is `SENT` to the receiver, and revision 2 reaches the usage bus; the receiver's log shows both records with `recordId` as the idempotency key and the mapped account |
 | Sink redrive | a sink created after the records is backfilled by `StartSinkRedrive` with an hour range; `StartSinkRedrive` without one sends the `FAILED` deliveries again |
 | Ingest redrive | `StartIngestRedrive` succeeds on the empty ingest dead-letter queue (`BUS`) or is a 400 (`DIRECT`) |
 | Failed alarm | the `DeliveriesFailed` alarm goes to `ALARM` |
@@ -102,6 +107,8 @@ If the script stops before its teardown, delete the stack
   unsigned call, so the test proves `FAILED`, `BLOCKED` and the resend
   without a public receiver; a consumer points a sink at its billing API.
   Its secret is created by the demo stack under `<fleet>/metering/sinks/`.
+- The test receiver is a public stand-in for a billing API, test only, off
+  by default. A consumer's sink points at its own billing API.
 - The stand-in registrar replaces the control plane's global hook, whose
   hooks are not yet released (spec §6.4); a consumer registers
   [`scripts/control-plane/metering-hook.sh`](scripts/control-plane/metering-hook.sh).
