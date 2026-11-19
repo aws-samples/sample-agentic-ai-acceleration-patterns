@@ -36,7 +36,7 @@ timings on stdout, never a token, a credential or a header value.
 Local state lives outside the repo in `~/.runtime-isolation-stress/<prefix>/`:
 `outputs.json` (stack outputs), `manifest.json` (tenant ids, names and user
 names; never a token or a password), `timings.txt` (deploy and destroy
-seconds) and `runs/<run-id>/` (window, k6 summary, query results).
+seconds, and the driver host's ready seconds) and `runs/<run-id>/` (window, k6 summary, query results).
 
 ## Run order
 

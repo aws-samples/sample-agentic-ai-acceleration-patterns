@@ -120,8 +120,10 @@ export function countStatus(status, tenantId) {
 
 /**
  * A refusal the HTTP status does not show, such as a tool call refused inside a 200: it counts
- * under the record's `refusals`, as a 4xx does, and one `body_refusal` line on stdout names
- * its tenant and reason (TENANT_ID, REASON), because no hop's log shows a refusal inside a 200
+ * under the record's `refusals`, as a 4xx does, and one `body_refusal` JSON line names its
+ * tenant and reason (TENANT_ID, REASON). k6 writes `console.log` to stderr in its log format,
+ * as `msg="<the JSON, quoted>"`; `stress/driver/k6.sh` keeps both streams in
+ * `<script>.k6-stdout.txt`, where `collect` reads it. No hop's log shows a refusal inside a 200
  * and only the driver can attribute it. `collect` moves these into `byTenantReason` (P-7,
  * stress ADR-0010). REASON is a short code (a status or an error name), never a body.
  */
