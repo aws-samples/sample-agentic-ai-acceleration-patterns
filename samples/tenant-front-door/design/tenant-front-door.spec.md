@@ -1146,8 +1146,8 @@ it; the value is no distribution's id, so IAM refuses the
 `UpdateDistributionTenant` and `DeleteDistributionTenant` of every
 front door's registrar, sweeper and teardown on it. No code reads the
 value. Tagging an untagged certificate, or a distribution tenant no
-front door created, remains possible (threat model AR-33). It uses them only on the edge
-operator role's domain calls and on deletes and replacements of an
+front door created, remains possible (threat model AR-33). The
+registrar uses these grants only on the edge operator role's domain calls and on deletes and replacements of an
 entry that has a `d`, and never deletes a distribution tenant or a
 certificate. The sweeper runs as an execution role of its own. It
 holds the route table read it needs to list `tenant#` entries
