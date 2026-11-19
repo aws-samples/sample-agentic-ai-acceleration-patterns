@@ -242,9 +242,14 @@ const mintOperatorRole = new lambda.Function(setup, 'MintOperatorRole', {
   `),
 });
 vendorIdp.addTrigger(cognito.UserPoolOperation.PRE_TOKEN_GENERATION_CONFIG, mintOperatorRole, cognito.LambdaVersion.V3_0);
+// Test-only: the ID tokens are minted once, at the start of the assertions,
+// and the run with hooks lasts about two hours, past Cognito's 1-hour
+// default; the teardown then got 403. Four hours covers the run.
 const idpClient = vendorIdp.addClient('IntegOperatorClient', {
   authFlows: { adminUserPassword: true },
   generateSecret: false,
+  idTokenValidity: Duration.hours(4),
+  accessTokenValidity: Duration.hours(4),
 });
 
 // R-38: two machine clients on the client credentials flow. Cognito runs
