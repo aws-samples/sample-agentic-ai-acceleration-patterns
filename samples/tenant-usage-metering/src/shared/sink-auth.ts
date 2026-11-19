@@ -2,9 +2,16 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The SigV4 target of an `AWS_IAM` sink (spec §4.4). Only AWS endpoints
- * that verify SigV4 themselves are accepted: a signature sent to any other
- * host is a credential that host could replay for its lifetime.
+ * The SigV4 target of an `AWS_IAM` sink (spec §4.4, ADR-0007). Only a
+ * Lambda function URL or an API Gateway `execute-api` host is accepted, on
+ * `https:` with no port and no credentials in the URL. The check keeps the
+ * signing scope on an AWS endpoint that verifies SigV4 and lets the
+ * dispatcher derive the service and Region. It does not decide who owns the
+ * endpoint: what the dispatcher can actually invoke is set by the IAM grants
+ * on its role (and, across accounts, the target's resource policy).
+ *
+ * `CreateSink`, `UpdateSink` and the dispatcher call the same function, so a
+ * stored sink is never signed under looser rules than it was created with.
  */
 
 export interface IamTarget {
@@ -26,4 +33,18 @@ export function iamTarget(hostname: string): IamTarget | undefined {
     return { service: 'execute-api', region: api[1] };
   }
   return undefined;
+}
+
+/** The SigV4 target of a whole `AWS_IAM` sink endpoint, or `undefined` when the URL may not be signed. */
+export function iamSinkTarget(endpoint: string): IamTarget | undefined {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'https:' || url.port !== '' || url.username !== '' || url.password !== '') {
+    return undefined;
+  }
+  return iamTarget(url.hostname);
 }

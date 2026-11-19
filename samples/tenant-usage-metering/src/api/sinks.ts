@@ -22,7 +22,7 @@ import { getItem } from '../shared/db';
 import type { MappingSource, SinkItem } from '../shared/items';
 import { keys, LIST_BY_TYPE_INDEX } from '../shared/keys';
 import { isConditionFailure } from '../shared/retry';
-import { iamTarget } from '../shared/sink-auth';
+import { iamSinkTarget } from '../shared/sink-auth';
 import { iso } from '../shared/time';
 import type { MappingSource as ModelMappingSource, SinkAuth, SinkSummary, SinkType } from '../smithy/metering/typescript-ssdk-codegen/src';
 
@@ -112,7 +112,7 @@ export function validateSink(sink: SinkItem, fleetName: string): SinkItem {
       if (sink.secretName !== undefined) {
         throw apiError.validation('an AWS_IAM sink takes no secretName');
       }
-      if (url.port !== '' || iamTarget(url.hostname) === undefined) {
+      if (iamSinkTarget(sink.endpoint) === undefined) {
         throw apiError.validation('an AWS_IAM sink endpoint must be a Lambda function URL or an API Gateway execute-api host');
       }
       return sink;

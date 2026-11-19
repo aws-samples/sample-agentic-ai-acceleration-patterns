@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * SigV4 signing of an `AWS_IAM` sink delivery (spec §4.4), as the
- * dispatcher's own role. The caller has already checked the host
+ * SigV4 signing of an `AWS_IAM` sink delivery (spec §4.4, ADR-0007), as
+ * the dispatcher's own role. The caller has already checked the endpoint
  * (src/shared/sink-auth.ts).
  */
 
@@ -17,10 +17,12 @@ import type { RequestSigner } from './dispatcher';
 /** A signer for the given identity; the Lambda entry uses the function's own role. */
 export const sigV4Signer = (identity: AwsCredentialIdentity | AwsCredentialIdentityProvider): RequestSigner => async (url, init, target) => {
   const parsed = new URL(url);
-  const query: Record<string, string> = {};
-  parsed.searchParams.forEach((value, key) => {
-    query[key] = value;
-  });
+  // A repeated key keeps every value, so the signed query matches the one fetch sends.
+  const query: Record<string, string | string[]> = {};
+  for (const key of new Set(parsed.searchParams.keys())) {
+    const values = parsed.searchParams.getAll(key);
+    query[key] = values.length === 1 ? values[0] : values;
+  }
   const request = new HttpRequest({
     method: init.method,
     protocol: 'https:',

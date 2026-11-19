@@ -46,7 +46,7 @@ export interface DemoContext {
   readonly integLocalCell: boolean;
   /** Write the published parameter; off for a second demo stack in the same account. */
   readonly publishServiceParameter: boolean;
-  /** TEST ONLY: a public stand-in billing API for the HTTP sink (needs integLocalCell). */
+  /** TEST ONLY: an AWS_IAM stand-in billing API for the HTTP sink, invocable by the dispatcher only (needs integLocalCell). */
   readonly integHttpReceiver: boolean;
 }
 

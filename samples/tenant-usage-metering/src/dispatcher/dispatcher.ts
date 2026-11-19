@@ -30,7 +30,7 @@ import { keys, publishShard } from '../shared/keys';
 import { log } from '../shared/logger';
 import { METRIC, type Metrics } from '../shared/metrics';
 import { isConditionFailure, withRetry } from '../shared/retry';
-import { iamTarget, type IamTarget } from '../shared/sink-auth';
+import { iamSinkTarget, type IamTarget } from '../shared/sink-auth';
 import { HOUR_MS, iso } from '../shared/time';
 
 export const DELIVERY_WINDOW_MS = 24 * HOUR_MS;
@@ -154,6 +154,16 @@ export class Dispatcher {
       if (await this.setState(record, message.sinkId, { status: 'FAILED', reason: sink === undefined ? 'SINK_DELETED' : 'SINK_DISABLED' })) {
         metrics.add(METRIC.deliveryFailed, 1, { sinkId: message.sinkId });
       }
+      return { done: true };
+    }
+
+    // CreateSink and UpdateSink refuse such an endpoint, so only a direct
+    // table write gets here; it can never succeed, so it fails at once.
+    if (sink.type === 'HTTP' && sink.auth === 'AWS_IAM' && iamSinkTarget(sink.endpoint) === undefined) {
+      if (await this.setState(record, message.sinkId, { status: 'FAILED', reason: 'AUTH_TARGET_INVALID' })) {
+        metrics.add(METRIC.deliveryFailed, 1, { sinkId: message.sinkId });
+      }
+      log.warn('delivery failed', { sinkId: sink.sinkId, reason: 'AUTH_TARGET_INVALID' });
       return { done: true };
     }
 
@@ -284,8 +294,8 @@ export class Dispatcher {
       body: JSON.stringify(mappedBody(sink, record, meter)),
     };
     if (sink.auth === 'AWS_IAM') {
-      // CreateSink checked the host; checked again so a signature never leaves for another host.
-      const target = iamTarget(new URL(sink.endpoint).hostname);
+      // dispatch() already failed an invalid target; kept so send() never signs one.
+      const target = iamSinkTarget(sink.endpoint);
       if (target === undefined) {
         throw new Error('the AWS_IAM sink endpoint is not a function URL or API Gateway host');
       }

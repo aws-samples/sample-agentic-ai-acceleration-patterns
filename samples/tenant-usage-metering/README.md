@@ -164,6 +164,30 @@ Smithy, `aws.protocols#restJson1`, model in [`model/`](model/).
 | Hour | `GetHour`, `ListHours` |
 | Jobs | `StartRecount`, `StartReadmission`, `StartIngestRedrive`, `StartSinkRedrive`, `StartResendBlocked`, `GetJob`, `ListJobs` |
 
+### HTTP sinks
+
+An `HTTP` sink authenticates in one of two ways, set at `CreateSink`:
+
+- `auth: SECRET` (the default): a Secrets Manager secret under
+  `<fleet>/metering/sinks/`, sent as `Authorization: Bearer <value>` or
+  as `{"header": ..., "value": ...}`.
+- `auth: AWS_IAM` (ADR-0007): no secret. The dispatcher signs each delivery
+  with SigV4 as its own role. The endpoint must be a Lambda function URL
+  or an API Gateway `execute-api` host, on `https:` with no port. Grant the
+  dispatcher role invoke on that endpoint only:
+
+  ```ts
+  billingFn.grantInvokeUrl(metering.roles.dispatcher); // function URL
+  metering.roles.dispatcher.addToPolicy(new iam.PolicyStatement({
+    actions: ['execute-api:Invoke'],
+    resources: [billingApi.arnForExecuteApi('POST', '/usage')],
+  })); // API Gateway with AWS_IAM authorization
+  ```
+
+  An endpoint in another account also needs a resource policy that names
+  the dispatcher role. API Gateway custom domain names and private API
+  hosts are not supported.
+
 Hour states: `OPEN` → `COUNTING` → `COUNTED` (→ `DIRTY` → `COUNTING`) →
 `CLOSED`, with `COUNT_FAILED` retried with backoff. Delivery states:
 `PENDING` → `SENT`, or `RETRYING` → `FAILED`, or `BLOCKED` until a billing

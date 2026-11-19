@@ -1,10 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { Sha256 } from '@aws-crypto/sha256-js';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
-import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { HttpRequest } from '@smithy/protocol-http';
+import { SignatureV4 } from '@smithy/signature-v4';
 import { mockClient } from 'aws-sdk-client-mock';
 import { Dispatcher, type RequestSigner } from '../src/dispatcher/dispatcher';
 import { sigV4Signer } from '../src/dispatcher/sigv4';
@@ -76,21 +79,66 @@ describe('AWS_IAM sinks (spec §4.4)', () => {
     expect(secretsMock.calls()).toHaveLength(0);
   });
 
-  test('a stored AWS_IAM sink to another host is never signed or sent', async () => {
-    const { dispatcher, sent, signed } = setup(sinkItem({ auth: 'AWS_IAM', endpoint: 'https://billing.example.com/usage' }));
-    const result = await dispatcher.dispatch(message, 1);
-    expect(result.done).toBe(false);
+  test.each([
+    ['another host', 'https://billing.example.com/usage'],
+    ['plain http', 'http://abc123.lambda-url.eu-central-1.on.aws/'],
+    ['a port', 'https://abc123.lambda-url.eu-central-1.on.aws:8443/'],
+  ])('a stored AWS_IAM sink to %s fails at once, unsigned and unsent', async (_name, endpoint) => {
+    const { dispatcher, sent, signed } = setup(sinkItem({ auth: 'AWS_IAM', endpoint }));
+    expect(await dispatcher.dispatch(message, 1)).toEqual({ done: true });
     expect(signed).toHaveLength(0);
     expect(sent).toHaveLength(0);
+    const update = ddb.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(update.ExpressionAttributeValues?.[':state']).toEqual({ status: 'FAILED', reason: 'AUTH_TARGET_INVALID' });
   });
 
-  test('sigV4Sign signs for the service and Region of the target', async () => {
+  test('sigV4Signer signs for the target, over the delivery headers, with every value of a repeated query key', async () => {
     const headers = await sigV4Signer({ accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'example-only' })(
-      'https://abc123.lambda-url.eu-central-1.on.aws/?x=1',
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+      'https://abc123.lambda-url.eu-central-1.on.aws/usage?tag=a&tag=b&x=1',
+      { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'r1' }, body: '{}' },
       { service: 'lambda', region: 'eu-central-1' },
     );
     expect(headers.authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\/\d{8}\/eu-central-1\/lambda\/aws4_request/);
+    const signedHeaders = /SignedHeaders=([^,]+)/.exec(headers.authorization)![1].split(';');
+    expect(signedHeaders).toEqual(expect.arrayContaining(['content-type', 'host', 'idempotency-key', 'x-amz-content-sha256', 'x-amz-date']));
     expect(headers.host).toBe('abc123.lambda-url.eu-central-1.on.aws');
+  });
+
+  test('a repeated query key is signed with every value (review v1 #5)', async () => {
+    jest.useFakeTimers({ now: Date.parse('2026-11-19T12:00:00Z') });
+    try {
+      const credentials = { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'example-only' };
+      const got = await sigV4Signer(credentials)(
+        'https://abc123.lambda-url.eu-central-1.on.aws/usage?tag=a&tag=b',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+        { service: 'lambda', region: 'eu-central-1' },
+      );
+      const expected = await new SignatureV4({ service: 'lambda', region: 'eu-central-1', credentials, sha256: Sha256 }).sign(
+        new HttpRequest({
+          method: 'POST',
+          protocol: 'https:',
+          hostname: 'abc123.lambda-url.eu-central-1.on.aws',
+          path: '/usage',
+          query: { tag: ['a', 'b'] },
+          headers: { 'Content-Type': 'application/json', 'host': 'abc123.lambda-url.eu-central-1.on.aws' },
+          body: '{}',
+        }),
+      );
+      expect(got.authorization).toBe(expected.headers.authorization);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('SECRET sinks (spec §4.4)', () => {
+  test('the delivery carries the secret as a bearer token and is not signed', async () => {
+    const { dispatcher, sent, signed } = setup(sinkItem({ endpoint: 'https://billing.example.com/usage', secretName: 'demo/metering/sinks/s' }));
+    secretsMock.on(GetSecretValueCommand).resolves({ SecretString: 't0ken' });
+    expect(await dispatcher.dispatch(message, 1)).toEqual({ done: true });
+    expect(signed).toHaveLength(0);
+    expect(sent).toEqual([
+      { url: 'https://billing.example.com/usage', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'r1', 'Authorization': 'Bearer t0ken' } },
+    ]);
   });
 });
