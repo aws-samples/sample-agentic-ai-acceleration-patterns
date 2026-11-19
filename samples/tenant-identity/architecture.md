@@ -1,14 +1,16 @@
 # Tenant Identity with Amazon Cognito — Architecture
 
 > Status: **Implemented and verified.** Last green deployment integration
-> test: 2026-11-10, eu-central-1, all four stacks (the three topologies and
-> `tiered`, ADR-0027) deployed as `TenantIdentityScopes-*`
-> (`E2E_STACK_PREFIX=TenantIdentityScopes E2E_PUBLISHER=none`, beside a
+> test: 2026-11-19, eu-central-1, all four stacks (the three topologies and
+> `tiered`, ADR-0027) deployed as `TenantIdentityCors-*`
+> (`E2E_STACK_PREFIX=TenantIdentityCors E2E_PUBLISHER=none`, beside a
 > standing deployment), spec §10 steps 1b and 2–9 including 8b, 11 and the
 > ADR-0027 tiered scenario (step 12), with the scope catalogue, entitlement
-> and grant checks of ADR-0034..0036: 51/51 e2e assertions passed in 11.5
-> minutes, all 8 alarm actions published, and the leftover check found no
-> pool, REST API or log group. The
+> and grant checks of ADR-0034..0036 and the step 7 CORS checks of ADR-0040
+> in every stack: 51/51 e2e assertions passed in 10.5 minutes (deploy 2.5,
+> destroy 4), all 8 alarm actions published, and the leftover check found no
+> pool, REST API or log group. The previous green run (2026-11-10, 51/51 in
+> 11.5 minutes) covered the same steps without CORS. The
 > previous green run (2026-10-23, 45/45, with the R-6 parameter check and all
 > 8 alarm actions published to the SNS topic, M-31) verified teardown leaves
 > no stack, pool, table, parameter, role or log group: the destroy's
@@ -18,7 +20,7 @@
 > mounting spec §10 steps 1–12 including 5b and 9b: 11/11 e2e assertions
 > passed in about 11 minutes, and teardown left no stack, parameter, pool,
 > REST API or log group. ADRs: see
-> [`adr/`](./adr/README.md) (ADR-0001..0037).
+> [`adr/`](./adr/README.md) (ADR-0001..0040).
 
 This document describes what the sample deploys and runs, not the plan. Where
 the code and the specification diverge, the code and its ADRs win; the

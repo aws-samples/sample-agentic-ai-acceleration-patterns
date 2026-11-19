@@ -90,7 +90,7 @@ beforeEach(() => {
 describe('a listed Origin reads every answer the function makes', () => {
   it('200, browser Content-Type with ;charset=UTF-8', async () => {
     const result = await handler(
-      event({ 'Content-Type': ['application/x-www-form-urlencoded;charset=UTF-8'], 'Origin': [LISTED] }),
+      event({ 'content-type': ['application/x-www-form-urlencoded;charset=UTF-8'], 'Origin': [LISTED] }),
     );
     expect(result.statusCode).toBe(200);
     const h = headers(result);
@@ -104,6 +104,7 @@ describe('a listed Origin reads every answer the function makes', () => {
     const result = await handler(event({ origin: [TENANT_HOST] }, formBody({ grant_type: 'password' })));
     expect(result.statusCode).toBe(400);
     expect(headers(result)['access-control-allow-origin']).toBe(TENANT_HOST);
+    expect(headers(result).vary).toBe('Origin');
   });
 
   it('server_error (Cognito returned an un-narrowed token)', async () => {
@@ -113,6 +114,7 @@ describe('a listed Origin reads every answer the function makes', () => {
     const result = await handler(event({ origin: [LISTED] }));
     expect(result.statusCode).toBe(500);
     expect(headers(result)['access-control-allow-origin']).toBe(LISTED);
+    expect(headers(result).vary).toBe('Origin');
   });
 
   it('framework error (unsupported media type)', async () => {

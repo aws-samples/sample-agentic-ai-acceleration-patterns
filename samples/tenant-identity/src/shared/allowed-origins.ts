@@ -22,6 +22,13 @@ const EXACT = new RegExp(`^https://(${NAME})(?::(${PORT}))?$`);
 const PATTERN = new RegExp(`^https://\\*\\.(${NAME})$`);
 
 /**
+ * Domains that are not public suffixes but where other customers' pages sit
+ * one label under them (S3 path-style URLs), so a pattern directly under
+ * them is refused too (§5.4.1).
+ */
+export const SHARED_HOSTING_DOMAINS: readonly string[] = ['amazonaws.com'];
+
+/**
  * Turns the context value or stack prop into a list. A missing value, an
  * empty string and `[]` all mean no list. A string is split on `,` with no
  * trimming, so `a, b` or `a,,b` fails the entry check below.
@@ -82,6 +89,9 @@ function checkEntry(entry: string): void {
     if (getPublicSuffix(domain, { allowPrivateDomains: true }) === domain) {
       refuse(`'${domain}' is a public suffix, so the pattern would trust hosts other parties run`);
     }
+    if (SHARED_HOSTING_DOMAINS.includes(domain)) {
+      refuse(`other customers' pages sit one label under '${domain}' (S3 path-style URLs)`);
+    }
     return;
   }
   refuse('not https://<host>[:<port>] or https://*.<domain> in lower case');
@@ -90,5 +100,7 @@ function checkEntry(entry: string): void {
 function checkName(name: string, refuse: (why: string) => never): void {
   if (name.length > 253) refuse('host longer than 253 characters');
   const labels = name.split('.');
-  if (/^[0-9]+$/.test(labels[labels.length - 1])) refuse('an IP address is not a host name');
+  // A URL parser reads a host whose last label is a number (decimal or
+  // 0x-hex) as an IPv4 address, so such an entry could never match.
+  if (/^(?:[0-9]+|0x[0-9a-f]*)$/.test(labels[labels.length - 1])) refuse('an IP address is not a host name');
 }

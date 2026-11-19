@@ -79,6 +79,8 @@ describe('validateAllowedOrigins', () => {
     ['https://*.cloudfront.net', 'pattern under a private suffix'],
     ['https://*.s3.amazonaws.com', 'pattern under a private suffix'],
     ['https://*.us-east-1.elb.amazonaws.com', 'pattern under a wildcard rule'],
+    ['https://*.amazonaws.com', 'pattern under a shared-hosting domain'],
+    ['https://a.0x10', 'hex IPv4 literal'],
   ])('refuses %s (%s), naming the entry', (entry) => {
     expect(() => validateAllowedOrigins([entry])).toThrow(`'${entry}'`);
   });
@@ -105,7 +107,9 @@ describe('validateAllowedOrigins', () => {
   });
 
   it('refuses more than 1,024 characters in total', () => {
-    const list = Array.from({ length: 10 }, (_, i) => `https://${'x'.repeat(90)}${i}.example.com`);
+    // 16 valid entries are 997 characters; a 17th takes the list to 1,060.
+    const list = Array.from({ length: 17 }, (_, i) => `https://${'x'.repeat(40)}${i}.example.com`);
+    expect(() => validateAllowedOrigins(list.slice(0, 16))).not.toThrow();
     expect(list.join(',').length).toBeGreaterThan(1024);
     expect(() => validateAllowedOrigins(list)).toThrow(/1024/);
   });

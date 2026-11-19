@@ -32,7 +32,7 @@ const topology = parseDeployment(app.node.tryGetContext('topology'));
 // Anything but the string 'false' (or a cdk.json boolean false) publishes.
 const publishSharedParameters = String(app.node.tryGetContext('publishSharedParameters') ?? 'true') !== 'false';
 
-// Optional: `--context allowedOrigins=https://app.example.com,https://*.tenants.example.com`
+// Optional: `--context 'allowedOrigins=https://app.example.com,https://*.tenants.example.com'`
 // lists the browser origins whose pages may read the token exchange's
 // answer (spec §5.4.1, ADR-0040). Missing or empty means no list, so
 // `--context allowedOrigins=` clears it on a redeploy.

@@ -728,13 +728,16 @@ under the Public Suffix List rules, wildcard and exception rules applied and
 the private section included (`https://*.co.uk`,
 `https://*.cloudfront.net`, `https://*.s3.amazonaws.com`, and
 `https://*.us-east-1.elb.amazonaws.com`, which only a wildcard rule
-catches); a repeated entry;
+catches); a pattern directly under `amazonaws.com`, which is not a public
+suffix but serves other customers' pages one label under it (S3 path-style
+URLs on `https://s3.amazonaws.com`); a repeated entry;
 more than 20 entries; more than 1,024 characters in total, so the list fits
 the function's environment beside its other variables.
 
 A pattern trusts every host one label under its domain, whoever serves it: a
 marketing site, a status page on another vendor's service, a CNAME left
-pointing at a deleted resource. Use a pattern only under a domain that
+pointing at a deleted resource. The suffix rules do not know every domain where other
+parties host pages. Use a pattern only under a domain that
 serves the app's tenant hosts and nothing else (`tenant-front-door`'s
 `appDomain`).
 
