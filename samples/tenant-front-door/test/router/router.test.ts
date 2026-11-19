@@ -265,6 +265,17 @@ describe('step 5: find the tenant', () => {
     return base + 's'.repeat(bytes - base.length);
   }
 
+  test('step 5: a repeated Authorization header counts as no token: 401', async () => {
+    for (const [make, host] of [[single, SINGLE_DOMAIN], [hostMode, ACME_HOST]] as const) {
+      const e = event({ host, uri: '/agents/support-bot/invocations', method: 'POST' });
+      e.request.headers.authorization = {
+        value: `Bearer ${tokenFor(T_ACME)}`,
+        multiValue: [{ value: `Bearer ${tokenFor(T_ACME)}` }, { value: `Bearer ${tokenFor(T_DEDICATED)}` }],
+      };
+      expect((await make().run(e)).statusCode).toBe(401);
+    }
+  });
+
   test('step 5: an Authorization header of 8,192 bytes is decoded', async () => {
     const a = await run(single(), { host: SINGLE_DOMAIN, uri: '/api/items', headers: { authorization: authOfLength(8192) } });
     expect(header(a, 'x-tenant-route')).toBe(T_ACME);

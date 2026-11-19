@@ -112,7 +112,7 @@ function one(q, name) {
   const x = q[name];
   return x && !(x.multiValue && x.multiValue.length > 1) && x.value ? x.value : null;
 }
-const fwd = (v) => v.replace(/[^\w.~%+-]/g, encodeURIComponent);
+const fwd = (v) => v.replace(/[^\w.~%+-]+/g, encodeURIComponent);
 
 // Step 2: the sign-in host, host mode only.
 async function signinHost(req) {
@@ -126,8 +126,12 @@ async function signinHost(req) {
   if (!te || te.s !== 'active') return fail(400);
   if (p.exp <= Date.now() / 1000 || typeof p.n !== 'string') return redirect('https://' + p.h + '/');
   const desc = one(q, 'error_description');
-  return redirect('https://' + p.h + '/callback?state=' + fwd(state) + (code ? '&code=' + fwd(code) :
-    '&error=' + fwd(error) + (desc ? '&error_description=' + fwd(desc) : '')));
+  try {
+    return redirect('https://' + p.h + '/callback?state=' + fwd(state) + (code ? '&code=' + fwd(code) :
+      '&error=' + fwd(error) + (desc ? '&error_description=' + fwd(desc) : '')));
+  } catch (e) {
+    return fail(400); // a lone surrogate cannot be encoded
+  }
 }
 
 async function handler(event) {
@@ -159,7 +163,7 @@ async function handler(event) {
     if ((api || agents || ss) && site && site.value !== 'same-origin' && site.value !== 'none') return fail(403);
     // Step 5.
     let token = null;
-    const auth = h.authorization ? h.authorization.value : '';
+    const a = h.authorization, auth = a && !(a.multiValue && a.multiValue.length > 1) ? a.value : '';
     const tooLong = Buffer.byteLength(auth, 'utf8') > 8192;
     if (api || agents) {
       const c = tooLong ? null : decodeClaim(auth);
@@ -170,7 +174,7 @@ async function handler(event) {
       token = c.token;
     } else if (tooLong) return fail(401, WWW);
     // Step 6.
-    te = ID.test(tenant) && await get('tenant', 'tenant#' + tenant);
+    te = typeof tenant === 'string' && ID.test(tenant) && await get('tenant', 'tenant#' + tenant);
     if (!te) return fail(403);
     if (te.s === 'suspended') return fail(503, { 'retry-after': '300' });
     // Step 7: the cell with origin access control (S-3), or the agent ingress.

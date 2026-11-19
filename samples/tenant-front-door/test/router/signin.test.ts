@@ -142,6 +142,12 @@ describe('step 2: the sign-in host login.<appDomain> (host)', () => {
     expect(new URL(header(a, 'location')!).searchParams.get('error_description')).toBe('a b:c/d');
   });
 
+  test('step 2: a character outside the BMP is encoded as UTF-8, and a lone surrogate gets 400', async () => {
+    const a = await callback(hostMode(), { state: f.valid[0].state, error: 'access_denied', error_description: 'ok \u{1F600}' });
+    expect(header(a, 'location')).toContain('&error_description=ok%20%F0%9F%98%80');
+    expect((await callback(hostMode(), { state: f.valid[0].state, error: 'access_denied', error_description: 'x\ud800' })).statusCode).toBe(400);
+  });
+
   test('step 2: a value with characters that need encoding is encoded, so it cannot add a parameter', async () => {
     const a = await callback(hostMode(), { state: f.valid[0].state, error: 'x&code=evil', error_description: 'a b#c' });
     const url = new URL(header(a, 'location')!);
