@@ -19,10 +19,13 @@
  * refused call; upgrade to a shorter TTL or an event-driven flush if that
  * window matters.
  *
- * An SSM error is not cached and is thrown: the check fails closed.
+ * An SSM error is not cached and is thrown: the check fails closed. The
+ * client makes two attempts with short timeouts, so a stalled SSM answers
+ * 503 well inside the function timeout.
  */
 
 import { GetParametersByPathCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { paramTenantNamespace } from '../shared/contracts';
 
 export const CACHE_TTL_MS = 60_000;
@@ -42,7 +45,7 @@ export class HostsCheck {
   private readonly cache = new Map<string, { hosted: boolean; expires: number }>();
 
   constructor(private readonly applicationId: string, deps: HostsCheckDependencies = {}) {
-    this.ssm = deps.ssm ?? new SSMClient({});
+    this.ssm = deps.ssm ?? new SSMClient({ maxAttempts: 2, requestHandler: new NodeHttpHandler({ connectionTimeout: 500, requestTimeout: 1000 }) });
     this.now = deps.now ?? Date.now;
   }
 
@@ -76,6 +79,7 @@ export class HostsCheck {
         return false;
       }
     }
-    return false;
+    // Pages ran out with a NextToken still set: no answer, so fail closed and cache nothing.
+    throw new Error('hosts check: too many empty pages');
   }
 }

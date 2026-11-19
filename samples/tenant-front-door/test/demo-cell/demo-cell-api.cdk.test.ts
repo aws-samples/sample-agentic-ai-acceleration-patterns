@@ -94,7 +94,7 @@ describe('CellRouteAccess (spec §5.2, ADR-0011, spike S-3)', () => {
       Action: 'lambda:InvokeFunction',
       Principal: 'cloudfront.amazonaws.com',
       SourceArn: DISTRIBUTION_ARN,
-      InvokedViaFunctionUrl: true,
+      InvokedViaFunctionUrl: Match.absent(),
       FunctionName: fn,
     });
   });

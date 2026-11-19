@@ -10,10 +10,6 @@
  * distribution's ARN (`SourceArn`). Spike S-3 found both actions are
  * needed; with only `InvokeFunctionUrl` the edge gets 403.
  *
- * `lambda:InvokeFunction` is further limited to calls that arrive through
- * the function URL (`lambda:InvokedViaFunctionUrl`), so the grant cannot be
- * used to invoke the function directly.
- *
  * The distribution ARN comes from the `distributionArn` prop, or from the
  * cell-account copy parameter `paramCellCopy(applicationId)` (§6.4), which
  * the application's shared stack writes in each cell account.
@@ -63,7 +59,6 @@ export class CellRouteAccess extends Construct {
       functionName: props.function.functionArn,
       principal,
       sourceArn: this.distributionArn,
-      invokedViaFunctionUrl: true,
     });
   }
 }

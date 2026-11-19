@@ -53,7 +53,6 @@ const ISSUER_FAILURE_CODES = new Set(['ERR_JOSE_GENERIC', 'ERR_JWKS_TIMEOUT', 'E
 export interface VerifiedToken {
   /** The verified tenant claim in its control-plane form (upper case). */
   readonly tenantId: string;
-  readonly sub: string;
 }
 
 export interface TokenVerifierOptions {
@@ -99,7 +98,8 @@ export class TokenVerifier {
     let payload: JWTPayload;
     let protectedHeader: JWTHeaderParameters;
     try {
-      ({ payload, protectedHeader } = await jwtVerify(token, this.getKey, { issuer: this.options.issuer, algorithms: ['RS256'] }));
+      const verifyOptions = { issuer: this.options.issuer, algorithms: ['RS256'], requiredClaims: ['exp'] };
+      ({ payload, protectedHeader } = await jwtVerify(token, this.getKey, verifyOptions));
     } catch (error) {
       const code = (error as { code?: unknown } | undefined)?.code;
       if (typeof code !== 'string' || ISSUER_FAILURE_CODES.has(code)) {
@@ -129,7 +129,7 @@ export class TokenVerifier {
       throw new TokenError('bad_tenant_id');
     }
     try {
-      return { tenantId: toStoredId(claim).toUpperCase(), sub: payload.sub };
+      return { tenantId: toStoredId(claim).toUpperCase() };
     } catch {
       throw new TokenError('bad_tenant_id');
     }

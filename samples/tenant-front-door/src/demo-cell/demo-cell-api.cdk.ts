@@ -149,7 +149,7 @@ export class DemoCellApi extends Construct {
     });
     Validations.of(this.function).acknowledge({
       id: 'AwsSolutions-L1',
-      reason: 'Node.js 24 is the runtime the cell API checks (threat model M-2, M-28) are tested on; the sample moves runtimes together.',
+      reason: 'Node.js 24 is the newest runtime the cell API checks (threat model M-2, M-28) are tested on; Node.js 26 is untested here.',
     });
   }
 }
