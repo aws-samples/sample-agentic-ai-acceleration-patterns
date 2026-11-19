@@ -137,18 +137,39 @@ function errorName(error: unknown): string {
   return error instanceof Error ? error.name : 'UnknownError';
 }
 
+/** Time the answer needs before the function's own timeout. */
+export const ANSWER_MARGIN_MS = 5_000;
+
+/**
+ * `handleEvent`, or FAILED with `Timeout` once `ms` pass: an answer that
+ * never goes out leaves the stack waiting an hour.
+ */
+export async function answerWithin(work: Promise<CustomResourceOutcome>, ms: number, physicalResourceId: string): Promise<CustomResourceOutcome> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<CustomResourceOutcome>((resolve) => {
+    timer = setTimeout(() => resolve({ status: 'FAILED', physicalResourceId, reason: 'Timeout' }), ms);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const deps: Deps = {
-  client: new CloudFrontKeyValueStoreClient({}),
+  // Each call gives up after 10 s, so the retries fit the function's timeout.
+  client: new CloudFrontKeyValueStoreClient({ requestHandler: { requestTimeout: 10_000 } }),
   newKey: () => randomBytes(32).toString('base64'),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
 };
 
-export const handler = async (event: RouteTableKeysEvent): Promise<void> => {
+export const handler = async (event: RouteTableKeysEvent, context: { getRemainingTimeInMillis(): number }): Promise<void> => {
+  const physicalResourceId = event.PhysicalResourceId ?? PHYSICAL_RESOURCE_ID;
   let outcome: CustomResourceOutcome;
   try {
-    outcome = await handleEvent(event, deps);
+    outcome = await answerWithin(handleEvent(event, deps), context.getRemainingTimeInMillis() - ANSWER_MARGIN_MS, physicalResourceId);
   } catch (error) {
-    outcome = { status: 'FAILED', physicalResourceId: event.PhysicalResourceId ?? PHYSICAL_RESOURCE_ID, reason: errorName(error) };
+    outcome = { status: 'FAILED', physicalResourceId, reason: errorName(error) };
   }
   await respond(event, outcome);
 };

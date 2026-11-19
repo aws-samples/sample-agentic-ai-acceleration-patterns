@@ -51,6 +51,8 @@ export function respond(
       },
     );
     req.on('error', () => resolve());
+    // A PUT that hangs would hold the function to its timeout.
+    req.setTimeout?.(10_000, () => req.destroy());
     req.end(body);
   });
 }

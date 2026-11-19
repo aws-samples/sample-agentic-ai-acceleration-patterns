@@ -202,6 +202,7 @@ describe('deployment inputs (spec §3.6)', () => {
   it.each([
     'arn:aws:secretsmanager:us-east-1:111111111111:secret:registrar-client-AbCdEf',
     'arn:aws:secretsmanager:eu-central-1:333333333333:secret:registrar-client-AbCdEf',
+    'arn:aws-us-gov:secretsmanager:eu-central-1:111111111111:secret:registrar-client-AbCdEf',
   ])('refuses a vendor IdP secret %j outside the edge account and the control plane\'s Region (ADR-0015)', (clientSecretArn) => {
     expect(() => validateInputs(withControlPlane({ vendorIdp: { ...base.controlPlane.vendorIdp, clientSecretArn } }))).toThrow(/clientSecretArn must name a secret/);
   });
