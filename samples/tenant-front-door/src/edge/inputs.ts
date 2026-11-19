@@ -200,7 +200,7 @@ export function validateInputs(inputs: TenantFrontDoorInputs): ResolvedInputs {
   // stack's Region, so the secret sits beside it (ADR-0015).
   const secret = SECRET_ARN.exec(controlPlane.vendorIdp.clientSecretArn)!;
   if (secret[1] !== partition || secret[2] !== controlPlane.region || secret[3] !== edgeAccount) {
-    throw new InputError('controlPlane.vendorIdp.clientSecretArn', 'must name a secret in the edge account and the control plane\'s Region');
+    throw new InputError('controlPlane.vendorIdp.clientSecretArn', 'must name a secret in the edge account, the control plane\'s Region and the edgeOperatorRoleArn partition');
   }
   const issuer = validateIssuer(inputs.issuer);
 

@@ -11,6 +11,7 @@ import {
 } from '@aws-sdk/client-cloudfront-keyvaluestore';
 import { mockClient } from 'aws-sdk-client-mock';
 import {
+  answerWithin,
   Deps,
   handleEvent,
   MAX_ATTEMPTS,
@@ -138,6 +139,13 @@ describe('route table keys custom resource (spec §4.1, ADR-0016, M-20)', () => 
   it('does nothing on Delete: the store goes with the stack', async () => {
     expect(await handleEvent(event({}, 'Delete'), deps)).toEqual({ status: 'SUCCESS', physicalResourceId: 'route-table-keys' });
     expect(kvs.calls()).toHaveLength(0);
+  });
+
+  it('answers FAILED with Timeout before the function times out when a call never settles', async () => {
+    const never = new Promise<never>(() => undefined);
+    expect(await answerWithin(never, 10, 'route-table-keys')).toEqual({ status: 'FAILED', physicalResourceId: 'route-table-keys', reason: 'Timeout' });
+    const done = Promise.resolve({ status: 'SUCCESS' as const, physicalResourceId: 'route-table-keys' });
+    expect(await answerWithin(done, 10_000, 'route-table-keys')).toEqual({ status: 'SUCCESS', physicalResourceId: 'route-table-keys' });
   });
 
   it('nextSigninEntry keeps the order of SigninIds', () => {

@@ -581,7 +581,7 @@ class Registrar extends Construct {
         commandHooks: {
           beforeBundling: () => [],
           beforeInstall: () => [],
-          afterBundling: (inputDir: string, outputDir: string) => [`cp ${inputDir}/node_modules/re2-wasm/build/wasm/re2.wasm ${outputDir}/`],
+          afterBundling: (inputDir: string, outputDir: string) => [`cp "${inputDir}/node_modules/re2-wasm/build/wasm/re2.wasm" "${outputDir}/"`],
         },
       },
     });
