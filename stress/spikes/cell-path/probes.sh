@@ -73,8 +73,11 @@ expect_denied "PutParameter over the identity pool id" ssm put-parameter --name 
 expect_denied "PutParameter over the cell bootstrap version" ssm put-parameter --name /cdk-bootstrap/cell/version --type String --value 99 --overwrite
 expect_denied "UpdateAccount: point the API Gateway logs role at a /cell/ role" apigateway update-account --patch-operations "op=replace,path=/cloudwatchRoleArn,value=arn:${partition}:iam::${account}:role/cell/cell-spike-positive"
 slr_out="$(probe iam create-service-linked-role --aws-service-name ops.apigateway.amazonaws.com 2>&1)"
-if [[ $? -eq 0 ]] || grep -q 'has been taken' <<<"$slr_out"; then
-  echo "PASS  CreateServiceLinkedRole for API Gateway under role/aws-service-role/ (positive control): allowed"
+slr_rc=$?
+if [[ $slr_rc -eq 0 ]]; then
+  echo "PASS  CreateServiceLinkedRole for API Gateway under role/aws-service-role/ (positive control): allowed (created)"
+elif grep -q 'has been taken' <<<"$slr_out"; then
+  echo "PASS  CreateServiceLinkedRole for API Gateway under role/aws-service-role/ (positive control): allowed (already present)"
 else
   echo "FAIL  CreateServiceLinkedRole for API Gateway: $(head -c 200 <<<"$slr_out")"; fails=$((fails + 1))
 fi

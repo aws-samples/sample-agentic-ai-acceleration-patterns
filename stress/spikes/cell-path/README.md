@@ -55,7 +55,7 @@ Run 2026-11-18, `eu-central-1`, two new, empty, non-production accounts
 | Cell bootstrap | 54 s; execution role bounded | 54 s; execution role bounded |
 | Probe stack (`cell-spike-probe` on `/cell/`, bounded) | 50 s | 49 s |
 | Deny probe: a bounded role on `/` | refused at `iam:CreateRole`, explicit deny in the boundary | the same |
-| `probes.sh` | 21 of 21 pass (2026-11-19) | 21 of 21 pass (2026-11-19); the service-linked-role control created `AWSServiceRoleForAPIGateway` under `/aws-service-role/` |
+| `probes.sh` | 21 of 21 pass (2026-11-19) | 21 of 21 pass (2026-11-19); the service-linked-role control created `AWSServiceRoleForAPIGateway` under `/aws-service-role/` (role `CreateDate` 2026-11-19T09:41:26Z), and later runs find it present |
 | runtime-isolation cell | `CREATE_COMPLETE` in 424 s; 27 of 27 roles on `/cell/` and bounded; destroyed in 528 s, nothing left | not deployed |
 
 `probes.sh`, as the bounded `/cell/` role whose own policy allows `iam:*`,
@@ -109,10 +109,10 @@ three positive controls.
 
 ## Teardown
 
-The cell is destroyed. The last 2026-11-19 re-run updated the owner
-stacks in place (61 s, 62 s) and deployed the probe stack again (50 s).
-The probe stack is destroyed by hand after a run (16 s on the earlier
-re-run). The cell deploy predates the
+The cell is destroyed. The fourth 2026-11-19 re-run updated the owner
+stacks in place (61 s, 62 s) and deployed the probe stack again (50 s);
+the later re-runs only ran `probes.sh` against it. The probe stack is
+destroyed by hand after a run (16 s on an earlier re-run). The cell deploy predates the
 SSM and API Gateway account denies and the service-linked-role path
 scope; runtime-isolation with `publishParameters=false` only reads those
 parameters, does not change the API Gateway account, and creates its
