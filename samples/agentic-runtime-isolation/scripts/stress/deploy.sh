@@ -9,10 +9,12 @@
 # 1. Checks the shared tenant-identity deployment is published (shared-pool,
 #    with the scope catalogue). It never deploys or destroys it.
 # 2. Synthesises test/stress.runtime.ts into cdk.stress.out with
-#    STRESS_AGENTS=false STRESS_DRIVER=false and deploys <prefix>-ingress.
-# 3. Synthesises again with both on (the agents stacks look up the document
-#    the ingress stack published) and deploys the agents stacks one at a
-#    time, then <prefix>-driver.
+#    STRESS_AGENTS=false and deploys <prefix>-ingress.
+# 3. Synthesises again with the agents on (the agents stacks look up the
+#    document the ingress stack published) and deploys the agents stacks one
+#    at a time, then <prefix>-driver through the shared driver
+#    (stress/driver/deploy.sh, stress ADR-0009), which may read the ingress
+#    stack's registry parameters.
 #
 # Prints one `stack=<name> deploy_seconds=<n>` line per stack and the
 # ingress stack's PolicySecondsToActive* outputs. The stack outputs are
@@ -88,11 +90,11 @@ done
 echo "identity: shared-pool with the scope catalogue (reused); vendor scopes added by this deploy: ${ADDED_SCOPES[*]:-none}"
 
 # -- helpers ----------------------------------------------------------------
-synth() { # AGENTS DRIVER
+synth() { # AGENTS
   rm -rf "$OUT"
-  STRESS_SCALE="$SCALE" STRESS_PREFIX="$PREFIX" STRESS_AGENTS="$1" STRESS_DRIVER="$2" \
+  STRESS_SCALE="$SCALE" STRESS_PREFIX="$PREFIX" STRESS_AGENTS="$1" \
     npx cdk synth -q --app "$STRESS_APP" --output "$OUT" >"${LIB_TMP}/synth.log" 2>&1 \
-    || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth (STRESS_AGENTS=$1 STRESS_DRIVER=$2)"; }
+    || { tail -30 "${LIB_TMP}/synth.log" >&2; fail "synth (STRESS_AGENTS=$1)"; }
 }
 
 # merge_outputs STACK: adds the stack's outputs to outputs.json, keyed by output name.
@@ -118,7 +120,7 @@ deploy_stack() { # STACK
 }
 
 # -- 2. the ingress stack ---------------------------------------------------
-synth false false
+synth false
 INGRESS_STACK="${PREFIX}-ingress"
 [[ -f "${OUT}/${INGRESS_STACK}.template.json" ]] || fail "the stress app did not synthesise ${INGRESS_STACK}"
 deploy_stack "$INGRESS_STACK"
@@ -126,12 +128,26 @@ echo "== policy seconds to ACTIVE (ADR-0040)"
 jq -r 'to_entries[] | select(.key | startswith("PolicySecondsToActive")) | "  \(.key)=\(.value)"' "$OUTPUTS"
 
 # -- 3. the agents stacks (one at a time), then the driver ------------------
-synth true true
+synth true
 mapfile -t AGENT_STACKS < <(find "$OUT" -maxdepth 1 -name "${PREFIX}-agents-*.template.json" -printf '%f\n' | sed 's/\.template\.json$//' | sort -V)
 for s in "${AGENT_STACKS[@]}"; do deploy_stack "$s"; done
 (( ${#AGENT_STACKS[@]} > 0 )) || echo "no agents stacks at scale ${SCALE} (the ingress stack holds every agent)"
 DRIVER_STACK="${PREFIX}-driver"
-[[ -f "${OUT}/${DRIVER_STACK}.template.json" ]] || fail "the stress app did not synthesise ${DRIVER_STACK}"
-deploy_stack "$DRIVER_STACK"
+echo "== deploy ${DRIVER_STACK} (stress/driver/deploy.sh)"
+REGISTRY_PREFIX="$(jq -r '.RegistryPrefix // empty' "$OUTPUTS")"
+[[ -n "$REGISTRY_PREFIX" ]] || fail "the ingress stack has no RegistryPrefix output; the driver could not read the registry parameters"
+# This slice's tokens come from the long-lived tenant-identity pool's parameters, not the
+# stress identity the driver reads by default, so it passes that path as well.
+STRESS_PREFIX="$PREFIX" STRESS_TIER="$SCALE" STRESS_PARAMETER_PREFIXES="/application-plane/shared/identity/,${REGISTRY_PREFIX}" \
+  "${SAMPLE_DIR}/../../stress/driver/deploy.sh" >"${LIB_TMP}/driver.log" 2>&1 \
+  || { tail -30 "${LIB_TMP}/driver.log" >&2; fail "deploy ${DRIVER_STACK}"; }
+# The script's own figure: the wall time of the call would include a first `npm ci`.
+secs="$(sed -n "s/^stack=${DRIVER_STACK} deploy_seconds=\([0-9][0-9]*\)$/\1/p" "${LIB_TMP}/driver.log" | tail -1)"
+[[ -n "$secs" ]] || fail "stress/driver/deploy.sh printed no deploy_seconds line"
+ready="$(sed -n "s/^stack=${DRIVER_STACK} ready_seconds=\([0-9][0-9]*\)$/\1/p" "${LIB_TMP}/driver.log" | tail -1)"
+[[ -n "$ready" ]] || fail "stress/driver/deploy.sh printed no ready_seconds line"
+echo "stack=${DRIVER_STACK} deploy_seconds=${secs} ready_seconds=${ready}"
+echo "$(date -u +%F) scale=${SCALE} stack=${DRIVER_STACK} deploy_seconds=${secs} ready_seconds=${ready}" >>"$TIMINGS"
+merge_outputs "$DRIVER_STACK"
 
 echo "deployed $(( ${#AGENT_STACKS[@]} + 2 )) stacks in ${SECONDS}s; outputs in ${OUTPUTS}"

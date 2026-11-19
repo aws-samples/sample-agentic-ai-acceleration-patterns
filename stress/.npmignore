@@ -18,6 +18,7 @@ dist
 tsconfig.tsbuildinfo
 /.eslintrc.json
 /projenrc/tsconfig.json
+/driver/tsconfig.json
 /.gitattributes
 /.projenrc.ts
 /projenrc

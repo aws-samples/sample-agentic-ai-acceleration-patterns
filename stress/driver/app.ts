@@ -1,0 +1,44 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+
+/**
+ * The driver app (stress ADR-0009): one stack, `<STRESS_PREFIX>-driver`, the k6 host and its
+ * results bucket. `deploy.sh` and `teardown.sh` in this folder synthesise it; a slice's own
+ * scripts call them. It runs from `stress/`, with `stress/`'s own aws-cdk-lib, so a sample
+ * never loads a second copy of the CDK.
+ *
+ * Environment: `STRESS_TIER` (small, medium, large; picks the instance type from
+ * `src/tiers.ts`), `STRESS_PREFIX` (stack name prefix; the host reads the stress identity at
+ * `/<STRESS_PREFIX>/identity`), `STRESS_PARAMETER_PREFIXES` (a comma-separated list of further
+ * SSM parameter path prefixes the host may read; a slice passes its registry prefix).
+ */
+
+import { App, Validations } from 'aws-cdk-lib';
+import { AwsSolutionsChecks } from 'cdk-nag';
+import { StressDriverStack, UNIQUE_LAUNCH_TEMPLATE_FLAG, stressIdentityParameter } from './stress-driver.cdk';
+import { tierOf } from '../src/tiers';
+
+const PREFIX = /^[A-Za-z][A-Za-z0-9]{0,39}$/;
+
+const prefix = process.env.STRESS_PREFIX ?? '';
+if (!PREFIX.test(prefix)) {
+  throw new Error('STRESS_PREFIX must be 1 to 40 letters and digits, starting with a letter');
+}
+const tier = tierOf(process.env.STRESS_TIER);
+const parameterPrefixes = (process.env.STRESS_PARAMETER_PREFIXES ?? '')
+  .split(',')
+  .map((p) => p.trim())
+  .filter((p) => p.length > 0);
+
+// The stack has no cdk.json, so the feature flag that matters is set here: without it, every
+// driver stack's IMDSv2 launch template is named `HostLaunchTemplate`, and a second
+// `<prefix>-driver` in the account fails to create.
+const app = new App({ context: { [UNIQUE_LAUNCH_TEMPLATE_FLAG]: true } });
+Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true, writeSuppressionsToCloudFormation: true }));
+new StressDriverStack(app, `${prefix}-driver`, {
+  instanceType: tier.driverInstanceType,
+  identityParameterName: stressIdentityParameter(prefix),
+  parameterPrefixes,
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+app.synth();

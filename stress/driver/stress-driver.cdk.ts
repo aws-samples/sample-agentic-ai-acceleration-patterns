@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The StressDriver stack (stress-test plan §8.1, §8.3 row 3): the k6 host.
- * One AZ, one NAT gateway in a public subnet, the host in a private subnet
- * with no public IP and no inbound rule, reached through SSM Session Manager.
+ * The StressDriver stack (docs/stress-test.spec.md §3.1; stress ADR-0007): the k6 host every
+ * slice runs its load from. One AZ, one NAT gateway in a public subnet, the host in a private
+ * subnet with no public IP and no inbound rule, reached through SSM Session Manager.
  * Every call leaves through the NAT gateway to the public AWS endpoints, as a
  * tenant's client would; the only VPC endpoint is the free S3 gateway one.
- * The k6 summaries go to a results bucket before the host is destroyed.
+ * The k6 summaries and result records go to a results bucket before the host is destroyed.
  */
 
 import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Validations } from 'aws-cdk-lib';
@@ -15,16 +15,56 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
-import type { StressTier } from './tiers';
-import { acknowledgeGranularFinding, nagFindingResource } from '../../src/shared/nag';
+import { acknowledgeGranularFinding, nagFindingResource } from './nag';
 
 /** Where the host installs the scripts and writes its output. */
 export const STRESS_HOME = '/opt/stress';
 
+/**
+ * The CDK feature flag that names the host's IMDSv2 launch template after its stack. The app
+ * must set it, or two driver stacks in one account clash on the name `HostLaunchTemplate`.
+ */
+export const UNIQUE_LAUNCH_TEMPLATE_FLAG = '@aws-cdk/aws-ec2:uniqueImdsv2TemplateName';
+
+/** A parameter name or path prefix the host may read: starts with `/`, then letters, digits and `_.-/`. */
+const PARAMETER_PATH = /^\/[A-Za-z0-9_.\-/]+$/;
+
+/** The stress identity's one parameter, `/<STRESS_PREFIX>/identity` (stress ADR-0002, tenant-identity ADR-0042). */
+export function stressIdentityParameter(stressPrefix: string): string {
+  return `/${stressPrefix}/identity`;
+}
+
+/**
+ * The actions the SSM Agent needs for Run Command and Session Manager. They replace the AWS
+ * managed `AmazonSSMManagedInstanceCore`, which also allows `ssm:GetParameter(s)` on every
+ * parameter in the account (stress ADR-0009).
+ */
+export const SSM_AGENT_MESSAGE_ACTIONS = [
+  'ec2messages:AcknowledgeMessage',
+  'ec2messages:DeleteMessage',
+  'ec2messages:FailMessage',
+  'ec2messages:GetEndpoint',
+  'ec2messages:GetMessages',
+  'ec2messages:SendReply',
+  'ssmmessages:CreateControlChannel',
+  'ssmmessages:CreateDataChannel',
+  'ssmmessages:OpenControlChannel',
+  'ssmmessages:OpenDataChannel',
+] as const;
+
 export interface StressDriverStackProps extends StackProps {
-  readonly tier: StressTier;
-  /** The stress ingress stack's registry prefix (§8.3); the host may read the parameters under it. */
-  readonly registryPrefix: string;
+  /** An EC2 instance type: the tier's `driverInstanceType` (stress/src/tiers.ts). */
+  readonly instanceType: string;
+  /**
+   * The stress identity's parameter, read for the tenants' tokens: `stressIdentityParameter(prefix)`.
+   * The host gets `ssm:GetParameter` on this one name.
+   */
+  readonly identityParameterName: string;
+  /**
+   * Further SSM parameter path prefixes the host may read, each starting with `/` (a slice's
+   * registry prefix). The host gets `ssm:GetParameter` on `<prefix>*`.
+   */
+  readonly parameterPrefixes?: readonly string[];
 }
 
 export class StressDriverStack extends Stack {
@@ -50,7 +90,7 @@ export class StressDriverStack extends Stack {
     });
     Validations.of(this.vpc).acknowledge({
       id: 'AwsSolutions-VPC7',
-      reason: 'Stress-test driver VPC, destroyed after each run: no flow log, for cost (stress-test plan §8.1). Nothing listens in it; the host has no inbound rule.',
+      reason: 'Stress-test driver VPC, destroyed after each run: no flow log, for cost (spec §3.1). Nothing listens in it; the host has no inbound rule.',
     });
 
     this.bucket = new s3.Bucket(this, 'Results', {
@@ -74,10 +114,24 @@ export class StressDriverStack extends Stack {
     this.securityGroup.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'HTTPS to the public AWS endpoints through the NAT gateway');
 
     this.role = new iam.Role(this, 'HostRole', {
-      description: 'Stress driver host: SSM Session Manager, execute-api:Invoke, the identity and stress registry parameters, the results bucket',
+      description: 'Stress driver host: the SSM Agent, execute-api:Invoke, the identity and slice registry parameters, the results bucket',
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore')],
     });
+    const instanceResource = `arn:${this.partition}:ec2:${this.region}:${this.account}:instance/*`;
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SsmAgentRegister',
+        actions: ['ssm:UpdateInstanceInformation'],
+        resources: [instanceResource],
+      }),
+    );
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SsmAgentMessages',
+        actions: [...SSM_AGENT_MESSAGE_ACTIONS],
+        resources: ['*'],
+      }),
+    );
     const invokeResource = `arn:${this.partition}:execute-api:${this.region}:${this.account}:*/*/*/*`;
     this.role.addToPolicy(
       new iam.PolicyStatement({
@@ -87,13 +141,21 @@ export class StressDriverStack extends Stack {
       }),
     );
     const parameterArn = (name: string) => `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${name}`;
-    const identityParameters = parameterArn('/application-plane/shared/identity/*');
-    const registryParameters = parameterArn(`${props.registryPrefix}*`);
+    if (!PARAMETER_PATH.test(props.identityParameterName) || props.identityParameterName.endsWith('/')) {
+      throw new Error(`the identity parameter must be a name starting with /, letters, digits and _.-/ only: ${props.identityParameterName}`);
+    }
+    const parameterPrefixes = [...new Set(props.parameterPrefixes ?? [])];
+    for (const prefix of parameterPrefixes) {
+      if (!PARAMETER_PATH.test(prefix)) {
+        throw new Error(`a parameter prefix must start with / and hold letters, digits and _.-/ only: ${prefix}`);
+      }
+    }
+    const prefixParameters = parameterPrefixes.map((prefix) => parameterArn(`${prefix}*`));
     this.role.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'ReadIdentityAndRegistryParameters',
+        sid: 'ReadPublishedParameters',
         actions: ['ssm:GetParameter'],
-        resources: [identityParameters, registryParameters],
+        resources: [parameterArn(props.identityParameterName), ...prefixParameters],
       }),
     );
     this.role.addToPolicy(
@@ -130,7 +192,7 @@ export class StressDriverStack extends Stack {
     this.instance = new ec2.Instance(this, 'Host', {
       vpc: this.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      instanceType: new ec2.InstanceType(props.tier.driverInstanceType),
+      instanceType: new ec2.InstanceType(props.instanceType),
       machineImage: ec2.MachineImage.latestAmazonLinux2023(),
       securityGroup: this.securityGroup,
       role: this.role,
@@ -156,28 +218,30 @@ export class StressDriverStack extends Stack {
     // Granular IAM findings on the host role (cdk-nag renders them from the policy resources).
     acknowledgeGranularFinding(
       this.role,
-      'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/AmazonSSMManagedInstanceCore]',
-      'AmazonSSMManagedInstanceCore is the managed policy Session Manager needs; the host has no key pair and no inbound rule (stress-test plan §8.1).',
+      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, instanceResource)}]`,
+      'The SSM Agent registers the instance it runs on; the instance id is not known before the role exists (stress ADR-0009).',
+    );
+    acknowledgeGranularFinding(
+      this.role,
+      'AwsSolutions-IAM5[Resource::*]',
+      'The ec2messages and ssmmessages actions the SSM Agent needs have no resource type, so IAM takes only * (stress ADR-0009).',
     );
     acknowledgeGranularFinding(
       this.role,
       `AwsSolutions-IAM5[Resource::${nagFindingResource(this, invokeResource)}]`,
-      'The Entitlements API and the platform API have ids this stack does not know (stress-test plan §8.3); both also authorise every call themselves.',
+      'The Entitlements API and the platform API have ids this stack does not know (spec §3.3); both also authorise every call themselves.',
     );
-    acknowledgeGranularFinding(
-      this.role,
-      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, identityParameters)}]`,
-      "tenant-identity's published parameters, read-only (stress-test plan §8.3).",
-    );
-    acknowledgeGranularFinding(
-      this.role,
-      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, registryParameters)}]`,
-      "The stress ingress stack's published parameters, read-only (stress-test plan §8.3).",
-    );
+    for (const parameter of prefixParameters) {
+      acknowledgeGranularFinding(
+        this.role,
+        `AwsSolutions-IAM5[Resource::${nagFindingResource(this, parameter)}]`,
+        "tenant-identity's or a slice's published parameters, read-only (spec §3.3).",
+      );
+    }
     acknowledgeGranularFinding(
       this.role,
       `AwsSolutions-IAM5[Resource::${nagFindingResource(this, this.bucket.arnForObjects('*'))}]`,
-      'The objects of the results bucket only (stress-test plan §8.1).',
+      'The objects of the results bucket only (spec §3.1).',
     );
 
     new CfnOutput(this, 'InstanceId', { value: this.instance.instanceId });

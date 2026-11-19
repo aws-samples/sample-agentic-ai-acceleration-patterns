@@ -7,6 +7,7 @@
     ".projen/deps.json",
     ".projen/files.json",
     ".projen/tasks.json",
+    "driver/tsconfig.json",
     "LICENSE",
     "projenrc/tsconfig.json",
     "test/tsconfig.json",

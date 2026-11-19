@@ -36,7 +36,7 @@ timings on stdout, never a token, a credential or a header value.
 Local state lives outside the repo in `~/.runtime-isolation-stress/<prefix>/`:
 `outputs.json` (stack outputs), `manifest.json` (tenant ids, names and user
 names; never a token or a password), `timings.txt` (deploy and destroy
-seconds) and `runs/<run-id>/` (window, k6 summary, query results).
+seconds, and the driver host's ready seconds) and `runs/<run-id>/` (window, k6 summary, query results).
 
 ## Run order
 
@@ -105,9 +105,12 @@ Estimates from the plan; the scripts print the measured figures.
 
 ## Also
 
-- `host.sh '<command>'` runs one shell command on the driver host through
-  Run Command and prints its output (read back from the results bucket);
-  a debugging aid, nothing listens on the host.
+- The driver host and its helpers are shared and live in `stress/driver/`
+  (stress ADR-0007, ADR-0009): `deploy.sh` and `teardown.sh` call its
+  `deploy.sh` and `teardown.sh`, and `STRESS_PREFIX=<prefix> stress/driver/host.sh
+  '<command>'` runs one shell command on the host through Run Command and
+  prints its output (read back from the results bucket); a debugging aid,
+  nothing listens on the host.
 - `large` reserves 800 + 1,000 Lambda concurrency (ADR-0049): the account's
   Lambda concurrency quota must be at least about 2,500 before
   `deploy.sh` at that scale, or CloudFormation refuses the reserve.
