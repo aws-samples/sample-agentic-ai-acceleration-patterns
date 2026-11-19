@@ -1876,10 +1876,9 @@ so the gate treats people and machine clients alike. Reader tokens
 keep their `GET`s. A machine client whose role is in `allowedRoles`
 is refused with 403 on every route until Open, so automation that
 uses an operator role, status polling included, MUST hold off, or
-retry after Open. The build MUST add
-these three deploys to the README as an upgrade step, with the
-`control-plane:closed` value and the 90 s wait, beside the
-`fleetName` pattern change of §3.3.
+retry after Open. The README lists these three deploys as an
+upgrade step, with the `control-plane:closed` value and the 90 s
+wait, beside the `fleetName` pattern change of §3.3.
 
 An explicit deny wins over any allow, and the stack never reads an
 attached policy to keep it (P-3). The list names only the stack's own
@@ -2040,7 +2039,15 @@ The guard MUST NOT use `$parse`. On bad input `$parse` raises
 Catch path is a failure write, which is wrong on delete. Any evaluation
 error the guard still raises is a defect, and on delete it MUST still
 yield `{}`: the delete script task catches `States.QueryEvaluationError`
-apart from build failures and goes on with `{}`. On create and update a
+apart from build failures and goes on with `{}`. The task's
+`Arguments` raise the same error name before the build starts, and the
+Catch cannot tell the two apart, so an evaluation error in the delete
+task's `Arguments` skips the delete script: the record is deleted and
+the cell account keeps the infrastructure. The `Arguments` read only
+plain input fields, so this needs a defect in the workflow, not bad
+input; README "Known issues" lists it. A `Pass` state cannot hold the
+guard instead, because a `Pass` state has no `Catch` and its error would
+fail the execution before any terminal write. On create and update a
 rejected value, or an evaluation error, takes the failure path (§8.2)
 with `statusReason` "script outputs rejected", the script's changes
 staying in place as after a post hook failure; on delete the workflow
@@ -2683,20 +2690,25 @@ state. An `Assign` reads every variable as it was when its state was
 entered and its new values are visible from the next state, so q and
 the token are assigned in the state after the one that sets `TRY`
 ([Step Functions Developer Guide, workflow variables][sfn-vars]). The
-token MUST be the SHA-256 of the six values joined by `|`, as this
+token MUST be the SHA-256 of the seven values joined by `|`, as this
 JSONata expression:
 
 ```
-$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID,
+$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_SCOPE, HOOK_ID,
   $string(ATTEMPT), $string(TRY)], '|'), 'SHA-256')
 ```
+
+`HOOK_SCOPE` is `GLOBAL` or `APPLICATION`. A global hook and an
+application hook may share a `hookId`, and both can run in one list
+of one event; the scope keeps their tokens apart, since each starts
+in a different project.
 
 [sfn-vars]: https://docs.aws.amazon.com/step-functions/latest/dg/workflow-variables.html
 
 The token is 64 lowercase hexadecimal characters, equal to `sha256sum`
 of the joined string (H-8), so it has a fixed length, and it differs
 on every try by construction; q is not part of it. The expression MUST
-read only those six values, all fixed for the try. Every field of the
+read only those seven values, all fixed for the try. Every field of the
 start task's `Arguments`, not only the token, MUST read only variables
 and the start task's state input, both fixed for the try: the project
 name, `sourceVersion` (R-40), the token, q, T and the R-42
@@ -3113,17 +3125,15 @@ on its remedy (§5.6). A compensation that fails in turn, like a crash
 between the write and the start, is the residual of §7.4 (T47); a
 tenant stranded `CREATING` that way is found with `ListTenants`.
 
-These seven operations answered 200 before ADR-045 and answer 202 after
-it, with a record that is usable only once it is live: a breaking
-change for every API client. A client that uses a record straight after
-creating it (a `CreateTenant` followed by a `CreateDeployment`) MUST
-poll the record's `Get` operation to `ACTIVE` first, or retry the 409.
-Records stored before the change have no `status` and read as `ACTIVE`
-(R-47), so the upgrade writes nothing to the table and needs no drain
-of its own. The build MUST add this to the README's upgrade step and
-change every caller with it: the integration test (§10), the README's
-examples, and clients of these operations such as the
-`tenant-front-door` sample's onboarding path.
+These seven operations answer 202 with a record that is usable only
+once it is live. A client that uses a record straight after creating
+it (a `CreateTenant` followed by a `CreateDeployment`) MUST poll the
+record's `Get` operation to `ACTIVE` first, or retry the 409. A record
+with no `status` reads as `ACTIVE` (R-47), so a deployment whose table
+holds such records needs no table write and no drain to take these
+operations. The README's upgrade steps say so for clients written
+against a 200 answer; every caller of these operations, the
+integration test (§10) and the README's examples included, polls.
 
 ---
 

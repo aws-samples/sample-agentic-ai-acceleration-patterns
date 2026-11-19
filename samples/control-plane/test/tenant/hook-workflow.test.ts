@@ -419,16 +419,18 @@ describe('the R-46 expressions', () => {
   });
   const at = (offsetMs: number) => new Date(START + offsetMs).toISOString();
 
-  test('the token is the SHA-256 of the six values joined by |, 64 hex characters, different on every try', async () => {
+  test('the token is the SHA-256 of the seven values joined by |, 64 hex characters, different on every try and scope', async () => {
     const tokens = new Set<string>();
-    for (const [attempt, attemptTry] of [[1, 1], [1, 2], [2, 1]]) {
-      const variables = { EXECUTION_ID: 'exec-1', EVENT: 'CELL_CREATE', PHASE: 'PRE', HOOK_ID: 'gate', ATTEMPT: attempt, TRY: attemptTry };
+    for (const [scope, attempt, attemptTry] of [['GLOBAL', 1, 1], ['GLOBAL', 1, 2], ['GLOBAL', 2, 1], ['APPLICATION', 1, 1]] as const) {
+      const variables = {
+        EXECUTION_ID: 'exec-1', EVENT: 'CELL_CREATE', PHASE: 'PRE', HOOK: { scope }, HOOK_ID: 'gate', ATTEMPT: attempt, TRY: attemptTry,
+      };
       const token: string = await evaluateJsonata(states.BeginTry.Assign.TOKEN, { context: { State: { EnteredTime: at(0) } } }, variables);
-      expect(token).toBe(createHash('sha256').update(`exec-1|CELL_CREATE|PRE|gate|${attempt}|${attemptTry}`).digest('hex'));
+      expect(token).toBe(createHash('sha256').update(`exec-1|CELL_CREATE|PRE|${scope}|gate|${attempt}|${attemptTry}`).digest('hex'));
       expect(token).toMatch(/^[0-9a-f]{64}$/);
       tokens.add(token);
     }
-    expect(tokens.size).toBe(3);
+    expect(tokens.size).toBe(4);
   });
 
   test('q is 10 on the first try and max(5, 10 - ceil(r)) after, so refusals and the queue take at most 10 minutes', async () => {
@@ -602,6 +604,17 @@ describe('the hook sub-graph (R-45, R-46)', () => {
     expect(Object.keys(result.output).sort()).toEqual(['accountId', 'applicationId', 'cellBuild', 'cellId', 'lastGlobalHooks', 'operatorId', 'tenantBuild', 'tenantId']);
   });
 
+  test('a global and an application hook with the same id on one event start under different tokens (R-46)', async () => {
+    const { handler, log } = service();
+    const result = await run('CellPreHooks', payload(hooks('CELL_CREATE', [hook('audit', 'GLOBAL'), hook('audit', 'APPLICATION')], [])), handler);
+
+    expect(result.stoppedAt).toBe('RunCellBuildSourcePin');
+    expect(log.starts.map((c) => c.args.ProjectName)).toEqual([`${FLEET}-global-hook`, `${FLEET}-app-hook`]);
+    const [globalToken, appToken] = log.starts.map((c) => c.args.IdempotencyToken);
+    expect(globalToken).not.toBe(appToken);
+    expect(appToken).toBe(createHash('sha256').update('exec-1|CELL_CREATE|PRE|APPLICATION|audit|1|1').digest('hex'));
+  });
+
   test('a hook build receives the R-42 environment and no other control plane state', async () => {
     const { handler, log } = service();
     await run('CellPreHooks', payload(hooks('CELL_CREATE', [hook('audit', 'GLOBAL')], [])), handler);
@@ -628,7 +641,7 @@ describe('the hook sub-graph (R-45, R-46)', () => {
       QueuedTimeoutInMinutesOverride: 10,
       BuildspecOverride: HOOK_BUILDSPEC,
     });
-    expect(call.args.IdempotencyToken).toBe(createHash('sha256').update('exec-1|CELL_CREATE|PRE|audit|1|1').digest('hex'));
+    expect(call.args.IdempotencyToken).toBe(createHash('sha256').update('exec-1|CELL_CREATE|PRE|GLOBAL|audit|1|1').digest('hex'));
     expect(Object.keys(call.args).sort()).toEqual([
       'BuildspecOverride', 'EnvironmentVariablesOverride', 'IdempotencyToken', 'ProjectName', 'QueuedTimeoutInMinutesOverride',
       'SourceLocationOverride', 'SourceTypeOverride', 'SourceVersion', 'TimeoutInMinutesOverride',
@@ -749,7 +762,7 @@ describe('the hook sub-graph (R-45, R-46)', () => {
       expect(log.starts.map((c) => Math.round((c.at - START) / 1000))).toEqual([0, 30, 60, 90, 120].map((s) => expect.closeTo(s, -1)));
       expect(log.starts.map((c) => c.args.QueuedTimeoutInMinutesOverride)).toEqual([10, 9, 8, 8, 7]);
       expect(new Set(log.starts.map((c) => c.args.IdempotencyToken)).size).toBe(5);
-      expect(log.starts.map((c) => c.args.IdempotencyToken)[1]).toBe(createHash('sha256').update('exec-1|CELL_CREATE|PRE|gate|1|2').digest('hex'));
+      expect(log.starts.map((c) => c.args.IdempotencyToken)[1]).toBe(createHash('sha256').update('exec-1|CELL_CREATE|PRE|GLOBAL|gate|1|2').digest('hex'));
     });
 
     test('a start refused for 5 minutes ends as a hook that cannot start and names the last refusal', async () => {

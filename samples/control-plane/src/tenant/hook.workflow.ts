@@ -222,7 +222,7 @@ export const BEGIN_TRY_ASSIGN: Record<string, string> = {
   Q: expr(
     `$max([5, ${REFUSAL_AND_QUEUE_MINUTES} - ($TRY = 1 ? 0 : $ceil((${ENTERED_MS} - $toMillis($FIRST_TRY_AT)) / ${MINUTE_MS}))])`,
   ),
-  TOKEN: expr("$hash($join([$EXECUTION_ID, $EVENT, $PHASE, $HOOK_ID, $string($ATTEMPT), $string($TRY)], '|'), 'SHA-256')"),
+  TOKEN: expr("$hash($join([$EXECUTION_ID, $EVENT, $PHASE, $HOOK.scope, $HOOK_ID, $string($ATTEMPT), $string($TRY)], '|'), 'SHA-256')"),
 };
 
 /**

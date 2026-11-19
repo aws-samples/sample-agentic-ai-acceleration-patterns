@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-11-10
 - Amends: ADR-0024
+- Amended by: ADR-0045
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -23,3 +24,5 @@ Option 1. `Account.applicationIds` is an optional, replaceable set. Eligibility 
 
 ## Consequences
 Spec §4.4 (Account) gains the field and §7.1 the eligibility rule; `PutAccount` validates the ids and `GetAccount`/`ListAccounts` return them. A per-application cap inside a shared account is recorded as a seam (§11): it would be Option 3 layered on this decision, with the account-level `maxCells` kept as the outer bound.
+
+**Amended by ADR-0045 (2026-11-18):** `applicationIds` holds at most 100 ids, so the `ACCOUNT_APPLICATION_IDS` hook variable stays inside one CodeBuild environment value. `PutAccount` refuses a longer list with 400, and a re-put of an account that holds more is a 400 until the list is shortened. A replace stages the new set in `pending`, and placement reads the live set until the workflow commits it after the pre hooks.

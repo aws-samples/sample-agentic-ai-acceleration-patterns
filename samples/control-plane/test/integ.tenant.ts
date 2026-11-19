@@ -535,7 +535,7 @@ new iam.ManagedPolicy(setup, 'AppHookTestPolicy', {
     }),
     // Step 16 needs this allow on the API function only, so the R-41 deny is
     // shown to override it. It stays a pattern, and the ProtoShield
-    // iam-least-privilege finding on `function:*` (scan cp-0045-1) is
+    // iam-least-privilege finding on `function:*` is
     // accepted for this test-only policy: the policy must exist before the
     // stack under test (the stack validates appHookManagedPolicyArns at
     // synth and attaches the policy at deploy), and the API function has no

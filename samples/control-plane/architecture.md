@@ -680,7 +680,7 @@ definition-replacing `UpdateCell` body is a noted extension, not included.
 ### Status state machines
 
 Cells, deployments, applications, tenants and accounts share one status
-vocabulary (the last three since ADR-045):
+vocabulary:
 
 ```
             create                     update
@@ -699,8 +699,7 @@ For an application, a tenant or an account the same diagram holds, with
 three differences (`src/tenant/record-writes.ts`). A put of a
 `CREATE_FAILED` application or account goes back to `CREATING`. The record
 is live in `ACTIVE`, `UPDATING` and `UPDATE_FAILED`, so a staged update
-leaves it usable. A record stored before ADR-045 has no status and reads as
-`ACTIVE`. Updates start from `ACTIVE` or `UPDATE_FAILED`, deletes from
+leaves it usable. A record with no status reads as `ACTIVE`. Updates start from `ACTIVE` or `UPDATE_FAILED`, deletes from
 `ACTIVE` or any `*_FAILED` status.
 
 Transitional statuses remain the concurrency guard (409 on in-flight

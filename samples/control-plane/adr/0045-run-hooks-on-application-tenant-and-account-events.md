@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-18
-- Amends: ADR-0005, ADR-0024, ADR-0032, ADR-0037, ADR-0044
+- Amends: ADR-0005, ADR-0024, ADR-0032, ADR-0033, ADR-0037, ADR-0044
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -104,8 +104,8 @@ and fire no hooks.
   and polling for every record call, spelled out in steps 2, 3, 4, 11
   and 18, new step 17, teardown becomes step 18, unit assertions,
   untested paths), §11. Threat model: T16, T28, T43 widened; new T45
-  to T47 and M33, M34. `integration-test.md` gains the changes the
-  built test will need.
+  to T47 and M33, M34. `integration-test.md` describes the new and
+  changed steps.
 - Breaking change for API clients: the seven operations answer 202
   with the record and its `status` instead of 200, and a record is
   usable only once it is `ACTIVE` (or `UPDATING` or `UPDATE_FAILED`
@@ -113,10 +113,9 @@ and fire no hooks.
   once must poll `GetTenant` first, or retry the 409. The integration
   test, the README's examples and every client of these operations
   (the `tenant-front-door` sample's onboarding path among them) change
-  with it. The README gains an upgrade note when the change is built.
-  Records stored before the upgrade have no `status` and read as
-  `ACTIVE`, so the upgrade writes nothing to the table and needs no
-  drain beyond ADR-0044's.
+  with it. The README carries an upgrade note. Records stored before
+  the upgrade have no `status` and read as `ACTIVE`, so the upgrade
+  writes nothing to the table and needs no drain beyond ADR-0044's.
 - Every one of these operations costs one Standard execution, with a
   few state transitions and seconds of latency when no hook matches,
   plus each matching hook's build and polling (ADR-0044). The path is
@@ -197,10 +196,10 @@ and fire no hooks.
 - Seams (spec §11): hooks on hook operations stay out. `PutHook` and
   `DeleteHook` stay synchronous; a hook that gated its own removal would
   have no exit.
-- ADR-0005, ADR-0024, ADR-0032 and ADR-0037 get "Amended by ADR-0045"
-  lines and dated trailing notes when this record is accepted. ADR-0044
-  carries a dated note now, because it is still Proposed and its seam
-  is the one this record closes; it gets the `Amended by` line too.
+- ADR-0005, ADR-0024, ADR-0032, ADR-0033, ADR-0037 and ADR-0044 carry
+  "Amended by ADR-0045" lines and dated trailing notes. ADR-0044's
+  seam "hooks on tenant record events and on account events" is the
+  one this record closes.
 - Revisit if a client cannot poll (a synchronous `CreateTenant` would
   then need option 2 beside this one), if the execution per operation
   becomes a cost that matters at the fleet's request rate, or if a hook

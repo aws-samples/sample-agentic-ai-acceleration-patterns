@@ -834,8 +834,8 @@ export class ProvisioningWorkflow extends Construct {
       }),
     );
     // The count of skipped delete hooks (R-46, T42). PutMetricData has no
-    // resource-level permission, so the resource is `*` (the ProtoShield
-    // iam-least-privilege finding of scan cp-0045-1); the condition limits
+    // resource-level permission, so the resource is `*` (a ProtoShield
+    // iam-least-privilege finding, accepted); the condition limits
     // it to the one fixed namespace the workflow writes, `<fleet>/hooks`
     // (hookMetricNamespace), asserted in test/tenant/hook-workflow.test.ts.
     this.stateMachine.addToRolePolicy(
@@ -1356,6 +1356,8 @@ export function buildResultOutput(resultField: string): string {
  * shortcut: the same error name is raised by the task's `Arguments` before
  * the build starts, and this Catch cannot tell the two apart, so a defect
  * there on a delete skips the script. The Arguments read plain input fields.
+ * README "Known issues" and spec R-43 list it; a `Pass` state cannot hold
+ * the guard instead, because it has no Catch.
  */
 export function scriptOutputsErrorOutput(phase: 'cellBuild' | 'tenantBuild'): string {
   return jsonata(

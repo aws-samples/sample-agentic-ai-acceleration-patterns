@@ -295,8 +295,10 @@ does not recognise, such as a throttle's generic
 that `Retry` under the same token, never to the refusal `Catch`,
 because a refused request does not bind its token (H-8) and a new
 token could leave a second build. The token is
-`$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID, $string(ATTEMPT),
-$string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters. Every
+`$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_SCOPE, HOOK_ID,
+$string(ATTEMPT), $string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal
+characters. The scope keeps a global hook and an application hook
+with the same `hookId` on one event apart. Every
 field of the start task's `Arguments`, the token included, reads only
 variables and the start task's state input, both fixed for the try.
 Every state on the way back to the start task, the entry and begin-try
@@ -423,17 +425,16 @@ as a consumer of a global post hook.
   stranded. The gate treats people and machine clients alike (R-38):
   a machine client with an operator role gets 403 on every route until
   (c), so automation that uses an operator role, status polling
-  included, must hold off or retry. The README gains
-  this upgrade step when the change is built.
+  included, must hold off or retry. The README lists this upgrade
+  step.
 - `fleetName` narrows from `[a-z0-9-]{1,32}` to
   `[a-z0-9][a-z0-9-]{0,31}` (spec §3.3), because it now names
   CodeBuild projects, whose names start with a letter or digit. A
   fleet whose name starts with a hyphen fails synth after the upgrade.
   Renaming it replaces every fleet role, so the role pair must be
   reinstalled under the new name in every registered account.
-  `architecture.md`, the README and `src/shared/fleet.ts` keep the
-  built pattern until this change is built, and then take the new
-  one.
+  `architecture.md`, the README and `src/shared/fleet.ts` use the
+  new pattern.
 - Every build role, every hook role and the two pair roles of the
   control plane's own account carry the deny, one standalone policy
   that nothing depends on, so a deployer can no longer grant them,
@@ -573,8 +574,8 @@ as a consumer of a global post hook.
   outputs from a pre hook into the script; a hook role per application
   or per global hook; publishing to an event bus as a built-in.
 - ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0025, ADR-0032
-  and ADR-0042 get "Amended by ADR-0044" lines and dated trailing notes
-  when this record is accepted.
+  and ADR-0042 carry "Amended by ADR-0044" lines and dated trailing
+  notes.
 - Revisit if a downstream system needs to veto a delete (today a delete
   cannot be gated), if per-application or per-hook permissions are
   needed, if hook latency on every operation becomes the larger cost, if

@@ -49,6 +49,13 @@ import { getTenantServiceServiceHandler } from '../smithy/source/typescript-ssdk
  * slow call with no bound, and the invocation can end before R-51
  * classifies and compensates the start. Only these calls are bounded: a
  * DynamoDB or STS call that hangs is the T47 residual (spec R-51, §7.4).
+ *
+ * The same bound applies to the cell and deployment starts on `sfnClient`.
+ * There every start error is compensated as a refusal, so a start that did
+ * begin but answered slower than 2 s on all three SDK attempts is marked
+ * `*_FAILED` while its execution runs (T47). Without the bound the same
+ * slow call would run into the function timeout with no compensation at
+ * all, which leaves the record in flight; the bound is the better failure.
  */
 export const SFN_CONNECTION_TIMEOUT_MS = 1_000;
 export const SFN_REQUEST_TIMEOUT_MS = 2_000;

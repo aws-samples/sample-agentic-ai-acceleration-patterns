@@ -10,6 +10,9 @@
 #                         projects, state machine, log groups and test
 #                         parameters (exit 1 when any exists)
 #
+# Either mode exits 2 when an AWS listing call fails: the leftovers are then
+# unknown, never reported as none.
+#
 # Account B holds this fleet's role pair and probe role in a stack of its own,
 # which the runner destroys; this script has A's credentials only and does not
 # read B. The default Lambda log groups of the test harness
@@ -37,28 +40,40 @@ report() {
 }
 
 stacks=$(aws cloudformation describe-stacks --region "$AWS_REGION" --query "Stacks[].StackName" --output text) || {
-  echo "Could not list CloudFormation stacks in $AWS_REGION"
-  exit 1
+  echo "Could not list CloudFormation stacks in $AWS_REGION; leftovers unknown" >&2
+  exit 2
 }
 report "Stacks of this run in $AWS_REGION (${FLEET}):" < <(printf '%s\n' $stacks | grep -E "^${FLEET}(-|$)")
 if [ "$mode" = stacks ]; then
   exit $found
 fi
 
-report "IAM roles named after the fleet:" \
-  < <(aws iam list-roles --query "Roles[?starts_with(RoleName, '${FLEET}-')].RoleName" --output text | tr '\t' '\n')
-report "CodeBuild projects named after the fleet:" \
-  < <(aws codebuild list-projects --region "$AWS_REGION" --query "projects[?starts_with(@, '${FLEET}-')]" --output text | tr '\t' '\n')
-report "State machines named after the fleet:" \
-  < <(aws stepfunctions list-state-machines --region "$AWS_REGION" --query "stateMachines[?starts_with(name, '${FLEET}-')].name" --output text | tr '\t' '\n')
+# Runs one AWS listing (text output) and prints one name per line. A failed
+# call ends the script with exit 2, so an error is never read as "nothing left".
+list() {
+  local what="$1" out
+  shift
+  out=$("$@" --output text) || {
+    echo "Could not list ${what} in $AWS_REGION; leftovers unknown" >&2
+    exit 2
+  }
+  printf '%s\n' "$out" | tr '\t' '\n' | { grep -v -e '^$' -e '^None$' || true; }
+}
+
+roles=$(list "IAM roles" aws iam list-roles --query "Roles[?starts_with(RoleName, '${FLEET}-')].RoleName") || exit 2
+report "IAM roles named after the fleet:" <<<"$roles"
+projects=$(list "CodeBuild projects" aws codebuild list-projects --region "$AWS_REGION" --query "projects[?starts_with(@, '${FLEET}-')]") || exit 2
+report "CodeBuild projects named after the fleet:" <<<"$projects"
+machines=$(list "state machines" aws stepfunctions list-state-machines --region "$AWS_REGION" --query "stateMachines[?starts_with(name, '${FLEET}-')].name") || exit 2
+report "State machines named after the fleet:" <<<"$machines"
 # Log groups the stacks own are named after their stack, so after the fleet.
-report "Log groups named after the fleet (the harness's Lambda ones excepted):" \
-  < <(aws logs describe-log-groups --region "$AWS_REGION" --log-group-name-prefix "${FLEET}-" --query "logGroups[].logGroupName" --output text | tr '\t' '\n' | grep -v '^/aws/lambda/')
-report "Hook ledger parameters (delete with: aws ssm delete-parameters --names <names>):" \
-  < <(aws ssm get-parameters-by-path --region "$AWS_REGION" --path "/cp-integ/${FLEET}" --recursive --query "Parameters[].Name" --output text | tr '\t' '\n')
+groups=$(list "log groups" aws logs describe-log-groups --region "$AWS_REGION" --log-group-name-prefix "${FLEET}-" --query "logGroups[].logGroupName") || exit 2
+report "Log groups named after the fleet (the harness's Lambda ones excepted):" < <(printf '%s\n' "$groups" | grep -v -e '^/aws/lambda/' -e '^$')
+params=$(list "SSM parameters" aws ssm get-parameters-by-path --region "$AWS_REGION" --path "/cp-integ/${FLEET}" --recursive --query "Parameters[].Name") || exit 2
+report "Hook ledger parameters (delete with: aws ssm delete-parameters --names <names>):" <<<"$params"
 
 # Expected: the harness's default function log groups (not counted).
-harness=$(aws logs describe-log-groups --region "$AWS_REGION" --log-group-name-prefix "/aws/lambda/${FLEET}-" --query "logGroups[].logGroupName" --output text | tr '\t' '\n')
+harness=$(list "harness log groups" aws logs describe-log-groups --region "$AWS_REGION" --log-group-name-prefix "/aws/lambda/${FLEET}-" --query "logGroups[].logGroupName") || exit 2
 if [ -n "$harness" ]; then
   echo "Expected harness leftovers (default Lambda log groups, delete by prefix /aws/lambda/${FLEET}-):"
   printf '%s\n' "$harness" | sed 's/^/  /'
