@@ -61,12 +61,21 @@ export interface ControlPlaneReaderOptions {
 const TOKEN_MARGIN_MS = 60_000;
 
 /** Each control-plane or token call is abandoned after this long, inside the function's 30 s. */
-const CALL_TIMEOUT_MS = 5_000;
+const CALL_TIMEOUT_MS = 3_000;
 
 const UNREADABLE = 'the control plane cannot be read; retry';
 
 function unreadable(): Error {
   return refuse.unavailable(UNREADABLE);
+}
+
+/** Releases the connection of a response whose body is not read. */
+async function discard(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Nothing to release.
+  }
 }
 
 function object(x: unknown): Record<string, unknown> {
@@ -153,6 +162,7 @@ export class ControlPlaneReader implements ControlPlane {
         throw unreadable();
       }
     }
+    await discard(response);
     if (response.status === 404 && (response.headers.get('x-amzn-errortype') ?? '').startsWith('ResourceNotFoundError')) {
       return undefined;
     }
@@ -187,6 +197,7 @@ export class ControlPlaneReader implements ControlPlane {
       throw unreadable();
     }
     if (response.status !== 200) {
+      await discard(response);
       // A rotated secret is read again on the next call.
       this.secret = undefined;
       throw unreadable();

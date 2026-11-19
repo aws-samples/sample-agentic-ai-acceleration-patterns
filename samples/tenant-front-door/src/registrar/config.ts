@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { ROLE_ARN } from './caller';
 import type { Addressing } from '../shared/contracts';
 import { REGISTRAR_ENV } from '../shared/contracts';
 
@@ -74,10 +75,11 @@ export function loadConfig(env: NodeJS.ProcessEnv): RegistrarConfig {
   const routeTableArn = required(env, REGISTRAR_ENV.routeTableArn);
   if (!routeTableArn.startsWith('arn:')) throw new ConfigError(`${REGISTRAR_ENV.routeTableArn} is not an ARN`);
   const edgeOperatorRoleArn = required(env, REGISTRAR_ENV.edgeOperatorRoleArn);
-  if (!/^arn:[a-z-]+:iam::\d{12}:role\/.+$/.test(edgeOperatorRoleArn)) {
+  if (!ROLE_ARN.test(edgeOperatorRoleArn)) {
     throw new ConfigError(`${REGISTRAR_ENV.edgeOperatorRoleArn} is not an IAM role ARN`);
   }
   const distributionId = env[REGISTRAR_ENV.distributionId]?.trim() || undefined;
+  if (dedicated === 'on' && distributionId === undefined) throw new ConfigError(`${REGISTRAR_ENV.distributionId} is not set`);
   return {
     routeTableArn,
     appDomain: matching(env, REGISTRAR_ENV.appDomain, HOST),

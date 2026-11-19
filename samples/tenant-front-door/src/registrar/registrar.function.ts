@@ -3,6 +3,7 @@
 
 import { CloudFrontKeyValueStoreClient } from '@aws-sdk/client-cloudfront-keyvaluestore';
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { classifyCaller } from './caller';
@@ -100,6 +101,15 @@ export function createHandler(deps: RegistrarDeps): Handler {
 
 let cached: Handler | undefined;
 
+/**
+ * SDK calls fail fast and retry once, so a call with its control-plane
+ * reads and five store attempts stays near API Gateway's 29 s limit.
+ */
+const SDK_CLIENT = {
+  maxAttempts: 2,
+  requestHandler: new NodeHttpHandler({ connectionTimeout: 2_000, requestTimeout: 3_000 }),
+} as const;
+
 /** Built once per environment, on the first call, so a test can import the module without the environment. */
 function coldStart(): Handler {
   const config = loadConfig(process.env);
@@ -110,9 +120,9 @@ function coldStart(): Handler {
       tokenUrl: config.vendorIdpTokenUrl,
       clientId: config.vendorIdpClientId,
       secretArn: config.vendorIdpSecretArn,
-      secrets: new SecretsManagerClient({}),
+      secrets: new SecretsManagerClient(SDK_CLIENT),
     }),
-    store: new KvsRouteStore({ client: new CloudFrontKeyValueStoreClient({}), arn: config.routeTableArn }),
+    store: new KvsRouteStore({ client: new CloudFrontKeyValueStoreClient(SDK_CLIENT), arn: config.routeTableArn }),
     domains: new DedicatedDomainsNotBuilt(),
   });
 }
