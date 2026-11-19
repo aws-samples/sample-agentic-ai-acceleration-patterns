@@ -682,7 +682,7 @@ and `create-tenant-burst` (`CreateTenant` beyond what Cognito's control plane
 takes). Each asserts that every token names the tenant it was issued for and
 that a token or path of tenant A is refused for tenant B, including tenant
 A's refresh token on tenant B's platform path with the name of a real user
-of B (ADR-0041) ([ADR-0042](./adr/0042-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)). The driver is
+of B ([ADR-0041](./adr/0041-bind-refreshtoken-result-to-the-path-user-and-tenant.md), [ADR-0042](./adr/0042-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)). The driver is
 [`test/stress/`](./test/stress/); its manifest and logs stay outside the
 repository and hold no token or password.
 

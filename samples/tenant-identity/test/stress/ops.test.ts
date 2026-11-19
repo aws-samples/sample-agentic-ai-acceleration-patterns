@@ -267,7 +267,6 @@ describe('createTenantWithAdmin (ADR-0037 recovery)', () => {
 });
 
 describe('foreign refresh token on its own path (P-1, ADR-0041)', () => {
-
   test('the 404 refusal holds', async () => {
     const rec = new Recorder();
     const calls: string[] = [];
@@ -282,5 +281,4 @@ describe('foreign refresh token on its own path (P-1, ADR-0041)', () => {
     await probeForeignRefreshToken(ctxWith({ platform: { call: async () => result(status, { accessToken: 'x' }) } }), rec, 'A', 'B', 'b-admin', 'r');
     expect(rec.totals).toMatchObject({ assertions: 1, mismatches: 1 });
   });
-
 });

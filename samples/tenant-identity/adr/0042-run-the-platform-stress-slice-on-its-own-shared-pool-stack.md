@@ -87,16 +87,15 @@ scenario do. Its choices:
 - **Isolation assertions (P-1).** Every token is verified against the stress
   pool and must carry `tenant_id` of the tenant it was issued for and no
   groups or tenants claim. Probes must be refused: a refresh token of A on
-  B's platform path with A's username (ADR-0013's membership check), A's
-  refresh token exchanged for B's resource, and, through the tenant admin
-  door, B's user read with A's narrowed token and a list that names only A's
-  users and, when it is complete, A's own admin (so an empty list cannot
-  pass). A probe that is throttled is retried like the others; one that never
-  answers is a finding, not a silent skip. A's refresh token on B's path
-  with the name of a real user of B passes the membership check, so that
-  probe tests the refresh token itself: `RefreshToken` binds its result to
-  the path's user and tenant (ADR-0041), and any served answer is a
-  mismatch.
+  B's platform path with A's username (ADR-0013's membership check); A's
+  refresh token on B's platform path with the name of a real user of B,
+  which passes the membership check and so tests the refresh token itself
+  (`RefreshToken` binds its result to the path's user and tenant,
+  ADR-0041); A's refresh token exchanged for B's resource; and, through the
+  tenant admin door, B's user read with A's narrowed token and a list that
+  names only A's users and, when it is complete, A's own admin (so an empty
+  list cannot pass). A probe that is throttled is retried like the others;
+  one that never answers is a finding, not a silent skip.
 - **Findings.** A bare 5xx other than 503, and an operation that never
   finishes, fail the scenario. A bare 5xx is also counted as unattributed in
   the record (stress spec P-7).
