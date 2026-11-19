@@ -9,8 +9,9 @@
 #     [STRESS_PARAMETER_PREFIXES=/path/a/,/path/b/] stress/driver/deploy.sh
 #
 # STRESS_TIER picks the instance type from stress/src/tiers.ts (default small).
-# STRESS_PARAMETER_PREFIXES lists SSM parameter paths the host may read besides
-# tenant-identity's. Prints `stack=<name> deploy_seconds=<n>`, then the outputs as JSON.
+# The host reads the stress identity, /<STRESS_PREFIX>/identity; STRESS_PARAMETER_PREFIXES
+# lists further SSM parameter paths it may read. Prints `stack=<name> deploy_seconds=<n>`,
+# waits until the host runs k6, prints `stack=<name> ready_seconds=<n>`, then the outputs as JSON.
 # The synthesised app goes to stress/cdk.driver.out (not committed).
 
 set -euo pipefail
@@ -35,4 +36,18 @@ start=$SECONDS
 npx cdk --app "npx ts-node --transpile-only driver/app.ts" deploy "$STACK" \
   --output "$OUT" --exclusively --require-approval never --outputs-file "$OUTPUTS" >&2
 echo "stack=${STACK} deploy_seconds=$((SECONDS - start))"
+
+# CloudFormation is done when the instance runs, not when its user data has installed k6, and
+# the SSM Agent registers a few seconds after that. Wait for both, so the next call can use
+# the host: the agent online (at most 5 minutes), then cloud-init finished and k6 present.
+INSTANCE="$(jq -r --arg s "$STACK" '.[$s].InstanceId' "$OUTPUTS")"
+ready_start=$SECONDS
+until [[ "$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${INSTANCE}" \
+  --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)" == Online ]]; do
+  (( SECONDS - ready_start < 300 )) || { echo "the SSM Agent on ${INSTANCE} did not come online in 5 minutes" >&2; exit 1; }
+  sleep 10
+done
+HOST_TIMEOUT=900 "${HERE}/host.sh" 'cloud-init status --wait >/dev/null 2>&1; k6 version' >&2 \
+  || { echo "the host did not finish its user data with k6 installed" >&2; exit 1; }
+echo "stack=${STACK} ready_seconds=$((SECONDS - ready_start))"
 jq --arg s "$STACK" '.[$s]' "$OUTPUTS"
