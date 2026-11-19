@@ -999,9 +999,16 @@ given below):
    domain the registrar set again meanwhile is left alone. A disabled
    distribution tenant whose domain is its tenant's `d` and whose
    `host#<d>` names that tenant is left as it is and logged as
-   `distribution tenant disabled on a routed domain`: a removal that raced
-   the registrar's re-enable can leave it, and a routed repeat looks
-   nothing up, so the operator drops the domain and sets it again. The
+   `distribution tenant disabled on a routed domain`. A removal cannot
+   leave it: the sweeper reads `d` after `GetDistributionTenant` and
+   sends that read's ETag with every disable and delete, and the
+   registrar re-enables only after its own `d` write, so a re-enable
+   either lands before the sweeper's `d` read, which then finds `d`, or
+   after its `GetDistributionTenant`, which makes the ETag stale. The
+   log detects a distribution tenant disabled outside the registrar and
+   the sweeper, by hand or by another tool. Nothing repairs it, and a
+   routed repeat looks nothing up, so the operator drops the domain and
+   sets it again. The
    sweeper finds what a crashed call left the same way. A changed domain is offline
    from the write until the new one validates. Before it touches a
    distribution tenant or a certificate, the registrar checks that its
