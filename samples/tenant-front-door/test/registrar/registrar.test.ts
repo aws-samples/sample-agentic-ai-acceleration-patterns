@@ -787,9 +787,10 @@ describe('route table limits', () => {
     await h.handler(restEvent('PUT', `/cells/${CELL}`, 'hook', { apiDomain: API_DOMAIN }));
     const emf = logSpy.mock.calls.map((call) => String(call[0])).find((l) => l.includes('RouteTableBytes'));
     expect(json(emf!).RouteTableBytes).toBe(h.kvs.size());
+    expect(json(emf!).DistributionId).toBe('E1EXAMPLE0DIST');
     expect((json(emf!)._aws as { CloudWatchMetrics: unknown[] }).CloudWatchMetrics[0]).toEqual({
       Namespace: 'TenantFrontDoor',
-      Dimensions: [[]],
+      Dimensions: [['DistributionId']],
       Metrics: [{ Name: 'RouteTableBytes', Unit: 'Bytes' }],
     });
     // One top-level JSON record per line on stdout, not console.log: under the

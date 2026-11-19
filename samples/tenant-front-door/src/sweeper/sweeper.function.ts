@@ -65,6 +65,7 @@ function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
 /** Builds the function's clients and settings from its environment. */
 export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): SweeperDeps {
   const routeTableArn = requireEnv(env, SWEEPER_ENV.routeTableArn);
+  const distributionId = requireEnv(env, SWEEPER_ENV.distributionId);
   const kvs = new CloudFrontKeyValueStoreClient({});
   const lookup = nodeDnsLookup();
   return {
@@ -75,6 +76,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): SweeperDeps {
       ddb: DynamoDBDocumentClient.from(new DynamoDBClient({ maxAttempts: 1 })),
       lambda: new LambdaClient({}),
       routeTableArn,
+      distributionId,
       tableName: requireEnv(env, SWEEPER_ENV.tableName),
       functionName: requireEnv(env, 'AWS_LAMBDA_FUNCTION_NAME'),
       now: () => Date.now(),
@@ -86,7 +88,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): SweeperDeps {
       acm: new ACMClient({ region: CERTIFICATE_REGION }),
       kvs,
       routeTableArn,
-      distributionId: requireEnv(env, SWEEPER_ENV.distributionId),
+      distributionId,
     },
   };
 }

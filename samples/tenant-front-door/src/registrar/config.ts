@@ -27,8 +27,8 @@ export interface RegistrarConfig {
   readonly fleet: string;
   readonly edgeOperatorRoleArn: string;
   readonly dedicatedDomains: boolean;
-  /** Set when `dedicatedDomains` is on; the dedicated-domain seam reads it. */
-  readonly distributionId?: string;
+  /** The multi-tenant distribution: the dimension of `RouteTableBytes` (§4.1), and the dedicated-domain seam's. */
+  readonly distributionId: string;
 }
 
 const ACCOUNT = /^\d{12}$/;
@@ -78,8 +78,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): RegistrarConfig {
   if (!ROLE_ARN.test(edgeOperatorRoleArn)) {
     throw new ConfigError(`${REGISTRAR_ENV.edgeOperatorRoleArn} is not an IAM role ARN`);
   }
-  const distributionId = env[REGISTRAR_ENV.distributionId]?.trim() || undefined;
-  if (dedicated === 'on' && distributionId === undefined) throw new ConfigError(`${REGISTRAR_ENV.distributionId} is not set`);
+  const distributionId = required(env, REGISTRAR_ENV.distributionId).trim();
   return {
     routeTableArn,
     appDomain: matching(env, REGISTRAR_ENV.appDomain, HOST),

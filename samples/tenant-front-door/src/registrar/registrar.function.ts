@@ -164,7 +164,7 @@ export function dedicatedDomainsFor(config: RegistrarConfig): DedicatedDomains {
   return new AwsDedicatedDomains({
     acm: new ACMClient({ ...SDK_CLIENT, region: CERTIFICATE_REGION }),
     cloudfront: new CloudFrontClient({ ...SDK_CLIENT, region: 'us-east-1' }),
-    distributionId: config.distributionId!,
+    distributionId: config.distributionId,
     lookup: nodeDnsLookup(),
   });
 }
@@ -181,7 +181,7 @@ function coldStart(): Handler {
       secretArn: config.vendorIdpSecretArn,
       secrets: new SecretsManagerClient(SDK_CLIENT),
     }),
-    store: new KvsRouteStore({ client: new CloudFrontKeyValueStoreClient(SDK_CLIENT), arn: config.routeTableArn }),
+    store: new KvsRouteStore({ client: new CloudFrontKeyValueStoreClient(SDK_CLIENT), arn: config.routeTableArn, distributionId: config.distributionId }),
     domains: dedicatedDomainsFor(config),
   });
 }

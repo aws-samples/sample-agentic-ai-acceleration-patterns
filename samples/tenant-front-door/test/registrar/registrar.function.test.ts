@@ -27,6 +27,7 @@ describe('the Lambda entry', () => {
       [REGISTRAR_ENV.fleet]: c.fleet,
       [REGISTRAR_ENV.edgeOperatorRoleArn]: c.edgeOperatorRoleArn,
       [REGISTRAR_ENV.dedicatedDomains]: 'off',
+      [REGISTRAR_ENV.distributionId]: 'E1EXAMPLE0DIST',
       AWS_REGION: 'eu-central-1',
     });
     const log = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);

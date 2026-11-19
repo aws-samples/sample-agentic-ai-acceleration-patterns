@@ -54,6 +54,8 @@ export const BACKOFF_MAX_MS = 500;
 export interface KvsRouteStoreOptions {
   readonly client: CloudFrontKeyValueStoreClient;
   readonly arn: string;
+  /** The `DistributionId` dimension of `RouteTableBytes`; without it (a tool outside the registrar) no metric line is written. */
+  readonly distributionId?: string;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly random?: () => number;
 }
@@ -118,7 +120,9 @@ export class KvsRouteStore implements RouteStore {
           Puts: puts.length > 0 ? puts.map(([Key, Value]) => ({ Key, Value })) : undefined,
           Deletes: deletes.length > 0 ? deletes.map((Key) => ({ Key })) : undefined,
         }));
-        if (written.TotalSizeInBytes !== undefined) emitRouteTableBytes(written.TotalSizeInBytes);
+        if (written.TotalSizeInBytes !== undefined && this.options.distributionId !== undefined) {
+          emitRouteTableBytes(written.TotalSizeInBytes, this.options.distributionId);
+        }
         return planned.result;
       } catch (error) {
         if (error instanceof ServiceQuotaExceededException) throw refuse.storage();

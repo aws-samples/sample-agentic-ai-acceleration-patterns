@@ -47,6 +47,7 @@ import {
   TAG_DISTRIBUTION_ID,
   TAG_TENANT_ID,
 } from '../shared/contracts';
+import { METRIC_DIMENSION_DISTRIBUTION } from '../shared/route-table';
 
 /** The Region of every registrar certificate: CloudFront takes certificates from `us-east-1` only. */
 export const CERTIFICATE_REGION = 'us-east-1';
@@ -446,7 +447,7 @@ export class Sweeper extends Construct {
       + 'the schedules invoke the unqualified function only (M-16, M-24, ADR-0020).',
     );
 
-    this.alarms = this.createAlarms(props.alarmAction);
+    this.alarms = this.createAlarms(props.distributionId, props.alarmAction);
 
     // The starter (§3.4 step 5): deployed with the sweeper and after it.
     const starterFn = nodeFunction(this, 'StarterFunction', {
@@ -473,9 +474,14 @@ export class Sweeper extends Construct {
     this.starter.node.addDependency(this.node.findChild('FanOut'));
   }
 
-  private createAlarms(action: cloudwatch.IAlarmAction | undefined): cloudwatch.Alarm[] {
-    const metric = (metricName: string, statistic: string, period: Duration) =>
-      new cloudwatch.Metric({ namespace: SWEEPER_METRIC_NAMESPACE, metricName, statistic, period });
+  private createAlarms(distributionId: string, action: cloudwatch.IAlarmAction | undefined): cloudwatch.Alarm[] {
+    const metric = (metricName: string, statistic: string, period: Duration) => new cloudwatch.Metric({
+      namespace: SWEEPER_METRIC_NAMESPACE,
+      metricName,
+      statistic,
+      period,
+      dimensionsMap: { [METRIC_DIMENSION_DISTRIBUTION]: distributionId },
+    });
     const alarms = [
       // Spec §3.4 step 5 names the count, not the period: one hour, so a
       // three-miss line alarms within the hour of the page that wrote it.

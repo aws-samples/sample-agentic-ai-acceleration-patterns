@@ -7,6 +7,7 @@ import { BatchWriteCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynam
 import {
   challengeOutcomes,
   ddb,
+  DISTRIBUTION_ID,
   entryItem,
   kvs,
   lambda,
@@ -90,6 +91,13 @@ describe('lister (spec §3.4 step 5, ADR-0020, ADR-0022)', () => {
   it('emits a missing-pages count of 0 on a first run, with no run item at all', async () => {
     await runLister(recheckDeps());
     expect(metricValues(SWEEPER_METRICS.missingPages)).toEqual([0]);
+  });
+
+  it('emits every count with the distribution as its one dimension (§3.4 step 5)', async () => {
+    await runLister(recheckDeps());
+    const line = logLines().find((l) => l._aws !== undefined)!;
+    expect(line._aws.CloudWatchMetrics[0].Dimensions).toEqual([['DistributionId']]);
+    expect(line.DistributionId).toBe(DISTRIBUTION_ID);
   });
 
   it('counts the previous day\'s started pages that did not finish', async () => {

@@ -32,15 +32,11 @@ describe('registrar configuration (REGISTRAR_ENV)', () => {
     expect(loadConfig(env())).toEqual({ ...base, addressing: 'host', dedicatedDomains: true, distributionId: 'E1EXAMPLE' });
   });
 
-  test('DISTRIBUTION_ID is optional', () => {
-    expect(loadConfig(env({ [REGISTRAR_ENV.distributionId]: undefined, [REGISTRAR_ENV.dedicatedDomains]: 'off' })).distributionId).toBeUndefined();
+  test('DISTRIBUTION_ID is required with dedicated domains off too: it is the metric dimension (§4.1)', () => {
+    expect(() => loadConfig(env({ [REGISTRAR_ENV.distributionId]: undefined, [REGISTRAR_ENV.dedicatedDomains]: 'off' }))).toThrow(REGISTRAR_ENV.distributionId);
   });
 
-  test('DISTRIBUTION_ID is required while dedicated domains are on', () => {
-    expect(() => loadConfig(env({ [REGISTRAR_ENV.distributionId]: undefined }))).toThrow(REGISTRAR_ENV.distributionId);
-  });
-
-  test.each(Object.values(REGISTRAR_ENV).filter((name) => name !== REGISTRAR_ENV.distributionId))('a missing %s fails closed', (name) => {
+  test.each(Object.values(REGISTRAR_ENV))('a missing %s fails closed', (name) => {
     expect(() => loadConfig(env({ [name]: undefined }))).toThrow(name);
   });
 

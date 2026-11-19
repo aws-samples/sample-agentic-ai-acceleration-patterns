@@ -389,8 +389,8 @@ export const SWEEPER_RUN_TTL_SECONDS = 14 * 24 * 60 * 60;
 
 /**
  * The re-check's counts: embedded metric format lines in the sweeper's log,
- * namespace `TenantFrontDoor` (the registrar's `METRIC_NAMESPACE`), no
- * dimensions, unit Count.
+ * namespace `TenantFrontDoor` (the registrar's `METRIC_NAMESPACE`),
+ * dimension `DistributionId` (`METRIC_DIMENSION_DISTRIBUTION`), unit Count.
  */
 export const SWEEPER_METRIC_NAMESPACE = 'TenantFrontDoor';
 export const SWEEPER_METRICS = {

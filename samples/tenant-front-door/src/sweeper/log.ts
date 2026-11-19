@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import { SWEEPER_METRIC_NAMESPACE } from '../shared/contracts';
+import { METRIC_DIMENSION_DISTRIBUTION } from '../shared/route-table';
 
 /**
  * The sweeper's structured log lines and its embedded metric format counts
@@ -27,13 +28,18 @@ export function logLine(level: 'INFO' | 'WARN' | 'ERROR', message: string, field
   write({ level, message, ...out });
 }
 
-/** One EMF line: `value` of `metric` in `TenantFrontDoor`, no dimensions, unit Count. */
-export function emitCount(metric: string, value: number, now: number = Date.now()): void {
+/** One EMF line: `value` of `metric` in `TenantFrontDoor`, dimension `DistributionId`, unit Count. */
+export function emitCount(metric: string, value: number, distributionId: string, now: number = Date.now()): void {
   write({
     _aws: {
       Timestamp: now,
-      CloudWatchMetrics: [{ Namespace: SWEEPER_METRIC_NAMESPACE, Dimensions: [[]], Metrics: [{ Name: metric, Unit: 'Count' }] }],
+      CloudWatchMetrics: [{
+        Namespace: SWEEPER_METRIC_NAMESPACE,
+        Dimensions: [[METRIC_DIMENSION_DISTRIBUTION]],
+        Metrics: [{ Name: metric, Unit: 'Count' }],
+      }],
     },
+    [METRIC_DIMENSION_DISTRIBUTION]: distributionId,
     [metric]: value,
   });
 }

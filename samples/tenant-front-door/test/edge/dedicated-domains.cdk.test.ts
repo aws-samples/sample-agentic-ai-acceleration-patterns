@@ -282,6 +282,12 @@ describe('dedicatedDomains on: sweeper (spec §3.1, §3.4 step 5, ADR-0020, ADR-
     });
   });
 
+  it('watches the sweeper\'s counts of this distribution only, so a second front door in the account cannot hide or trip them (§3.4 step 5)', () => {
+    const alarms = Object.values(resources(on.main)).filter((r) => r.Type === 'AWS::CloudWatch::Alarm' && r.Properties.Namespace === SWEEPER_METRIC_NAMESPACE);
+    expect(alarms).toHaveLength(5);
+    for (const a of alarms) expect(a.Properties.Dimensions).toEqual([{ Name: 'DistributionId', Value: DISTRIBUTION }]);
+  });
+
   it('adds no alarm action without alarmTopicArn', () => {
     for (const r of Object.values(resources(on.main)).filter((x) => x.Type === 'AWS::CloudWatch::Alarm')) {
       expect(r.Properties.AlarmActions).toBeUndefined();

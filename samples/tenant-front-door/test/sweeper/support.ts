@@ -231,6 +231,7 @@ export function recheckDeps(overrides: Partial<RecheckDeps> = {}): RecheckDeps {
     ddb: DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' })),
     lambda: new LambdaClient({ region: 'eu-central-1' }),
     routeTableArn: ROUTE_TABLE_ARN,
+    distributionId: DISTRIBUTION_ID,
     tableName: TABLE,
     functionName: FUNCTION_NAME,
     now: () => NOW,

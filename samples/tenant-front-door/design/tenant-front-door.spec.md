@@ -1088,6 +1088,10 @@ only `lambda:InvokeFunction` on the sweeper function. The challenge
 lookup itself needs no IAM action: it is a DNS lookup. The re-check's counts,
 the three-miss, `unverifiable` and missing-pages counts, are embedded
 metric format log lines, so no role needs `cloudwatch:PutMetricData`.
+Each carries the dimension `DistributionId` with the distribution's id,
+as `RouteTableBytes` does (§4.1), and every alarm on them watches that
+dimension, so a second front door in the account and Region neither
+trips this one's alarms nor keeps its no-lister alarm out of ALARM.
 The log group keeps its lines for 14 days. Where IAM cannot narrow a CloudFront action to this
 distribution's tenants, the registrar and the sweeper check a
 distribution tenant's distribution and tags before they change it. The
@@ -1535,9 +1539,13 @@ Rules:
   takes `TotalSizeInBytes` from the write's own response (`PutKey`,
   `DeleteKey` or `UpdateKeys`), which holds the size after the write,
   and writes it as the custom metric
-  `RouteTableBytes` (namespace `TenantFrontDoor`, an embedded metric
-  format line in its log). The alarm (maximum at or above 4,000,000
-  bytes) lives in the main stack's Region beside the registrar, so the
+  `RouteTableBytes` (namespace `TenantFrontDoor`, dimension
+  `DistributionId` with the distribution's id, an embedded metric format
+  line in its log). The dimension keeps the metrics of several front
+  doors in one account and Region apart (ADR-0014), so the registrar
+  reads `DISTRIBUTION_ID` whether or not `dedicatedDomains` is on. The
+  alarm (maximum at or above 4,000,000 bytes, on this distribution's
+  dimension) lives in the main stack's Region beside the registrar, so the
   main-Region `alarmTopicArn` is its action (§3.6) and no `us-east-1`
   topic is needed.
 - ACM binds before that headroom does. A dedicated domain needs one ACM
