@@ -86,9 +86,11 @@ the ready time.
 ## Consequences
 
 A memory fill no longer depends on an `oom_score_adj` value on
-`microvm` and `agentcore`; on `nitro` the watchdog covers the case where
-the platform's -998 changes. `microvm` jobs are limited to 256 MiB per process and about ten
-processes and threads at the default size, each thread taking about
+`microvm` and `agentcore`. On `nitro` the watchdog, which fires at L
+below the task limit, is the cover if the platform's -998 changes; it
+does not see an unmapped `memfd` or tmpfs files, and it is untested
+until S-16. `microvm` jobs are limited to 256 MiB per process and about
+ten processes and threads at the default size, each thread taking about
 8 MiB of stack out of the 256 MiB, which rules out runtimes that reserve
 large address space, such as Node (344 MiB to start); the sample runs
 Python only. A larger `microvm.memoryMiB` raises N, not A. The runner

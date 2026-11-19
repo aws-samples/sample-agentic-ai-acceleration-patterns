@@ -890,11 +890,14 @@ which on ECS Managed Instances terminates the instance (ECS developer
 guide, Managed Instances draining), and waits until `DescribeInstances`
 shows every one of those ids `terminated`. It repeats the read,
 deregister and wait until `ListContainerInstances` is empty, so a
-replacement started for `nitro.minInstances` is ended too. The 10-minute
-bound covers every wait. A construct test checks that the drain role
-may deregister on the cluster and the reaper role may not. How long that takes, whether the capacity provider delete
-then succeeds, and whether a minimum above 0 starts a replacement first
-are checked in S-16. A
+replacement started for `nitro.minInstances` is ended too, unless the
+capacity provider keeps starting one; then the drain fails at its
+bound and the delete fails (§3.3). The 10-minute bound covers every
+wait. How long the waits take, whether the capacity provider delete then
+succeeds, whether a minimum above 0 starts a replacement first, and
+whether the loop then empties the cluster are checked in S-16. The
+`synth` test checks that the drain role may deregister on the cluster
+and the reaper role may not. A
 `StopTask` takes 45 to 78 s, so the runner
 exits at once on `SIGTERM`. AgentCore sessions in rows are stopped with
 `StopRuntimeSession`; sessions with no row end within about 20 s of the
@@ -1041,7 +1044,7 @@ deploy and destroy time, and cleans up on exit.
 | S-13 | Does a VPC-wide Route 53 Resolver DNS Firewall see and block each backend's lookups, and does each backend still work with it on? | §3.9, ADR-0016 |
 | S-14 | Runner checks: can code in one AgentCore session reach another session of the same runtime (by its address, by a listener on a known port, by anything the sessions share); can the runner create a cgroup v2 group and set `oom_score_adj` on each backend; do `RunTask` container overrides and `runHookPayload` appear in CloudTrail `requestParameters`, and does the `InvokeAgentRuntime` payload appear in any CloudTrail event; does the AgentCore container receive the runtime session id as a request header | C-1 and C-3 on `agentcore`, §3.5 memory cap, ADR-0018 |
 | S-15 | On `microvm`, which has no cgroup: do `RLIMIT_AS` and `RLIMIT_NPROC`, set before the drop to uid 1001, cap a job's memory, can code raise them, and do common runtimes start under them? | §3.5 memory cap on `microvm` |
-| S-16 | Planned: which of `/tmp`, `/dev/shm` and `/work` are tmpfs on each backend, and a tmpfs fill and an unmapped `memfd` fill against the §3.5 caps; the `agentcore` setup as a whole (runner in `/runner`, root `memory.oom.group` 0, job group 1) under a global out-of-memory; a thread-pool job under the `microvm` rlimits with `MALLOC_ARENA_MAX` = 2; after every task has stopped and a forced deregister, the time to `terminated` and to a successful capacity provider delete with `nitro.minInstances` 0 and 1, and whether a minimum of 1 starts a replacement first; a tmpfs fill on `nitro` against the watchdog; the job's `VmPeak` in the four-thread `microvm` step; the account's applied MicroVM memory quota | §3.5 memory cap, §5.3 drain, §6.1 |
+| S-16 | Planned: which of `/tmp`, `/dev/shm` and `/work` are tmpfs on each backend, and a tmpfs fill and an unmapped `memfd` fill against the §3.5 caps; the `agentcore` setup as a whole (runner in `/runner`, root `memory.oom.group` 0, job group 1) under a global out-of-memory; a thread-pool job under the `microvm` rlimits with `MALLOC_ARENA_MAX` = 2; after every task has stopped and a forced deregister, the time to `terminated` and to a successful capacity provider delete with `nitro.minInstances` 0 and 1, and whether a minimum of 1 starts a replacement first and the drain's loop then empties the cluster; a tmpfs fill on `nitro` against the watchdog; the job's `VmPeak` in the four-thread `microvm` step; the account's applied MicroVM memory quota | §3.5 memory cap, §5.3 drain, §6.1 |
 
 ### 7.1 Spike results, S-1 to S-12 (2026-11-18, a non-production test account, eu-central-1)
 
@@ -1166,7 +1169,7 @@ touched.
 | max-life | `nitro`: the driver invokes the reaper with `maxLifeSeconds` of 60 while A's task runs a long job; the task is stopped and A's next call gets a fresh one. Test-only shortcut: the reaper honours `maxLifeSeconds` only when its environment has `RC_INTEG_OVERRIDES=1`, which the integration stack sets through a CDK escape hatch and no prop exposes |
 | failed-start | `nitro` and `microvm`: for tenant `E` the tool passes the runner an exit-at-boot flag (test-only shortcut, honoured only with `RC_INTEG_OVERRIDES=1`); the driver retries `E`'s call until the first `sandbox_failed`, bounded by the backend's start cap; a reaper run then leaves the `FAILED` row alone and writes no stop line; a call before `retryAt` returns `sandbox_failed` and starts nothing (checked with `ListTasks` or `ListMicrovms`); a call after `retryAt` starts again; the tool line carries the reason, and exactly one stop line exists for the failed sandbox |
 | microvm-stop | A's MicroVM, idle past `sandboxIdle` (2 min in the integration stack), shows `SUSPENDED`; the driver then ends it with `TerminateMicrovm` out of band and invokes the reaper; a stop line for A's MicroVM carries `sandboxSeconds`, `runningSeconds`, `suspendedSeconds` and `estimated` |
-| synth | a unit test synthesises two construct instances in one stack and asserts that every §5.3 name is unique and matches its charset |
+| synth | a unit test synthesises two construct instances in one stack and asserts that every §5.3 name is unique and matches its charset, and that the drain role's policy allows `ecs:DeregisterContainerInstance` on the cluster ARN and the reaper role's does not |
 | session-files | `run-code-files`: A's session writes and reads its own `sessions/<sid>/`; a `GetObject` on B's session prefix is denied |
 | dns | `run-code` (firewall on): A's script looks up `example.com`, a unique `<token>.example.com`, a 40-character exfil label and a TXT name, then `logs.<region>.amazonaws.com`; the first four return NXDOMAIN and appear in the query log as `BLOCK`, the last resolves to an endpoint address. `run-code-files` (firewall off): `example.com` resolves to a public address. On `nitro` the `BLOCK` line's `srcaddr` is A's task address |
 | dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9); any other blocked name is a platform name missing from the allow list and fails the step |
