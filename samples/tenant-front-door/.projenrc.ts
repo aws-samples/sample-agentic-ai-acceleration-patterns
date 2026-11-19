@@ -39,6 +39,9 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-dynamodb@3.1125.0',
     '@aws-sdk/lib-dynamodb@3.1125.0',
     '@aws-sdk/client-scheduler@3.1125.0',
+    // The sweeper's lister starts its pages, and the starter the first
+    // daily run, with an asynchronous invoke (spec §3.4 step 5).
+    '@aws-sdk/client-lambda@3.1125.0',
     // The demo cell API verifies the tenant token against the issuer's JWKS (spec §3.5)
     'jose@6.2.10',
     // Security linting - AwsSolutionsChecks applied in src/main.ts
