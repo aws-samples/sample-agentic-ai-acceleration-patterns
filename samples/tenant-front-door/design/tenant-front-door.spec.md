@@ -647,8 +647,12 @@ given below):
       in sub-step 2) and write no `host#<d>`; the certificate stays, the
       challenge stays passed, and the operator repeats the call once the
       record is back. Otherwise create the distribution tenant with the
-      certificate, on this distribution and with the same tags, unless
-      it exists. Its name is `tfd-` and the first 32 hex characters of a
+      certificate, on this distribution, in the stack's connection group
+      (the pooled distribution tenant's) and with the same tags, unless
+      it exists. The tenant points the domain with a CNAME at that
+      connection group's routing endpoint, which the main stack publishes
+      as its `RoutingEndpoint` output (§6.4); the domain serves once that
+      record resolves and the distribution tenant has deployed. Its name is `tfd-` and the first 32 hex characters of a
       SHA-256 over the distribution id, the tenant id and the domain, 36
       characters, inside CloudFront's 128 for any id and domain. A
       distribution tenant for the domain that is this tenant's and
@@ -1670,7 +1674,9 @@ the record again. Unless it still holds the token, the call answers 202
 with `stage: "challenge-recheck"`, the record and its `challenge` value,
 and writes no `host#` key. Otherwise it creates the dedicated
 distribution tenant and writes the domain's `host#` key, which routes
-requests and records its owner (`t`, `ac`), and answers 200. A failed or
+requests and records its owner (`t`, `ac`), and answers 200. The tenant
+then points the domain with a CNAME at the main stack's
+`RoutingEndpoint` output (§6.4). A failed or
 timed-out validation gets 422. A changed or dropped domain removes the
 old `host#<d>` at once and its distribution tenant and certificate in two
 phases (§3.4 steps 3 to 5). The domain is never a sign-in target: its
@@ -2039,8 +2045,15 @@ ingress behind `/agents/*` needs its URL form checked first.
 - **Constructs** `TenantFrontDoor`, `CellRouteAccess` and `RouteHookAccess`
   (`src/index.ts`).
   `TenantFrontDoor` exposes `distributionId`, `distributionArn`,
-  `routeTableArn`, `registrarUrl`, `appDomain`, `addressing` and
-  `pooledTenantId` (the distribution tenant).
+  `routeTableArn`, `registrarUrl`, `appDomain`, `addressing`,
+  `pooledTenantId` (the distribution tenant) and `routingEndpoint`.
+- **Stack output** `RoutingEndpoint` of the main stack: the routing
+  endpoint of the stack's connection group, which the pooled distribution
+  tenant and every dedicated distribution tenant join. It is the CNAME
+  target the operator gives a tenant for its dedicated domain once
+  `PutTenantRoute` answers 200 (§3.4 step 5). The answer itself does not
+  carry it, because the target is the same for every domain of the
+  front door.
 - **Published parameter** `/application-plane/shared/front-door/edge` in
   the edge account, one JSON document: `version`, `appDomain`,
   `addressing`, `applicationId`, `distributionArn`, `registrarUrl`,

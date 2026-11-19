@@ -52,6 +52,7 @@ const NOW_S = Math.floor(NOW_MS / 1000);
 const TOKEN_1 = '1'.repeat(43);
 const TOKEN_2 = '2'.repeat(43);
 const record = (token: string): string => `tfd-verify=${token}`;
+const CONNECTION_GROUP_ID = 'cg_example';
 
 interface Rig extends Harness {
   readonly dns: FakeDns;
@@ -74,6 +75,7 @@ function rig(): Rig {
     acm: new ACMClient({ region: 'us-east-1' }),
     cloudfront: new CloudFrontClient({ region: 'us-east-1' }),
     distributionId: DISTRIBUTION_ID,
+    connectionGroupId: CONNECTION_GROUP_ID,
     lookup: dns,
     now: () => NOW_MS,
     sleep: async (ms) => void domainSleeps.push(ms),
@@ -433,6 +435,7 @@ describe('§3.4 step 5 sub-step 5: the certificate issued', () => {
       DistributionId: DISTRIBUTION_ID,
       Name: distributionTenantName(DISTRIBUTION_ID, t, D),
       Domains: [{ Domain: D }],
+      ConnectionGroupId: CONNECTION_GROUP_ID,
       Customizations: { Certificate: { Arn: arn } },
       Tags: { Items: [{ Key: TAG_TENANT_ID, Value: t }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION_ID }, { Key: TAG_COST_TENANT_ID, Value: TENANT }] },
       Enabled: true,

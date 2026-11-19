@@ -23,13 +23,18 @@ function env(overrides: Record<string, string | undefined> = {}): NodeJS.Process
     [REGISTRAR_ENV.edgeOperatorRoleArn]: base.edgeOperatorRoleArn,
     [REGISTRAR_ENV.dedicatedDomains]: 'on',
     [REGISTRAR_ENV.distributionId]: 'E1EXAMPLE',
+    [REGISTRAR_ENV.connectionGroupId]: 'cg_example',
     ...overrides,
   };
 }
 
 describe('registrar configuration (REGISTRAR_ENV)', () => {
   test('reads every variable, trimming the control plane URL', () => {
-    expect(loadConfig(env())).toEqual({ ...base, addressing: 'host', dedicatedDomains: true, distributionId: 'E1EXAMPLE' });
+    expect(loadConfig(env())).toEqual({ ...base, addressing: 'host', dedicatedDomains: true, distributionId: 'E1EXAMPLE', connectionGroupId: 'cg_example' });
+  });
+
+  test('CONNECTION_GROUP_ID is needed only while dedicated domains are on', () => {
+    expect(loadConfig(env({ [REGISTRAR_ENV.connectionGroupId]: undefined, [REGISTRAR_ENV.dedicatedDomains]: 'off' })).connectionGroupId).toBeUndefined();
   });
 
   test('DISTRIBUTION_ID is required with dedicated domains off too: it is the metric dimension (§4.1)', () => {

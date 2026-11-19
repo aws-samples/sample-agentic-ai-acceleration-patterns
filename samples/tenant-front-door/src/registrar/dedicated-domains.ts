@@ -113,6 +113,8 @@ export interface AwsDedicatedDomainsOptions {
   readonly cloudfront: CloudFrontClient;
   /** The multi-tenant distribution the dedicated distribution tenants attach to. */
   readonly distributionId: string;
+  /** The stack's connection group, whose routing endpoint is the dedicated domain's CNAME target (§6.4). */
+  readonly connectionGroupId: string;
   readonly lookup: DnsLookup;
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
@@ -507,7 +509,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
    * holds another certificate is updated to serve with this one.
    */
   private async ensureDistributionTenant(tenantId: string, domain: string, certificateArn: string): Promise<void> {
-    const { cloudfront, distributionId } = this.options;
+    const { cloudfront, distributionId, connectionGroupId } = this.options;
     const found = await this.distributionTenant(domain);
     if (found !== undefined) {
       await this.requireOwnDistributionTenant(found.tenant, tenantId);
@@ -520,6 +522,7 @@ export class AwsDedicatedDomains implements DedicatedDomains {
         DistributionId: distributionId,
         Name: distributionTenantName(distributionId, tenantId, domain),
         Domains: [{ Domain: domain }],
+        ConnectionGroupId: connectionGroupId,
         Customizations: { Certificate: { Arn: certificateArn } },
         Tags: { Items: registrarTags(tenantId, distributionId) },
         Enabled: true,

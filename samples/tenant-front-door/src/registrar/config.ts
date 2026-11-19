@@ -29,6 +29,8 @@ export interface RegistrarConfig {
   readonly dedicatedDomains: boolean;
   /** The multi-tenant distribution: the dimension of `RouteTableBytes` (§4.1), and the dedicated-domain seam's. */
   readonly distributionId: string;
+  /** Set when `dedicatedDomains` is on: the connection group dedicated distribution tenants join. */
+  readonly connectionGroupId?: string;
 }
 
 const ACCOUNT = /^\d{12}$/;
@@ -79,6 +81,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): RegistrarConfig {
     throw new ConfigError(`${REGISTRAR_ENV.edgeOperatorRoleArn} is not an IAM role ARN`);
   }
   const distributionId = required(env, REGISTRAR_ENV.distributionId).trim();
+  const connectionGroupId = env[REGISTRAR_ENV.connectionGroupId]?.trim() || undefined;
+  if (dedicated === 'on' && connectionGroupId === undefined) throw new ConfigError(`${REGISTRAR_ENV.connectionGroupId} is not set`);
   return {
     routeTableArn,
     appDomain: matching(env, REGISTRAR_ENV.appDomain, HOST),
@@ -94,5 +98,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): RegistrarConfig {
     edgeOperatorRoleArn,
     dedicatedDomains: dedicated === 'on',
     distributionId,
+    connectionGroupId,
   };
 }

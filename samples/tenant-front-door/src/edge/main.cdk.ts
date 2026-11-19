@@ -20,7 +20,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Annotations, CustomResource, Duration, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
+import { Annotations, CfnOutput, CustomResource, Duration, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
@@ -103,6 +103,8 @@ export class MainStack extends Stack {
   public readonly routeTableArn: string;
   public readonly registrarUrl: string;
   public readonly pooledTenantId: string;
+  /** The connection group's routing endpoint: the CNAME target of the pooled host and of every dedicated domain. */
+  public readonly routingEndpoint: string;
 
   constructor(scope: Construct, id: string, props: MainStackProps) {
     super(scope, id, props);
@@ -327,6 +329,12 @@ export class MainStack extends Stack {
       enabled: true,
     });
     this.pooledTenantId = pooled.attrId;
+    this.routingEndpoint = connectionGroup.attrRoutingEndpoint;
+    // The tenant points its dedicated domain here with a CNAME (§3.4 step 5, §6.4).
+    new CfnOutput(this, 'RoutingEndpoint', {
+      description: 'CNAME target for a dedicated domain: the connection group\'s routing endpoint (spec §6.4)',
+      value: connectionGroup.attrRoutingEndpoint,
+    });
     const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
       hostedZoneId: inputs.hostedZone.zoneId,
       zoneName: inputs.hostedZone.zoneName,
@@ -345,6 +353,7 @@ export class MainStack extends Stack {
       entry: props.registrarEntry,
       routeTableArn: routeTable.keyValueStoreArn,
       distributionId: distribution.ref,
+      connectionGroupId: connectionGroup.attrId,
     });
     this.registrarUrl = registrar.url;
 
@@ -353,6 +362,8 @@ export class MainStack extends Stack {
     // distribution tenant is created while the teardown runs; the teardown
     // then runs before the distribution's delete.
     const teardown = new DedicatedDomainsTeardown(this, 'DedicatedDomainsTeardown', { distributionId: distribution.ref });
+    // Dedicated distribution tenants sit in the connection group too, so it goes after the teardown.
+    teardown.resource.node.addDependency(connectionGroup);
     (registrar.function.node.defaultChild as lambda.CfnFunction).node.addDependency(teardown.resource);
     const guard = new DedicatedDomainsGuard(this, 'DedicatedDomainsGuard', {
       dedicatedDomains: inputs.dedicatedDomains,
@@ -556,6 +567,8 @@ interface RegistrarProps {
   readonly entry: string;
   readonly routeTableArn: string;
   readonly distributionId: string;
+  /** The connection group dedicated distribution tenants join (§3.4 step 5). */
+  readonly connectionGroupId: string;
 }
 
 /**
@@ -588,6 +601,7 @@ class Registrar extends Construct {
       edgeOperatorRoleArn: inputs.edgeOperatorRoleArn,
       dedicatedDomains: inputs.dedicatedDomains ? 'on' : 'off',
       distributionId: props.distributionId,
+      connectionGroupId: props.connectionGroupId,
     };
     const environment = Object.fromEntries(
       Object.entries(env).map(([k, v]) => [REGISTRAR_ENV[k as keyof typeof REGISTRAR_ENV], v]),

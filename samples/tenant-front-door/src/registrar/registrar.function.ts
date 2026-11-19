@@ -165,6 +165,7 @@ export function dedicatedDomainsFor(config: RegistrarConfig): DedicatedDomains {
     acm: new ACMClient({ ...SDK_CLIENT, region: CERTIFICATE_REGION }),
     cloudfront: new CloudFrontClient({ ...SDK_CLIENT, region: 'us-east-1' }),
     distributionId: config.distributionId,
+    connectionGroupId: config.connectionGroupId!,
     lookup: nodeDnsLookup(),
   });
 }
