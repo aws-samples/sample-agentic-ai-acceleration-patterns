@@ -681,7 +681,7 @@ count), `token-rate` (issue, refresh and exchange at the tier's steady rate)
 and `create-tenant-burst` (`CreateTenant` beyond what Cognito's control plane
 takes). Each asserts that every token names the tenant it was issued for and
 that a token or path of tenant A is refused for tenant B. One observed
-behaviour is recorded, not failed: tenant A's refresh token on tenant B's
+behaviour is printed as an `observed:` line, not failed: tenant A's refresh token on tenant B's
 platform path, with the name of a real user of B, is served with A's own
 tokens, because `RefreshToken` checks that the path's user is a member but
 does not tie the refresh token to that user. The probe asserts the answer

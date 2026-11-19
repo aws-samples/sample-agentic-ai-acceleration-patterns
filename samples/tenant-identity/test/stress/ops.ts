@@ -330,8 +330,10 @@ export async function probeForeignRefreshToken(
       rec.finding(`${what} for tenant ${tenantId}: HTTP ${r.status} without a token`);
       return;
     }
-    await assertTokenTenant(ctx, rec, token, tenantId, `${what}: served`);
-    rec.note(`${what}: served, the answer named the caller's tenant`);
+    const claims = await assertTokenTenant(ctx, rec, token, tenantId, `${what}: served`);
+    if (claims?.tenant_id === tenantId) {
+      rec.note(`${what}: served, the answer named the caller's tenant`);
+    }
     return;
   }
   assertRefused(rec, tenantId, what, r);

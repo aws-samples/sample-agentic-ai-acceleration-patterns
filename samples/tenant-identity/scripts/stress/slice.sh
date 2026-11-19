@@ -90,8 +90,15 @@ need_region() {
   export AWS_DEFAULT_REGION="$AWS_REGION"
 }
 
+# True unless CloudFormation says the stack does not exist: an AWS error
+# (credentials, throttle, network) counts as "still there", so nothing is
+# forgotten on a failed check.
 stack_exists() {
-  aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text > /dev/null 2>&1
+  local err
+  if err="$(aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text 2>&1 >/dev/null)"; then
+    return 0
+  fi
+  ! grep -q 'does not exist' <<<"$err"
 }
 
 case "$verb" in
@@ -168,8 +175,11 @@ case "$verb" in
         echo "teardown: stack ${STACK} is still there; manifest and parameter kept for a rerun" >&2
         status=1
       else
-        driver unpublish || status=1
-        rm -f "${RUN_HOME}/tenant-identity.json"
+        if driver unpublish; then
+          rm -f "${RUN_HOME}/tenant-identity.json"
+        else
+          status=1
+        fi
       fi
       left="$(leftover_pool_ids ${pools[@]+"${pools[@]}"})"
       if [ -n "$left" ]; then
