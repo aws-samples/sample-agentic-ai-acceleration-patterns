@@ -22,8 +22,8 @@ misbehaving. It writes only `s` of an existing `tenant#` entry: no cell,
 account, `dt` or name.
 
 ## Options considered
-### Option 1: Read the placement first, as every other write does
-Pros: one rule for every write; a suspension of a deployment the control
+### Option 1: Read the placement first, as hook writes do
+Pros: one rule for every put; a suspension of a deployment the control
 plane no longer knows is refused (403). Cons: while the control plane
 cannot be read, the operator cannot suspend anyone; the check guards no
 value, because the status write copies the entry's placement fields as

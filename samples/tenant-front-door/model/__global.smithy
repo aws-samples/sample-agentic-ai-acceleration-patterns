@@ -14,8 +14,10 @@ use smithy.framework#ValidationException
 /// The route registrar (spec §3.4, §5.1): the only writer of the route
 /// table. Every operation is AWS_IAM (SigV4) and idempotent. The API's
 /// resource policy admits only the control plane's global hook role and
-/// the edge operator role; the registrar checks every write against the
-/// control plane, never against the request (ADR-0013, ADR-0017).
+/// the edge operator role; the registrar checks every write that sets
+/// placement against the control plane, never against the request. The
+/// edge operator role's deletes and status changes set none and skip the
+/// read (ADR-0013, ADR-0017, ADR-0025).
 @title("Tenant Front Door - Route Registrar")
 @restJson1
 @sigv4(name: "execute-api")
