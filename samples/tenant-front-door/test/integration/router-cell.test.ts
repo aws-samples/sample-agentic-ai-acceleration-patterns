@@ -3,7 +3,7 @@
 
 /**
  * The router-to-cell seam (spec §3.2, §3.3 step 7, §3.5): the request the
- * router forwards on `/api/*`, cut to the four headers the origin request
+ * router forwards on `/api/*`, cut to the three headers the origin request
  * policy passes, is what the demo cell API reads. A header rename, a
  * `Bearer` prefix or a case change on either side fails here.
  */

@@ -255,11 +255,13 @@ from the path before the request leaves the edge (§3.3 step 7,
 ADR-0019).
 
 `/api/*` uses a custom origin request policy with the cache policy
-`CachingDisabled`. It forwards exactly four headers: `x-tenant-token` and
-`x-tenant-route` (§3.3 step 7), `Content-Type`, and
-`x-amz-content-sha256`, which origin access control needs to sign a
-request with a body (ADR-0011). It forwards every query string and no
-cookie. It does not forward `Host`, so the request reaches the origin
+`CachingDisabled`. It forwards exactly three headers: `x-tenant-token`
+and `x-tenant-route` (§3.3 step 7), and `Content-Type`. CloudFront
+refuses an `x-amz-*` name in an origin request policy, and origin access
+control reads the viewer's `x-amz-content-sha256` itself to sign a
+request with a body (ADR-0011): the smoke run of 2026-11-19 served a
+`POST` that carried it and refused one without it with Lambda's 403. It
+forwards every query string and no cookie. It does not forward `Host`, so the request reaches the origin
 under the origin's own host name, which the signature covers, and it does
 not forward `Authorization`, which origin access control overwrites. A
 request header outside these four does not reach the cell.

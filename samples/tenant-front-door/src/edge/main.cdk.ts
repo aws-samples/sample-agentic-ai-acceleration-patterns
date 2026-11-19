@@ -190,7 +190,7 @@ export class MainStack extends Stack {
       enableAcceptEncodingBrotli: true,
     });
     const apiRequests = new cloudfront.OriginRequestPolicy(this, 'ApiRequests', {
-      comment: 'Tenant front door /api/*: exactly the four headers of spec §3.2',
+      comment: 'Tenant front door /api/*: exactly the three headers of spec §3.2',
       headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList(...API_FORWARDED_HEADERS),
       queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all(),
       cookieBehavior: cloudfront.OriginRequestCookieBehavior.none(),

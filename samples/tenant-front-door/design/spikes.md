@@ -256,3 +256,36 @@ and 181 s after `INSYNC` at TTL 300, and the deleted record was last served
 631 s after `INSYNC` (661 s after the deletion), within the one-day bound of
 the daily re-check (§3.4 step 5). Deploy 67 s plus 7 s for the function
 code; destroy 32 s for the stack and 35 s for the DNS records.
+
+## Smoke run, 2026-11-19
+
+`scripts/smoke.sh`: the built sample in `single` mode with one demo cell,
+before the control plane's hooks exist. Routes are seeded straight into the
+route table (the §10 step 2 shortcut); the control plane the front door
+names does not exist.
+
+**Found and fixed.** (1) CloudFront refuses `x-amz-content-sha256` in an
+origin request policy (`InvalidRequest`), so the `/api/*` policy forwards
+three headers; a `POST` with the body's SHA-256 in that header was served by
+the cell and one without it got Lambda's 403, so origin access control reads
+the viewer's header itself (§3.2). (2) `cloudfront-js-2.0` refuses `await`
+inside call arguments at load (`SyntaxError: await in arguments not
+supported`), which made every request 503 with `FunctionExecutionError`;
+the router reads the value first, and a source test refuses the pattern.
+
+**Result.** 38 of 38 checks passed: the SPA, `/config.json`, `/logout` and
+`/signin-state` with the §7.1 headers; `/api/whoami` for two tenants through
+origin access control; 401 with no token and with an `Authorization` header
+over 8,192 bytes; 403 for an unrouted tenant, `Sec-Fetch-Site: same-site`, a
+forged payload (refused by the cell) and a direct function URL call; a
+client `x-tenant-route` ignored; registrar 403 unsigned and 503 for
+`PutCellRoute` with the control plane unreadable; and `UpdateTenantRouteStatus`
+suspending and resuming a tenant with no control plane (ADR-0025), with the
+other tenant still served, and 409 for a tenant with no route.
+
+**Propagation.** A seeded route was first served 34 to 52 s after the write,
+and for up to about a minute after that some requests (3 of 60 in one run)
+still got the router's 403. After 60 s from the write, 200 of 200 were
+routed, as the 60 s wait of §10 assumes. A suspension reached the edge in 28
+to 64 s. Deploy: front door stacks 384 s (a fresh main stack after a failed
+first attempt; the edge stack had deployed), demo cell 66 s, support 59 s.

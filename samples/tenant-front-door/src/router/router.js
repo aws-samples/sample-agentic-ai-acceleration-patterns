@@ -25,9 +25,11 @@ const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
 // A route table entry, or null for a missing key or a malformed value.
 async function get(kind, key) {
-  let o;
+  let o, s;
   try {
-    o = JSON.parse(await kvs.get(key));
+    // CloudFront Functions refuse `await` inside call arguments.
+    s = await kvs.get(key);
+    o = JSON.parse(s);
   } catch (e) {
     return null; // a missing key, or any store fault: fail closed
   }
