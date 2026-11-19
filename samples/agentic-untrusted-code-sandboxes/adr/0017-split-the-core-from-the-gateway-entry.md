@@ -59,13 +59,19 @@ because projen owns `package.json`: `devDependencies` holds
 `agentic-runtime-isolation` as `file:../agentic-runtime-isolation`;
 `peerDependencies` holds it as `*` with
 `peerDependenciesMeta.agentic-runtime-isolation.optional = true`;
-`exports` maps `.` to `src/index.ts` and `./gateway` to
-`src/gateway/index.ts`, with `main` and `types` on `src/index.ts`, and
-`.npmignore` keeps `src/` in the package. The sample ships TypeScript
-sources, like its siblings: CDK apps run under ts-node, and the
-constructs build their Lambdas from `path.join(__dirname, '….function.ts')`,
-which only resolves when the `.ts` files are present. The exports map
-also with `typesVersions` for consumers on `node10` resolution. No
+`exports` maps `.` to `lib/index.js` and `./gateway` to
+`lib/gateway/index.js`, with `main` and `types` on `lib/index.js` and
+`lib/index.d.ts`, and `typesVersions` for consumers on `node10`
+resolution. The core is the first sample meant to be installed outside
+the repository, so it ships compiled JavaScript: a `.ts` entry under a
+consumer's `node_modules` is not compiled by the default ts-node and is
+refused by Node's type stripping there. Its constructs build their
+Lambdas from `path.join(__dirname, '….function.ts')`, so a post-compile
+projen task copies every `src/**/*.function.ts`, the modules they import,
+and the runner sources into `lib/` at the same relative paths, and the
+package's `files` keeps them. esbuild compiles those handler sources at
+the consumer's synth. A unit test asserts that every `__dirname` entry
+the constructs name exists under `lib/` after compile. No
 sample consumes another through `file:` yet, and the producer has no
 `main` or `exports`. The same pull request therefore changes
 `agentic-runtime-isolation`'s `.projenrc.ts` to set `main` and `types` to
