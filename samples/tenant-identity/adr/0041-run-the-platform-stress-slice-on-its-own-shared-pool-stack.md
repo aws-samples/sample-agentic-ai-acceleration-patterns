@@ -75,7 +75,12 @@ scenario do. Its choices:
   `CreateTenant` to the verified token. `token-rate` runs the steady rate for
   the scenario length as an open-loop mix of admin exchanges, platform
   refreshes and one cross-tenant probe in five. `create-tenant-burst` creates
-  four times the churn count at once (runtime-isolation finding F-3). A 429
+  four times the churn count (runtime-isolation finding F-3), at most 100
+  onboarding at once: each worker runs one tenant's whole onboarding, so up
+  to 100 `CreateTenant` calls start together and the rest follow as workers
+  free up. At `small` and `medium` that is every tenant at once; at `large`
+  (400) the creates come in waves. The cap keeps the driver's own sockets and
+  memory bounded. A 429
   or 503 is a counted result in `token-rate` and is waited out with backoff in
   the other two, using ADR-0037's recovery: read the tenant, then claim the
   first-admin slot, never repeat a blind create.
@@ -85,7 +90,9 @@ scenario do. Its choices:
   B's platform path with A's username (ADR-0013's membership check), A's
   refresh token exchanged for B's resource, and, through the tenant admin
   door, B's user read with A's narrowed token and a list that names only A's
-  users. One probe may be served: A's refresh token on B's path with the name
+  users and, when it is complete, A's own admin (so an empty list cannot
+  pass). A probe that is throttled is retried like the others; one that never
+  answers is a finding, not a silent skip. One probe may be served: A's refresh token on B's path with the name
   of a real user of B passes the membership check, and `RefreshToken` does
   not tie the refresh token to the path's user. The assertion is that the
   answer is refused or names A, never B.
@@ -100,22 +107,27 @@ scenario do. Its choices:
   finishes, fail the scenario. A bare 5xx is also counted as unattributed in
   the record (stress spec P-7).
 - **Collect.** After a wait for CloudWatch to catch up (finding F-6, four
-  minutes at most), API Gateway's `5XXError` over the union of the records'
-  windows, in whole minutes, minus the 5xx the scenarios saw, minus the 5xx
+  minutes at most), API Gateway's `5XXError`, summed per record window (each
+  widened to whole minutes, windows that share a minute merged, the gaps
+  between scenarios left out), minus the 5xx the scenarios saw, minus the 5xx
   `seed` saw in the same minutes (seed writes them per minute to the
   manifest, with its run id), goes on the latest record as unattributed
   refusals. If `Count` has not reached 90% of the driver's calls by the
   deadline, `collect` exits 1 and the run fails: a late 5XX cannot be ruled
   out (P-7). In `platform` mode the identity API is shared with the control
-  plane, so its 5XX land in the same count and would be charged to this
-  slice; that stays a known limitation until W-5 decides how the control
-  plane mounts the stress stack.
+  plane. Its 5XX between this slice's scenarios are not counted; its 5XX in
+  the same minutes as one of them still are, and are charged to this slice.
+  That stays a known limitation until W-5 decides how the control plane
+  mounts the stress stack.
 - **Budget.** The slice declares `cognito-groups` (two per tenant at the
   pool's peak, including the control plane's tenants in `platform` mode),
   `cognito-user-authentication-rps` (the steady rate, or the 8 a second
   token-preparation pace if higher) and `lambda-concurrency` (twice the
   steady rate for the token or platform function plus the trigger, or the
-  burst concurrency). The catalogue has no id for the API Gateway control
+  burst concurrency). Each record's quota peaks are measured the same way:
+  `cognito-groups` counts the control plane's tenants in `platform` mode, and
+  `cognito-user-authentication-rps` is the busiest second of token calls in
+  PS-1, the burst and `token-rate` (its preparation included). The catalogue has no id for the API Gateway control
   plane, which the deploy also draws on; it is added with the first slice
   that needs it (W-7).
 

@@ -35,7 +35,12 @@ export const ISSUE_PACE_PER_SECOND = 8;
 /** The onboarding batch runs this many tenants at once, at most (the control plane's build limit). */
 export const MAX_ONBOARD_CONCURRENCY = 50;
 
-/** The burst is this many times the tier's churn count, all at once. */
+/**
+ * The burst is this many times the tier's churn count. At most
+ * `MAX_BURST_CONCURRENCY` tenants are onboarded at once: each of those
+ * workers runs one tenant's whole onboarding, so beyond 100 tenants the
+ * CreateTenant calls start in waves, not in one instant (ADR-0041).
+ */
 export const BURST_FACTOR = 4;
 export const MAX_BURST_CONCURRENCY = 100;
 
@@ -70,6 +75,13 @@ function count(v: unknown, field: string): number {
   return v;
 }
 
+function positive(v: unknown, field: string): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+    throw new Error(`STRESS_TIER_JSON.${field} must be a positive number`);
+  }
+  return v;
+}
+
 /** Reads the tier the runner passes in `STRESS_TIER_JSON`. */
 export function parseTier(json: string | undefined): TierSizes {
   if (json === undefined || json === '') {
@@ -89,7 +101,7 @@ export function parseTier(json: string | undefined): TierSizes {
     usersPerActiveTenant: count(doc.usersPerActiveTenant, 'usersPerActiveTenant'),
     onboarding: doc.onboarding,
     churnPerRun: count(doc.churnPerRun, 'churnPerRun'),
-    steadyRps: count(doc.steadyRps, 'steadyRps'),
+    steadyRps: positive(doc.steadyRps, 'steadyRps'),
     scenarioSeconds: count(doc.scenarioSeconds, 'scenarioSeconds'),
   };
   if (tier.tenantsActive > tier.tenantsSeeded) {
@@ -117,9 +129,11 @@ export interface Plan {
   /** PS-1: tenants onboarded, and how many at once. */
   readonly onboardTenants: number;
   readonly onboardConcurrency: number;
-  /** create-tenant-burst: tenants created, all at once. */
+  /** create-tenant-burst: tenants created, at most `burstConcurrency` onboarding at once. */
   readonly burstTenants: number;
   readonly burstConcurrency: number;
+  /** Tenants the control plane puts into the stress pool (`platform` mode only, else 0). */
+  readonly controlPlaneTenants: number;
   /** The most tenants the stress pool holds at one moment, whoever created them. */
   readonly peakPoolTenants: number;
 }
@@ -141,6 +155,7 @@ export function planOf(tier: TierSizes, mode: Mode): Plan {
     onboardConcurrency: Math.min(onboardTenants, MAX_ONBOARD_CONCURRENCY),
     burstTenants,
     burstConcurrency: Math.min(burstTenants, MAX_BURST_CONCURRENCY),
+    controlPlaneTenants: others,
     peakPoolTenants: others + seedTenants + Math.max(onboardTenants, burstTenants),
   };
 }

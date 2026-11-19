@@ -375,6 +375,10 @@ export class SharedPoolMultiTenantProvisioner implements Provisioner {
         // the tenant DELETING; its retry finds no group, and no member listed
         // by it. Stop here instead of failing the retry for good (found by the
         // platform stress test's create-tenant-burst, ADR-0041).
+        // Cognito answers the same error for a missing user pool, so a wrong
+        // pool id would also land here and DeleteTenant would "succeed"
+        // having deleted nothing. Accepted: the pool id comes from the stack
+        // that owns this function, not from the caller.
         if (isCognitoError(error, COGNITO.resourceNotFound)) {
           return names;
         }

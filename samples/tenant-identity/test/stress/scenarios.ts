@@ -63,6 +63,19 @@ export function emailOf(prefix: string, tag: string, name: string): string {
   return `success+${prefix}-${tag}-${name}@simulator.amazonses.com`.toLowerCase();
 }
 
+/** Calls per second that reached Cognito's user authentication, for the quota peak. */
+class PerSecond {
+  private readonly buckets = new Map<number, number>();
+  hit(): void {
+    const s = Math.floor(Date.now() / 1000);
+    this.buckets.set(s, (this.buckets.get(s) ?? 0) + 1);
+  }
+
+  get peak(): number {
+    return Math.max(0, ...this.buckets.values());
+  }
+}
+
 interface Onboarded {
   readonly tenant: ManifestTenant;
   readonly tokens: Map<string, Tokens>;
@@ -81,6 +94,7 @@ async function onboardAll(
   concurrency: number,
   extraUsers: number,
   password: string,
+  auth: PerSecond,
 ): Promise<(Onboarded | undefined)[]> {
   const { ctx, rec, prefix, tag } = env;
   const out: (Onboarded | undefined)[] = new Array<Onboarded | undefined>(ids.length).fill(undefined);
@@ -104,6 +118,7 @@ async function onboardAll(
     const admin: ManifestUser = { username: adminName, email: adminEmail };
     const tokens = new Map<string, Tokens>();
     for (const user of [admin, ...users]) {
+      auth.hit();
       const issued = await issueToken(ctx, rec, tenantId, user.username, password);
       if (issued === undefined) {
         return;
@@ -122,7 +137,12 @@ async function onboardAll(
  * the caller's own name, on its path with the next tenant's admin name, and
  * exchanged for its resource.
  */
-async function probeNeighbours(env: ScenarioEnv, done: readonly Onboarded[], fallbackForeign: ManifestTenant | undefined): Promise<void> {
+async function probeNeighbours(
+  env: ScenarioEnv,
+  done: readonly Onboarded[],
+  fallbackForeign: ManifestTenant | undefined,
+  auth: PerSecond,
+): Promise<void> {
   const { ctx, rec } = env;
   await runPool(done, 10, async (o, i) => {
     const foreign = done.length > 1 ? done[(i + 1) % done.length].tenant : fallbackForeign;
@@ -131,7 +151,9 @@ async function probeNeighbours(env: ScenarioEnv, done: readonly Onboarded[], fal
       return;
     }
     await probeForeignRefresh(ctx, rec, o.tenant.tenantId, foreign.tenantId, o.tenant.admin.username, token.refreshToken);
+    auth.hit();
     await probeForeignRefreshToken(ctx, rec, o.tenant.tenantId, foreign.tenantId, foreign.admin.username, token.refreshToken);
+    auth.hit();
     await probeForeignExchange(ctx, rec, o.tenant.tenantId, foreign.tenantId, token.refreshToken);
   });
 }
@@ -150,14 +172,18 @@ async function batch(env: ScenarioEnv, kind: string, count: number, concurrency:
   const ids = Array.from({ length: count }, () => ulid());
   store.addTransient(ids);
   const password = randomPassword();
-  rec.quotaPeak('cognito-groups', GROUPS_PER_TENANT * (store.seeded.length + count));
-  const done = (await onboardAll(env, kind, ids, concurrency, plan.extraUsers, password)).filter(
+  // The same peak the budget draws (plan.ts drawsOf): the control plane's
+  // tenants share the pool in `platform` mode.
+  rec.quotaPeak('cognito-groups', GROUPS_PER_TENANT * (plan.controlPlaneTenants + store.seeded.length + count));
+  const auth = new PerSecond();
+  const done = (await onboardAll(env, kind, ids, concurrency, plan.extraUsers, password, auth)).filter(
     (o): o is Onboarded => o !== undefined,
   );
   if (done.length !== count) {
     rec.finding(`${kind}: ${count - done.length} of ${count} tenants did not finish onboarding`);
   }
-  await probeNeighbours(env, done, store.seeded[0]);
+  await probeNeighbours(env, done, store.seeded[0], auth);
+  rec.quotaPeak('cognito-user-authentication-rps', auth.peak);
   await removeAll(env, ids);
 }
 
@@ -173,26 +199,15 @@ export async function ps1(env: ScenarioEnv): Promise<void> {
 
 /**
  * create-tenant-burst (runtime-isolation finding F-3): four times the churn
- * count of CreateTenant calls, all at once. Throttles (429, and 503 from
+ * count of tenants, at most 100 onboarding at once (`MAX_BURST_CONCURRENCY`).
+ * Each worker runs one tenant's whole onboarding, so up to 100 CreateTenant
+ * calls start together and the rest follow as workers free up. Throttles (429, and 503 from
  * ADR-0037) are expected and counted; what must hold is that no call ends in
  * a bare 500, every tenant ends ACTIVE with its admin (the ADR-0037 recovery),
  * and every token still names its own tenant.
  */
 export async function createTenantBurst(env: ScenarioEnv): Promise<void> {
   await batch(env, 'burst', env.plan.burstTenants, env.plan.burstConcurrency);
-}
-
-/** Ops per second that reached Cognito, for the quota peak. */
-class PerSecond {
-  private readonly buckets = new Map<number, number>();
-  hit(): void {
-    const s = Math.floor(Date.now() / 1000);
-    this.buckets.set(s, (this.buckets.get(s) ?? 0) + 1);
-  }
-
-  get peak(): number {
-    return Math.max(0, ...this.buckets.values());
-  }
 }
 
 const MAX_INFLIGHT = 200;
@@ -216,11 +231,13 @@ export async function tokenRate(env: ScenarioEnv): Promise<void> {
   const password = randomPassword();
   const pacer = new Pacer(ISSUE_PACE_PER_SECOND);
   const refresh = new Map<string, Tokens>();
+  const cognito = new PerSecond();
   await runPool(
     tenants.flatMap((t) => [t.admin, ...t.users].map((u) => ({ tenantId: t.tenantId, user: u }))),
     4,
     async ({ tenantId, user }) => {
       await pacer.wait();
+      cognito.hit();
       const issued = await issueToken(ctx, rec, tenantId, user.username, password);
       if (issued !== undefined) {
         await assertTokenTenant(ctx, rec, issued.accessToken, tenantId, 'IssueToken');
@@ -230,7 +247,6 @@ export async function tokenRate(env: ScenarioEnv): Promise<void> {
   );
 
   const narrowed = new Map<string, string>();
-  const cognito = new PerSecond();
 
   const op = async (i: number): Promise<void> => {
     const t = tenants[Math.floor(i / 5) % tenants.length];

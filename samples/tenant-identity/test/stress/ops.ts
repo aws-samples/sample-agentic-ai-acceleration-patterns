@@ -361,7 +361,9 @@ export async function probeForeignExchange(
 
 /**
  * The tenant admin door with tenant A's narrowed token: it lists only users of
- * A, and it cannot read a user of B.
+ * A, its own admin among them, and it cannot read a user of B. `ownUsers[0]`
+ * is the admin. A throttle is retried like the other probes; a call that never
+ * answers is a finding, so a fully throttled probe cannot drop out unseen.
  */
 export async function probeTenantDoor(
   ctx: Ctx,
@@ -371,19 +373,24 @@ export async function probeTenantDoor(
   ownUsers: readonly ManifestUser[],
   foreignUsername: string,
 ): Promise<void> {
-  const list = await timed(rec, 'tenant-door', tenantId, () =>
-    ctx.tenantApi.call<{ users: UserBody[] }>('GET', 'tenant/users', narrowedToken));
+  const list = await withRetry(() =>
+    timed(rec, 'tenant-door', tenantId, () =>
+      ctx.tenantApi.call<{ users: UserBody[]; nextToken?: string }>('GET', 'tenant/users', narrowedToken)));
   if (list.status === 200) {
     const own = new Set(ownUsers.map((u) => u.username));
-    rec.assertIsolation(list.body.users.every((u) => own.has(u.username)), 'the admin door listed a user of another tenant', tenantId);
-  } else if (list.status !== 429) {
+    const users = list.body.users ?? [];
+    rec.assertIsolation(users.every((u) => own.has(u.username)), 'the admin door listed a user of another tenant', tenantId);
+    // A complete list (no next page) must name the caller's own admin, so an empty answer cannot pass.
+    if (list.body.nextToken === undefined) {
+      rec.assertIsolation(users.some((u) => u.username === ownUsers[0]?.username), "the admin door list lacks the tenant's own admin", tenantId);
+    }
+  } else {
     rec.finding(`ListTenantUsers for tenant ${tenantId}: HTTP ${list.status}`);
   }
-  const foreign = await timed(rec, 'tenant-door', tenantId, () =>
-    ctx.tenantApi.call('GET', `tenant/users/${foreignUsername}`, narrowedToken));
-  if (foreign.status !== 429) {
-    assertRefused(rec, tenantId, 'GetTenantUser of another tenant', foreign);
-  }
+  const foreign = await withRetry(() =>
+    timed(rec, 'tenant-door', tenantId, () =>
+      ctx.tenantApi.call('GET', `tenant/users/${foreignUsername}`, narrowedToken)));
+  assertRefused(rec, tenantId, 'GetTenantUser of another tenant', foreign);
 }
 
 /** Exchanges a refresh token for the tenant-admin narrowed token of `tenantId`. */

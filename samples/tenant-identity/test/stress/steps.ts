@@ -159,11 +159,34 @@ export interface RecordDoc {
   refusals: { unattributed: number };
 }
 
-/** The union of the records' windows, widened to whole CloudWatch minutes, plus one for late points. */
-export function windowOf(docs: readonly Pick<RecordDoc, 'window'>[]): { start: Date; end: Date } {
-  const first = Math.min(...docs.map((d) => Date.parse(d.window.start)));
-  const last = Math.max(...docs.map((d) => Date.parse(d.window.end)));
-  return { start: new Date(Math.floor(first / MINUTE) * MINUTE), end: new Date(Math.ceil(last / MINUTE) * MINUTE + MINUTE) };
+export interface Window {
+  readonly start: Date;
+  readonly end: Date;
+}
+
+/**
+ * Each record's window widened to whole CloudWatch minutes (`[floor(start),
+ * ceil(end))`), sorted, and merged where two share or touch a minute. The
+ * gaps between scenarios are left out: in `platform` mode another slice
+ * calls the same API there, and its 5XX are not this slice's.
+ */
+export function windowsOf(docs: readonly Pick<RecordDoc, 'window'>[]): Window[] {
+  const spans = docs
+    .map((d) => ({
+      start: Math.floor(Date.parse(d.window.start) / MINUTE) * MINUTE,
+      end: Math.max(Math.ceil(Date.parse(d.window.end) / MINUTE) * MINUTE, Math.floor(Date.parse(d.window.start) / MINUTE) * MINUTE + MINUTE),
+    }))
+    .sort((a, b) => a.start - b.start);
+  const merged: { start: number; end: number }[] = [];
+  for (const s of spans) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && s.start <= last.end) {
+      last.end = Math.max(last.end, s.end);
+    } else {
+      merged.push({ ...s });
+    }
+  }
+  return merged.map((m) => ({ start: new Date(m.start), end: new Date(m.end) }));
 }
 
 /** Calls that reached the API (status 0 did not) and the 5xx among them, over every record. */
@@ -190,8 +213,8 @@ export function seed5xxIn(perMinute: Readonly<Record<string, number>> | undefine
 }
 
 export interface Collected {
-  readonly start: Date;
-  readonly end: Date;
+  /** The minutes the metrics were summed over: one per scenario, merged where they overlap. */
+  readonly windows: readonly Window[];
   readonly reached: number;
   readonly counted: number;
   readonly api5xx: number;
@@ -214,8 +237,10 @@ export interface CollectOps {
  * Waits for API Gateway's `Count` to reach 90% of the calls the driver made
  * (CloudWatch delivers late, finding F-6), up to `waitMs`, then takes
  * `5XXError` minus the 5xx the scenarios saw and minus seed's 5xx in the same
- * minutes. If `Count` never caught up the result says so, and the verb fails
- * (P-7: a late 5XX must not pass unseen).
+ * minutes. Every metric is summed per scenario window (`windowsOf`), never
+ * over the span from the first to the last, so the gaps between scenarios are
+ * not counted. If `Count` never caught up the result says so, and the verb
+ * fails (P-7: a late 5XX must not pass unseen).
  */
 export async function collectFiveXx(
   docs: readonly RecordDoc[],
@@ -224,19 +249,26 @@ export async function collectFiveXx(
   waitMs = 4 * MINUTE,
   pollMs = 20_000,
 ): Promise<Collected> {
-  const { start, end } = windowOf(docs);
+  const windows = windowsOf(docs);
   const { reached, seen5xx } = driverCounts(docs);
-  const seed5xx = seed5xxIn(seedPerMinute, start, end);
+  const seed5xx = windows.reduce((a, w) => a + seed5xxIn(seedPerMinute, w.start, w.end), 0);
+  const sum = async (metric: 'Count' | '5XXError'): Promise<number> => {
+    let total = 0;
+    for (const w of windows) {
+      total += await ops.apiSum(metric, w.start, w.end);
+    }
+    return total;
+  };
   const deadline = ops.now() + waitMs;
-  let counted = await ops.apiSum('Count', start, end);
+  let counted = await sum('Count');
   while (counted < 0.9 * reached && ops.now() < deadline) {
     await ops.sleep(pollMs);
-    counted = await ops.apiSum('Count', start, end);
+    counted = await sum('Count');
   }
   const caughtUp = counted >= 0.9 * reached;
-  const api5xx = await ops.apiSum('5XXError', start, end);
+  const api5xx = await sum('5XXError');
   const extra = Math.max(0, Math.round(api5xx - seen5xx - seed5xx));
-  return { start, end, reached, counted, api5xx, seen5xx, seed5xx, extra, caughtUp };
+  return { windows, reached, counted, api5xx, seen5xx, seed5xx, extra, caughtUp };
 }
 
 /** The record the leftover goes on: the one whose window ends last. */

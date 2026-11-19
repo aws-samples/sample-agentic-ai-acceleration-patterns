@@ -49,23 +49,27 @@ if [[ "$prefix_lower" == tenantidentity* ]]; then
   echo "slice.sh: STRESS_PREFIX must not start with TenantIdentity: those stacks belong to the integration tests" >&2
   exit 2
 fi
+# teardown reads the tier with jq; check it here so a missing jq fails the
+# verb instead of skipping the seeded sweep.
+if ! command -v jq > /dev/null 2>&1; then
+  echo "slice.sh: jq is not installed" >&2
+  exit 2
+fi
+
 STACK="${STRESS_PREFIX}-identity"
 RUN_HOME="${STRESS_HOME}/${STRESS_PREFIX}"
 CDK_OUT="${RUN_HOME}/tenant-identity.cdk.out"
 
-# Installs and builds on a fresh checkout. `budget` has an empty HOME, so
-# npm's cache goes to a scratch folder there.
+# Installs on a fresh checkout, and again when node_modules lacks a declared
+# dependency (`npm ls` exits non-zero on a missing or wrong version), so a new
+# dependency in package.json cannot break every driver verb at import.
+# `budget` runs with HOME set to an empty scratch folder; npm's cache goes
+# there.
 ensure_installed() {
-  if [ -d "${SAMPLE_DIR}/node_modules/.bin" ]; then
+  if [ -d "${SAMPLE_DIR}/node_modules/.bin" ] && (cd "$SAMPLE_DIR" && npm ls --depth=0 > /dev/null 2>&1); then
     return 0
   fi
-  local cache=""
-  if [ -z "${HOME:-}" ]; then
-    cache="$(mktemp -d)"
-    export npm_config_cache="$cache"
-  fi
   (cd "$SAMPLE_DIR" && npm ci --silent)
-  [ -z "$cache" ] || rm -rf "${cache:?}"
 }
 
 ensure_built() {
@@ -99,6 +103,15 @@ stack_exists() {
     return 0
   fi
   ! grep -q 'does not exist' <<<"$err"
+}
+
+# True unless SSM says the parameter is not found, failing safe the same way.
+parameter_exists() {
+  local err
+  if err="$(aws ssm get-parameter --name "/${STRESS_PREFIX}/identity" --query Parameter.Name --output text 2>&1 >/dev/null)"; then
+    return 0
+  fi
+  ! grep -q 'ParameterNotFound' <<<"$err"
 }
 
 case "$verb" in
@@ -147,7 +160,8 @@ case "$verb" in
     # onboarding repeats every run (small, medium: stress ADR-0004) or on
     # --fixtures; at `large` it stays, as the fixture it is.
     seeded=()
-    if [ "$fixtures" -eq 1 ] || [ "$(jq -r .onboarding <<< "$STRESS_TIER_JSON")" = "every-run" ]; then
+    onboarding="$(jq -er .onboarding <<< "$STRESS_TIER_JSON")"
+    if [ "$fixtures" -eq 1 ] || [ "$onboarding" = "every-run" ]; then
       seeded=(--seeded)
     fi
     driver sweep ${seeded[@]+"${seeded[@]}"} || status=1
@@ -191,13 +205,26 @@ case "$verb" in
         echo "teardown: leftover REST API(s): $(printf '%s' "$left" | wc -l)" >&2
         status=1
       fi
+      # A failed create can leave resources CloudFormation never listed:
+      # the shell REST API (by its stack-scoped name) and a pool tagged with
+      # the stack (integ-lib.sh).
+      left="$(leftover_rest_apis)"
+      if [ -n "$left" ]; then
+        echo "teardown: REST API(s) named ${STACK}-api left: $(printf '%s\n' "$left" | wc -l)" >&2
+        status=1
+      fi
+      left="$(leftover_pools)"
+      if [ -n "$left" ]; then
+        echo "teardown: user pool(s) tagged ${STACK} left: $(printf '%s\n' "$left" | wc -l)" >&2
+        status=1
+      fi
       left="$(leftover_log_groups ${groups[@]+"${groups[@]}"})"
       if [ -n "$left" ]; then
         echo "teardown: leftover log group(s): $(printf '%s' "$left" | wc -l)" >&2
         status=1
       fi
-      if aws ssm get-parameter --name "/${STRESS_PREFIX}/identity" --query Parameter.Name --output text > /dev/null 2>&1; then
-        echo "teardown: parameter /${STRESS_PREFIX}/identity is still there" >&2
+      if parameter_exists; then
+        echo "teardown: parameter /${STRESS_PREFIX}/identity is still there, or SSM did not answer" >&2
         status=1
       fi
       if [ "$status" -eq 0 ]; then

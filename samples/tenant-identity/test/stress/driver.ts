@@ -39,6 +39,21 @@ import { createTenantBurst, emailOf, ps1, type ScenarioEnv, type Store, tokenRat
 import { applyReconciled, collectFiveXx, latestOf, MinuteRecorder, type RecordDoc, reconcileSeeded, sweepIds, sweepTenants } from './steps';
 import { AccessTokenVerifier, ExchangeClient, PlatformClient, region, TenantClient } from '../e2e/clients';
 
+/**
+ * What an error path prints: the error's name and HTTP status (AWS SDK
+ * `$metadata`), never the text of an SDK, verifier or transport error. A
+ * plain `Error` is one this sample throws itself (driver.ts, plan.ts) with a
+ * fixed message of names and ids, so that message is printed.
+ */
+function errorName(e: unknown): string {
+  const err = e as Error & { $metadata?: { httpStatusCode?: number } };
+  if (err instanceof Error && Object.getPrototypeOf(err) === Error.prototype) {
+    return err.message;
+  }
+  const status = err?.$metadata?.httpStatusCode;
+  return `${err?.name ?? 'Error'}${status === undefined ? '' : ` (HTTP ${status})`}`;
+}
+
 function need(name: string): string {
   const v = process.env[name];
   if (v === undefined || v === '') {
@@ -233,7 +248,7 @@ async function run(prefix: string, stack: string, scenario: string): Promise<num
   try {
     await scenarioFn({ ctx, plan, rec, store, prefix, tag });
   } catch (e) {
-    rec.finding(`${scenario} stopped: ${(e as Error).name}: ${(e as Error).message.slice(0, 200)}`);
+    rec.finding(`${scenario} stopped: ${errorName(e)}`);
   }
   const record = rec.toRecord(
     { runId: need('STRESS_RUN_ID'), tier: plan.tier.name, mode: plan.mode, slice: 'tenant-identity', commit: need('STRESS_COMMIT') },
@@ -274,14 +289,15 @@ async function apiSum(cw: CloudWatchClient, apiName: string, metric: string, sta
 /**
  * Late fields (spec §3.4): API Gateway's own count of 5XX over the run's
  * scenarios, minus the 5XX the driver saw (scenarios and seed), is a server
- * error the driver cannot attribute (P-7). Scenarios run back to back and
- * CloudWatch's finest period is a minute, so adjacent scenarios share a
- * bucket: the count is over the union of the windows, and what is left over
- * goes on the latest record. CloudWatch delivers metrics late (finding F-6),
- * so the count of calls is waited for first, for up to four minutes; if it
- * never catches up the verb fails rather than pass a count it cannot trust.
- * In `platform` mode the API is shared with the control plane, whose 5XX this
- * count would also hold (ADR-0041, until W-5).
+ * error the driver cannot attribute (P-7). CloudWatch's finest period is a
+ * minute, so each scenario's window is widened to whole minutes, windows that
+ * share a minute are merged, and the metrics are summed per window: the gaps
+ * between scenarios, where another slice may call the same API in `platform`
+ * mode, are not counted. What is left over goes on the latest record.
+ * CloudWatch delivers metrics late (finding F-6), so the count of calls is
+ * waited for first, for up to four minutes; if it never catches up the verb
+ * fails rather than pass a count it cannot trust. Another slice's 5XX inside
+ * a scenario's own minutes still land here (ADR-0041, until W-5).
  */
 async function collect(prefix: string, stack: string): Promise<number> {
   const dir = need('STRESS_RESULTS');
@@ -301,7 +317,7 @@ async function collect(prefix: string, stack: string): Promise<number> {
     now: Date.now,
   });
   process.stdout.write(
-    `collect: driver ${c.reached} calls, API Gateway counted ${Math.round(c.counted)}; 5XX scenarios ${c.seen5xx}, seed ${c.seed5xx}, API ${Math.round(c.api5xx)}\n`,
+    `collect: ${c.windows.length} window(s), ${c.windows.reduce((a, w) => a + (w.end.getTime() - w.start.getTime()) / 60_000, 0)} minutes; driver ${c.reached} calls, API Gateway counted ${Math.round(c.counted)}; 5XX scenarios ${c.seen5xx}, seed ${c.seed5xx}, API ${Math.round(c.api5xx)}\n`,
   );
   if (!c.caughtUp) {
     process.stdout.write('  API Gateway metrics had not caught up after 4 minutes: late 5XX cannot be ruled out (P-7)\n');
@@ -411,7 +427,7 @@ main(process.argv.slice(2)).then(
     process.exitCode = code;
   },
   (e: unknown) => {
-    process.stderr.write(`${(e as Error).name}: ${(e as Error).message.slice(0, 300)}\n`);
+    process.stderr.write(`${errorName(e)}\n`);
     process.exitCode = 1;
   },
 );

@@ -37,6 +37,15 @@ describe('tier and mode', () => {
     expect(() => parseTier(json)).toThrow();
   });
 
+  test.each([0, -1])('refuses steadyRps %p, which would stall the open loop', (steadyRps) => {
+    expect(() => parseTier(JSON.stringify({ ...JSON.parse(SMALL), steadyRps }))).toThrow(/steadyRps/);
+  });
+
+  test('the control plane\'s tenants count only in platform mode', () => {
+    expect(planOf(parseTier(SMALL), 'slice').controlPlaneTenants).toBe(0);
+    expect(planOf(parseTier(SMALL), 'platform').controlPlaneTenants).toBe(25);
+  });
+
   test('refuses an unknown mode', () => {
     expect(() => parseMode('both')).toThrow(/STRESS_MODE/);
   });

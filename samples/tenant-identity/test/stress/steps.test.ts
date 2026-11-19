@@ -13,7 +13,7 @@ import {
   seed5xxIn,
   sweepTenants,
   type SweepStore,
-  windowOf,
+  windowsOf,
 } from './steps';
 
 const tenant = (id: string, name = `s-${id}`): ManifestTenant => ({ tenantId: id, name, admin: { username: `${id}-a`, email: `${id}@x` }, users: [] });
@@ -96,28 +96,54 @@ describe('sweep', () => {
 
 describe('collect arithmetic', () => {
   const doc = (start: string, end: string, requests: Record<string, number>) => ({ window: { start, end }, requests, refusals: { unattributed: 0 } });
+  const clock = () => {
+    let t = 0;
+    return { now: () => t, sleep: async (ms: number) => { t += ms; } };
+  };
   const docs = [
     doc('2026-11-19T10:00:20Z', '2026-11-19T10:02:10Z', { '200': 90, '503:dependency-throttled': 4, '0:network': 3 }),
     doc('2026-11-19T10:02:15Z', '2026-11-19T10:03:40Z', { '201': 10, '404:not-found': 2 }),
   ];
 
-  test('the window is the union widened to whole minutes plus one', () => {
-    const w = windowOf(docs);
-    expect(w.start.toISOString()).toBe('2026-11-19T10:00:00.000Z');
-    expect(w.end.toISOString()).toBe('2026-11-19T10:05:00.000Z');
+  const iso = (ws: { start: Date; end: Date }[]) => ws.map((w) => [w.start.toISOString(), w.end.toISOString()]);
+
+  test('windows that share a minute merge into one, in whole minutes', () => {
+    expect(iso(windowsOf(docs))).toEqual([['2026-11-19T10:00:00.000Z', '2026-11-19T10:04:00.000Z']]);
     expect(driverCounts(docs)).toEqual({ reached: 106, seen5xx: 4 });
   });
 
-  test('seed 5xx count only inside the window', () => {
-    const w = windowOf(docs);
-    expect(seed5xxIn({ '2026-11-19T09:59:00.000Z': 7, '2026-11-19T10:00:00.000Z': 2, '2026-11-19T10:05:00.000Z': 5 }, w.start, w.end)).toBe(2);
+  test('a gap between scenarios stays out of the windows', () => {
+    const gapped = [docs[0], doc('2026-11-19T10:09:05Z', '2026-11-19T10:10:00Z', {})];
+    expect(iso(windowsOf(gapped))).toEqual([
+      ['2026-11-19T10:00:00.000Z', '2026-11-19T10:03:00.000Z'],
+      ['2026-11-19T10:09:00.000Z', '2026-11-19T10:10:00.000Z'],
+    ]);
+  });
+
+  test('seed 5xx count only inside a window', () => {
+    const [w] = windowsOf(docs);
+    expect(seed5xxIn({ '2026-11-19T09:59:00.000Z': 7, '2026-11-19T10:00:00.000Z': 2, '2026-11-19T10:04:00.000Z': 5 }, w.start, w.end)).toBe(2);
     expect(seed5xxIn(undefined, w.start, w.end)).toBe(0);
   });
 
-  const clock = () => {
-    let t = 0;
-    return { now: () => t, sleep: async (ms: number) => { t += ms; } };
-  };
+  test("another slice's 5XX in the gap between scenarios is not charged here", async () => {
+    const gapped = [doc('2026-11-19T10:00:20Z', '2026-11-19T10:01:40Z', { 200: 10 }), doc('2026-11-19T10:06:10Z', '2026-11-19T10:06:50Z', { 200: 10 })];
+    // 5XX per minute as API Gateway would report it: 9 in 10:03, inside the gap.
+    const fiveXx: Record<string, number> = { '2026-11-19T10:03:00.000Z': 9 };
+    const perMinute = (metric: string, start: Date, end: Date) => {
+      let n = 0;
+      for (let t = start.getTime(); t < end.getTime(); t += MINUTE) {
+        n += metric === 'Count' ? 10 : fiveXx[new Date(t).toISOString()] ?? 0;
+      }
+      return n;
+    };
+    const apiSum = jest.fn(async (metric: 'Count' | '5XXError', start: Date, end: Date) => perMinute(metric, start, end));
+    const c = await collectFiveXx(gapped, undefined, { ...clock(), apiSum });
+    expect(c).toMatchObject({ caughtUp: true, api5xx: 0, extra: 0 });
+    expect(c.windows).toHaveLength(2);
+    // One call per window and metric, never one over 10:00..10:07.
+    expect(apiSum.mock.calls.every(([, s, e]) => e.getTime() - s.getTime() <= 2 * MINUTE)).toBe(true);
+  });
 
   test('seed 5xx in a shared minute are not unattributed refusals', async () => {
     const c = await collectFiveXx(docs, { '2026-11-19T10:00:00.000Z': 3 }, {

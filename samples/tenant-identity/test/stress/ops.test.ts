@@ -13,6 +13,7 @@ import {
   probeForeignExchange,
   probeForeignRefresh,
   probeForeignRefreshToken,
+  probeTenantDoor,
   randomPassword,
   runPool,
   withRetry,
@@ -131,6 +132,44 @@ describe('isolation assertions (P-1)', () => {
     jest.restoreAllMocks();
     expect(rec.totals.assertions).toBe(0);
     expect(rec.findings.length).toBeGreaterThan(0);
+  });
+});
+
+describe('tenant admin door (P-1)', () => {
+  const own = [{ username: 'a-admin', email: 'a@x' }, { username: 'a-u1', email: 'u@x' }];
+  const next = (q: HttpResult<any>[]) => (q.length > 1 ? q.shift()! : q[0]);
+  const door = (list: HttpResult<any>[], foreign: HttpResult<any>[]) => {
+    const call = jest.fn(async (_m: string, p: string) => (p === 'tenant/users' ? next(list) : next(foreign)));
+    return { ctx: { clientId: 'c', tenantApi: { call } } as unknown as Ctx, call };
+  };
+  const instantTimers = () =>
+    jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void) => { fn(); return 0 as unknown as NodeJS.Timeout; }) as typeof setTimeout);
+
+  test('a list of own users that names the admin, and a refused foreign read, hold', async () => {
+    const rec = new Recorder();
+    const { ctx } = door([result(200, { users: [{ username: 'a-admin' }, { username: 'a-u1' }] })], [result(404)]);
+    await probeTenantDoor(ctx, rec, 'A', 'n', own, 'b-admin');
+    expect(rec.totals).toMatchObject({ assertions: 3, mismatches: 0 });
+    expect(rec.findings).toEqual([]);
+  });
+
+  test('an empty list is a mismatch, not a pass', async () => {
+    const rec = new Recorder();
+    const { ctx } = door([result(200, { users: [] })], [result(404)]);
+    await probeTenantDoor(ctx, rec, 'A', 'n', own, 'b-admin');
+    expect(rec.totals.mismatches).toBe(1);
+  });
+
+  test('a throttle is retried, and one that never clears is a finding', async () => {
+    const rec = new Recorder();
+    const spy = instantTimers();
+    const { ctx, call } = door([result(429), result(200, { users: [{ username: 'a-admin' }] })], [result(429)]);
+    await probeTenantDoor(ctx, rec, 'A', 'n', own, 'b-admin');
+    spy.mockRestore();
+    // The list cleared on its retry; the foreign read stayed throttled.
+    expect(call.mock.calls.filter(([, p]) => p === 'tenant/users')).toHaveLength(2);
+    expect(rec.totals).toMatchObject({ assertions: 2, mismatches: 0 });
+    expect(rec.findings).toEqual(['GetTenantUser of another tenant for tenant A: no answer (HTTP 429)']);
   });
 });
 
