@@ -82,6 +82,7 @@ function clearTenantView(): void {
   agentRun?.abort();
   agentRun = undefined;
   session = undefined;
+  retry = undefined; // its closure holds the refresh token
   ui.actions.hidden = true;
   ui.whoamiOut.textContent = '';
   ui.agentOut.textContent = '';
@@ -162,6 +163,9 @@ async function start(): Promise<void> {
   try {
     config = await loadConfig(env);
   } catch {
+    // §3.5 step 4: the saved verifier and nonce go on every outcome, also
+    // when a callback page cannot load its settings.
+    if (parseCallback(query).kind !== 'none') clearPending(env.storage);
     status(MESSAGES.config);
     return;
   }
@@ -194,7 +198,11 @@ async function start(): Promise<void> {
     agentRun?.abort();
     const run = new AbortController();
     agentRun = run;
-    void import('./agent-view').then((m) => m.runAgent(env.fetch, run.signal, s.accessToken, ui.backend.value, ui.prompt.value, ui.agentOut));
+    void import('./agent-view').then(
+      (m) => m.runAgent(env.fetch, run.signal, s.accessToken, ui.backend.value, ui.prompt.value, ui.agentOut),
+      // A chunk that fails to load (for example an integrity mismatch) says so.
+      () => { if (!run.signal.aborted) ui.agentOut.textContent = 'The agent view did not load.'; },
+    );
   });
 
   const cb = parseCallback(query);
