@@ -117,14 +117,22 @@ if [[ "$DELETE_TENANTS" == 1 ]]; then
     }
     START=$SECONDS
     TOTAL="$(jq '.tenants | length' "$MANIFEST")"
-    while read -r id; do
-      pace 500
-      while (( $(jobs -rp | wc -l) >= 4 )); do wait -n 2>/dev/null || true; done
-      job_delete "$id" &
-    done < <(jq -r '.tenants[].tenantId' "$MANIFEST")
-    wait
-    GONE="$(wc -l <"$DELETED")"
-    drop_deleted
+    # A tenant whose Cognito clean-up was throttled (503) is DELETING and stays in the manifest;
+    # DeleteTenant is idempotent, so up to three passes retry the rest after a pause (other
+    # runs in the shared pool draw on the same Cognito limits).
+    GONE=0
+    for pass in 1 2 3; do
+      [[ "$(jq '.tenants | length' "$MANIFEST")" -gt 0 ]] || break
+      (( pass == 1 )) || { echo "tenants: pass ${pass}, $(jq '.tenants | length' "$MANIFEST") left"; sleep 30; }
+      while read -r id; do
+        pace 500
+        while (( $(jobs -rp | wc -l) >= 4 )); do wait -n 2>/dev/null || true; done
+        job_delete "$id" &
+      done < <(jq -r '.tenants[].tenantId' "$MANIFEST")
+      wait
+      GONE=$((GONE + $(wc -l <"$DELETED")))
+      drop_deleted
+    done
     echo "tenants: ${GONE} of ${TOTAL} deleted in $((SECONDS - START))s; status $(sort "$STATUSES" | uniq -c | awk '{printf "%s:%s=%s ", $2, $3, $1}')"
     # Not a stop: the stacks are destroyed below either way, and the script
     # fails at the end so the undeleted tenants (still in the manifest) are
