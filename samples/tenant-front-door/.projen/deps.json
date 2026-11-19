@@ -176,6 +176,11 @@
       "type": "runtime"
     },
     {
+      "name": "jose",
+      "version": "6.2.10",
+      "type": "runtime"
+    },
+    {
       "name": "tslib",
       "version": "2.8.1",
       "type": "runtime"

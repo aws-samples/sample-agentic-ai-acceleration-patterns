@@ -328,6 +328,7 @@
             "aws-cdk-lib",
             "cdk-nag",
             "constructs",
+            "jose",
             "tslib"
           ]
         },
