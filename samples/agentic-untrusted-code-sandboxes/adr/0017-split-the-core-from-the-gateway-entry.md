@@ -62,6 +62,12 @@ because projen owns `package.json`: `devDependencies` holds
 `exports` maps `.` to the core entry and `./gateway` to the gateway
 entry, with `typesVersions` for consumers on `node10` resolution. No
 sample consumes another through `file:` yet, and the producer has no
-`main` or `exports`, so the first build proves both imports from the
-integration app and from a stub consumer, and checks that the gateway
-entry resolves the consumer's copy of the producer.
+`main` or `exports`. The same pull request therefore changes
+`agentic-runtime-isolation`'s `.projenrc.ts` to add `main: lib/index.js`
+and `types: lib/index.d.ts` (its `src/index.ts` already exports
+`ToolTarget` and `toolHandler`), and runs that sample's build and tests.
+A deep import of the producer's source was rejected, because standard
+§1.1 asks for imports through the producer's package entry. The first
+build proves the gateway import from the integration app and from a stub
+consumer that has the producer, and the §8 `standalone-build` step proves
+a consumer without it installs, compiles and synths the core.
