@@ -12,8 +12,9 @@
 ADR-0019 capped `microvm` jobs with `RLIMIT_AS` and `RLIMIT_NPROC`,
 because the guest has no cgroup the runner can use. S-16 found that the
 rlimits do not count data in an unmapped `memfd`: a job with 9 MB of
-resident memory filled 3840 MiB in about 1 s, the kernel killed the
-runner, and the MicroVM ended with no result, in 3 of 3 runs. S-17 found
+resident memory, aiming at 3840 MiB, ended the MicroVM at about 3.6 GiB,
+1.3 to 1.7 s in, with no result, in 3 of 3 runs. The kernel most likely
+killed the runner; the guest has no kernel log. S-17 found
 five more routes the rlimits miss: Unix socket buffers, SysV semaphores
 and message queues, `vmsplice` pages held in pipes, and a tmpfs mounted
 in a user namespace. Two of them stopped the runner the same way. SysV
@@ -50,9 +51,14 @@ and `bootId` with no cause code, from 20 lines of Python.
 
 Option 1 (spec §3.5 job filter). On `microvm` the runner sets
 `PR_SET_NO_NEW_PRIVS` and installs the filter in each job after the uid
-drop and before `exec`, checks `Seccomp: 2` before it sends the input,
-and keeps a `MemAvailable` floor of 512 MiB checked every 200 ms that
-kills the job and sweeps uid 1001. `/dev/shm` stays closed to uid 1001.
+drop, checks `PR_GET_SECCOMP` = 2 in the child before `exec` so no code
+runs unfiltered, also blocks new namespaces through `clone` and
+`clone3`, sets `RLIMIT_NOFILE` to 64, and keeps a `MemAvailable` floor
+of 512 MiB checked every 200 ms that kills the job and sweeps uid 1001.
+`/tmp` is disk (S-16), so ADR-0019's lock on it is dropped; `/dev/shm`
+stays closed. On every backend step 3 also removes uid 1001's SysV
+objects through a uid 1001 child, because they outlive the job and the
+root runner may not remove them (S-17).
 `nitro` and `agentcore` keep ADR-0019 as it stands: their task and job
 groups bound the `memfd` and tmpfs routes (S-16). `nitro.minInstances` is
 dropped, and the drain stays as ADR-0011's note describes.
@@ -63,7 +69,8 @@ dropped, and the drain stays as ADR-0011's note describes.
 `vmsplice` and socket buffer sizing, which the tool description states.
 The filter list must be revisited when the guest kernel changes, and a
 new route found by a test is a new list entry. The floor's own behaviour
-is not yet measured. Whether `nitro` and `agentcore` need the filter for
-socket and SysV memory is open: S-16 bounded `memfd` and tmpfs there, not
-those routes. With no warm instance, every `nitro` start after two idle
+is not yet measured, nor are the `clone` entries or the job-wide Unix
+socket total (S-18). Whether `nitro` and `agentcore` need the filter for
+socket memory is open: S-16 bounded `memfd` and tmpfs there, not that
+route; the SysV sweep covers the objects that outlive a job. With no warm instance, every `nitro` start after two idle
 minutes is a cold start of about 30 s.
