@@ -84,7 +84,8 @@ export class TokenVerifier {
     // createRemoteJWKSet caches the keys per container and refetches on an
     // unknown `kid`, at most once per cooldown (jose defaults: 30 s cooldown,
     // 10 min max age).
-    this.getKey = deps.getKey ?? createRemoteJWKSet(new URL(options.jwksUrl));
+    // A 2 s fetch timeout keeps JWKS + DynamoDB + SSM worst cases inside the 10 s function timeout.
+    this.getKey = deps.getKey ?? createRemoteJWKSet(new URL(options.jwksUrl), { timeoutDuration: 2000 });
   }
 
   /** Verifies a raw token (no `Bearer` prefix). Throws TokenError. */

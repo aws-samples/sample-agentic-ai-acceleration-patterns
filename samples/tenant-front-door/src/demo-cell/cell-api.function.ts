@@ -40,7 +40,7 @@ function build(): CellApi {
     verifier: new TokenVerifier({
       issuer: required(CELL_API_ENV.issuer),
       jwksUrl: required(CELL_API_ENV.jwksUrl),
-      allowedClientIds: required(CELL_API_ENV.allowedClientIds).split(','),
+      allowedClientIds: required(CELL_API_ENV.allowedClientIds).split(',').map((c) => c.trim()).filter((c) => c.length > 0),
       tenantClaim: required(CELL_API_ENV.tenantClaim),
     }),
     hosts: new HostsCheck(required(CELL_API_ENV.applicationId)),

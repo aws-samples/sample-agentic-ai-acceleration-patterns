@@ -29,7 +29,7 @@ import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { paramTenantNamespace } from '../shared/contracts';
 
 export const CACHE_TTL_MS = 60_000;
-/** Bounds the cache; the oldest entry goes first. */
+/** Bounds the cache; the entry written longest ago goes first (insertion order, not LRU). */
 export const CACHE_MAX_ENTRIES = 1000;
 /** `GetParametersByPath` may answer a page with no parameters and a `NextToken`; follow at most this many. */
 export const MAX_PAGES = 5;
