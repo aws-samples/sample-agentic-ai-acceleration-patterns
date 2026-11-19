@@ -328,6 +328,7 @@
             "@aws-sdk/client-cloudfront-keyvaluestore",
             "@aws-sdk/client-cloudfront",
             "@aws-sdk/client-dynamodb",
+            "@aws-sdk/client-lambda",
             "@aws-sdk/client-scheduler",
             "@aws-sdk/client-secrets-manager",
             "@aws-sdk/client-ssm",
