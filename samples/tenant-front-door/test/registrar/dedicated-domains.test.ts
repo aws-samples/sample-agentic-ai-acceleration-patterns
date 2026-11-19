@@ -355,17 +355,30 @@ describe('§3.4 step 5 sub-steps 3, 4 and 6: the certificate', () => {
   /** The idempotency token the registrar derives for D under `dk`. */
   const idempotency = (dk: string): string => createHash('sha256').update(`${DISTRIBUTION_ID}\n${t}\n${D}\n${dk}`).digest('hex').slice(0, 32);
 
-  test.each([
-    ['FAILED', 'CAA_ERROR', /failed validation: CAA_ERROR/],
-    ['VALIDATION_TIMED_OUT', undefined, /timed out/],
-  ])('a request that returns a certificate %s (ACM\'s hour, the same challenge) is 422 carrying ACM\'s reason', async (status, failureReason, message) => {
+  /** A repeat within ACM's hour that gets back a certificate in `status`. */
+  async function repeatGets(
+    status: string,
+    failureReason: string | undefined,
+  ): Promise<{ statusCode: number; body: Record<string, unknown>; h: Harness }> {
     const h = rig();
     passed(h);
     h.acm.add(certificateArn(1), { domain: D, status, failureReason, tags: ownTags(t), idempotencyToken: idempotency(TOKEN_1) });
-    const res = await put(h);
+    return { ...(await put(h)), h };
+  }
+
+  test('a request that returns a FAILED certificate (ACM\'s hour, the same challenge) is 422 carrying ACM\'s reason', async () => {
+    const res = await repeatGets('FAILED', 'CAA_ERROR');
     expect(res.statusCode).toBe(422);
-    expect(res.body.message).toMatch(message);
-    expect(h.kvs.items.has(hostKey(D))).toBe(false);
+    expect(res.body.message).toMatch(/failed validation: CAA_ERROR/);
+    expect(res.h.kvs.items.has(hostKey(D))).toBe(false);
+  });
+
+  test('defensive: a request that returns a VALIDATION_TIMED_OUT certificate, which sub-step 6 says ACM does not do, is 422', async () => {
+    // ACM times a validation out after 72 hours, long past its one-hour token.
+    const res = await repeatGets('VALIDATION_TIMED_OUT', undefined);
+    expect(res.statusCode).toBe(422);
+    expect(res.body.message).toMatch(/timed out/);
+    expect(res.h.kvs.items.has(hostKey(D))).toBe(false);
   });
 
   test.each(['FAILED', 'VALIDATION_TIMED_OUT', 'REVOKED', 'EXPIRED'])('a certificate %s counts as absent: a new one is requested', async (status) => {
