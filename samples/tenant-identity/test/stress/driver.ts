@@ -261,9 +261,6 @@ async function run(prefix: string, stack: string, scenario: string): Promise<num
   for (const f of rec.findings.slice(0, 25)) {
     process.stdout.write(`  ${f}\n`);
   }
-  for (const [what, n] of rec.notes) {
-    process.stdout.write(`  observed: ${what} (${n})\n`);
-  }
   return rec.findings.length === 0 && t.assertions > 0 ? 0 : 1;
 }
 
@@ -297,7 +294,7 @@ async function apiSum(cw: CloudWatchClient, apiName: string, metric: string, sta
  * CloudWatch delivers metrics late (finding F-6), so the count of calls is
  * waited for first, for up to four minutes; if it never catches up the verb
  * fails rather than pass a count it cannot trust. Another slice's 5XX inside
- * a scenario's own minutes still land here (ADR-0041, until W-5).
+ * a scenario's own minutes still land here (ADR-0042, until W-5).
  */
 async function collect(prefix: string, stack: string): Promise<number> {
   const dir = need('STRESS_RESULTS');

@@ -665,7 +665,7 @@ The sample is a slice of the repository's platform stress test
 [`stress/`](../../stress/README.md)). The slice runs on a `shared-pool` stack
 of its own, `<STRESS_PREFIX>-identity`, so thousands of stress tenants never
 crowd the pool the integration tests share, and it never touches a
-`TenantIdentity-*` stack ([ADR-0041](./adr/0041-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)).
+`TenantIdentity-*` stack ([ADR-0042](./adr/0042-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)).
 
 ```bash
 export AWS_REGION=eu-central-1 STRESS_PREFIX=stress-ti
@@ -680,12 +680,9 @@ stays for the next run. Scenarios: `PS-1` (onboarding at the tier's churn
 count), `token-rate` (issue, refresh and exchange at the tier's steady rate)
 and `create-tenant-burst` (`CreateTenant` beyond what Cognito's control plane
 takes). Each asserts that every token names the tenant it was issued for and
-that a token or path of tenant A is refused for tenant B. One observed
-behaviour is printed as an `observed:` line, not failed: tenant A's refresh token on tenant B's
-platform path, with the name of a real user of B, is served with A's own
-tokens, because `RefreshToken` checks that the path's user is a member but
-does not tie the refresh token to that user. The probe asserts the answer
-names A, never B ([ADR-0041](./adr/0041-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)). The driver is
+that a token or path of tenant A is refused for tenant B, including tenant
+A's refresh token on tenant B's platform path with the name of a real user
+of B (ADR-0041) ([ADR-0042](./adr/0042-run-the-platform-stress-slice-on-its-own-shared-pool-stack.md)). The driver is
 [`test/stress/`](./test/stress/); its manifest and logs stay outside the
 repository and hold no token or password.
 
@@ -750,7 +747,7 @@ Three Smithy services ([`model/`](./model/)) merged into one REST API
 | `CreateMembership` | `PUT /platform/tenants/{tenantId}/users/{username}/membership` | 204 — topology 3 only; 400 `UnsupportedInTopology` otherwise |
 | `DeleteMembership` | `DELETE /platform/tenants/{tenantId}/users/{username}/membership` | 204 — topology 3 only; 409 on last tenant; releases the first-admin slot when it removes the holder, as `DeleteUser` does (ADR-0032) |
 | `IssueToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token` | 200 — sets a password, signs in; remove before production (ADR-0006) |
-| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` | 200 — refresh re-runs the trigger; remove before production (ADR-0006) |
+| `RefreshToken` (test aid) | `POST /platform/tenants/{tenantId}/users/{username}/token/refresh` | 200 — refresh re-runs the trigger; 404 when the refresh token belongs to another user or tenant than the path (ADR-0041; `pool-per-tenant` answers 409 for another tenant's token, which the tenant's app client refuses); remove before production (ADR-0006) |
 
 ### Tenant admin (`/tenant/*`, narrowed admin token)
 

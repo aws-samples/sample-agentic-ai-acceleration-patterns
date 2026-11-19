@@ -266,36 +266,21 @@ describe('createTenantWithAdmin (ADR-0037 recovery)', () => {
   });
 });
 
-describe('foreign refresh token on its own path (P-1)', () => {
-  const verifier = (tenantId: string) => ({ verify: async () => ({ tenant_id: tenantId }) });
+describe('foreign refresh token on its own path (P-1, ADR-0041)', () => {
 
-  test('a refusal holds', async () => {
-    const rec = new Recorder();
-    await probeForeignRefreshToken(ctxWith({ platform: { call: async () => result(400) } }), rec, 'A', 'B', 'b-admin', 'r');
-    expect(rec.totals).toMatchObject({ assertions: 1, mismatches: 0 });
-    expect(rec.notes.size).toBe(0);
-  });
-
-  test("a served answer that names the caller's tenant holds and is noted", async () => {
+  test('the 404 refusal holds', async () => {
     const rec = new Recorder();
     const calls: string[] = [];
-    const platform = { call: async (_m: string, p: string) => { calls.push(p); return result(200, { accessToken: 'x' }); } };
-    await probeForeignRefreshToken(ctxWith({ platform, verifier: verifier('A') }), rec, 'A', 'B', 'b-admin', 'r');
+    const platform = { call: async (_m: string, p: string) => { calls.push(p); return result(404); } };
+    await probeForeignRefreshToken(ctxWith({ platform }), rec, 'A', 'B', 'b-admin', 'r');
     expect(calls).toEqual(['platform/tenants/B/users/b-admin/token/refresh']);
-    expect(rec.totals.mismatches).toBe(0);
-    expect(rec.totals.assertions).toBeGreaterThan(0);
-    expect([...rec.notes.values()]).toEqual([1]);
+    expect(rec.totals).toMatchObject({ assertions: 1, mismatches: 0 });
   });
 
-  test("a served answer that names the path's tenant is a mismatch", async () => {
+  test.each([200, 204])('a served answer (HTTP %i) is a mismatch, whatever tenant it names', async (status) => {
     const rec = new Recorder();
-    await probeForeignRefreshToken(ctxWith({ platform: { call: async () => result(200, { accessToken: 'x' }) }, verifier: verifier('B') }), rec, 'A', 'B', 'b-admin', 'r');
-    expect(rec.totals.mismatches).toBe(1);
+    await probeForeignRefreshToken(ctxWith({ platform: { call: async () => result(status, { accessToken: 'x' }) } }), rec, 'A', 'B', 'b-admin', 'r');
+    expect(rec.totals).toMatchObject({ assertions: 1, mismatches: 1 });
   });
 
-  test('a served answer without a token is a finding', async () => {
-    const rec = new Recorder();
-    await probeForeignRefreshToken(ctxWith({ platform: { call: async () => result(200, {}) } }), rec, 'A', 'B', 'b-admin', 'r');
-    expect(rec.findings).toHaveLength(1);
-  });
 });

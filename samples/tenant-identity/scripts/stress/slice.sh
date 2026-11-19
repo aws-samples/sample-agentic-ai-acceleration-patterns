@@ -15,7 +15,7 @@
 #
 # The stack is `${STRESS_PREFIX}-identity`, a `shared-pool` deployment with its
 # own user pool that publishes none of the fixed-name shared parameters
-# (stress ADR-0002, ADR-0041). It is a fixture: `teardown` keeps it unless
+# (stress ADR-0002, ADR-0042). It is a fixture: `teardown` keeps it unless
 # `--fixtures`. The long-lived TenantIdentity-* stacks the integration tests
 # share are never read, changed or destroyed here: the prefix check below
 # refuses any prefix that could name one of them.

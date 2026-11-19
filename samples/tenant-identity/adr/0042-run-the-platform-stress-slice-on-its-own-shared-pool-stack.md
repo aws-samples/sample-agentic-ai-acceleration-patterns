@@ -1,4 +1,4 @@
-# ADR-0041: Run the platform stress slice on its own `shared-pool` stack, with its own parameter
+# ADR-0042: Run the platform stress slice on its own `shared-pool` stack, with its own parameter
 
 - Status: Accepted
 - Date: 2026-11-19
@@ -92,17 +92,11 @@ scenario do. Its choices:
   door, B's user read with A's narrowed token and a list that names only A's
   users and, when it is complete, A's own admin (so an empty list cannot
   pass). A probe that is throttled is retried like the others; one that never
-  answers is a finding, not a silent skip. One probe may be served: A's refresh token on B's path with the name
-  of a real user of B passes the membership check, and `RefreshToken` does
-  not tie the refresh token to the path's user. The assertion is that the
-  answer is refused or names A, never B.
-- **Observed finding (refresh path).** In the `small` run of 2026-11-19 that
-  probe was served every time, and every token it returned named A. B's data
-  is not reached, and the platform API is the vendor's own IAM-signed door,
-  so this is a path-tenant mismatch, not a cross-tenant leak. The driver
-  prints it as an `observed:` line. Binding the refresh token to the path's
-  user (compare the token's `sub` or `username` to the path) is a change to
-  `RefreshToken`, outside this ADR.
+  answers is a finding, not a silent skip. A's refresh token on B's path
+  with the name of a real user of B passes the membership check, so that
+  probe tests the refresh token itself: `RefreshToken` binds its result to
+  the path's user and tenant (ADR-0041), and any served answer is a
+  mismatch.
 - **Findings.** A bare 5xx other than 503, and an operation that never
   finishes, fail the scenario. A bare 5xx is also counted as unattributed in
   the record (stress spec P-7).

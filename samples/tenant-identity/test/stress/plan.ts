@@ -39,7 +39,7 @@ export const MAX_ONBOARD_CONCURRENCY = 50;
  * The burst is this many times the tier's churn count. At most
  * `MAX_BURST_CONCURRENCY` tenants are onboarded at once: each of those
  * workers runs one tenant's whole onboarding, so beyond 100 tenants the
- * CreateTenant calls start in waves, not in one instant (ADR-0041).
+ * CreateTenant calls start in waves, not in one instant (ADR-0042).
  */
 export const BURST_FACTOR = 4;
 export const MAX_BURST_CONCURRENCY = 100;
@@ -169,7 +169,7 @@ export interface Draw {
 /**
  * The slice's draw on each budgeted quota (spec §4.4, tenant-identity column).
  * Declared in `slice.json`: lambda-concurrency, cognito-groups,
- * cognito-user-authentication-rps. ADR-0041 gives the reasoning for each.
+ * cognito-user-authentication-rps. ADR-0042 gives the reasoning for each.
  */
 export function drawsOf(plan: Plan): Draw[] {
   const { tier } = plan;

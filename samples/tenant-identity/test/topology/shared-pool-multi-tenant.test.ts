@@ -6,6 +6,7 @@ import {
   AdminCreateUserCommand,
   AdminDeleteUserCommand,
   AdminGetUserCommand,
+  AdminInitiateAuthCommand,
   AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
   AdminUpdateUserAttributesCommand,
@@ -15,7 +16,7 @@ import {
   ListUsersInGroupCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import 'aws-sdk-client-mock-jest';
-import { AnyMock, cognitoError, cognitoMock, depsFor, IDS, tenant } from './helpers';
+import { accessJwt, AnyMock, authResult, cognitoError, cognitoMock, depsFor, IDS, tenant } from './helpers';
 import { ConflictError, NotFoundError } from '../../src/shared/errors';
 import { SharedPoolMultiTenantProvisioner } from '../../src/topology/shared-pool-multi-tenant';
 
@@ -258,7 +259,7 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
       await expect(provisioner().deprovisionTenant(tenantA())).resolves.toBeUndefined();
     });
 
-    it('a retry after the tenant group is gone finishes (ADR-0041)', async () => {
+    it('a retry after the tenant group is gone finishes (ADR-0042)', async () => {
       cognito.on(ListUsersInGroupCommand).rejects(cognitoError('ResourceNotFoundException'));
       cognito.on(DeleteGroupCommand).rejects(cognitoError('ResourceNotFoundException'));
       await expect(provisioner().deprovisionTenant(tenantA())).resolves.toBeUndefined();
@@ -297,6 +298,44 @@ describe('SharedPoolMultiTenantProvisioner (spec §7.3)', () => {
       cognito.on(AdminGetUserCommand).resolves({ Username: 'sub-u1', UserAttributes: [{ Name: 'email', Value: 'u1@example.com' }], UserStatus: 'CONFIRMED' });
       const view = await provisioner().getUser(tenantA(), 'u1@example.com');
       expect(view.username).toBe('sub-u1');
+    });
+  });
+
+  describe('refreshToken binds the result to the path\'s user and tenant (ADR-0041)', () => {
+    beforeEach(() => {
+      userGroups(`t-${IDS.a}`, `t-${IDS.b}`);
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: 'sub', Value: 'sub-u1' }], UserStatus: 'CONFIRMED' });
+    });
+
+    it('serves the path user\'s own token (200)', async () => {
+      const own = accessJwt({ sub: 'sub-u1', tenants: [IDS.a, IDS.b] });
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(own));
+      const tokens = await provisioner().refreshToken(tenantA(), 'u1', 'rt');
+      expect(tokens.accessToken).toBe(own);
+    });
+
+    it('refuses a foreign tenant\'s token on this tenant\'s path with the non-member 404', async () => {
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-b1', tenants: [IDS.b] })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt-of-b')).rejects.toMatchObject({
+        name: 'NotFoundError',
+        message: 'User not found in tenant',
+      });
+    });
+
+    it('refuses another user\'s token from the same tenant with 404', async () => {
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-u2', tenants: [IDS.a] })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt-of-u2')).rejects.toBeInstanceOf(NotFoundError);
+    });
+
+    it('refuses the user\'s own sub when `tenants` lacks the path\'s tenant', async () => {
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-u1', tenants: [IDS.b] })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt')).rejects.toBeInstanceOf(NotFoundError);
+    });
+
+    it('refuses a non-member before any refresh (R-12)', async () => {
+      userGroups(`t-${IDS.b}`);
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt')).rejects.toBeInstanceOf(NotFoundError);
+      expect(cognito).toHaveReceivedCommandTimes(AdminInitiateAuthCommand as AnyMock, 0);
     });
   });
 

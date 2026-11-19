@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-21
+- Amended by: ADR-0041
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -48,3 +49,7 @@ the platform role needs `AdminGetUser` and `AdminListGroupsForUser`, scoped
 like its other actions (N-3). The check and the action are two calls, so a
 concurrent membership change can race them; at vendor scale that is
 accepted.
+
+Note 2026-11-19: ADR-0041 amends this record for `RefreshToken`. The
+membership check stays, and the refreshed token must also belong to the
+path's user and tenant.
