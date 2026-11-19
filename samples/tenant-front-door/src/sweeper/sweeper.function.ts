@@ -28,7 +28,7 @@ import { logLine } from './log';
 import { parsePageEvent, type RecheckDeps, runLister, runPage } from './recheck';
 import { type RemovalDeps, runRemoval } from './removal';
 import { SWEEPER_ENV, SWEEPER_JOB } from '../shared/contracts';
-import { checkChallenge } from '../shared/dns-challenge';
+import { checkChallenge, nodeDnsLookup } from '../shared/dns-challenge';
 
 /** The Region of every registrar certificate: CloudFront takes certificates from `us-east-1` only. */
 export const CERTIFICATE_REGION = 'us-east-1';
@@ -66,6 +66,7 @@ function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
 export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): SweeperDeps {
   const routeTableArn = requireEnv(env, SWEEPER_ENV.routeTableArn);
   const kvs = new CloudFrontKeyValueStoreClient({});
+  const lookup = nodeDnsLookup();
   return {
     recheck: {
       kvs,
@@ -77,7 +78,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env): SweeperDeps {
       tableName: requireEnv(env, SWEEPER_ENV.tableName),
       functionName: requireEnv(env, 'AWS_LAMBDA_FUNCTION_NAME'),
       now: () => Date.now(),
-      challenge: (domain, token) => checkChallenge(domain, token),
+      challenge: (domain, token) => checkChallenge(domain, token, { lookup }),
     },
     removal: {
       cloudFront: new CloudFrontClient({}),

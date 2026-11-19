@@ -13,10 +13,10 @@ import { classifyCaller } from './caller';
 import { loadConfig, type RegistrarConfig } from './config';
 import { ControlPlaneReader } from './control-plane';
 import { AwsDedicatedDomains, CERTIFICATE_REGION, type DedicatedDomains, DedicatedDomainsOff } from './dedicated-domains';
-import { nodeDnsLookup } from './domain-challenge';
 import { logLine } from './log';
 import { type RegistrarContext, type RegistrarDeps, RegistrarService } from './registrar';
 import { KvsRouteStore } from './route-store';
+import { nodeDnsLookup } from '../shared/dns-challenge';
 import {
   getRegistrarServiceServiceHandler,
   type RegistrarServiceService,
