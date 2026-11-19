@@ -69,6 +69,14 @@ ensure_installed() {
   (cd "$SAMPLE_DIR" && npm ci --silent)
 }
 
+# The CDK app imports the generated Smithy server code; a fresh checkout has none.
+ensure_built() {
+  ensure_installed
+  if [[ ! -d "${SAMPLE_DIR}/src/smithy" ]]; then
+    (cd "$SAMPLE_DIR" && smithy build >/dev/null)
+  fi
+}
+
 slice_cli() {
   (cd "$SAMPLE_DIR" && node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/slice-cli.ts "$@")
 }
@@ -99,6 +107,7 @@ case "$verb" in
     need_slice_mode
     need_region
     ensure_installed
+    ensure_built
     mkdir -p -m 700 "$STRESS_STATE_DIR"
     "${here}/deploy.sh"
     ;;
@@ -224,7 +233,7 @@ case "$verb" in
   teardown)
     need_slice_mode
     need_region
-    ensure_installed
+    ensure_built
     fixtures=0
     [[ "${1:-}" != "--fixtures" ]] || fixtures=1
     # The run's tenants go with it when the tier onboards every run (small, medium: stress
