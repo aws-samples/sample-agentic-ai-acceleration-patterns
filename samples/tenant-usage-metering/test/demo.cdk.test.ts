@@ -23,7 +23,7 @@ type InlinePolicy = { PolicyDocument: { Statement: Statement[] } };
 
 const actions = (statement: Statement): string[] => (Array.isArray(statement.Action) ? statement.Action : [statement.Action]);
 
-describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () => {
+describe('demo HTTP sink receiver (threat model T-17, M-17)', () => {
   const template = synthDemo({ integLocalCell: 'true', integHttpReceiver: 'true' });
   const functions = template.findResources('AWS::Lambda::Function');
   const receiverId = Object.keys(functions).find((id) => id.startsWith('DemoHttpReceiver'))!;
@@ -71,9 +71,10 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
     }
   });
 
-  // A resource as one string: `Fn::Join` and `Fn::Sub` are flattened, and every token (`Ref`,
-  // `Fn::GetAtt`, `${...}`) becomes TOKEN, which is never a wildcard. So a wildcard counts the
-  // same whether it sits in its own join piece or after a `${AWS::StackName}`.
+  // A resource as one string: `Fn::Join` and `Fn::Sub` are flattened, and a `Ref`, `Fn::GetAtt`
+  // or `${...}` becomes TOKEN, a name in the template (a parameter set to `*` is out of reach of
+  // a synth-time check). Any other intrinsic counts as `*`. So a wildcard counts the same whether
+  // it sits in its own join piece or after a `${AWS::StackName}`.
   const TOKEN = 'TOKEN';
   const flat = (value: unknown): string => {
     if (typeof value === 'string') {
@@ -89,7 +90,11 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
       const [body, variables] = Array.isArray(sub) ? [String(sub[0]), (sub[1] ?? {}) as Record<string, unknown>] : [String(sub), {}];
       return body.replace(/\$\{([^}]*)\}/g, (_, name: string) => (name in variables ? flat(variables[name]) : TOKEN));
     }
-    return TOKEN;
+    if (intrinsic.Ref !== undefined || intrinsic['Fn::GetAtt'] !== undefined) {
+      return TOKEN;
+    }
+    // Fn::If, Fn::Select, Fn::ImportValue and the like are not resolved here: count them as `*`.
+    return '*';
   };
   const WILD = /[*?]/;
   // A resource that covers more than named functions or APIs: `*`, or a `*` or `?` in the
@@ -157,7 +162,7 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
     );
     expect(attached.length).toBeGreaterThan(0);
     expect(attached.filter(({ arn }) => !allowedManaged(arn, managed))).toEqual([]);
-    // Self-test (review v5 #2): an AWS-managed policy that grants invoke, or an unknown ARN, fails.
+    // The check itself: an AWS-managed policy that grants invoke, or an unknown ARN, fails.
     expect(allowedManaged({ 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':iam::aws:policy/service-role/AWSLambdaRole']] }, managed)).toBe(false);
     expect(allowedManaged('arn:aws:iam::111122223333:policy/Anything', managed)).toBe(false);
     expect(allowedManaged({ 'Fn::Sub': 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole' }, managed)).toBe(true);
@@ -165,55 +170,54 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
 
   const allow = (Action: string, Resource: unknown): Statement => ({ Effect: 'Allow', Action, Resource });
 
-  test('the wildcard check catches the broad shapes (review v3 #1)', () => {
-    const fnArn = { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':lambda:eu-central-1:111122223333:function:*']] };
-    expect(invokes(allow('lambda:Invoke*', 'x')) && broad(allow('lambda:Invoke*', fnArn))).toBe(true);
-    expect(broad(allow('lambda:InvokeFunction', '*'))).toBe(true);
-    expect(broad(allow('lambda:InvokeFunction', 'arn:aws:lambda:*:*:function:x'))).toBe(true);
-    expect(apiInvokes(allow('execute-api:Invoke', 'x')) && broad(allow('execute-api:Invoke', 'arn:aws:execute-api:eu-central-1:111122223333:*'))).toBe(true);
-    expect(broad(allow('lambda:InvokeFunction', { 'Fn::Join': ['', [{ 'Fn::GetAtt': ['Fn', 'Arn'] }, ':*']] }))).toBe(false);
+  // The checker's own boundary: each resource shape, and whether it counts as broad.
+  const join = (...parts: unknown[]) => ({ 'Fn::Join': ['', parts] });
+  const FN = 'arn:aws:lambda:eu-central-1:111122223333:function:';
+  const API = 'arn:aws:execute-api:eu-central-1:111122223333:';
+  const RESOURCE_SHAPES: Array<[string, unknown, boolean]> = [
+    ['any resource', '*', true],
+    ['any function', `${FN}*`, true],
+    ['a name prefix', `${FN}TenantUsageMetering-*`, true],
+    ['a stack-name prefix in a join', join(FN, { Ref: 'AWS::StackName' }, '-*'), true],
+    ['a stack-name prefix in Fn::Sub', { 'Fn::Sub': 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-*' }, true],
+    ['a wildcard Fn::Sub variable', { 'Fn::Sub': [`${FN}\${Name}`, { Name: '*' }] }, true],
+    ['a partial Region', 'arn:aws:lambda:eu-*:111122223333:function:x', true],
+    ['a wildcard account in a join', join('arn:aws:lambda:', { Ref: 'AWS::Region' }, ':*:function:x'), true],
+    ['a `?` in the account', 'arn:aws:lambda:eu-central-1:1111?2223333:function:x', true],
+    ['every resource type', 'arn:aws:lambda:eu-central-1:111122223333:*', true],
+    ['a truncated ARN', 'arn:aws:lambda:*', true],
+    ['a wildcard after a function ARN token', join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, '*'), true],
+    ['a conditional with a wildcard branch', { 'Fn::If': ['Cond', '*', `${FN}x`] }, true],
+    ['an imported prefix', join({ 'Fn::ImportValue': 'Prefix' }, ':function:*'), true],
+    ['any API', join(API, '*'), true],
+    ['an API id prefix', `${API}ab*/prod/POST/usage`, true],
+    ['one function', `${FN}billing`, false],
+    ['a qualifier on one function', `${FN}x:*`, false],
+    ['a qualifier after a function ARN token', join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, ':*'), false],
+    ['an alias of one function', join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, ':live'), false],
+    ['every route of one API', join(API, { Ref: 'Api' }, '/*'), false],
+    ['one stage of one API', join(API, { Ref: 'Api' }, '/prod/*'), false],
+  ];
+  test.each(RESOURCE_SHAPES)('resource shape: %s is broad = %s', (_name, resource, expected) => {
+    expect(broadResource(resource)).toBe(expected);
   });
 
-  test('the wildcard check catches prefix, partial and case shapes (review v4 #2, #3)', () => {
-    const fn = (resource: unknown) => broad(allow('lambda:InvokeFunction', resource));
-    expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:TenantUsageMetering-*')).toBe(true);
-    expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:Demo*')).toBe(true);
-    expect(fn('arn:aws:lambda:eu-*:111122223333:function:x')).toBe(true);
-    expect(fn('arn:aws:lambda:eu-central-1:1111?2223333:function:x')).toBe(true);
-    expect(fn({ 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':lambda:', { Ref: 'AWS::Region' }, ':*:function:x']] })).toBe(true);
-    expect(broad(allow('execute-api:Invoke', 'arn:aws:execute-api:eu-central-1:111122223333:ab*/prod/POST/usage'))).toBe(true);
-    expect(broad(allow('execute-api:Invoke', 'arn:aws:execute-api:eu-central-1:111122223333:abc123/*'))).toBe(false);
-    expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:billing')).toBe(false);
-    for (const action of ['lambda:invokefunction', 'Lambda:InvokeFunction', 'lambda:InvokeFunction?rl', 'lambda:InvokeAsync']) {
-      expect(invokes(allow(action, 'x'))).toBe(true);
-    }
-    expect(invokes(allow('lambda:GetFunction', 'x'))).toBe(false);
-  });
-
-  test('the wildcard check sees through join pieces and Fn::Sub (review v5 #1)', () => {
-    const fn = (resource: unknown) => broad(allow('lambda:InvokeFunction', resource));
-    const join = (...parts: unknown[]) => ({ 'Fn::Join': ['', parts] });
-    const lambdaArn = 'arn:aws:lambda:eu-central-1:111122223333:function:';
-    expect(fn(join(lambdaArn, { Ref: 'AWS::StackName' }, '-*'))).toBe(true);
-    expect(fn(join(lambdaArn, '*'))).toBe(true);
-    expect(fn(join(lambdaArn, 'Demo*'))).toBe(true);
-    expect(fn(join('arn:aws:lambda:', { Ref: 'AWS::Region' }, ':', '*', ':function:x'))).toBe(true);
-    expect(fn(join('arn:aws:lambda:', '*', ':111122223333:function:x'))).toBe(true);
-    expect(fn({ 'Fn::Sub': 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-*' })).toBe(true);
-    expect(fn({ 'Fn::Sub': ['arn:aws:lambda:eu-central-1:111122223333:function:${Name}', { Name: '*' }] })).toBe(true);
-    expect(fn('arn:aws:lambda:eu-central-1:111122223333:*')).toBe(true);
-    expect(fn('arn:aws:lambda:*')).toBe(true);
-    expect(fn(join('arn:aws:lambda:eu-central-1:', '*'))).toBe(true);
-    expect(fn(join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, '*'))).toBe(true);
-    const api = (resource: unknown) => broad(allow('execute-api:Invoke', resource));
-    expect(api(join('arn:aws:execute-api:eu-central-1:111122223333:', '*'))).toBe(true);
-    expect(api(join('arn:aws:execute-api:eu-central-1:', { Ref: 'AWS::AccountId' }, ':*/prod/POST/x'))).toBe(true);
-    // Allowed: a qualifier wildcard on one function, and stage/method/path wildcards on one API.
-    expect(fn('arn:aws:lambda:eu-central-1:111122223333:function:x:*')).toBe(false);
-    expect(fn({ 'Fn::Sub': 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${Fn}:*' })).toBe(false);
-    expect(fn(join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, ':live'))).toBe(false);
-    expect(api(join('arn:aws:execute-api:eu-central-1:111122223333:', { Ref: 'Api' }, '/*'))).toBe(false);
-    expect(api(join('arn:aws:execute-api:eu-central-1:111122223333:', { Ref: 'Api' }, '/prod/*'))).toBe(false);
+  const ACTION_SHAPES: Array<[string, boolean]> = [
+    ['lambda:InvokeFunction', true],
+    ['lambda:invokefunction', true],
+    ['Lambda:InvokeFunction', true],
+    ['lambda:InvokeFunctionUrl', true],
+    ['lambda:InvokeFunction?rl', true],
+    ['lambda:InvokeAsync', true],
+    ['lambda:Invoke*', true],
+    ['*', true],
+    ['execute-api:Invoke', true],
+    ['execute-api:*', true],
+    ['lambda:GetFunction', false],
+  ];
+  test.each(ACTION_SHAPES)('action shape: %s invokes = %s', (action, expected) => {
+    const s = allow(action, 'x');
+    expect(invokes(s) || apiInvokes(s)).toBe(expected);
   });
 
   test('without integHttpReceiver there is no function URL at all', () => {

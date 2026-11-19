@@ -104,7 +104,7 @@ describe('AWS_IAM sinks (spec §4.4)', () => {
     expect(headers.host).toBe('abc123.lambda-url.eu-central-1.on.aws');
   });
 
-  test('a repeated query key is signed with every value (review v1 #5)', async () => {
+  test('a repeated query key is signed with every value', async () => {
     jest.useFakeTimers({ now: Date.parse('2026-11-19T12:00:00Z') });
     try {
       const credentials = { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'example-only' };
