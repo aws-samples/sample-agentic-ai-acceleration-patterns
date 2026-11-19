@@ -321,7 +321,8 @@ describe('main stack: response headers policy (spec §7.1, M-30)', () => {
   it('builds the CSP from csp.json and the issuer origins, single mode', () => {
     const csp = config().SecurityHeadersConfig.ContentSecurityPolicy;
     expect(csp.Override).toBe(true);
-    expect(csp.ContentSecurityPolicy).toMatch(/^default-src 'self'; script-src 'sha256-A+=' 'sha256-B+=' 'sha256-C+=' 'strict-dynamic' 'report-sample'; /);
+    const hashes = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'spa', 'csp.json'), 'utf8'))['script-src'];
+    expect(csp.ContentSecurityPolicy.startsWith(`default-src 'self'; script-src ${hashes.join(' ')} 'strict-dynamic' 'report-sample'; `)).toBe(true);
     expect(csp.ContentSecurityPolicy).toContain("connect-src 'self' https://login.auth.example.com;");
     expect(csp.ContentSecurityPolicy).toContain("form-action 'self' https://login.auth.example.com;");
     expect(csp.ContentSecurityPolicy).not.toContain('report-to');
@@ -382,7 +383,7 @@ describe('main stack: SPA bucket (spec §3.1, M-44, ADR-0023)', () => {
 
 describe('main stack: registrar (spec §3.4, §5.1, M-6)', () => {
   const api = (s = single) => only(s.main, 'AWS::ApiGateway::RestApi');
-  const hookRole = { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:iam::${CONTROL_PLANE_ACCOUNT}:role/demo-fleet-global-hook`]] };
+  const hookRole = `arn:aws:iam::${CONTROL_PLANE_ACCOUNT}:role/demo-fleet-global-hook`;
 
   it('is a regional REST API from the Smithy OpenAPI with every integration on the registrar function', () => {
     const a = api();

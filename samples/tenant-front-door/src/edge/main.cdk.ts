@@ -611,7 +611,7 @@ class Registrar extends Construct {
       'Active X-Ray tracing grants xray:PutTraceSegments and PutTelemetryRecords, which take no resource ARN (M-18).',
     );
 
-    const hookRoleArn = `arn:${stack.partition}:iam::${inputs.controlPlane.accountId}:role/${inputs.fleet}-global-hook`;
+    const hookRoleArn = `arn:${inputs.partition}:iam::${inputs.controlPlane.accountId}:role/${inputs.fleet}-global-hook`;
     const admitted = [hookRoleArn, inputs.edgeOperatorRoleArn];
 
     const definition = allowEmptyBody(patchIntegrations(
@@ -626,8 +626,11 @@ class Registrar extends Construct {
       restApiName: `${stack.stackName}-registrar`,
       apiDefinition: apigateway.ApiDefinition.fromInline(definition),
       endpointTypes: [apigateway.EndpointType.REGIONAL],
-      // The account-wide API Gateway CloudWatch role is the deployer's: CDK
-      // would retain it on destroy (README prerequisites).
+      // The access log and the ERROR execution log need the account's API
+      // Gateway CloudWatch Logs role (`aws apigateway update-account`), a
+      // per-account setting that CDK would retain on destroy, so the
+      // deployer sets it once, as for tenant-identity (deployment
+      // prerequisite).
       cloudWatchRole: false,
       policy: new iam.PolicyDocument({
         statements: [

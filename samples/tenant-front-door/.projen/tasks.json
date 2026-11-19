@@ -220,7 +220,10 @@
       "description": "Synthesizes your cdk app into cdk.out",
       "steps": [
         {
-          "exec": "cdk synth --context appDomain=app.build-placeholder.example.com --context 'hostedZone={\"zoneId\":\"ZBUILDPLACEHOLDER\",\"zoneName\":\"build-placeholder.example.com\"}' --context applicationId=build-placeholder --context 'controlPlane={\"apiUrl\":\"https://control-plane.build-placeholder.example.com\",\"accountId\":\"000000000000\",\"region\":\"eu-central-1\",\"vendorIdp\":{\"tokenUrl\":\"https://idp.build-placeholder.example.com/oauth2/token\",\"clientId\":\"build-placeholder\",\"clientSecretArn\":\"arn:aws:secretsmanager:eu-central-1:000000000000:secret:build-placeholder-AAAAAA\"}}' --context fleet=build-placeholder --context edgeOperatorRoleArn=arn:aws:iam::000000000000:role/build-placeholder-operator --context 'issuer={\"clientId\":\"build-placeholder\",\"scopes\":\"openid\",\"cognitoDomain\":\"https://auth.build-placeholder.example.com\"}' --context routerSourcePath=test/edge/fixtures/router-stub.js --context registrarEntry=test/edge/fixtures/registrar-stub.function.ts --context spaSource=test/edge/fixtures/spa"
+          "execArgs": [
+            "cdk",
+            "synth"
+          ]
         }
       ]
     },

@@ -90,7 +90,8 @@ const buildOnlyPlaceholderContext = [
   '--context registrarEntry=test/edge/fixtures/registrar-stub.function.ts',
   '--context spaSource=test/edge/fixtures/spa',
 ].join(' ');
+// Only the build's quiet synth: `npx projen synth` stays a plain `cdk synth`,
+// so it reads a deployer's own cdk.json inputs.
 project.tasks.tryFind('synth:silent')?.reset(`cdk synth -q ${buildOnlyPlaceholderContext}`);
-project.tasks.tryFind('synth')?.reset(`cdk synth ${buildOnlyPlaceholderContext}`);
 
 project.synth();
