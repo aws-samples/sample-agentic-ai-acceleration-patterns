@@ -134,11 +134,14 @@ for s in "${AGENT_STACKS[@]}"; do deploy_stack "$s"; done
 (( ${#AGENT_STACKS[@]} > 0 )) || echo "no agents stacks at scale ${SCALE} (the ingress stack holds every agent)"
 DRIVER_STACK="${PREFIX}-driver"
 echo "== deploy ${DRIVER_STACK} (stress/driver/deploy.sh)"
-start=$SECONDS
-STRESS_PREFIX="$PREFIX" STRESS_TIER="$SCALE" STRESS_PARAMETER_PREFIXES="$(jq -r '.RegistryPrefix // empty' "$OUTPUTS")" \
+REGISTRY_PREFIX="$(jq -r '.RegistryPrefix // empty' "$OUTPUTS")"
+[[ -n "$REGISTRY_PREFIX" ]] || fail "the ingress stack has no RegistryPrefix output; the driver could not read the registry parameters"
+STRESS_PREFIX="$PREFIX" STRESS_TIER="$SCALE" STRESS_PARAMETER_PREFIXES="$REGISTRY_PREFIX" \
   "${SAMPLE_DIR}/../../stress/driver/deploy.sh" >"${LIB_TMP}/driver.log" 2>&1 \
   || { tail -30 "${LIB_TMP}/driver.log" >&2; fail "deploy ${DRIVER_STACK}"; }
-secs=$((SECONDS - start))
+# The script's own figure: the wall time of the call would include a first `npm ci`.
+secs="$(sed -n "s/^stack=${DRIVER_STACK} deploy_seconds=\([0-9][0-9]*\)$/\1/p" "${LIB_TMP}/driver.log" | tail -1)"
+[[ -n "$secs" ]] || fail "stress/driver/deploy.sh printed no deploy_seconds line"
 echo "stack=${DRIVER_STACK} deploy_seconds=${secs}"
 echo "$(date -u +%F) scale=${SCALE} stack=${DRIVER_STACK} deploy_seconds=${secs}" >>"$TIMINGS"
 merge_outputs "$DRIVER_STACK"

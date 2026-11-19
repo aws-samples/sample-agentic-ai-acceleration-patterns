@@ -19,8 +19,10 @@
 # - the instance role's credentials, resolved on the host (the k6 AWS library does not read
 #   the instance metadata service), so IssueToken calls can be signed.
 # The host runs `k6 <K6_COMMAND> <script>` in the script's folder. Its stdout and stderr, and
-# the files k6 wrote to STRESS_RESULTS, come back: the records to $STRESS_RESULTS, the text to
-# $STRESS_RESULTS/../k6-stdout.txt. The exit code is k6's. Nothing here prints a token, and
+# the files k6 wrote to STRESS_RESULTS, come back: the records to $STRESS_RESULTS, and into
+# <parent of STRESS_RESULTS>/k6/ the text as <script>.k6-stdout.txt and k6's summary (SUMMARY_PATH,
+# `summary.json` by default, for a slice's `collect`) as <script>.summary.json, so a second
+# scenario does not overwrite the first. The exit code is k6's. Nothing here prints a token, and
 # k6 must not be run with --http-debug.
 #
 # The mirror travels inside the Run Command parameters (about 100 KB at most), compressed:
@@ -77,6 +79,7 @@ fi
   for name in STRESS_RUN_ID STRESS_TIER_JSON STRESS_MODE STRESS_COMMIT STRESS_TIER; do
     [[ -z "${!name:-}" ]] || { echo "export ${name}=$(sq "${!name}")"; NAMES="${NAMES} ${name}"; }
   done
+  echo 'export SUMMARY_PATH=/opt/stress/out/summary.json'
   for kv in "$@"; do
     [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { echo "not NAME=value: ${kv%%=*}" >&2; exit 2; }
     echo "export ${kv%%=*}=$(sq "${kv#*=}")"
@@ -114,8 +117,14 @@ sed -n '1,/^OUT_BASE64_BEGIN$/{/^OUT_BASE64_BEGIN$/!p}' "${TMP}/host.out"
 mkdir -p "$STRESS_RESULTS"
 if sed -n '/^OUT_BASE64_BEGIN$/,/^OUT_BASE64_END$/{/^OUT_BASE64_/!p}' "${TMP}/host.out" | base64 -d >"${TMP}/out.tgz" 2>/dev/null && [[ -s "${TMP}/out.tgz" ]]; then
   tar xzf "${TMP}/out.tgz" -C "$TMP"
-  cp -R "${TMP}/out/results/." "$STRESS_RESULTS/" 2>/dev/null || true
-  cp "${TMP}/out/k6-stdout.txt" "${STRESS_RESULTS%/}/../k6-stdout.txt" 2>/dev/null || true
+  cp -R "${TMP}/out/results/." "$STRESS_RESULTS/"
+  DEST="$(dirname "${STRESS_RESULTS%/}")/k6"
+  NAME="$(basename "$SCRIPT" .js)"
+  mkdir -p "$DEST"
+  cp "${TMP}/out/k6-stdout.txt" "${DEST}/${NAME}.k6-stdout.txt" || echo "could not keep k6's stdout" >&2
+  if [[ -f "${TMP}/out/summary.json" ]]; then
+    cp "${TMP}/out/summary.json" "${DEST}/${NAME}.summary.json" || echo "could not keep k6's summary" >&2
+  fi
 else
   echo "no output archive came back from the host" >&2
 fi

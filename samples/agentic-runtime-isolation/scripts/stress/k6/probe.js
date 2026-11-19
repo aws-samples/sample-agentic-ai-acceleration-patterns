@@ -29,6 +29,7 @@ import {
   ledger,
   loadTier as loadTierShared,
   pacing,
+  RUN_ID,
   refreshIfNeeded,
   setupTokens as setupTokensShared,
   summarize as summarizeShared,
@@ -113,8 +114,7 @@ function cleanId(raw) {
  * microVMs behind a cold ingress).
  */
 export function setupTokens(manifest, tier, opts = {}) {
-  const runId = cleanId(env('STRESS_RUN_ID', env('RUN_ID', Date.now().toString(36))));
-  const convRun = cleanId(env('CONVERSATION_RUN_ID', runId));
+  const convRun = cleanId(env('CONVERSATION_RUN_ID', RUN_ID));
   positiveControlFail.add(0);
   return setupTokensShared(
     manifest,

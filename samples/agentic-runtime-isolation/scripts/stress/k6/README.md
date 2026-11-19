@@ -6,8 +6,8 @@ The load half of the stress test in
 [`stress/k6/`](../../../../../stress/k6/README.md) (token pool and refresh, pacing, the
 correlation header, the result record) and the seed manifest to the driver host and runs
 one scenario; the pass table is computed by `collect.sh`,
-not here. Written for k6 v0.5x (ES modules, `k6/execution`); the syntax was
-checked with esbuild, not yet by a k6 run.
+not here. Written for k6 v1.x (ES modules, `k6/execution`); `k6 inspect` of S1 to S7 passes on k6 v2.4
+on the driver host (W-2), a full run against an ingress is W-3's.
 
 | File | Does |
 |---|---|

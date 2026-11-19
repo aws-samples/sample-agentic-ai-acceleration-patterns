@@ -135,13 +135,16 @@ function runIdOf() {
   return raw.slice(0, 20).padStart(4, '0');
 }
 
+/** The run's id as the correlation ids and session names carry it, fixed at init. */
+export const RUN_ID = runIdOf();
+
 /**
  * A fresh id per request: the run, the VU and a counter, at most 64 characters of
  * [A-Za-z0-9-], which is all a hop accepts. The hops log it and use it for nothing else.
  */
 export function correlationId() {
   correlationSeq += 1;
-  return `${runIdOf()}-${exec.vu.idInTest}-${correlationSeq.toString(36)}`;
+  return `${RUN_ID}-${exec.vu.idInTest}-${correlationSeq.toString(36)}`;
 }
 
 /** {id, headers}: `headers` plus a fresh correlation header. */
@@ -348,7 +351,7 @@ export function setupTokens(manifest, tier, opts = {}) {
   const users = opts.usersPerTenant || tier.usersPerActiveTenant;
   const mode = opts.mode || 'setup';
   const decorate = opts.decorate || (() => ({}));
-  const runId = runIdOf();
+  const runId = RUN_ID;
   const n = tenants.length;
   const entries = [];
   tenants.forEach((t, ti) => {
@@ -543,8 +546,8 @@ export function isolationCheck(entry, probeKind, status, bad, requestId, correla
 }
 
 /**
- * Per-tenant sends and 429s per epoch minute, one stdout line each: what the slice's `collect`
- * joins with the hops' logs to attribute a refusal to a tenant (P-7).
+ * Per-tenant sends and 429s per epoch minute, one stdout line each: what a slice's `collect`
+ * may join with the hops' logs to attribute a refusal to a tenant (P-7).
  */
 export function ledger(tenantId, status) {
   const minute = Math.floor(Date.now() / 60000);
@@ -618,7 +621,7 @@ export function summarize(data, rec) {
     const ms = data.state && typeof data.state.testRunDurationMs === 'number' ? data.state.testRunDurationMs : 0;
     const record = buildRecord(data, {
       runId: need('STRESS_RUN_ID'),
-      tier: String(JSON.parse(need('STRESS_TIER_JSON')).name),
+      tier: String(JSON.parse(need('STRESS_TIER_JSON')).name || 'small'),
       slice: rec.slice,
       scenario: rec.scenario,
       mode: need('STRESS_MODE'),

@@ -328,7 +328,7 @@ synthesised into `cdk.stress.out/` (gitignored), as `integ.sh` does.
 | `deploy.sh` | checks the shared identity deployment exists (as `integ.sh`, never deploys or destroys it); synth and deploy `<prefix>-ingress` with `STRESS_AGENTS=false`; then synth again and deploy the agents stacks (concurrency 1), then the driver stack through `stress/driver/deploy.sh` | one line per stack: name, deploy seconds; the `PolicySecondsToActive*` outputs |
 | `seed.sh` | §8.2 reuse; `CreateTenant` with `app/use` at 8 rps for the tier's seeded count, `PutTenantSubscription` on the Entitlements API (`agents: ['default', 'a001', ...]` all agents, `tools: ['<target>/*']` all targets) for the active tenants, `BatchWriteItem` one demo-table row per tenant (`PK`, a `label`, `crmAccount`); `CreateUser` to the tier's users per active tenant; writes the manifest; `--tenants N` overrides the seeded count | counts created and reused, wall seconds, status histogram |
 | `count.sh` | Phase 1 steps 1.4 to 1.7 at the tier's size | the step table |
-| `run.sh <s1..s7>` | uploads `k6/` and the manifest to `s3://<bucket>/in/`, runs k6 on the host through `ssm send-command` (`AWS-RunShellScript`), waits, downloads `s3://<bucket>/out/<run-id>/summary.json` and the k6 stdout; `s2` first applies the §13 recipe (env marker on the authoriser, the ingress function and every interceptor; `flush-stage-authorizers-cache`; 60 s idle) | the scenario's summary line and the isolation counters |
+| `run.sh <s1..s7>` | uploads `k6/` and the shared `stress/k6/` to `s3://<bucket>/in/repo/` at their repository-relative paths, and the manifest to `in/manifest.json`, runs k6 on the host through `ssm send-command` (`AWS-RunShellScript`), waits, downloads `s3://<bucket>/out/<run-id>/summary.json` and the k6 stdout; `s2` first applies the §13 recipe (env marker on the authoriser, the ingress function and every interceptor; `flush-stage-authorizers-cache`; 60 s idle) | the scenario's summary line and the isolation counters |
 | `collect.sh <run-id>` | Logs Insights on the ingress log group for the run window (`request served` percentiles, 429 by tenant and minute, `sdk retried` sums by service), CloudWatch metrics (API Gateway, Lambda, DynamoDB), the k6 summary; writes `design/stress-results/<YYYY-MM-DD>-<scale>.md` after a redaction check (`[0-9]{12}`, tenant ids and user names from the manifest, `eyJ`, `https://`) | the pass table |
 | `teardown.sh [--tenants]` | destroys driver, agents, ingress stacks in that order (concurrency 1); with `--tenants`, first deletes the manifest's tenants at 8 rps | one line per stack: name, destroy seconds |
 
@@ -336,9 +336,10 @@ synthesised into `cdk.stress.out/` (gitignored), as `integ.sh` does.
 tier)` (SigV4 `IssueToken` on the platform API with k6's `SignatureV4`,
 at 8 rps; a random password per call; tokens live in memory only),
 `refreshIfNeeded(entry)` (the `/token` exchange when under 90 s remain, at
-most 17 rps), `probe(entry, kind)` for `report`, `read-own`, `read-other`,
-`tool` with the §6 assertions, and the counters `isolation_mismatch`,
-`positive_control_fail`, `status_<code>`, `tenant_429` (tagged by tenant).
+most 17 rps), and the counters `isolation_mismatch`, `isolation_assertions`,
+`status_<code>`, `tenant_429` (tagged by tenant); `probe.js` exports
+`probe(entry, kind)` for `report`, `read-own`, `read-other`, `tool` with the §6
+assertions, and the counter `positive_control_fail`.
 `s1-steady.js`..`s7-eviction.js` read `__ENV.STRESS_TIER_JSON` (JSON) and `__ENV.MANIFEST`
 (path), apply the §5 shapes at the tier's rate and length, and write
 `summary.json` with `handleSummary`. The pass table is computed in

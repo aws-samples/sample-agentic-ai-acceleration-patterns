@@ -27,7 +27,7 @@ them, and fails the scenario without them. What a record holds from k6:
 | `requests` | `status_<code>` counters (`countStatus`); `other` for a code the library does not list |
 | `latency.client`, `latency['client-ttfb']` | the `client_ms` and `ttfb_ms` trends (`timed`), p50, p95, p99 in seconds; the ingress, router and origin hops come from the slices' logs |
 | `isolation` | `isolation_assertions` and `isolation_mismatch` (`isolationCheck`, one assertion per checked request, P-1) |
-| `refusals` | `unattributed` is the count of 4xx and 5xx the driver saw; `byTenantReason` is empty. The slice's `collect` joins the `tenant_minute` lines with the hops' logs and moves attributed refusals across (P-7) |
+| `refusals` | `unattributed` is the count of 4xx and 5xx the driver saw; `byTenantReason` is empty. The slice's `collect` attributes them from the hops' logs (it may join the `tenant_minute` lines the library prints) and moves attributed refusals across (P-7) |
 | `quotas` | empty; a slice's `collect` fills it from its own measurements |
 | `window` | the end of the test and its duration |
 
@@ -64,5 +64,5 @@ Tuning, all optional: `ISSUE_RPS` (8), `REFRESH_RPS` (17), `REFRESH_MARGIN_S` (9
 - Nothing logs a token, a password or a caller ARN. Never add `--http-debug`.
 - The library imports `jslib.k6.io` (SigV4 signing, the text summary) when k6 starts, so the
   driver host needs outbound HTTPS to it, which its security group allows.
-- Written for k6 v1.x (ES modules, `k6/execution`). `stress/driver/k6.sh` runs a script on the
+- Written for k6 v1.x and checked on v2.4 (ES modules, `k6/execution`). `stress/driver/k6.sh` runs a script on the
   host with `K6_COMMAND=inspect` to check that its imports resolve.

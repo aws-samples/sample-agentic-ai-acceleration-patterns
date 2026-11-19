@@ -42,4 +42,11 @@ Easier: one host stack, one CDK copy, and the stack's tests run in `stress/`.
 Harder: a slice that wants the host in the same CloudFormation deploy as its own
 stacks cannot have that; it deploys the host as a second step. `nag.ts` is a
 copy of the two helpers every sample keeps (the samples do not import each other).
+ProtoShield flags three wildcard resources on the host role, as it did in
+runtime-isolation (its threat model records them as accepted): `execute-api:Invoke`
+on every API of the account (the platform and entitlement API ids are not known at
+deploy time, and each authorises every call itself), `ssm:GetParameter` on the
+identity and slice prefixes, and `s3:GetObject`/`PutObject` on the objects of the
+host's own results bucket. The change does not widen them: the SSM grant takes its
+prefixes as input and the tests pin the action set.
 Revisit if the platform run wants the host in the platform account's own stacks.

@@ -62,5 +62,7 @@ Easier: a slice writes a probe module and scenario files; the record is the
 same everywhere and tested. Harder: a sample's scenario depth in the tree
 (five `..`) is part of the contract; `probe.js` reads the library's `vu`
 state. k6 reads `jslib.k6.io` at start, so the host needs that egress, which
-it has. Revisit if a second slice needs warm-up or step logic that differs from
-`probe.js`: those two would then move into the library behind hooks (Option 3).
+it has. ADR-0007 expects history to follow a `git mv`; `lib.js` changed too much for git
+to see a rename, so its history before W-2 is under the old path
+(`git log origin/main -- samples/agentic-runtime-isolation/scripts/stress/k6/lib.js`).
+Revisit if a second slice needs warm-up or step logic that differs from `probe.js`: those two would then move into the library behind hooks (Option 3).

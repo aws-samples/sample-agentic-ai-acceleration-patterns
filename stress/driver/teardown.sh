@@ -26,8 +26,21 @@ export STRESS_TIER="${STRESS_TIER:-small}"
 STACK="${STRESS_PREFIX}-driver"
 OUT="cdk.driver.out"
 
-status="$(aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || true)"
-if [[ -z "$status" || "$status" == DELETE_COMPLETE ]]; then
+# stack_status -> the status on stdout; "absent" when CloudFormation says the stack does not
+# exist; any other failure (credentials, throttle, Region) stops the script.
+stack_status() {
+  local out
+  if out="$(aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text 2>&1)"; then
+    echo "$out"
+  elif [[ "$out" == *"does not exist"* ]]; then
+    echo absent
+  else
+    echo "describe-stacks ${STACK} failed: ${out}" >&2
+    exit 1
+  fi
+}
+status="$(stack_status)"
+if [[ "$status" == absent || "$status" == DELETE_COMPLETE ]]; then
   echo "stack=${STACK} not deployed; nothing to remove"
   exit 0
 fi
@@ -36,6 +49,6 @@ start=$SECONDS
 npx cdk --app "npx ts-node --transpile-only driver/app.ts" --output "$OUT" destroy "$STACK" --exclusively --force >&2
 echo "stack=${STACK} destroy_seconds=$((SECONDS - start))"
 
-left="$(aws cloudformation describe-stacks --stack-name "$STACK" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || true)"
-[[ -z "$left" || "$left" == DELETE_COMPLETE ]] || { echo "leftover: ${STACK} is ${left}" >&2; exit 1; }
+left="$(stack_status)"
+[[ "$left" == absent || "$left" == DELETE_COMPLETE ]] || { echo "leftover: ${STACK} is ${left}" >&2; exit 1; }
 echo "leftovers: none"

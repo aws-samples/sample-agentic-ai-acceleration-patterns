@@ -10,9 +10,9 @@
 //
 // What a record built here leaves for the slice's `collect` verb (spec §3.4):
 // - refusals.byTenantReason is empty and refusals.unattributed is the number of 4xx and 5xx
-//   responses the driver saw. `collect` joins the per-tenant lines the library prints
-//   (kind `tenant_minute`) with the hops' logs and moves the attributed ones into
-//   byTenantReason (P-7). A scenario with refusals and no `collect` fails the run, which is
+//   responses the driver saw. `collect` may join the per-tenant lines the library prints
+//   (kind `tenant_minute`), if it uses them, with the hops' logs and moves the attributed ones
+//   into byTenantReason (P-7). A scenario with refusals and no `collect` fails the run, which is
 //   the point: an unattributed refusal is a finding.
 // - cost is absent: `collect` adds it.
 

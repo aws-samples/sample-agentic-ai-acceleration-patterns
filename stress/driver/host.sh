@@ -13,6 +13,11 @@
 # is read from S3, not from the Run Command API. Nothing opens an inbound path to the host.
 # The instance and the bucket come from the outputs of <prefix>-driver. HOST_TIMEOUT is the
 # command's limit in seconds (default 600, at most 14400).
+#
+# A SIGINT or SIGTERM cancels the command on the host, so a k6 run does not keep loading its
+# target. The wait ends early, with the reason, when the command fails or times out, when the
+# host loses its SSM agent for three minutes (a k6 that ran the host out of memory, finding
+# F-14) and when the credentials expire.
 
 set -euo pipefail
 
@@ -36,7 +41,22 @@ TIMEOUT="${HOST_TIMEOUT:-600}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 KEY="host/${STAMP}/output.txt"
 TMP="$(mktemp -d)"
-trap 'rm -f "${TMP}"/* ; rmdir "$TMP"; aws s3api delete-object --bucket "$BUCKET" --key "$KEY" >/dev/null 2>&1 || true' EXIT
+COMMAND_ID=""
+DONE=0
+cleanup() {
+  local code=$?
+  set +e
+  if [[ -n "$COMMAND_ID" && "$DONE" == 0 ]]; then
+    aws ssm cancel-command --command-id "$COMMAND_ID" >/dev/null 2>&1 && echo "cancelled the command on the driver host" >&2
+  fi
+  rm -f "${TMP}"/*
+  rmdir "$TMP"
+  aws s3api delete-object --bucket "$BUCKET" --key "$KEY" >/dev/null 2>&1
+  exit "$code"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 REMOTE="$(printf 'set +e\n( %s ) >/tmp/host-%s.out 2>&1\necho "exit=$?" >>/tmp/host-%s.out\naws s3 cp /tmp/host-%s.out s3://%s/%s --quiet\nrm -f /tmp/host-%s.out\n' \
   "$1" "$STAMP" "$STAMP" "$STAMP" "$BUCKET" "$KEY" "$STAMP")"
@@ -44,11 +64,48 @@ jq -n --arg c "$REMOTE" --arg t "$TIMEOUT" '{commands: [$c], executionTimeout: [
 COMMAND_ID="$(aws ssm send-command --instance-ids "$INSTANCE" --document-name AWS-RunShellScript \
   --parameters "file://${TMP}/params.json" --query Command.CommandId --output text)"
 
+lost=0
+finished=0
 for _ in $(seq 1 $((TIMEOUT / 5 + 12))); do
-  if aws s3api get-object --bucket "$BUCKET" --key "$KEY" "${TMP}/output.txt" >/dev/null 2>&1; then
+  if aws s3api get-object --bucket "$BUCKET" --key "$KEY" "${TMP}/output.txt" >/dev/null 2>"${TMP}/get.err"; then
+    DONE=1
     cat "${TMP}/output.txt"
     code="$(tail -n 1 "${TMP}/output.txt" | sed -n 's/^exit=\([0-9]*\)$/\1/p')"
     exit "${code:-1}"
+  fi
+  # NoSuchKey is the expected answer until the host has written; anything else is a failure.
+  if ! grep -q -E 'NoSuchKey|Not Found' "${TMP}/get.err"; then
+    echo "reading the output failed: $(tail -n 1 "${TMP}/get.err")" >&2
+    exit 1
+  fi
+  status="$(aws ssm list-command-invocations --command-id "$COMMAND_ID" --instance-id "$INSTANCE" \
+    --query 'CommandInvocations[0].Status' --output text 2>/dev/null || echo Unknown)"
+  case "$status" in
+    Failed | TimedOut | Cancelled | Cancelling | DeliveryTimedOut | ExecutionTimedOut | Undeliverable | Terminated)
+      # The host writes its output last, so give it one more read before giving up.
+      sleep 5
+      if aws s3api get-object --bucket "$BUCKET" --key "$KEY" "${TMP}/output.txt" >/dev/null 2>&1; then
+        DONE=1
+        cat "${TMP}/output.txt"
+        exit 1
+      fi
+      DONE=1
+      echo "the command ended ${status} on the host and wrote no output (command ${COMMAND_ID})" >&2
+      exit 1
+      ;;
+    Success)
+      # The command finished but its output is not in the bucket: the host could not upload it.
+      finished=$((finished + 1))
+      (( finished < 6 )) || { DONE=1; echo "the command succeeded but wrote no output to the results bucket (command ${COMMAND_ID})" >&2; exit 1; }
+      ;;
+  esac
+  ping="$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=${INSTANCE}" \
+    --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo Online)"
+  if [[ "$ping" == ConnectionLost ]]; then
+    lost=$((lost + 1))
+    (( lost < 36 )) || { echo "the host lost its SSM agent for 3 minutes (out of memory?); reboot the instance (command ${COMMAND_ID})" >&2; exit 1; }
+  else
+    lost=0
   fi
   sleep 5
 done
