@@ -19,15 +19,19 @@ export const HEADER_TENANT_TOKEN = 'x-tenant-token';
 /** The lower-case tenant id the router routed on: a hint the cell checks against the verified `tenant_id`. */
 export const HEADER_TENANT_ROUTE = 'x-tenant-route';
 
-/** OAC signs a request body with this header (ADR-0011); the SPA sends it on `PUT` and `POST`. */
+/**
+ * OAC signs a request body with this header (ADR-0011); the SPA sends it on
+ * `PUT` and `POST`. CloudFront refuses `x-amz-*` names in an origin request
+ * policy, so it is not in `API_FORWARDED_HEADERS`: origin access control
+ * reads it from the viewer request itself (§3.2).
+ */
 export const HEADER_CONTENT_SHA256 = 'x-amz-content-sha256';
 
-/** The exactly four headers the `/api/*` origin request policy forwards (§3.2). */
+/** The exactly three headers the `/api/*` origin request policy forwards (§3.2). */
 export const API_FORWARDED_HEADERS: readonly string[] = [
   HEADER_TENANT_TOKEN,
   HEADER_TENANT_ROUTE,
   'content-type',
-  HEADER_CONTENT_SHA256,
 ];
 
 /**

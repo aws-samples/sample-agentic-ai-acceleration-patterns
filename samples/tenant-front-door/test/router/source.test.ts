@@ -39,6 +39,13 @@ describe('router source', () => {
     expect(src.match(/__TFD_[A-Z_]+__/g)).toHaveLength(Object.keys(ROUTER_TOKENS).length);
   });
 
+  test('no await inside call arguments, which cloudfront-js-2.0 refuses at load (smoke 2026-11-19)', () => {
+    const src = fs.readFileSync(ROUTER_PATH, 'utf8');
+    const code = src.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    expect(code).not.toMatch(/[\w\])]\s*\(\s*await\b/);
+    expect(code).not.toMatch(/,\s*await\b/);
+  });
+
   test('every line fits the 150-character lint limit and the file is ASCII', () => {
     const src = fs.readFileSync(ROUTER_PATH, 'utf8');
     for (const line of src.split('\n')) expect(line.length).toBeLessThanOrEqual(150);
