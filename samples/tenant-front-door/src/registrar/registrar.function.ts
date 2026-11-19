@@ -5,6 +5,7 @@ import { CloudFrontKeyValueStoreClient } from '@aws-sdk/client-cloudfront-keyval
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
+import { ServiceException } from '@smithy/server-common';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { classifyCaller } from './caller';
 import { loadConfig } from './config';
@@ -13,7 +14,7 @@ import { DedicatedDomainsNotBuilt } from './dedicated-domains';
 import { logLine } from './log';
 import { type RegistrarContext, type RegistrarDeps, RegistrarService } from './registrar';
 import { KvsRouteStore } from './route-store';
-import { getRegistrarServiceServiceHandler } from '../smithy/source/typescript-ssdk-codegen/src';
+import { getRegistrarServiceServiceHandler, type RegistrarServiceService } from '../smithy/source/typescript-ssdk-codegen/src';
 
 /**
  * The route registrar's Lambda entry (spec §3.4, §5.1), behind an API
@@ -75,7 +76,7 @@ function forbidden(): APIGatewayProxyResult {
 }
 
 export function createHandler(deps: RegistrarDeps): Handler {
-  const serviceHandler = getRegistrarServiceServiceHandler<RegistrarContext>(new RegistrarService(deps));
+  const serviceHandler = getRegistrarServiceServiceHandler<RegistrarContext>(recordingErrors(new RegistrarService(deps)));
   return async (event) => {
     const operation = `${event.httpMethod} ${event.resource ?? event.path}`;
     // §3.4 step 1: the role from the signed request context, never the body.
@@ -94,7 +95,13 @@ export function createHandler(deps: RegistrarDeps): Handler {
     }
     if (result.statusCode >= 400) result = { ...result, body: errorBody(result.statusCode, result.body) };
     // §3.4 step 6: role, key and outcome, never the body.
-    logLine(result.statusCode >= 500 ? 'ERROR' : 'INFO', 'registrar call', { role, operation, key: context.key, outcome: result.statusCode });
+    logLine(result.statusCode >= 500 ? 'ERROR' : 'INFO', 'registrar call', {
+      role,
+      operation,
+      key: context.key,
+      outcome: result.statusCode,
+      error: context.error,
+    });
     return result;
   };
 }
@@ -102,13 +109,39 @@ export function createHandler(deps: RegistrarDeps): Handler {
 let cached: Handler | undefined;
 
 /**
- * SDK calls fail fast and retry once, so a call with its control-plane
- * reads and five store attempts stays near API Gateway's 29 s limit.
+ * Each SDK call is bounded: 2 s to connect, 3 s for the answer (an error,
+ * not only a warning), two tries. That bounds a hung call, not the whole
+ * request: a call with its token fetch and five store attempts can still
+ * run past API Gateway's 29 s and get a 504 while the function goes on.
+ * Every operation is repeat-safe, so the caller repeats it (spec §3.4).
  */
-const SDK_CLIENT = {
+export const SDK_CLIENT = {
   maxAttempts: 2,
-  requestHandler: new NodeHttpHandler({ connectionTimeout: 2_000, requestTimeout: 3_000 }),
+  requestHandler: new NodeHttpHandler({ connectionTimeout: 2_000, requestTimeout: 3_000, throwOnRequestTimeout: true }),
 } as const;
+
+const OPERATIONS = ['PutCellRoute', 'DeleteCellRoute', 'PutTenantRoute', 'DeleteTenantRoute', 'UpdateTenantRouteStatus', 'DeleteHostRoute'] as const;
+
+/**
+ * The SSDK answers an error it does not model with an empty 500 itself, so
+ * the function never sees it. Each operation records the class name of
+ * such an error (never its message) on the context for the log line.
+ */
+function recordingErrors(service: RegistrarService): RegistrarServiceService<RegistrarContext> {
+  const wrapped: Record<string, unknown> = {};
+  for (const op of OPERATIONS) {
+    const run = service[op] as (input: unknown, ctx: RegistrarContext) => Promise<unknown>;
+    wrapped[op] = async (input: unknown, ctx: RegistrarContext) => {
+      try {
+        return await run(input, ctx);
+      } catch (error) {
+        if (!(error instanceof ServiceException)) ctx.error = error instanceof Error ? error.name : typeof error;
+        throw error;
+      }
+    };
+  }
+  return wrapped as unknown as RegistrarServiceService<RegistrarContext>;
+}
 
 /** Built once per environment, on the first call, so a test can import the module without the environment. */
 function coldStart(): Handler {

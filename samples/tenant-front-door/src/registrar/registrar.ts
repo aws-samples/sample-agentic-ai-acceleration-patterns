@@ -54,6 +54,8 @@ export interface RegistrarContext {
   readonly role: CallerRole;
   /** Filled in by the operation for the function's log line (§3.4 step 6). */
   key?: string;
+  /** The class name of an unmodelled error, for the same log line. */
+  error?: string;
 }
 
 export interface RegistrarDeps {
@@ -332,7 +334,7 @@ export class RegistrarService implements RegistrarServiceService<RegistrarContex
 
   DeleteHostRoute = async (input: DeleteHostRouteServerInput, ctx: RegistrarContext): Promise<DeleteHostRouteServerOutput> => {
     const { store, domains } = this.deps;
-    const host = input.host!.toLowerCase();
+    const host = input.host!;
     ctx.key = hostKey(host);
     if (ctx.role !== 'operator') throw refuse.forbidden('only the edge operator role clears a host route');
     const release = await store.update(async (read) => {
@@ -362,7 +364,12 @@ export class RegistrarService implements RegistrarServiceService<RegistrarContex
     return deployment;
   }
 
-  /** §3.4 step 4: the tenant route's cell has a route, written for the same account. */
+  /**
+   * §3.4 step 4: the tenant route's cell has a route, written for the same
+   * account. A `cell#` value that does not decode is a 500 for every hook
+   * put of its tenants (logged as `RouteTableError`); the edge operator
+   * role's `PutCellRoute` overwrites it without decoding it, which repairs it.
+   */
   private async requireCellRoute(read: ReadKey, cellId: string, accountId: string): Promise<void> {
     const value = await read(cellKey(cellId));
     if (value === undefined || decodeCellEntry(value).ac !== accountId) {

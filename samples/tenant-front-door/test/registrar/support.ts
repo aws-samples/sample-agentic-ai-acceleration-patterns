@@ -105,8 +105,6 @@ export class MemoryKvs {
   padding = 0;
   /** Each UpdateKeys while this is positive fails with a conflict, as if another writer won. */
   conflicts = 0;
-  /** Called after each Describe, to let a test write between the read and the write. */
-  afterDescribe?: () => void;
   /**
    * Called before each UpdateKeys. It may change the store as another
    * writer would; when it returns true the call fails with a conflict.
@@ -137,9 +135,7 @@ export const secretsMock = mockClient(SecretsManagerClient);
 export function installKvs(kvs: MemoryKvs): void {
   kvsMock.reset();
   kvsMock.on(DescribeKeyValueStoreCommand).callsFake(() => {
-    const out = { ETag: `etag-${kvs.version}`, TotalSizeInBytes: kvs.size(), ItemCount: kvs.items.size };
-    kvs.afterDescribe?.();
-    return out;
+    return { ETag: `etag-${kvs.version}`, TotalSizeInBytes: kvs.size(), ItemCount: kvs.items.size };
   });
   kvsMock.on(GetKeyCommand).callsFake((input: { Key: string }) => {
     kvs.gets.push(input.Key);
