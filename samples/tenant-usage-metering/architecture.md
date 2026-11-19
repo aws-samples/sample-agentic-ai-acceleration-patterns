@@ -19,7 +19,7 @@ SPDX-License-Identifier: MIT-0
 > update through the raw bucket's configuration deny. The two paths differ
 > only before the raw store; the `BUS` run is on the current code. A
 > delete leaves only the CDK provider log groups (§11). Unit tests:
-> 188.
+> 189.
 > **Not exercised live:** `StartIngestRedrive` with messages in the queue,
 > the close of an hour after `recountWindowHours`, a cell or a bus
 > subscriber in a second account (the AWS RAM shares and the share guard

@@ -62,8 +62,9 @@ alone is not a new finding.
 |---|---|---|
 | Demo operator and reader roles allowed `execute-api:Invoke` on every route | ProtoShield, high | Fixed: each stand-in role is granted only its routes from `src/api/routes.ts`; the API resource policy denies the rest anyway |
 | Dispatcher may read every secret under `<fleet>/metering/sinks/` | ProtoShield, high | Accepted: sinks are run-time configuration (ADR-0004), so their secrets are not known at deploy time; the prefix is the boundary, and `CreateSink`/`UpdateSink` refuse a name outside it (spec §4.4) |
-| `grantReadWriteData` on the admin and jobs roles | ProtoShield, medium | Accepted: the admin API writes every item kind (meters, sinks, registrations, jobs) and `SINK_REDRIVE` scans; the table policy still limits writers to the stack's roles |
-| Firehose bucket-level `ListBucket`, `GetBucketLocation` | ProtoShield, medium | Accepted: Firehose's S3 destination needs them on the bucket (the delivery role's documented permissions) |
+| `grantReadWriteData` on the admin role | ProtoShield, medium | Accepted: the admin API writes every item kind (meters, sinks, registrations, jobs); the table policy still limits writers to the stack's roles |
+| Broad table access for the jobs role | ProtoShield, high | Fixed: the jobs role gets the item reads, `Scan` (for `SINK_REDRIVE`) and `UpdateItem` only, never a put or delete (`src/construct/compute.ts` grants; `test/construct.cdk.test.ts`) |
+| Firehose bucket-level `ListBucket`, `GetBucketLocation`, and the multipart actions `grantPut` adds | ProtoShield, medium | Accepted: Firehose's S3 destination needs them on the bucket and its two prefixes (the delivery role's documented permissions) |
 | Readmission role gets two `PutObject` grants, on `readmitted/` and `error/` | ProtoShield, low | Accepted: two prefixes with one writer each, matching the bucket policy's per-prefix denies (spec §3.5); merging them would hide which prefix each grant is for |
 | `minimatch`, `glob` CVEs (denial of service) | ProtoShield, medium | Accepted: development dependencies of jest and eslint, on `main` across the repository; nothing in a bundled function uses them |
 | Test fixtures `user:pw@billing.example.com`, `secretName` values | ASH detect-secrets | False positive: the strings are refusal cases in `test/pure.test.ts` and `test/integ.metering.ts` |

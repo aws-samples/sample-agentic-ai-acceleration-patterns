@@ -302,7 +302,9 @@ export function createCompute(scope: Construct, props: ComputeProps): Compute {
   const reads = ['GetItem', 'BatchGetItem', 'Query', 'ConditionCheckItem'];
   tableItems(roles.ingest, ['GetItem', 'Query', 'UpdateItem']);
   table.grantReadWriteData(roles.admin);
-  table.grantReadWriteData(roles.jobs);
+  // RECOUNT, SINK_REDRIVE and RESEND_BLOCKED read records, scan for failed
+  // deliveries, and update records and the job item; they never put or delete.
+  tableItems(roles.jobs, [...reads, 'Scan', 'UpdateItem']);
   tableItems(roles.readmission, [...reads, 'UpdateItem']);
   tableItems(roles.redrive, [...reads, 'UpdateItem']);
   tableItems(roles.tracker, ['GetItem', 'PutItem', 'UpdateItem']);

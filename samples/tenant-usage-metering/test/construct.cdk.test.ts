@@ -239,6 +239,16 @@ describe('functions, recounter and alarms (spec §3.1)', () => {
     });
   });
 
+  test('the jobs role reads, scans and updates the table, and never puts or deletes', () => {
+    const actions = statementsOf(template, 'AWS::IAM::Policy', (id) => id.startsWith('MeteringJobsRole'))
+      .flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]) as string[])
+      .filter((action) => action.startsWith('dynamodb:'));
+    expect(actions).toEqual(expect.arrayContaining(['dynamodb:Scan', 'dynamodb:UpdateItem', 'dynamodb:Query', 'dynamodb:GetItem']));
+    for (const denied of ['dynamodb:PutItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem', 'dynamodb:PartiQLDelete']) {
+      expect(actions).not.toContain(denied);
+    }
+  });
+
   test('the alarms of the specification exist, the heartbeat breaching on missing data', () => {
     expect(Object.keys(template.findResources('AWS::CloudWatch::Alarm')).length).toBe(16);
     template.hasResourceProperties('AWS::CloudWatch::Alarm', { MetricName: 'Invocations', TreatMissingData: 'breaching', EvaluationPeriods: 3 });
