@@ -293,7 +293,7 @@ echo "subscribe: $(jq '[.tenants[] | select(.active)] | length' "$MANIFEST") act
 job_create_user() { # TENANT_ID LABEL
   local st
   job_init
-  st="$(retry '429' platform POST "platform/tenants/$1/users" "$(jq -nc --arg e "success+${2}@simulator.amazonses.com" '{email: $e}')")"
+  st="$(retry '429|503' platform POST "platform/tenants/$1/users" "$(jq -nc --arg e "success+${2}@simulator.amazonses.com" '{email: $e}')")"
   echo "CreateUser ${st}" >>"$STATUSES"
   [[ "$st" == 201 ]] && jq -c --arg t "$1" '{tenantId: $t, user: .user.username}' "$BODY" >>"$PENDING"
   : >"$BODY"
@@ -301,6 +301,8 @@ job_create_user() { # TENANT_ID LABEL
 }
 START=$SECONDS
 USERS_WANTED=0
+# CreateUser writes to Cognito too: 503 is its throttle (ADR-0037), so it is paced as CreateTenant is and retried.
+INTERVAL_MS=250
 while IFS=$'\t' read -r idx id have; do
   for ((n = have + 1; n <= USERS_PER; n++)); do
     USERS_WANTED=$((USERS_WANTED + 1))
