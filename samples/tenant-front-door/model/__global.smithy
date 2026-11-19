@@ -76,6 +76,8 @@ string ApiDomain
 long DeploymentRevision
 
 /// Error message. Never names another tenant, account or cell (§5.1).
+/// Every error body the registrar function writes is `{message, reason?}`;
+/// only `CertificateQuotaError` sets `reason`.
 string ErrorMessage
 
 // ---------------------------------------------------------------------------
@@ -120,13 +122,32 @@ structure UnprocessableError {
     message: ErrorMessage
 }
 
-/// 507: the write would exceed the route table's 5 MB, or ACM refused a
-/// certificate request for its quota (§4.1).
+/// 507: the write would exceed the route table's 5 MB (§4.1, ADR-0012).
 @error("server")
 @httpError(507)
 structure InsufficientStorageError {
     @required
     message: ErrorMessage
+}
+
+/// Why a 429 came from the registrar function. API Gateway's own stage
+/// throttle 429 carries no `reason` and is retried with backoff (§5.1).
+enum TooManyRequestsReason {
+    /// ACM refused a dedicated domain's certificate request for its
+    /// quota. Lasts until the deployer raises the quota or certificates
+    /// are deleted, so the caller does not repeat the call until then.
+    CERTIFICATE_QUOTA = "certificate-quota"
+}
+
+/// 429 with `reason: certificate-quota` (§4.1, §5.1).
+@error("client")
+@httpError(429)
+structure CertificateQuotaError {
+    @required
+    message: ErrorMessage
+
+    @required
+    reason: TooManyRequestsReason
 }
 
 /// 503: the control plane cannot be read or returned a `createdAt` that
