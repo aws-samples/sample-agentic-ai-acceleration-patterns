@@ -55,7 +55,13 @@ Run on 2026-11-18 on the synthesised tree (`npx cdk synth` with the test
 account and Region): ProtoShield v0.18 (MIT-0 license-header config in
 `.protoshield/config.yaml`) and ASH in local mode. cdk-nag
 `AwsSolutionsChecks` runs in every synth and passes; every suppression
-carries a reason in code. No critical finding.
+carries a reason in code. No critical finding. ProtoShield ran again on
+2026-11-19 after the `AWS_IAM` sink change (ADR-0007), on a clean export
+of the sample with its `cdk.out`: 0 critical, 1 high, 4 medium, 1 low.
+Every finding is in the table below; only the readmission-role low is
+new. The scanner grades the same IAM statements differently from run to
+run (one run that day reported no IAM findings), so a changed count alone
+is not a new finding.
 
 | Finding | Scanner | Disposition |
 |---|---|---|
@@ -63,6 +69,7 @@ carries a reason in code. No critical finding.
 | Dispatcher may read every secret under `<fleet>/metering/sinks/` | ProtoShield, high | Accepted: sinks are run-time configuration (ADR-0004), so their secrets are not known at deploy time; the prefix is the boundary, and `CreateSink`/`UpdateSink` refuse a name outside it (spec §4.4) |
 | `grantReadWriteData` on the admin and jobs roles | ProtoShield, medium | Accepted: the admin API writes every item kind (meters, sinks, registrations, jobs) and `SINK_REDRIVE` scans; the table policy still limits writers to the stack's roles |
 | Firehose bucket-level `ListBucket`, `GetBucketLocation` | ProtoShield, medium | Accepted: Firehose's S3 destination needs them on the bucket (the delivery role's documented permissions) |
+| Readmission role gets two `PutObject` grants, on `readmitted/` and `error/` | ProtoShield, low | Accepted: two prefixes with one writer each, matching the bucket policy's per-prefix denies (spec §3.5); merging them would hide which prefix each grant is for |
 | `minimatch`, `glob` CVEs (denial of service) | ProtoShield, medium | Accepted: development dependencies of jest and eslint, on `main` across the repository; nothing in a bundled function uses them |
 | Test fixtures `user:pw@billing.example.com`, `secretName` values | ASH detect-secrets | False positive: the strings are refusal cases in `test/pure.test.ts` and `test/integ.metering.ts` |
 | Log groups not KMS-encrypted; SQS queues with SQS-managed SSE, not KMS | ASH checkov | Accepted: logs carry no payload or credential (spec §3.5); SSE-SQS encrypts at rest; a customer key is a production option |
