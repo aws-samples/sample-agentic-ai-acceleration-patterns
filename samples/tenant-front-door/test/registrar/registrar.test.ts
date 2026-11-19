@@ -101,14 +101,6 @@ describe('§3.4 step 1: only the global hook role and the edge operator role get
     expect(res.statusCode).toBe(200);
   });
 
-  test('the operator\'s PutCellRoute repairs a cell# value that does not decode', async () => {
-    const h = harness();
-    h.cp.cells.set(CELL, { status: 'ACTIVE' });
-    h.kvs.items.set(cellKey(c), 'not json');
-    expect((await h.handler(restEvent('PUT', `/cells/${CELL}`, 'operator', { apiDomain: API_DOMAIN }))).statusCode).toBe(200);
-    expect(h.kvs.get(cellKey(c))).toBe(golden(`cell#${c}`));
-  });
-
   test('§3.4 step 6: the log line has the role, key and outcome, never the body', async () => {
     const h = harness();
     h.cp.cells.set(CELL, { status: 'CREATING' });
@@ -117,6 +109,16 @@ describe('§3.4 step 1: only the global hook role and the edge operator role get
     expect(lines).toHaveLength(1);
     expect(json(lines[0])).toMatchObject({ role: 'hook', key: cellKey(c), outcome: 200 });
     expect(lines[0]).not.toContain(API_DOMAIN);
+    expect(json(lines[0]).error).toBeUndefined();
+  });
+
+  test('§3.4 step 6: a modelled refusal logs its status and no error class', async () => {
+    const h = harness();
+    h.cp.cells.set(CELL, { status: 'ACTIVE' });
+    await h.handler(restEvent('PUT', `/cells/${CELL}`, 'hook', { apiDomain: API_DOMAIN }));
+    const line = logSpy.mock.calls.map((call) => String(call[0])).find((l) => l.includes('registrar call'))!;
+    expect(json(line)).toMatchObject({ outcome: 409 });
+    expect(json(line).error).toBeUndefined();
   });
 });
 
@@ -161,6 +163,14 @@ describe('PutCellRoute', () => {
     seedCell(h);
     const res = await h.handler(restEvent('PUT', `/cells/${CELL}`, 'hook', { apiDomain: API_DOMAIN_2 }));
     expect(res.statusCode).toBe(409);
+    expect(h.kvs.get(cellKey(c))).toBe(golden(`cell#${c}`));
+  });
+
+  test('the operator\'s PutCellRoute repairs a cell# value that does not decode', async () => {
+    const h = harness();
+    h.cp.cells.set(CELL, { status: 'ACTIVE' });
+    h.kvs.items.set(cellKey(c), 'not json');
+    expect((await h.handler(restEvent('PUT', `/cells/${CELL}`, 'operator', { apiDomain: API_DOMAIN }))).statusCode).toBe(200);
     expect(h.kvs.get(cellKey(c))).toBe(golden(`cell#${c}`));
   });
 
@@ -592,15 +602,6 @@ describe('DeleteTenantRoute', () => {
     expect([...h.kvs.items.keys()].sort()).toEqual([hostKey(POOLED), hostKey('portal.example.com')].sort());
   });
 
-  test('§5.1: a damaged tenant# whose host# names it is left as it is when the host# goes', async () => {
-    const h = harness();
-    h.kvs.items.set(tenantKey(t), 'not json');
-    seedHost(h, 'portal.example.com');
-    expect((await h.handler(restEvent('DELETE', '/hosts/portal.example.com', 'operator'))).statusCode).toBe(200);
-    expect(h.kvs.items.has(hostKey('portal.example.com'))).toBe(false);
-    expect(h.kvs.get(tenantKey(t))).toBe('not json');
-  });
-
   test('§5.1: a damaged tenant# is still removed; a damaged host# is kept as naming no tenant', async () => {
     const h = harness(testConfig({ addressing: 'host' }));
     h.kvs.items.set(tenantKey(t), 'not json');
@@ -717,6 +718,15 @@ describe('DeleteHostRoute', () => {
     expect((await h.handler(restEvent('DELETE', '/hosts/portal.example.com', 'operator'))).statusCode).toBe(200);
     expect(h.kvs.items.has(hostKey('portal.example.com'))).toBe(false);
     expect(JSON.parse(h.kvs.get(tenantKey(t))!).d).toBe('portal.example.com');
+  });
+
+  test('§5.1: a damaged tenant# whose host# names it is left as it is when the host# goes', async () => {
+    const h = harness();
+    h.kvs.items.set(tenantKey(t), 'not json');
+    seedHost(h, 'portal.example.com');
+    expect((await h.handler(restEvent('DELETE', '/hosts/portal.example.com', 'operator'))).statusCode).toBe(200);
+    expect(h.kvs.items.has(hostKey('portal.example.com'))).toBe(false);
+    expect(h.kvs.get(tenantKey(t))).toBe('not json');
   });
 
   test('§3.4: the hook role gets 403', async () => {
