@@ -298,6 +298,8 @@ export const REGISTRAR_ENV = {
   dedicatedDomains: 'DEDICATED_DOMAINS',
   /** The multi-tenant distribution; dedicated distribution tenants attach to it. */
   distributionId: 'DISTRIBUTION_ID',
+  /** The stack's connection group; dedicated distribution tenants join it, so its routing endpoint is their CNAME target. */
+  connectionGroupId: 'CONNECTION_GROUP_ID',
 } as const;
 
 // ---------------------------------------------------------------------------

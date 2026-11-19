@@ -368,4 +368,21 @@ describe('dedicatedDomains on: deploy order (spec §3.4, §6.2)', () => {
     expect(dependsOn(on.main, ids.registrar)).toContain(ids.teardown);
     expect(dependsOn(off.main, logicalId(off.main, 'AWS::Lambda::Function', 'RegistrarFunction'))).toContain(ids.teardown);
   });
+
+  it('removes the dedicated distribution tenants before the connection group they joined', () => {
+    expect(dependsOn(on.main, ids.teardown)).toContain(logicalId(on.main, 'AWS::CloudFront::ConnectionGroup', 'ConnectionGroup'));
+  });
+});
+
+describe('dedicatedDomains on: the CNAME target (spec §3.4 step 5, §6.4)', () => {
+  const group = () => logicalId(on.main, 'AWS::CloudFront::ConnectionGroup', 'ConnectionGroup');
+
+  it('tells the registrar the stack\'s connection group, which dedicated distribution tenants join', () => {
+    const fn = resources(on.main)[logicalId(on.main, 'AWS::Lambda::Function', 'RegistrarFunction')].Properties;
+    expect(fn.Environment.Variables[REGISTRAR_ENV.connectionGroupId]).toEqual({ 'Fn::GetAtt': [group(), 'Id'] });
+  });
+
+  it('publishes the connection group\'s routing endpoint as the RoutingEndpoint stack output', () => {
+    on.main.hasOutput('RoutingEndpoint', { Value: { 'Fn::GetAtt': [group(), 'RoutingEndpoint'] } });
+  });
 });

@@ -52,6 +52,8 @@ export class TenantFrontDoor extends Construct {
   public readonly addressing: Addressing;
   /** The pooled distribution tenant's id. */
   public readonly pooledTenantId: string;
+  /** The CNAME target of a dedicated domain: the connection group's routing endpoint (spec §6.4). */
+  public readonly routingEndpoint: string;
 
   constructor(scope: Construct, id: string, props: TenantFrontDoorProps) {
     super(scope, id);
@@ -92,5 +94,6 @@ export class TenantFrontDoor extends Construct {
     this.appDomain = inputs.appDomain;
     this.addressing = inputs.addressing;
     this.pooledTenantId = this.mainStack.pooledTenantId;
+    this.routingEndpoint = this.mainStack.routingEndpoint;
   }
 }
