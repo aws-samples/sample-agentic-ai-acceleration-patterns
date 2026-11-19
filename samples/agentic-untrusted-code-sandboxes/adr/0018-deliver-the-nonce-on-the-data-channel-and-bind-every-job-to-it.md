@@ -21,9 +21,13 @@ can read them.
 ### Option 1: A per-job MAC checked before code runs, and only a hash of the nonce in start calls
 Pros: no extra round trip on `microvm` or `agentcore`; a wrong runner
 refuses before it writes the input or starts code; start calls and
-their logs show only a hash. Cons: the first message carries the nonce,
-so a wrong runner sees it, but only in the runner process, which tenant
-code cannot read, and it refuses and keeps nothing.
+their logs show only a hash. Cons: every message carries the nonce, and
+on `microvm` and `agentcore` the job's code and input travel with it, so
+a wrong runner sees all three, but only in the runner process, which
+tenant code cannot read, and it refuses and keeps nothing. This rests on
+the vendor runner being the sole listener and the sandbox ending when it
+exits. `agentcore` has no start call to carry a hash, so its runner
+anchors adoption to the session id it is invoked under instead.
 
 ### Option 2: A `/hello` challenge before every job on every backend
 Pros: identity proven before any job byte, like `nitro`. Cons: one more
@@ -39,12 +43,19 @@ Option 1 (spec §3.4 Identity check, §3.5 nonce delivery). Every job
 carries `jobAuth` = `HMAC(nonce, runId ‖ SHA-256(code ‖ input))`, and the
 runner refuses a mismatch with `wrong_sandbox` before it touches `/work`.
 Start calls carry `nonceHash` = SHA-256(`"nonce" ‖ nonce`); the nonce
-travels on the data channel and is adopted only if it matches the hash.
+travels on the data channel with every job and `/hello` and is adopted
+only if it matches the hash. On `agentcore` the job carries `tenantId`
+under `jobAuth`, and the runner adopts only when its session id is
+`rc-` + SHA-256(`tenantId`). The `jobAuth` encoding is length-prefixed
+(spec §3.5).
 `nitro` keeps its TLS `/hello` before the first job.
 
 ## Consequences
 
-A tool defect that addresses the wrong MicroVM or session costs one
-refused call and a restart, not a run in another tenant's sandbox. The
+A tool defect that addresses the wrong MicroVM, task or session costs
+one refused call and a restart, not a run in another tenant's sandbox.
+The result HMAC now confirms acceptance rather than proving identity.
+S-14 checks that the AgentCore container receives the session id and
+that CloudTrail records none of the nonce carriers. The
 registry still holds the nonce, readable by the vendor's roles. Spike
 S-14 checks what CloudTrail records for the start calls.
