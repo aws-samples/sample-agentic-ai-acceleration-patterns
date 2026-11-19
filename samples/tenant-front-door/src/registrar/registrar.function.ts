@@ -14,7 +14,11 @@ import { DedicatedDomainsNotBuilt } from './dedicated-domains';
 import { logLine } from './log';
 import { type RegistrarContext, type RegistrarDeps, RegistrarService } from './registrar';
 import { KvsRouteStore } from './route-store';
-import { getRegistrarServiceServiceHandler, type RegistrarServiceService } from '../smithy/source/typescript-ssdk-codegen/src';
+import {
+  getRegistrarServiceServiceHandler,
+  type RegistrarServiceService,
+  type RegistrarServiceServiceOperations,
+} from '../smithy/source/typescript-ssdk-codegen/src';
 
 /**
  * The route registrar's Lambda entry (spec §3.4, §5.1), behind an API
@@ -121,6 +125,10 @@ export const SDK_CLIENT = {
 } as const;
 
 const OPERATIONS = ['PutCellRoute', 'DeleteCellRoute', 'PutTenantRoute', 'DeleteTenantRoute', 'UpdateTenantRouteStatus', 'DeleteHostRoute'] as const;
+
+// Fails to compile when the model gains an operation this list lacks.
+const EVERY_OPERATION: [Exclude<RegistrarServiceServiceOperations, (typeof OPERATIONS)[number]>] extends [never] ? true : never = true;
+void EVERY_OPERATION;
 
 /**
  * The SSDK answers an error it does not model with an empty 500 itself, so
