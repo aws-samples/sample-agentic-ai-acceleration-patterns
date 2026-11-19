@@ -4,7 +4,7 @@
 import type { CallerRole } from './caller';
 import type { RegistrarConfig } from './config';
 import type { ControlPlane, DeploymentRecord } from './control-plane';
-import type { DedicatedDomains } from './dedicated-domains';
+import type { DedicatedDomains, DomainCheck } from './dedicated-domains';
 import { NOT_THIS_APPLICATION, refuse } from './errors';
 import type { ReadKey, RouteStore } from './route-store';
 import {
@@ -251,15 +251,17 @@ export class RegistrarService implements RegistrarServiceService<RegistrarContex
     const deployment = await this.deployment(tenantId);
 
     if (customDomain !== undefined) {
-      const entry = await store.update(async (read) => {
-        const found = await this.requireOperatorEntry(read, tenantId, deployment);
+      // Steps 3 and 4 on one read; the seam runs them again on every write it makes.
+      const check = async (read: ReadKey): Promise<DomainCheck> => {
+        const entry = await this.requireOperatorEntry(read, tenantId, deployment);
         const holder = await read(hostKey(customDomain));
         if (holder !== undefined && decodeHostEntry(holder).t !== tenantId) {
           throw refuse.conflict('customDomain is held by another tenant');
         }
-        return { result: found };
-      });
-      return domains.putTenantDomain({ tenantId, requestTenantId, customDomain, entry, deployment, store });
+        return { entry, routed: holder !== undefined };
+      };
+      const first = await store.update(async (read) => ({ result: await check(read) }));
+      return domains.putTenantDomain({ tenantId, requestTenantId, customDomain, first, check, store });
     }
 
     const result = await store.update(async (read) => {

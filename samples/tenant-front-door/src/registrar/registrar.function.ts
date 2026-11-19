@@ -1,6 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { ACMClient } from '@aws-sdk/client-acm';
+import { CloudFrontClient } from '@aws-sdk/client-cloudfront';
 import { CloudFrontKeyValueStoreClient } from '@aws-sdk/client-cloudfront-keyvaluestore';
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
@@ -8,9 +10,10 @@ import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway
 import { ServiceException } from '@smithy/server-common';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { classifyCaller } from './caller';
-import { loadConfig } from './config';
+import { loadConfig, type RegistrarConfig } from './config';
 import { ControlPlaneReader } from './control-plane';
-import { DedicatedDomainsNotBuilt } from './dedicated-domains';
+import { AwsDedicatedDomains, CERTIFICATE_REGION, type DedicatedDomains, DedicatedDomainsOff } from './dedicated-domains';
+import { nodeDnsLookup } from './domain-challenge';
 import { logLine } from './log';
 import { type RegistrarContext, type RegistrarDeps, RegistrarService } from './registrar';
 import { KvsRouteStore } from './route-store';
@@ -151,6 +154,21 @@ function recordingErrors(service: RegistrarService): RegistrarServiceService<Reg
   return wrapped as unknown as RegistrarServiceService<RegistrarContext>;
 }
 
+/**
+ * The dedicated-domain seam the configuration asks for. ACM is called in
+ * `us-east-1`, where CloudFront reads certificates; CloudFront's control
+ * API is global and signed for `us-east-1`.
+ */
+export function dedicatedDomainsFor(config: RegistrarConfig): DedicatedDomains {
+  if (!config.dedicatedDomains) return new DedicatedDomainsOff();
+  return new AwsDedicatedDomains({
+    acm: new ACMClient({ ...SDK_CLIENT, region: CERTIFICATE_REGION }),
+    cloudfront: new CloudFrontClient({ ...SDK_CLIENT, region: 'us-east-1' }),
+    distributionId: config.distributionId!,
+    lookup: nodeDnsLookup(),
+  });
+}
+
 /** Built once per environment, on the first call, so a test can import the module without the environment. */
 function coldStart(): Handler {
   const config = loadConfig(process.env);
@@ -164,7 +182,7 @@ function coldStart(): Handler {
       secrets: new SecretsManagerClient(SDK_CLIENT),
     }),
     store: new KvsRouteStore({ client: new CloudFrontKeyValueStoreClient(SDK_CLIENT), arn: config.routeTableArn }),
-    domains: new DedicatedDomainsNotBuilt(),
+    domains: dedicatedDomainsFor(config),
   });
 }
 

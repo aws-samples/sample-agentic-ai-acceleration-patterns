@@ -27,7 +27,7 @@ export interface RegistrarConfig {
   readonly fleet: string;
   readonly edgeOperatorRoleArn: string;
   readonly dedicatedDomains: boolean;
-  /** Set when `dedicatedDomains` is on; the S6 seam reads it. */
+  /** Set when `dedicatedDomains` is on; the dedicated-domain seam reads it. */
   readonly distributionId?: string;
 }
 

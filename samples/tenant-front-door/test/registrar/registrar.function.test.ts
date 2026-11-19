@@ -51,4 +51,14 @@ describe('the Lambda entry', () => {
     const { handler } = await import('../../src/registrar/registrar.function');
     await expect(handler(restEvent('DELETE', '/cells/01HZX8K9P0QRST7VWXYZ1A2B3D', 'operator'))).rejects.toThrow(/is not set/);
   });
+
+  test('uses the AWS seam, with ACM in us-east-1, only when dedicatedDomains is on', async () => {
+    const { dedicatedDomainsFor } = await import('../../src/registrar/registrar.function');
+    const { AwsDedicatedDomains, DedicatedDomainsOff } = await import('../../src/registrar/dedicated-domains');
+    expect(dedicatedDomainsFor(testConfig())).toBeInstanceOf(DedicatedDomainsOff);
+    const on = dedicatedDomainsFor(testConfig({ dedicatedDomains: true, distributionId: 'E1EXAMPLE2DIST' }));
+    expect(on).toBeInstanceOf(AwsDedicatedDomains);
+    const acm = (on as unknown as { options: { acm: { config: { region: () => Promise<string> } } } }).options.acm;
+    await expect(acm.config.region()).resolves.toBe('us-east-1');
+  });
 });
