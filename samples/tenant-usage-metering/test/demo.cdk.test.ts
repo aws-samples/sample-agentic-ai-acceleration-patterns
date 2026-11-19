@@ -104,9 +104,13 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
       return false;
     }
     const segments = arn.split(':');
-    if (segments[0] !== 'arn' || segments.length < 6) {
+    if (segments[0] !== 'arn') {
       const last = arn.lastIndexOf(':');
       return last < 0 || WILD.test(arn.slice(0, last));
+    }
+    if (segments.length < 6) {
+      // A truncated ARN with a wildcard (`arn:aws:lambda:*`) is not one named resource.
+      return true;
     }
     const [, partition, service, region, account, ...rest] = segments;
     if ([partition, service, region, account].some((segment) => WILD.test(segment))) {
@@ -198,6 +202,8 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
     expect(fn({ 'Fn::Sub': 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-*' })).toBe(true);
     expect(fn({ 'Fn::Sub': ['arn:aws:lambda:eu-central-1:111122223333:function:${Name}', { Name: '*' }] })).toBe(true);
     expect(fn('arn:aws:lambda:eu-central-1:111122223333:*')).toBe(true);
+    expect(fn('arn:aws:lambda:*')).toBe(true);
+    expect(fn(join('arn:aws:lambda:eu-central-1:', '*'))).toBe(true);
     expect(fn(join({ 'Fn::GetAtt': ['Fn', 'Arn'] }, '*'))).toBe(true);
     const api = (resource: unknown) => broad(allow('execute-api:Invoke', resource));
     expect(api(join('arn:aws:execute-api:eu-central-1:111122223333:', '*'))).toBe(true);
