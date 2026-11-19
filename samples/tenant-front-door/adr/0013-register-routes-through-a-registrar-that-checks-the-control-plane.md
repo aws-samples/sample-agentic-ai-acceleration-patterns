@@ -5,6 +5,7 @@
 - Status: Accepted
 - Date: 2026-11-17
 - Deciders: Dave Roberts (PSA)
+- Amended by: ADR-0025
 
 ## Context
 
@@ -90,3 +91,7 @@ cleanup works after the control plane has removed the record.
 Note 2026-11-18: ADR-0017 (Proposed) will supersede this record once
 control-plane ADR-0044 is accepted. The specification describes the
 ADR-0017 design.
+
+Note 2026-11-19: ADR-0025 amends this record. `UpdateTenantRouteStatus`
+skips the control-plane read, like the edge operator role's deletes, so
+a suspension works while the control plane cannot be read.
