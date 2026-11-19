@@ -42,17 +42,23 @@ already close.
 ## Decision
 
 Option 1 (spec §3.3, §3.9). The rule group allows `amazonaws.com`,
-`*.amazonaws.com`, `*.on.aws`, `*.api.aws`, `time.aws.com`,
-`*.amazon.pool.ntp.org` and `*.compute.internal`, plus any `allowDomains`,
-and blocks the rest with NXDOMAIN. The construct owns the rule group, its
+`*.amazonaws.com`, `*.on.aws`, `*.api.aws`, `time.aws.com`
+and `*.compute.internal`, plus any `allowDomains`, and blocks the rest
+with NXDOMAIN and `FirewallFailOpen` disabled. `*.amazon.pool.ntp.org`
+stays blocked: it is a third-party zone, and no spike saw a failure
+without it. Synth refuses the option with a supplied `vpc`, because the
+association would block names for every other workload in that VPC. The construct owns the rule group, its
 VPC association (mutation protection off), the query-log configuration and
-its log group, so `cdk destroy` removes them all.
+its log group, and any Logs resource policy that query-log delivery needs,
+so `cdk destroy` removes them all.
 
 ## Consequences
 
 C-3 reads per setting. The integration test runs `run-code` with the
 firewall on and `run-code-files` with it off, checks both outcomes, and
-fails if any platform name was blocked. Names under the allowed AWS zones
+fails if any platform name other than the NTP pool was blocked. Running
+an `agentcore` runtime in each instance also gives the with-and-without
+control for the ready-time question. Names under the allowed AWS zones
 still resolve; a narrower list of exact names is a later option. The
 AgentCore ready time is measured again on the integration run; if the
 firewall causes it, the README says so next to the prop. Revisit the

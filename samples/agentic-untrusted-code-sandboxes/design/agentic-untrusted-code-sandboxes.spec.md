@@ -218,7 +218,7 @@ path is the same (ADR-0001).
 | `sandboxMaxLife` | `Duration` | 8 h | hard life cap on every backend |
 | `perTenantMetrics` | `boolean` | `false` | emit CloudWatch metrics with a `TenantId` dimension (ADR-0013) |
 | `vpc` | `ec2.IVpc` | created (§3.7) | must have subnets tagged for the tool and the sandboxes |
-| `dnsFirewall` | `boolean \| { allowDomains?: string[] }` | `false` | associate a Route 53 Resolver DNS Firewall rule group with the VPC that allows only the §3.9 AWS names and blocks the rest with NXDOMAIN, plus VPC query logging; `allowDomains` adds names (ADR-0016) |
+| `dnsFirewall` | `boolean \| { allowDomains?: string[] }` | `false` | associate a Route 53 Resolver DNS Firewall rule group with the VPC that allows only the §3.9 AWS names and blocks the rest with NXDOMAIN, plus VPC query logging; `allowDomains` adds names; refused with a supplied `vpc` (ADR-0016) |
 | `createEndpoints` | `boolean` | `true` | create the §3.7 sandbox endpoints; `false` when a supplied `vpc` already has them, which then must meet §3.7 |
 | `inputBucket` | `s3.IBucket` | created | the bucket with `inputs/<tenant>/` |
 | `microvm.memoryMiB` | `number` | 1024 | MicroVM image minimum memory |
@@ -239,7 +239,7 @@ Gateway documentation, a Lambda error reaches the agent only as a generic
 empty `backends`, `defaultBackend` not enabled, `runTimeout` outside 1 s to
 60 s, a budget above the cap, `sandboxMaxLife` above 8 h, `sandboxIdle`
 below 1 min or at or above `sandboxMaxLife`, `toolName` or `gateway` set
-without `ingress`.
+without `ingress`, `dnsFirewall` together with a supplied `vpc`.
 
 Read-only properties: `toolTarget` (undefined without `ingress`),
 `runCodeFunction`, `registryTable`, `inputBucket`, `toolRole`,
@@ -474,14 +474,14 @@ Cost attribution per backend:
 
 With `dnsFirewall` on, the construct creates one Route 53 Resolver DNS
 Firewall rule group and associates it with the whole VPC
-(`MutationProtection` off, so `cdk destroy` can remove it). Every backend's
+(`MutationProtection` off, so `cdk destroy` can remove it; `FirewallFailOpen` `DISABLED`, so a firewall fault blocks lookups instead of letting them through). Every backend's
 lookups reach the VPC resolver, so one rule group covers all three
 (S-13). The rule group applies to the tool subnets too, so the allow list
 also carries the ECS Managed Instances' names.
 
 | Priority | Action | Domains |
 |---|---|---|
-| 100 | ALLOW | `amazonaws.com`, `*.amazonaws.com`, `*.on.aws` (MicroVM endpoints), `*.api.aws` (ECS Managed Instances), `time.aws.com`, `*.amazon.pool.ntp.org` (clock), `*.compute.internal`, plus `allowDomains` |
+| 100 | ALLOW | `amazonaws.com`, `*.amazonaws.com`, `*.on.aws` (MicroVM endpoints), `*.api.aws` (ECS Managed Instances), `time.aws.com`, `*.compute.internal`, plus `allowDomains` |
 | 200 | BLOCK, `NXDOMAIN` | `*` |
 
 Resolver query logging for the VPC goes to a log group the construct owns
@@ -490,8 +490,28 @@ Resolver query logging for the VPC goes to a log group the construct owns
 lookups carry no action. `srcaddr` names one tenant only on `nitro` (each
 task has its own ENI); on `microvm` it is the shared connector ENI and on
 `agentcore` the shared runtime ENI, so a hit there is joined to a tenant
-by time against the tool's run lines (§3.8). A Contributor Insights rule
+by time against the tool's run lines (§3.8), which narrows a hit to the
+tenants active in that window, not to one tenant. A Contributor Insights rule
 ranks `srcaddr` by blocked lookups.
+
+Every allowed zone is answered by AWS. `*.amazon.pool.ntp.org`, which
+the MicroVM and AgentCore platforms look up, is a third-party zone and is
+left blocked: its servers would see every label. S-13 saw no failure with
+it blocked over 15 minutes; clock behaviour over hours is unverified.
+Names a vendor adds in `allowDomains` are the vendor's own exception to
+C-3.
+
+Scope. The association covers the whole VPC. The construct creates its
+own VPC, so nothing else is affected. With a supplied `vpc`, BLOCK `*`
+would also refuse the vendor's private hosted zones and forwarded
+domains for every other workload in it, so synth refuses `dnsFirewall`
+together with `vpc`; a vendor with their own VPC associates their own
+rule group with the §3.9 allow list.
+
+Query logging to CloudWatch Logs may add an account-level Logs resource
+policy outside the stack. The integration run checks for one after
+deploy; if delivery creates it, the construct declares that policy
+itself, so `cdk destroy` removes it.
 
 What it does not cover: the tool Lambda, which has NAT egress and can
 query a public resolver directly (it is trusted code); and names under
@@ -501,7 +521,7 @@ Lambda's network, outside the VPC, so the firewall does not apply to it.
 
 Cost: per query processed, with no fixed charge, plus query-log storage.
 The S-13 network with the firewall deployed in 127 s and destroyed in
-212 s, no slower than the same network without it (157 s, 182 s).
+212 s; the same network without it took 157 s and 182 s.
 
 ## 4. Data model
 
@@ -720,7 +740,8 @@ truncates, and appends 8 hex characters of a hash of the path:
 | MicroVM image and network connector | `[a-zA-Z0-9_-]`, 64 (the connector's ARN uses a generated `nc-` id, so reference it with `GetAtt Arn`) |
 | Task log group, usage-log group | `[\w./#-]`, 512 |
 | Usage-log `DeliverySource` and `DeliveryDestination` | `[\w-]`, 60, unique per account and Region |
-| Two Contributor Insights rules | `RuleName`, 128 |
+| Three Contributor Insights rules (the third with `dnsFirewall`) | `RuleName`, 128 |
+| DNS Firewall domain lists, rule group, association, query-log config and its log group | Resolver names `[\w-]`, 64; log group `[\w./#-]`, 512 |
 
 The `synth` unit test asserts that every one of these names is unique and
 matches its charset when two instances share a stack.
@@ -766,14 +787,16 @@ matches its charset when two instances share a stack.
   on every backend, so a script can encode data in lookups. With it on,
   only the §3.9 names resolve and every other lookup returns NXDOMAIN
   and is logged; names under the allowed AWS zones still resolve, but
-  AWS, not the script's owner, answers them.
+  AWS, not the script's owner, answers them. Names in `allowDomains` are
+  the vendor's own exception.
 - C-4: A run ends within `runTimeout` plus 5 s with its process group
   killed, or the tool stops the sandbox and reports `timedOut`.
 - C-5: The tool reads inputs only under the caller's tenant prefix and
   registry rows only under its key; IAM refuses any other key even if the
   tool's code is wrong.
-- C-6: `cdk destroy` leaves no sandbox, task, MicroVM, session, instance or
-  log group behind, including sandboxes started at run time.
+- C-6: `cdk destroy` leaves no sandbox, task, MicroVM, session, instance,
+  log group, DNS Firewall resource or Logs resource policy behind,
+  including sandboxes started at run time.
 
 ### 6.3 Composition (standard §1.1)
 
@@ -890,7 +913,7 @@ touched.
 | iam-wall | `iam:SimulatePrincipalPolicy` on the tool tenant role with `aws:PrincipalTag/TenantId` = `A` denies `inputs/B/*`, the `TENANT#B` row, and `StopTask` on B's task |
 | limits | a 6 MiB input returns `input_too_large`; a 1 MiB print returns `truncated` = true |
 | no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no answer within the script's own 3 s timeout), and the `GetObject` fails. `agentcore`: credentials load, and every call outside C-2 is denied |
-| no-egress | A's script tries HTTPS to `example.com`, TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy; all fail within 5 s |
+| no-egress | A's script tries HTTPS to `example.com`, HTTPS to a public IP address with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy; all fail within 5 s |
 | runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, and a disk fill: each returns `timedOut` or a non-zero exit, nothing of the job survives into A's next call, and A's next call works |
 | dead-handle | stop A's sandbox out of band; A's next call returns `sandbox` = `started` |
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
@@ -901,12 +924,12 @@ touched.
 | microvm-stop | A's MicroVM, idle past `sandboxIdle` (2 min in the integration stack), shows `SUSPENDED`; the driver then ends it with `TerminateMicrovm` out of band and invokes the reaper; a stop line for A's MicroVM carries `sandboxSeconds`, `runningSeconds`, `suspendedSeconds` and `estimated` |
 | synth | a unit test synthesises two construct instances in one stack and asserts that every §5.3 name is unique and matches its charset |
 | session-files | `run-code-files`: A's session writes and reads its own `sessions/<sid>/`; a `GetObject` on B's session prefix is denied |
-| dns | `run-code` (firewall on): A's script looks up a unique `<token>.example.com`, a 40-character exfil label and a TXT name, then `logs.<region>.amazonaws.com`; the first three return NXDOMAIN and appear in the query log as `BLOCK`, the last resolves to an endpoint address. `run-code-files` (firewall off): the same unique name resolves through the public DNS (it returns the real zone's answer, NXDOMAIN or not), and no `BLOCK` line exists for it. On `nitro` the `BLOCK` line's `srcaddr` is A's task address |
-| dns-platform | after the run, the query log for `run-code` holds no `BLOCK` line for a platform name (any name not sent by a probe), so the §3.9 allow list is complete |
+| dns | `run-code` (firewall on): A's script looks up `example.com`, a unique `<token>.example.com`, a 40-character exfil label and a TXT name, then `logs.<region>.amazonaws.com`; the first four return NXDOMAIN and appear in the query log as `BLOCK`, the last resolves to an endpoint address. `run-code-files` (firewall off): `example.com` resolves to a public address. On `nitro` the `BLOCK` line's `srcaddr` is A's task address |
+| dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9); any other blocked name is a platform name missing from the allow list and fails the step |
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
 | offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
-| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
+| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or Logs resource policy of the sample, and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
 
 Preconditions, checked by the driver before it deploys: the account's
 "maximum allocated ARM_64 MicroVM memory" quota (Service Quotas, looked up
