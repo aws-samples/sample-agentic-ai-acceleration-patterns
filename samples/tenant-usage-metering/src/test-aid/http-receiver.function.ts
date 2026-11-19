@@ -4,17 +4,14 @@
 /**
  * TEST ONLY: a stand-in billing API for the integration test's `HTTP` sink
  * (demo stack, `integHttpReceiver=true`). It sits behind a Lambda function
- * URL, so it is reachable from the internet while the test stack exists:
+ * URL with `AuthType AWS_IAM`, and only the dispatcher's role is granted
+ * invoke, so Lambda refuses an unsigned or unauthorised call before this
+ * code runs:
  *
  * - only `POST` is accepted;
- * - the `Authorization: Bearer <secret>` the dispatcher sends must equal the
- *   sink's secret, compared in constant time; anything else is a 401;
- * - it stores nothing and logs only the record id, the idempotency key and
- *   the mapped billing account, which are synthetic test values.
+ * - it stores nothing and logs only the idempotency key and the mapped
+ *   billing account, which are synthetic test values.
  */
-
-import { timingSafeEqual } from 'node:crypto';
-import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 
 interface FunctionUrlEvent {
   readonly requestContext?: { readonly http?: { readonly method?: string } };
@@ -29,35 +26,11 @@ interface FunctionUrlResult {
   readonly body: string;
 }
 
-const secrets = new SecretsManagerClient({});
-let expected: Buffer | undefined;
-
-async function expectedHeader(): Promise<Buffer> {
-  if (expected === undefined) {
-    const name = process.env.RECEIVER_SECRET_NAME;
-    if (name === undefined) {
-      throw new Error('RECEIVER_SECRET_NAME is not set');
-    }
-    const out = await secrets.send(new GetSecretValueCommand({ SecretId: name }));
-    expected = Buffer.from(`Bearer ${out.SecretString ?? ''}`);
-  }
-  return expected;
-}
-
 const reply = (statusCode: number): FunctionUrlResult => ({ statusCode, headers: { 'content-type': 'application/json' }, body: '{}' });
-
-/** True when the presented header equals the expected one, in constant time. */
-export function sameCredential(presented: string | undefined, wanted: Buffer): boolean {
-  const given = Buffer.from(presented ?? '');
-  return given.length === wanted.length && timingSafeEqual(given, wanted);
-}
 
 export const handler = async (event: FunctionUrlEvent): Promise<FunctionUrlResult> => {
   if (event.requestContext?.http?.method !== 'POST') {
     return reply(405);
-  }
-  if (!sameCredential(event.headers?.authorization, await expectedHeader())) {
-    return reply(401);
   }
   let body: Record<string, unknown> = {};
   try {

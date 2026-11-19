@@ -137,25 +137,27 @@ export class TenantUsageMeteringDemoStack extends Stack {
       new CfnOutput(this, 'HttpSinkSecretName', { value: sinkSecretName });
 
       if (props.context.integHttpReceiver) {
-        // TEST ONLY, and reachable from the internet while the stack exists: a
-        // stand-in billing API behind a function URL. It answers 401 to any
-        // call without the sink's bearer secret, stores nothing, and runs at
-        // most two at a time (src/test-aid/http-receiver.function.ts).
+        // TEST ONLY: a stand-in billing API behind an AWS_IAM function URL, the
+        // target of an `auth: AWS_IAM` sink. Only the dispatcher's role is
+        // granted invoke (an identity grant, so the function has no resource
+        // policy); an unsigned call is refused by Lambda before the code runs.
+        // It stores nothing and runs at most two at a time
+        // (src/test-aid/http-receiver.function.ts).
         const receiverRole = new iam.Role(this, 'DemoHttpReceiverRole', {
           assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
           description: 'TEST ONLY: the integration test HTTP sink receiver',
         });
-        sinkSecret.grantRead(receiverRole);
         const receiver = createFunction(this, 'DemoHttpReceiver', {
           entry: 'test-aid/http-receiver.function.ts',
           role: receiverRole,
           timeout: Duration.seconds(5),
-          environment: { RECEIVER_SECRET_NAME: sinkSecretName },
+          environment: {},
           logRetention: logs.RetentionDays.ONE_WEEK,
           description: 'TEST ONLY: stand-in billing API for the HTTP sink',
           reservedConcurrentExecutions: 2,
         });
-        const url = receiver.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.NONE });
+        const url = receiver.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+        receiver.grantInvokeUrl(this.metering.roles.dispatcher);
         new CfnOutput(this, 'HttpReceiverUrl', { value: url.url });
         new CfnOutput(this, 'HttpReceiverLogGroup', { value: receiver.logGroup.logGroupName });
       }

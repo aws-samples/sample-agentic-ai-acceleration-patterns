@@ -129,6 +129,14 @@ enum SinkType {
     S3_EXPORT
 }
 
+/// How the dispatcher authenticates to an `HTTP` sink (spec §4.4).
+/// `SECRET`: the credential in `secretName`. `AWS_IAM`: SigV4 with the
+/// dispatcher's role, for a Lambda function URL or an API Gateway endpoint.
+enum SinkAuth {
+    SECRET
+    AWS_IAM
+}
+
 enum HourStatus {
     OPEN
     COUNTING

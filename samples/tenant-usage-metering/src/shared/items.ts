@@ -96,6 +96,8 @@ export interface SinkItem extends Audit {
   readonly type: 'HTTP' | 'S3_EXPORT';
   readonly enabled: boolean;
   readonly endpoint: string;
+  /** `HTTP` only; absent is `SECRET`. Fixed at create. */
+  readonly auth?: 'SECRET' | 'AWS_IAM';
   readonly secretName?: string;
   readonly mapping?: Record<string, MappingSource>;
   readonly meters?: string[];

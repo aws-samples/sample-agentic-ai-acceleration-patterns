@@ -19,9 +19,9 @@ import { billingBinding, type BindingItem, type HourItem, type SinkItem, type Us
 import { splitConcatenatedJson } from '../src/shared/json-stream';
 import { ingestDeduplicationId, publishShard, recordId } from '../src/shared/keys';
 import { closeAttributes, reactivation, updateExpression } from '../src/shared/registration';
+import { iamTarget } from '../src/shared/sink-auth';
 import { closeTimeMs, hoursBetween, nextWholeHour, pastCloseGuard } from '../src/shared/time';
 import type { EnrichedUsageEvent } from '../src/shared/usage-event';
-import { sameCredential } from '../src/test-aid/http-receiver.function';
 import { decodeS3Key, hourOfObjectKey } from '../src/tracker/track';
 
 const NOW = Date.parse('2026-11-18T12:30:00Z');
@@ -42,12 +42,14 @@ const event = (overrides: Partial<EnrichedUsageEvent> = {}): EnrichedUsageEvent 
 
 const MODEL_OPERATIONS = [...fs.readFileSync(path.join(__dirname, '..', 'model', 'metering.smithy'), 'utf8').matchAll(/^operation (\w+)/gm)].map((match) => match[1]);
 
-describe('test receiver gate', () => {
-  test('only the exact bearer secret passes', () => {
-    const wanted = Buffer.from('Bearer s3cret');
-    expect(sameCredential('Bearer s3cret', wanted)).toBe(true);
-    expect(sameCredential('Bearer s3cre', wanted)).toBe(false);
-    expect(sameCredential(undefined, wanted)).toBe(false);
+describe('AWS_IAM sink hosts (spec §4.4)', () => {
+  test('only function URL and execute-api hosts get a signature', () => {
+    expect(iamTarget('abc123.lambda-url.eu-central-1.on.aws')).toEqual({ service: 'lambda', region: 'eu-central-1' });
+    expect(iamTarget('a1b2c3d4e5.execute-api.us-gov-west-1.amazonaws.com')).toEqual({ service: 'execute-api', region: 'us-gov-west-1' });
+    expect(iamTarget('billing.example.com')).toBeUndefined();
+    expect(iamTarget('abc123.lambda-url.eu-central-1.on.aws.example.com')).toBeUndefined();
+    expect(iamTarget('evil.example.com.lambda-url.eu-central-1.on.aws')).toBeUndefined();
+    expect(iamTarget('a1b2c3d4e5.execute-api.eu-central-1.amazonaws.com.example.com')).toBeUndefined();
   });
 });
 
@@ -116,6 +118,15 @@ describe('sinks (spec §4.4)', () => {
     expect(() => validateSink(sink({ endpoint: 'https://10.0.0.1/x' }), 'demo')).toThrow();
     expect(() => validateSink(sink({ endpoint: 'https://user:pw@billing.example.com/' }), 'demo')).toThrow();
     expect(() => validateSink(sink({ secretName: 'other/metering/sinks/s' }), 'demo')).toThrow();
+  });
+  test('an AWS_IAM sink takes no secret and only a function URL or execute-api host', () => {
+    const iam = (overrides: Partial<SinkItem>) => sink({ auth: 'AWS_IAM', secretName: undefined, endpoint: 'https://abc123.lambda-url.eu-central-1.on.aws/', ...overrides });
+    expect(() => validateSink(iam({}), 'demo')).not.toThrow();
+    expect(() => validateSink(iam({ endpoint: 'https://a1b2c3d4e5.execute-api.eu-central-1.amazonaws.com/prod/usage' }), 'demo')).not.toThrow();
+    expect(() => validateSink(iam({ secretName: 'demo/metering/sinks/s' }), 'demo')).toThrow(/no secretName/);
+    expect(() => validateSink(iam({ endpoint: 'https://billing.example.com/usage' }), 'demo')).toThrow(/function URL/);
+    expect(() => validateSink(iam({ endpoint: 'https://abc123.lambda-url.eu-central-1.on.aws:8443/' }), 'demo')).toThrow(/function URL/);
+    expect(() => validateSink(sink({ type: 'S3_EXPORT', endpoint: 'exports/', secretName: undefined, auth: 'AWS_IAM' }), 'demo')).toThrow(/no auth/);
   });
   test('an S3_EXPORT sink is a clean key prefix and takes no secret', () => {
     expect(validateSink(sink({ type: 'S3_EXPORT', endpoint: 'exports/billing', secretName: undefined }), 'demo').endpoint).toBe('exports/billing/');

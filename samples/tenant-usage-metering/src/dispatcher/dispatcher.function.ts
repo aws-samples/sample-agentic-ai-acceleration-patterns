@@ -12,6 +12,7 @@ import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { ChangeMessageVisibilityCommand, SQSClient } from '@aws-sdk/client-sqs';
 import type { SQSBatchResponse, SQSEvent } from 'aws-lambda';
 import { Dispatcher, fetchSend } from './dispatcher';
+import { sigV4Sign } from './sigv4';
 import { documentClient } from '../shared/db';
 import { ENV, requireEnv } from '../shared/env';
 import type { DeliveryMessage } from '../shared/items';
@@ -30,6 +31,7 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
     s3: new S3Client({}),
     secrets: new SecretsManagerClient({}),
     send: fetchSend,
+    sign: sigV4Sign,
     metrics,
   });
   const queueUrl = requireEnv(ENV.deliveryQueueUrl);

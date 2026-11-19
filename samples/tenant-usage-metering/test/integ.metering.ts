@@ -176,30 +176,35 @@ async function main(): Promise<void> {
     meters: ['agent.tokens'],
   });
   check('operator creates an HTTP sink that needs billingAccount', httpSink.status === 201, httpSink);
-  // The test receiver is public while the stack exists: prove its gate first.
+  // The test receiver is an AWS_IAM function URL that only the dispatcher may
+  // invoke: prove Lambda's own gate refuses an unsigned call first.
   const RECEIVER = outputs.HttpReceiverUrl;
   if (RECEIVER !== undefined) {
     const anonymous = await fetch(RECEIVER, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-    const wrong = await fetch(RECEIVER, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'authorization': 'Bearer not-the-secret' },
-      body: '{}',
-    });
-    check('the public test receiver refuses a call without the sink secret (401)', anonymous.status === 401 && wrong.status === 401, [
+    const gate = anonymous.headers.get('x-amzn-errortype') ?? '';
+    check('the test receiver refuses an unsigned call at the function URL (403)', anonymous.status === 403 && gate.startsWith('AccessDenied'), [
       anonymous.status,
-      wrong.status,
+      gate,
     ]);
     const okSink = await call(operator, 'POST', '/sinks', {
       sinkId: 'httpok',
       type: 'HTTP',
       enabled: true,
       endpoint: RECEIVER,
-      secretName: outputs.HttpSinkSecretName,
+      auth: 'AWS_IAM',
       mapping: { account: { recordField: 'billingAccount' }, qty: { recordField: 'quantity' } },
       meters: ['agent.tokens'],
     });
-    check('operator creates an HTTP sink to the test receiver', okSink.status === 201, okSink);
+    check('operator creates an AWS_IAM HTTP sink to the test receiver', okSink.status === 201 && okSink.body.sink?.auth === 'AWS_IAM', okSink);
   }
+  const iamElsewhere = await call(operator, 'POST', '/sinks', {
+    sinkId: 'httpiam',
+    type: 'HTTP',
+    enabled: true,
+    endpoint: 'https://billing.example.com/usage',
+    auth: 'AWS_IAM',
+  });
+  check('an AWS_IAM sink to a host that is not a function URL or API Gateway is a 400', iamElsewhere.status === 400, iamElsewhere);
   const badSink = await call(operator, 'POST', '/sinks', {
     sinkId: 'http',
     type: 'HTTP',

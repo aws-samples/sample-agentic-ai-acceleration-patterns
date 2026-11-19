@@ -66,6 +66,11 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     '@aws-sdk/client-sfn@3.1154.0', // the scheduler starts recounts (spec §4.5)
     '@aws-sdk/client-lambda@3.1154.0', // the admin function starts jobs (spec §4.6)
     'ulid@3.0.2', // job ids, emitter snippet event ids (spec §4.6, §4.8)
+    // SigV4 for AWS_IAM HTTP sinks (spec §4.4); the integration test signs its API calls with them too
+    '@aws-sdk/credential-providers@3.1154.0',
+    '@aws-crypto/sha256-js@5.2.0',
+    '@smithy/protocol-http@5.6.2',
+    '@smithy/signature-v4@5.7.5',
     // Security linting - AwsSolutionsChecks aspect applied in src/main.ts
     'cdk-nag@3.0.2',
   ],
@@ -75,11 +80,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     'aws-sdk-client-mock@4.1.0',
     'aws-sdk-client-mock-jest@4.1.0',
     'esbuild@0.28.2', // local NodejsFunction bundling, no Docker needed
-    // The integration test (test/integ.metering.ts): signs API calls as the stand-in callers
-    '@aws-sdk/credential-providers@3.1154.0',
-    '@aws-crypto/sha256-js@5.2.0',
-    '@smithy/protocol-http@5.6.2',
-    '@smithy/signature-v4@5.7.5',
+    // The integration test (test/integ.metering.ts)
     '@aws-sdk/client-cloudwatch-logs@3.1154.0', // reads the test receiver's log lines
   ],
   jestOptions: {

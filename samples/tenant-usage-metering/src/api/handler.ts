@@ -123,6 +123,7 @@ export function createAdminService(deps: AdminDeps, lists: CallerLists): TenantU
             type: input.type!,
             enabled: input.enabled!,
             endpoint: input.endpoint!,
+            auth: input.auth,
             secretName: input.secretName,
             mapping: input.mapping,
             meters: input.meters,

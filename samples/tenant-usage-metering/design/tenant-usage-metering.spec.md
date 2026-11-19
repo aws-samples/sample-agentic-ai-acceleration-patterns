@@ -459,7 +459,8 @@ placed in another cell, it lands in a new item, and the old one stays
 | `enabled` | boolean |
 | `endpoint` | `HTTP`: HTTPS URL. `S3_EXPORT`: a key prefix in the sample's export bucket |
 | `version` | moves on every write; `UpdateSink` is conditioned on it |
-| `secretName` | `HTTP` only: Secrets Manager name of the credential, under `<fleet>/metering/sinks/`; `CreateSink` and `UpdateSink` refuse any other name, and the dispatcher's role may read only that prefix |
+| `auth` | `HTTP` only, fixed at create: `SECRET` (default) sends the credential in `secretName`; `AWS_IAM` signs with SigV4 as the dispatcher's role and takes no `secretName`. An `AWS_IAM` endpoint must be a Lambda function URL (`*.lambda-url.<region>.on.aws`) or an API Gateway host (`*.execute-api.<region>.amazonaws.com`) with no port, so a signature never goes to a host that does not verify it; the deployer grants the dispatcher role invoke on that endpoint |
+| `secretName` | `SECRET` `HTTP` sinks only: Secrets Manager name of the credential, under `<fleet>/metering/sinks/`; `CreateSink` and `UpdateSink` refuse any other name, and the dispatcher's role may read only that prefix |
 | `mapping` | `HTTP` only: target field name → source (record field, meter field, or constant); without one, the body is the `UsageRecorded` detail |
 | `meters` | meter ids this sink takes; empty is all |
 

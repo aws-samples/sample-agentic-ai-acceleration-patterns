@@ -344,6 +344,9 @@ structure SinkSummary {
     @required
     endpoint: SinkEndpoint
 
+    /// `HTTP` only.
+    auth: SinkAuth
+
     secretName: SecretName
 
     mapping: FieldMapping
@@ -363,7 +366,9 @@ list SinkSummaryList {
 
 /// Not idempotent: a repeat is a 409 `ALREADY_EXISTS`. `CreateSink` and
 /// `UpdateSink` refuse a `secretName` outside `<fleet>/metering/sinks/`
-/// with a `ValidationError` (spec §4.4).
+/// with a `ValidationError` (spec §4.4). An `HTTP` sink's `auth` is set
+/// here only (default `SECRET`); an `AWS_IAM` sink takes no `secretName`,
+/// and its endpoint must be a Lambda function URL or an API Gateway host.
 @http(method: "POST", uri: "/sinks", code: 201)
 operation CreateSink {
     input := {
@@ -378,6 +383,8 @@ operation CreateSink {
 
         @required
         endpoint: SinkEndpoint
+
+        auth: SinkAuth
 
         secretName: SecretName
 
@@ -412,8 +419,8 @@ operation GetSink {
 }
 
 /// An absent member keeps its value; `meters: []` means all, and
-/// `mapping: {}` clears the mapping. `secretName` cannot be cleared: an
-/// `HTTP` sink always has one.
+/// `mapping: {}` clears the mapping. `secretName` cannot be cleared: a
+/// `SECRET` sink always has one. `auth` cannot change after create.
 @http(method: "PATCH", uri: "/sinks/{sinkId}", code: 200)
 operation UpdateSink {
     input := {

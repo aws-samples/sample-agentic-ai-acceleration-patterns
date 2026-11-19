@@ -26,11 +26,7 @@
     "projen": "projen"
   },
   "devDependencies": {
-    "@aws-crypto/sha256-js": "5.2.0",
     "@aws-sdk/client-cloudwatch-logs": "3.1154.0",
-    "@aws-sdk/credential-providers": "3.1154.0",
-    "@smithy/protocol-http": "5.6.2",
-    "@smithy/signature-v4": "5.7.5",
     "@stylistic/eslint-plugin": "2.13.0",
     "@types/aws-lambda": "8.10.164",
     "@types/jest": "30.0.0",
@@ -52,6 +48,7 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "@aws-crypto/sha256-js": "5.2.0",
     "@aws-sdk/client-cloudwatch": "3.1154.0",
     "@aws-sdk/client-dynamodb": "3.1154.0",
     "@aws-sdk/client-eventbridgev2": "3.1154.0",
@@ -62,13 +59,16 @@
     "@aws-sdk/client-sfn": "3.1154.0",
     "@aws-sdk/client-sqs": "3.1154.0",
     "@aws-sdk/core": "3.980.0",
+    "@aws-sdk/credential-providers": "3.1154.0",
     "@aws-sdk/lib-dynamodb": "3.1154.0",
     "@aws-sdk/util-dynamodb": "3.996.9",
     "@smithy/core": "3.39.0",
     "@smithy/fetch-http-handler": "5.8.0",
     "@smithy/node-http-handler": "4.14.2",
+    "@smithy/protocol-http": "5.6.2",
     "@smithy/server-apigateway": "0.3.3",
     "@smithy/server-common": "0.4.2",
+    "@smithy/signature-v4": "5.7.5",
     "@smithy/types": "4.20.0",
     "aws-cdk-lib": "2.274.0",
     "cdk-nag": "3.0.2",

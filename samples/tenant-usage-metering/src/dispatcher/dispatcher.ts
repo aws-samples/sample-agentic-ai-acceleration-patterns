@@ -9,7 +9,9 @@
  * trigger the publisher.
  *
  * - `S3_EXPORT`: one JSON line per record revision in the export bucket.
- * - `HTTP`: a POST of the mapped record with `Idempotency-Key: <recordId>`.
+ * - `HTTP`: a POST of the mapped record with `Idempotency-Key: <recordId>`,
+ *   carrying the sink's secret (`auth: SECRET`) or signed with SigV4 as the
+ *   dispatcher's role (`auth: AWS_IAM`).
  *   No redirects are followed. A 2xx is `SENT`; a 3xx, or a 4xx other than
  *   408 and 429, is `FAILED` at once; anything else is retried with backoff until
  *   24 hours after the delivery was first queued, then `FAILED`.
@@ -28,6 +30,7 @@ import { keys, publishShard } from '../shared/keys';
 import { log } from '../shared/logger';
 import { METRIC, type Metrics } from '../shared/metrics';
 import { isConditionFailure, withRetry } from '../shared/retry';
+import { iamTarget, type IamTarget } from '../shared/sink-auth';
 import { HOUR_MS, iso } from '../shared/time';
 
 export const DELIVERY_WINDOW_MS = 24 * HOUR_MS;
@@ -41,6 +44,13 @@ export interface HttpResponseLike {
 
 export type HttpSend = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string }) => Promise<HttpResponseLike>;
 
+/** Returns the headers of a SigV4-signed request (an `AWS_IAM` sink). */
+export type RequestSigner = (
+  url: string,
+  init: { method: 'POST'; headers: Record<string, string>; body: string },
+  target: IamTarget,
+) => Promise<Record<string, string>>;
+
 export interface DispatcherDeps {
   readonly db: DynamoDBDocumentClient;
   readonly tableName: string;
@@ -48,6 +58,7 @@ export interface DispatcherDeps {
   readonly s3: S3Client;
   readonly secrets: SecretsManagerClient;
   readonly send: HttpSend;
+  readonly sign: RequestSigner;
   readonly metrics: Metrics;
   readonly now?: () => number;
 }
@@ -267,12 +278,22 @@ export class Dispatcher {
     const meter = sink.mapping !== undefined && Object.values(sink.mapping).some((source) => 'meterField' in source)
       ? await getItem<MeterVersionItem>(this.deps.db, this.deps.tableName, keys.meterVersion(record.meterId, record.meterVersion))
       : undefined;
-    const [header, value] = authHeader(await this.secret(sink.secretName!));
-    const response = await this.deps.send(sink.endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': record.recordId, [header]: value },
+    const init = {
+      method: 'POST' as const,
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': record.recordId } as Record<string, string>,
       body: JSON.stringify(mappedBody(sink, record, meter)),
-    });
+    };
+    if (sink.auth === 'AWS_IAM') {
+      // CreateSink checked the host; checked again so a signature never leaves for another host.
+      const target = iamTarget(new URL(sink.endpoint).hostname);
+      if (target === undefined) {
+        throw new Error('the AWS_IAM sink endpoint is not a function URL or API Gateway host');
+      }
+      const response = await this.deps.send(sink.endpoint, { ...init, headers: await this.deps.sign(sink.endpoint, init, target) });
+      return response.status;
+    }
+    const [header, value] = authHeader(await this.secret(sink.secretName!));
+    const response = await this.deps.send(sink.endpoint, { ...init, headers: { ...init.headers, [header]: value } });
     return response.status;
   }
 }

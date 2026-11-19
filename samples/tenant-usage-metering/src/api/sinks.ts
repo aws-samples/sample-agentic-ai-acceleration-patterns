@@ -6,8 +6,10 @@
  * effect at the next dispatch (spec §6.2 item 5).
  *
  * - `HTTP`: an HTTPS URL with no credentials in it and no IP-literal or
- *   `localhost` host, a secret under `<fleet>/metering/sinks/`, and an
- *   optional field mapping.
+ *   `localhost` host, and an optional field mapping. `auth: SECRET` (the
+ *   default) takes a secret under `<fleet>/metering/sinks/`; `AWS_IAM`
+ *   takes none and is signed with the dispatcher's role, so its host must
+ *   be a Lambda function URL or an API Gateway endpoint (src/shared/sink-auth.ts).
  * - `S3_EXPORT`: a key prefix in the sample's export bucket; no secret, no
  *   mapping (the line is the record).
  */
@@ -20,8 +22,9 @@ import { getItem } from '../shared/db';
 import type { MappingSource, SinkItem } from '../shared/items';
 import { keys, LIST_BY_TYPE_INDEX } from '../shared/keys';
 import { isConditionFailure } from '../shared/retry';
+import { iamTarget } from '../shared/sink-auth';
 import { iso } from '../shared/time';
-import type { MappingSource as ModelMappingSource, SinkSummary, SinkType } from '../smithy/metering/typescript-ssdk-codegen/src';
+import type { MappingSource as ModelMappingSource, SinkAuth, SinkSummary, SinkType } from '../smithy/metering/typescript-ssdk-codegen/src';
 
 /** Record fields a mapping may read (spec §4.7, §4.8). */
 export const RECORD_FIELDS: ReadonlySet<string> = new Set([
@@ -53,6 +56,7 @@ export function sinkOut(item: SinkItem): SinkSummary {
     type: item.type,
     enabled: item.enabled,
     endpoint: item.endpoint,
+    auth: item.type === 'HTTP' ? (item.auth ?? 'SECRET') : undefined,
     secretName: item.secretName,
     mapping: item.mapping as Record<string, ModelMappingSource> | undefined,
     meters: item.meters,
@@ -104,13 +108,22 @@ export function validateSink(sink: SinkItem, fleetName: string): SinkItem {
     ) {
       throw apiError.validation('endpoint must be an https URL with a DNS host name and no credentials');
     }
+    if (sink.auth === 'AWS_IAM') {
+      if (sink.secretName !== undefined) {
+        throw apiError.validation('an AWS_IAM sink takes no secretName');
+      }
+      if (url.port !== '' || iamTarget(url.hostname) === undefined) {
+        throw apiError.validation('an AWS_IAM sink endpoint must be a Lambda function URL or an API Gateway execute-api host');
+      }
+      return sink;
+    }
     if (sink.secretName === undefined || !sink.secretName.startsWith(`${fleetName}/metering/sinks/`) || sink.secretName.includes('..')) {
       throw apiError.validation(`secretName must be under ${fleetName}/metering/sinks/`);
     }
     return sink;
   }
-  if (sink.secretName !== undefined || sink.mapping !== undefined) {
-    throw apiError.validation('an S3_EXPORT sink takes no secretName and no mapping');
+  if (sink.secretName !== undefined || sink.mapping !== undefined || sink.auth !== undefined) {
+    throw apiError.validation('an S3_EXPORT sink takes no auth, no secretName and no mapping');
   }
   if (
     sink.endpoint.length > 512 ||
@@ -133,11 +146,15 @@ export async function createSink(
     type: SinkType;
     enabled: boolean;
     endpoint: string;
+    auth?: SinkAuth;
     secretName?: string;
     mapping?: Record<string, ModelMappingSource>;
     meters?: string[];
   },
 ): Promise<SinkItem> {
+  if (input.auth !== undefined && input.auth !== 'SECRET' && input.auth !== 'AWS_IAM') {
+    throw apiError.validation('auth must be SECRET or AWS_IAM');
+  }
   const item = validateSink(
     {
       ...keys.sink(input.sinkId),
@@ -146,6 +163,7 @@ export async function createSink(
       type: input.type as SinkItem['type'],
       enabled: input.enabled,
       endpoint: input.endpoint,
+      auth: input.auth as SinkItem['auth'],
       secretName: input.secretName,
       mapping: mappingIn(input.mapping),
       meters: meterList(input.meters),
