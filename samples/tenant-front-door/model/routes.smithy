@@ -46,7 +46,6 @@ operation PutCellRoute {
     }
 
     errors: [
-        UnprocessableError
         InsufficientStorageError
     ]
 }
@@ -104,15 +103,20 @@ enum ChallengeResult {
     UNRESOLVED = "unresolved"
 }
 
+/// `TXT` for the domain challenge, `CNAME` for ACM validation.
+enum DnsRecordType {
+    TXT
+    CNAME
+}
+
 /// A DNS record the tenant publishes.
 structure DnsRecord {
     /// Fully qualified record name.
     @required
     name: String
 
-    /// `TXT` for the domain challenge, `CNAME` for ACM validation.
     @required
-    type: String
+    type: DnsRecordType
 
     @required
     value: String
@@ -217,6 +221,10 @@ operation UpdateTenantRouteStatus {
         @required
         status: RouteStatus
     }
+
+    errors: [
+        InsufficientStorageError
+    ]
 }
 
 // ---------------------------------------------------------------------------

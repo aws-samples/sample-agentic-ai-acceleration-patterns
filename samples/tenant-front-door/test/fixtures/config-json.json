@@ -1,0 +1,66 @@
+{
+  "_comment": "Golden /config.json bodies (spec §3.2, §3.5) for the route-table.json entries, appDomain app.example.com in single mode and tenants.example.com in host mode. The router generates these; the SPA reads them. Field order is not part of the contract.",
+  "cases": [
+    {
+      "name": "single, appDomain",
+      "addressing": "single",
+      "host": "app.example.com",
+      "body": {
+        "authorizeEndpoint": "https://auth.example.com/oauth2/authorize",
+        "tokenEndpoint": "https://auth.example.com/oauth2/token",
+        "clientId": "exampleclientid",
+        "scopes": "openid sample/read",
+        "exchangeEndpoint": "https://api.example.com/prod/oauth2/token"
+      }
+    },
+    {
+      "name": "single, dedicated domain",
+      "addressing": "single",
+      "host": "portal.example.com",
+      "body": {
+        "authorizeEndpoint": "https://auth.example.com/oauth2/authorize",
+        "tokenEndpoint": "https://auth.example.com/oauth2/token",
+        "clientId": "exampleclientid",
+        "scopes": "openid sample/read",
+        "exchangeEndpoint": "https://api.example.com/prod/oauth2/token",
+        "tenantId": "01HZX8K9P0QRST7VWXYZ1A2B3E",
+        "displayName": "Example 'Two' / Ltd",
+        "rev": 1795080000123,
+        "signInHost": "app.example.com"
+      }
+    },
+    {
+      "name": "host, pooled tenant host",
+      "addressing": "host",
+      "host": "01hzx8k9p0qrst7vwxyz1a2b3c.tenants.example.com",
+      "body": {
+        "authorizeEndpoint": "https://auth.example.com/oauth2/authorize",
+        "tokenEndpoint": "https://auth.example.com/oauth2/token",
+        "clientId": "exampleclientid",
+        "scopes": "openid sample/read",
+        "exchangeEndpoint": "https://api.example.com/prod/oauth2/token",
+        "tenantId": "01HZX8K9P0QRST7VWXYZ1A2B3C",
+        "displayName": "Acme Corp",
+        "rev": 1795080000000,
+        "redirectUri": "https://login.tenants.example.com/callback"
+      }
+    },
+    {
+      "name": "host, dedicated domain",
+      "addressing": "host",
+      "host": "portal.example.com",
+      "body": {
+        "authorizeEndpoint": "https://auth.example.com/oauth2/authorize",
+        "tokenEndpoint": "https://auth.example.com/oauth2/token",
+        "clientId": "exampleclientid",
+        "scopes": "openid sample/read",
+        "exchangeEndpoint": "https://api.example.com/prod/oauth2/token",
+        "tenantId": "01HZX8K9P0QRST7VWXYZ1A2B3E",
+        "displayName": "Example 'Two' / Ltd",
+        "rev": 1795080000123,
+        "redirectUri": "https://login.tenants.example.com/callback",
+        "signInHost": "01hzx8k9p0qrst7vwxyz1a2b3e.tenants.example.com"
+      }
+    }
+  ]
+}
