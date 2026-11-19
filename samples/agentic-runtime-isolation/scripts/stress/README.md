@@ -143,7 +143,7 @@ Estimates from the plan; the scripts print the measured figures.
 | `count.sh` | about 2 min | about 3 min | about 6 min |
 | `run`, each scenario | 1 min plus token set-up | 3 min plus token set-up | the plan's §5 figures, 5 to 10 min plus warm-up |
 | `collect` | 150 s settle plus about 1 min a scenario | the same | a few minutes a scenario |
-| `teardown` | about 14 min (832 s measured 2026-11-19, tenants included) | about 15 min | about 30 min; the tenants add 21 min |
+| `teardown` | about 15 min (832 s and 878 s measured 2026-11-19, tenants included) | about 15 min | about 30 min; the tenants add 21 min |
 | `cost.sh` | seconds, the next day | seconds, the next day | seconds, the next day |
 
 ## Also
