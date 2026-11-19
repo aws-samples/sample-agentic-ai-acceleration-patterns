@@ -437,7 +437,9 @@ describe('§3.4 step 5 sub-step 5: the certificate issued', () => {
       Domains: [{ Domain: D }],
       ConnectionGroupId: CONNECTION_GROUP_ID,
       Customizations: { Certificate: { Arn: arn } },
-      Tags: { Items: [{ Key: TAG_TENANT_ID, Value: t }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION_ID }, { Key: TAG_COST_TENANT_ID, Value: TENANT }] },
+      Tags: {
+        Items: [{ Key: TAG_TENANT_ID, Value: t }, { Key: TAG_DISTRIBUTION_ID, Value: DISTRIBUTION_ID }, { Key: TAG_COST_TENANT_ID, Value: TENANT }],
+      },
       Enabled: true,
     });
     expect(h.kvs.items.get(hostKey(D))).toBe(encodeEntry(hostEntry({ t, ac: CELL_ACCOUNT })));

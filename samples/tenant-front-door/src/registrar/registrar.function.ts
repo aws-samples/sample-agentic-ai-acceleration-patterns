@@ -182,7 +182,11 @@ function coldStart(): Handler {
       secretArn: config.vendorIdpSecretArn,
       secrets: new SecretsManagerClient(SDK_CLIENT),
     }),
-    store: new KvsRouteStore({ client: new CloudFrontKeyValueStoreClient(SDK_CLIENT), arn: config.routeTableArn, distributionId: config.distributionId }),
+    store: new KvsRouteStore({
+      client: new CloudFrontKeyValueStoreClient(SDK_CLIENT),
+      arn: config.routeTableArn,
+      distributionId: config.distributionId,
+    }),
     domains: dedicatedDomainsFor(config),
   });
 }
