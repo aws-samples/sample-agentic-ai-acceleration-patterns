@@ -5,6 +5,7 @@
 - Status: Proposed
 - Date: 2026-11-19
 - Amends: ADR-0010, ADR-0011, ADR-0016, ADR-0018
+- Amended by: ADR-0020
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -103,3 +104,5 @@ whether the capacity provider delete then succeeds, and whether a
 `nitro.minInstances` above 0 starts a replacement first. Also open:
 CloudTrail with data events. Revisit if `microvm` gains a cgroup mount, or if a
 platform grants `CAP_SYS_RESOURCE`.
+
+Note 2026-11-19: amended by ADR-0020. On `microvm` the rlimits do not count an unmapped `memfd`, socket buffers, SysV objects, `vmsplice` pages or a user-namespace tmpfs, and one of them ended the MicroVM (S-16). A seccomp filter in the job and a free-memory floor close that. S-16 also answered the open items: `/work` is disk on every backend, the drain ends instances in 17 to 30 s, and the capacity provider has no minimum, so `nitro.minInstances` is dropped.

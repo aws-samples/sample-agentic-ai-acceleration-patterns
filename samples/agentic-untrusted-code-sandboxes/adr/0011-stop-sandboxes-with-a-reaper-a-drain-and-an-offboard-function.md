@@ -4,7 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Amended by: ADR-0015, ADR-0019
+- Amended by: ADR-0015, ADR-0019, ADR-0020
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -60,3 +60,5 @@ tenant objects (spec §1.2).
 Note 2026-11-18: amended by ADR-0015. The drain waits until every task is `STOPPED` and every MicroVM of the image is `TERMINATED` before the stack's resources are deleted, and the log cleanup resource also deletes the MicroVM image build log group.
 
 Note 2026-11-19: amended by ADR-0019. An idle ECS managed instance blocks the capacity provider delete. So once every task has stopped the drain deregisters the cluster's container instances with `force`, which on ECS Managed Instances terminates them, and waits until EC2 shows each one `terminated`. S-16 measures how long that takes and whether a minimum above 0 starts a replacement first.
+
+Note 2026-11-19: amended by ADR-0020. S-16 measured the drain: a forced deregister ended each instance in 17 to 30 s, no replacement started, and the stack delete then succeeded first time in 38 s. The capacity provider has no minimum-instances setting, so the sample keeps no warm instance.
