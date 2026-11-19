@@ -697,7 +697,11 @@ given below):
    outcome from the lookups that got an answer: `mismatch` when any of
    them held TXT records or a CNAME, `missing` otherwise. It is
    `unresolved` only when every lookup errors; a mix of errors and
-   misses is a miss. A query takes at most
+   misses is a miss. The CNAME query runs only when the TXT query was
+   empty or matched, and a TXT match passes only when the CNAME query
+   got an answer: a TXT match whose CNAME query errored on every lookup
+   is `unresolved`, so a pass never rests on a CNAME query that did not
+   answer. A query takes at most
    5.4 s. A call makes at most two queries, because sub-step 5 skips its
    lookup when sub-step 2 passed in the same call, so 10.8 s of DNS and
    the ACM calls of sub-step 3 (up to five validation-record reads 1 s
@@ -888,7 +892,29 @@ given below):
    run. The alarm can read ALARM for the few minutes that run takes. The
    starter does not wait for it, so a failed deploy-time run does not
    fail the deployment: the alarm then reads ALARM until the first daily
-   run, which finds no run item and emits 0.
+   run, which finds no run item and emits 0. An invoke that Lambda
+   refuses (a missing grant or function) fails the starter, and with it
+   the deployment.
+
+   The sweeper function runs one of three jobs, named by its input's
+   `job`: `{"job":"remove"}` from the 15-minute schedule;
+   `{"job":"recheck"}`, the lister, from the daily schedule, the starter
+   or a run by hand; and `{"job":"page","runDay","page","tenantIds"}`,
+   which only the lister sends. Any other input fails the invocation.
+   Both schedules retry a delivery at most twice and send one they could
+   not make to the on-failure queue as their dead-letter queue, so the
+   queue's depth alarm covers them too. The removal schedule's maximum
+   event age is 15 minutes, because the next run redoes the work.
+
+   The alarms' periods: the three-miss and `unverifiable` alarms fire on
+   a `Sum` of at least 1 over one one-hour period, 1 of 1, with missing
+   data not breaching, so a count alarms within the hour of the page that
+   wrote it. A domain that stays broken therefore alarms for that hour
+   after each daily page and then returns to OK until the next page
+   counts again: an OK after an ALARM does not mean the domain was
+   fixed, and the operator acts on the ALARM itself. The queue-depth alarm fires on a `Maximum` of at least
+   1 visible message over one five-minute period, the queue metric's own
+   period, with missing data not breaching.
 
    Size and cost. At the ceiling of 3,472 dedicated tenants the table
    holds 3,472 entry items of under 400 bytes, about 1.4 MB, and about 14
@@ -1942,8 +1968,16 @@ All with a small static HTML or JSON body and `no-store`:
   pending validation included, which has no distribution tenant and
   would outlive the stack, polling until each disable has deployed (the
   CDK provider framework's `isComplete`), because CloudFront cannot
-  delete a distribution that still has distribution tenants. The README
-  states the same order.
+  delete a distribution that still has distribution tenants. The
+  teardown exists whether or not `dedicatedDomains` is on. The registrar
+  function depends on it and the teardown depends on the distribution
+  and the connection group, so a stack delete removes the registrar
+  function first (no new dedicated distribution tenant can appear), then
+  runs the teardown, then deletes the connection group and the
+  distribution. The provider framework (two functions and a Step
+  Functions waiter) is therefore part of every stack, and the
+  integration run records the deploy and destroy time it adds. The
+  README states the same order.
 
 Limits of these promises:
 
@@ -2497,6 +2531,11 @@ destroy time, which the test reports with the rest.
     check confirms the certificate is gone. A former holder whose
     challenge had passed differs only by a certificate the sweeper
     deletes before the domain is free, so the test does not build one.
+    `b`'s certificate request is the run's check that ACM authorises the
+    tags of a request under the tag grant's `Null` condition (§3.4). The
+    step creates no distribution tenant, so the create in the stack's
+    connection group, its tags and the `ListTagsForResource` reads are
+    not checked here.
 15. Wait 60 s for log delivery (33 s in S-1). Per-tenant counts name
     `a` and `b`, queried in `us-east-1` where the log group is
     (ADR-0010), from `viewer-request-log-data` in both modes (§3.1); in

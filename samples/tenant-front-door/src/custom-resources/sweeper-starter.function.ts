@@ -47,9 +47,8 @@ export async function handleEvent(event: SweeperStarterEvent, deps: Deps): Promi
       Payload: Buffer.from(SWEEPER_RECHECK_INPUT),
     }));
   } catch (error) {
-    // Spec §3.4 step 5 lets a failed run pass the deployment and says
-    // nothing of a refused invoke. A refused invoke (a missing grant, a
-    // missing function) fails the resource, so the deployment shows it.
+    // A refused invoke (a missing grant, a missing function) fails the
+    // resource, so the deployment shows it (§3.4 step 5).
     return { status: 'FAILED', physicalResourceId, reason: `sweeper invoke failed: ${error instanceof Error ? error.name : 'UnknownError'}` };
   }
   return { status: 'SUCCESS', physicalResourceId };
