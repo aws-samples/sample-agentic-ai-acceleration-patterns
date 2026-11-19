@@ -15,9 +15,10 @@
  * `/application-plane/shared/metering/service` (spec §6.3).
  */
 
-import { CfnOutput, Stack, type StackProps, Validations } from 'aws-cdk-lib';
+import { CfnOutput, RemovalPolicy, Stack, type StackProps, Validations } from 'aws-cdk-lib';
 import { Duration } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
@@ -40,6 +41,8 @@ export interface DemoContext {
   readonly rawRetentionDays?: number;
   readonly lateGraceMinutes?: number;
   readonly integLocalCell: boolean;
+  /** Write the published parameter; off for a second demo stack in the same account. */
+  readonly publishServiceParameter: boolean;
 }
 
 export function parseDemoContext(get: (key: string) => unknown): DemoContext {
@@ -53,6 +56,7 @@ export function parseDemoContext(get: (key: string) => unknown): DemoContext {
     ...(retention !== undefined ? { rawRetentionDays: Number(retention) } : {}),
     ...(grace !== undefined ? { lateGraceMinutes: Number(grace) } : {}),
     integLocalCell: String(get('integLocalCell') ?? 'false') === 'true',
+    publishServiceParameter: String(get('publishServiceParameter') ?? 'true') === 'true',
   };
 }
 
@@ -108,6 +112,17 @@ export class TenantUsageMeteringDemoStack extends Stack {
       emitter.addToPolicy(this.metering.ingestStatement);
       new CfnOutput(this, 'EmitterRoleArn', { value: emitter.roleArn });
       new CfnOutput(this, 'CellId', { value: DEMO_CELL_ID });
+      // TEST ONLY: the credential of the integration test's HTTP sink.
+      const sinkSecret = new secretsmanager.Secret(this, 'DemoHttpSinkSecret', {
+        secretName: `${props.context.fleetName}/metering/sinks/integ`,
+        description: 'TEST ONLY: credential of the integration test HTTP sink',
+        removalPolicy: RemovalPolicy.DESTROY,
+      });
+      Validations.of(sinkSecret).acknowledge({
+        id: 'AwsSolutions-SMG4',
+        reason: 'A test-only credential that lives for one integration run.',
+      });
+      new CfnOutput(this, 'HttpSinkSecretName', { value: `${props.context.fleetName}/metering/sinks/integ` });
     }
 
     // A reader of the usage bus (ADR-0006): UsageRecorded records of one
@@ -126,7 +141,7 @@ export class TenantUsageMeteringDemoStack extends Stack {
       description: 'Delivers UsageRecorded to the demo reader queue',
     });
     usageQueue.grantSendMessages(deliveryRole);
-    new UsageSubscriber(this, 'DemoUsageReader', {
+    const filtered = new UsageSubscriber(this, 'DemoUsageReader', {
       busArn: this.metering.usageBusArn,
       stream: 'usage',
       targetArn: usageQueue.queueArn,
@@ -134,6 +149,32 @@ export class TenantUsageMeteringDemoStack extends Stack {
       meters: ['agent.tokens'],
     });
     new CfnOutput(this, 'UsageQueueUrl', { value: usageQueue.queueUrl });
+    new CfnOutput(this, 'UsageReaderDlqUrl', { value: filtered.deadLetterQueue.queueUrl });
+    new CfnOutput(this, 'UsageReaderArn', { value: filtered.subscriber.attrSubscriberArn });
+
+    // A second reader with no filter: every UsageRecorded.
+    const allQueue = new sqs.Queue(this, 'DemoUsageAllQueue', {
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: Duration.days(4),
+    });
+    Validations.of(allQueue).acknowledge({
+      id: 'AwsSolutions-SQS3',
+      reason: 'The demo reader queue is the target of a UsageSubscriber, whose own dead-letter queue catches failed deliveries (ADR-0006).',
+    });
+    const allRole = new iam.Role(this, 'DemoUsageAllReaderRole', {
+      assumedBy: new iam.ServicePrincipal('events.amazonaws.com'),
+      description: 'Delivers every UsageRecorded to the second demo reader queue',
+    });
+    allQueue.grantSendMessages(allRole);
+    const unfiltered = new UsageSubscriber(this, 'DemoUsageAllReader', {
+      busArn: this.metering.usageBusArn,
+      targetArn: allQueue.queueArn,
+      role: allRole,
+    });
+    new CfnOutput(this, 'UsageAllQueueUrl', { value: allQueue.queueUrl });
+    new CfnOutput(this, 'UsageAllReaderDlqUrl', { value: unfiltered.deadLetterQueue.queueUrl });
+    new CfnOutput(this, 'UsageAllReaderArn', { value: unfiltered.subscriber.attrSubscriberArn });
 
     acknowledgeWildcards(this, (path) =>
       /\/Demo[A-Za-z]+\/DefaultPolicy\//.test(path)
@@ -141,18 +182,20 @@ export class TenantUsageMeteringDemoStack extends Stack {
         : undefined,
     );
 
-    new ssm.StringParameter(this, 'ServiceParameter', {
-      parameterName: SERVICE_PARAMETER,
-      description: 'tenant-usage-metering: the metering service (spec §6.3)',
-      stringValue: Stack.of(this).toJsonString({
-        version: 1,
-        apiUrl: this.metering.apiUrl,
-        region: this.region,
-        ingestBusArn: this.metering.ingestBusArn ?? '',
-        usageBusArn: this.metering.usageBusArn,
-        emitterRoleNamePattern: this.metering.emitterRoleNamePattern,
-      }),
-    });
+    if (props.context.publishServiceParameter) {
+      new ssm.StringParameter(this, 'ServiceParameter', {
+        parameterName: SERVICE_PARAMETER,
+        description: 'tenant-usage-metering: the metering service (spec §6.3)',
+        stringValue: Stack.of(this).toJsonString({
+          version: 1,
+          apiUrl: this.metering.apiUrl,
+          region: this.region,
+          ingestBusArn: this.metering.ingestBusArn ?? '',
+          usageBusArn: this.metering.usageBusArn,
+          emitterRoleNamePattern: this.metering.emitterRoleNamePattern,
+        }),
+      });
+    }
 
     new CfnOutput(this, 'ApiUrl', { value: this.metering.apiUrl });
     new CfnOutput(this, 'UsageBusArn', { value: this.metering.usageBusArn });

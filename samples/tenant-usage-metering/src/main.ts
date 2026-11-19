@@ -15,7 +15,8 @@ Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true, writ
 // Every resource carries the sample tag, so teardown can be proven by tag.
 Tags.of(app).add('sample', 'tenant-usage-metering');
 
-new TenantUsageMeteringDemoStack(app, 'TenantUsageMetering', {
+// `-c stackName=...` deploys a second demo stack beside the first (with its own fleetName).
+new TenantUsageMeteringDemoStack(app, (app.node.tryGetContext('stackName') as string | undefined) ?? 'TenantUsageMetering', {
   description: 'Tenant usage metering for agentic applications (aws-samples, MIT-0)',
   context: parseDemoContext((key) => app.node.tryGetContext(key)),
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },

@@ -13,6 +13,7 @@
 
 import * as fs from 'node:fs';
 import { Sha256 } from '@aws-crypto/sha256-js';
+import { CloudWatchClient, DescribeAlarmsCommand } from '@aws-sdk/client-cloudwatch';
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { ReceiveMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { fromNodeProviderChain, fromTemporaryCredentials } from '@aws-sdk/credential-providers';
@@ -21,7 +22,9 @@ import { SignatureV4 } from '@smithy/signature-v4';
 import type { AwsCredentialIdentityProvider } from '@smithy/types';
 import { ulid } from 'ulid';
 
-const outputs = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')).TenantUsageMetering as Record<string, string>;
+const outputFile = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')) as Record<string, Record<string, string>>;
+const STACK = Object.keys(outputFile)[0];
+const outputs = outputFile[STACK];
 const REGION = process.env.AWS_REGION ?? 'eu-central-1';
 const API = new URL(outputs.ApiUrl);
 const base = fromNodeProviderChain();
@@ -160,6 +163,18 @@ async function main(): Promise<void> {
   check('a second CreateMeter is 409 ALREADY_EXISTS', dup.status === 409 && dup.body.reason === 'ALREADY_EXISTS', dup);
   const sink = await call(operator, 'POST', '/sinks', { sinkId: 'export', type: 'S3_EXPORT', enabled: true, endpoint: 'exports/integ' });
   check('operator creates an S3_EXPORT sink', sink.status === 201 && sink.body.sink?.endpoint === 'exports/integ/', sink);
+  // An HTTP sink whose endpoint refuses (an unsigned call to this API is a 403), so
+  // the run proves FAILED, BLOCKED and the resend without a public receiver.
+  const httpSink = await call(operator, 'POST', '/sinks', {
+    sinkId: 'http',
+    type: 'HTTP',
+    enabled: true,
+    endpoint: `https://${API.hostname}/v1/http-sink-probe`,
+    secretName: outputs.HttpSinkSecretName,
+    mapping: { account: { recordField: 'billingAccount' }, qty: { recordField: 'quantity' }, rule: { meterField: 'rule' } },
+    meters: ['agent.tokens'],
+  });
+  check('operator creates an HTTP sink that needs billingAccount', httpSink.status === 201, httpSink);
   const badSink = await call(operator, 'POST', '/sinks', {
     sinkId: 'http',
     type: 'HTTP',
@@ -243,19 +258,152 @@ async function main(): Promise<void> {
   });
   check('the record shows the export delivery SENT', delivered !== undefined);
 
-  // A reader on the usage bus (UsageSubscriber, meters: agent.tokens) ----------------------
+  // Readers on the usage bus: one filtered to agent.tokens, one unfiltered ------------------
   const sqsClient = new SQSClient({ region: REGION });
-  const seen = new Map<string, { tenantId: string; meterId: string; total: string }>();
-  await waitFor('UsageRecorded on the reader queue', 5 * 60_000, async () => {
-    const out = await sqsClient.send(new ReceiveMessageCommand({ QueueUrl: outputs.UsageQueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 5 }));
+  const drain = async (queueUrl: string, into: Map<string, { tenantId: string; meterId: string; total: string; revision: number }>) => {
+    const out = await sqsClient.send(new ReceiveMessageCommand({ QueueUrl: queueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 5 }));
     for (const message of out.Messages ?? []) {
-      const detail = JSON.parse(message.Body ?? '{}').detail ?? JSON.parse(message.Body ?? '{}');
-      seen.set(`${detail.recordId}#${detail.revision}`, detail);
+      const body = JSON.parse(message.Body ?? '{}');
+      const detail = typeof body.detail === 'object' && body.detail !== null ? body.detail : body;
+      into.set(`${detail.recordId}#${detail.revision}`, detail);
     }
-    return seen.size >= 2 ? true : undefined;
+    return out.Messages?.length ?? 0;
+  };
+  const peek = async (queueUrl: string) => {
+    const out = await sqsClient.send(
+      new ReceiveMessageCommand({
+        QueueUrl: queueUrl,
+        MaxNumberOfMessages: 1,
+        WaitTimeSeconds: 1,
+        VisibilityTimeout: 0,
+        MessageAttributeNames: ['All'],
+      }),
+    );
+    return out.Messages?.[0] === undefined
+      ? 'empty'
+      : JSON.stringify({ body: out.Messages[0].Body?.slice(0, 600), attributes: out.Messages[0].MessageAttributes });
+  };
+  const seen = new Map<string, { tenantId: string; meterId: string; total: string; revision: number }>();
+  const seenAll = new Map<string, { tenantId: string; meterId: string; total: string; revision: number }>();
+  await waitFor('UsageRecorded on the reader queues', 5 * 60_000, async () => {
+    await drain(outputs.UsageQueueUrl, seen);
+    await drain(outputs.UsageAllQueueUrl, seenAll);
+    return seen.size >= 2 && seenAll.size >= 2 ? true : undefined;
   });
-  const records = [...seen.values()];
-  check('the usage-bus reader receives both UsageRecorded records', records.some((r) => r.tenantId === 'tenant-a' && r.total === '15.5') && records.some((r) => r.tenantId === 'tenant-b'), records);
+  const both = (records: Array<{ tenantId: string; total: string }>) =>
+    records.some((r) => r.tenantId === 'tenant-a' && r.total === '15.5') && records.some((r) => r.tenantId === 'tenant-b');
+  check('the unfiltered usage-bus reader receives both records', both([...seenAll.values()]), {
+    records: [...seenAll.values()],
+    dlq: await peek(outputs.UsageAllReaderDlqUrl),
+  });
+  check('the agent.tokens reader receives both records', both([...seen.values()]), {
+    records: [...seen.values()],
+    dlq: await peek(outputs.UsageReaderDlqUrl),
+  });
+
+  // The HTTP sink: FAILED for a refused send, BLOCKED without a billing account ---------------
+  const recordOf = async (tenantId: string) => (await call(operator, 'GET', usagePath(tenantId, 'agent.tokens'))).body.records?.[0];
+  const httpStates = await waitFor('HTTP sink states', 4 * 60_000, async () => {
+    const [a, b] = [await recordOf('tenant-a'), await recordOf('tenant-b')];
+    return a?.sinks?.http?.status === 'FAILED' && b?.sinks?.http?.status === 'BLOCKED' ? [a, b] : undefined;
+  });
+  check(
+    'a refused HTTP send is FAILED at once (403)',
+    httpStates?.[0]?.sinks?.http?.reason === 'HTTP_403',
+    httpStates ?? [await recordOf('tenant-a'), await recordOf('tenant-b')],
+  );
+  check(
+    'a record without billingAccount is BLOCKED for the HTTP sink',
+    httpStates?.[1]?.sinks?.http?.reason === 'NO_BILLING_ACCOUNT',
+    httpStates,
+  );
+
+  const waitJob = async (name: string, jobId: string | undefined) =>
+    waitFor(name, 5 * 60_000, async () => {
+      const out = await call(operator, 'GET', `/jobs/${jobId}`);
+      return out.body.job?.status !== undefined && out.body.job.status !== 'RUNNING' ? out.body.job : undefined;
+    });
+
+  // RESEND_BLOCKED: a billing account set later makes revision 2 and resends --------------
+  const billB = await call(registrar, 'PUT', `/cells/${CELL}/tenants/tenant-b`, { applicationId: 'demo-app', billingAccount: 'acct-b' });
+  check('a new billing account starts a RESEND_BLOCKED job', billB.status === 200 && typeof billB.body.resendJobId === 'string', billB);
+  const resendJob = await waitJob('RESEND_BLOCKED job', billB.body.resendJobId);
+  check(
+    'the resend writes revision 2 for the blocked record',
+    resendJob?.status === 'SUCCEEDED' && resendJob.counts?.admitted === 1,
+    resendJob,
+  );
+  const rev2 = await waitFor('revision 2 sent to the HTTP sink', 4 * 60_000, async () => {
+    const b = await recordOf('tenant-b');
+    return b?.revision === 2 && b.sinks?.http?.status === 'FAILED' ? b : undefined;
+  });
+  check(
+    'revision 2 carries acct-b and is sent again (FAILED by the refusing endpoint)',
+    rev2?.billingAccount === 'acct-b',
+    rev2 ?? (await recordOf('tenant-b')),
+  );
+  await waitFor('revision 2 on the unfiltered reader', 3 * 60_000, async () => {
+    await drain(outputs.UsageAllQueueUrl, seenAll);
+    return [...seenAll.values()].some((r) => r.tenantId === 'tenant-b' && r.revision === 2) ? true : undefined;
+  });
+  check(
+    'revision 2 is published on the usage bus',
+    [...seenAll.values()].some((r) => r.tenantId === 'tenant-b' && r.revision === 2),
+    [...seenAll.values()],
+  );
+
+  // SINK_REDRIVE: a sink enabled later is backfilled; FAILED deliveries are sent again ------
+  const export2 = await call(operator, 'POST', '/sinks', {
+    sinkId: 'export2',
+    type: 'S3_EXPORT',
+    enabled: true,
+    endpoint: 'exports/integ2',
+  });
+  check('a second export sink, created after the records', export2.status === 201, export2);
+  const backfill = await call(operator, 'POST', '/jobs/sink-redrive', { sinkId: 'export2', from: H, to: H });
+  const backfillJob = await waitJob('SINK_REDRIVE backfill', backfill.body.job?.jobId);
+  check(
+    'the backfill queues every record of the hour for the new sink',
+    backfillJob?.status === 'SUCCEEDED' && backfillJob.counts?.redriven >= 2,
+    backfillJob,
+  );
+  const backfilled = await waitFor('backfilled export objects', 3 * 60_000, async () => {
+    const list = await s3.send(new ListObjectsV2Command({ Bucket: outputs.ExportBucketName, Prefix: `exports/integ2/hour=${H}/` }));
+    return (list.Contents ?? []).length >= 2 ? list.Contents : undefined;
+  });
+  check(
+    'the backfilled records reach the new sink',
+    (backfilled?.length ?? 0) >= 2,
+    backfilled?.map((o) => o.Key),
+  );
+  const redrive = await call(operator, 'POST', '/jobs/sink-redrive', { sinkId: 'http' });
+  const redriveJob = await waitJob('SINK_REDRIVE of FAILED', redrive.body.job?.jobId);
+  check(
+    'the redrive sends the FAILED HTTP deliveries again',
+    redriveJob?.status === 'SUCCEEDED' && redriveJob.counts?.redriven >= 2,
+    redriveJob,
+  );
+
+  // INGEST_REDRIVE: the ingest dead-letter queue (empty in a healthy run) ------------------
+  const ingestRedrive = await call(operator, 'POST', '/jobs/ingest-redrive', {});
+  if (outputs.IngestBusArn !== undefined) {
+    const job = await waitJob('INGEST_REDRIVE job', ingestRedrive.body.job?.jobId);
+    check(
+      'StartIngestRedrive drains the (empty) ingest dead-letter queue',
+      job?.status === 'SUCCEEDED' && job.counts?.processed === 0,
+      job,
+    );
+  } else {
+    check('StartIngestRedrive is a 400 with ingestPath DIRECT', ingestRedrive.status === 400, ingestRedrive);
+  }
+
+  // The FAILED deliveries fire the alarm (metrics written without dimensions too) -------------
+  const cw = new CloudWatchClient({ region: REGION });
+  const alarm = await waitFor('DeliveriesFailed alarm', 10 * 60_000, async () => {
+    const out = await cw.send(new DescribeAlarmsCommand({ AlarmNamePrefix: `${STACK}-MeteringDeliveriesFailedAlarm` }));
+    return out.MetricAlarms?.[0]?.StateValue === 'ALARM' ? out.MetricAlarms[0] : undefined;
+  });
+  check('the DeliveriesFailed alarm fires', alarm !== undefined);
 
   // A late event gives an ADJUSTMENT -----------------------------------------------------
   const late = await call(emitter, 'POST', '/usage-events', { events: [ev('tenant-a', 'agent.tokens', '2', 50)] });
@@ -290,8 +438,12 @@ async function main(): Promise<void> {
     return out.body.records?.length > 0 ? out.body.records : undefined;
   });
   check('the re-admitted event is counted', callRecords?.[0]?.total === '1', callRecords);
-  const later = await sqsClient.send(new ReceiveMessageCommand({ QueueUrl: outputs.UsageQueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 10 }));
-  const meters = (later.Messages ?? []).map((message) => (JSON.parse(message.Body ?? '{}').detail ?? JSON.parse(message.Body ?? '{}')).meterId);
+  const later = await sqsClient.send(
+    new ReceiveMessageCommand({ QueueUrl: outputs.UsageQueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 10 }),
+  );
+  const meters = (later.Messages ?? []).map(
+    (message) => (JSON.parse(message.Body ?? '{}').detail ?? JSON.parse(message.Body ?? '{}')).meterId,
+  );
   check('the reader filter keeps agent.calls off the queue', !meters.includes('agent.calls'), meters);
 
   // Readers and offboarding -----------------------------------------------------------------
