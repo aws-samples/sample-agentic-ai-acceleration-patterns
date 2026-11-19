@@ -17,7 +17,7 @@ function synthDemo(context: Record<string, string>): Template {
   return Template.fromStack(stack);
 }
 
-type Statement = { Action: string | string[]; Resource?: unknown; Principal?: unknown };
+type Statement = { Effect?: string; Action: string | string[]; Resource?: unknown; NotResource?: unknown; NotAction?: unknown; Principal?: unknown };
 type PolicyResource = { Properties: { PolicyDocument: { Statement: Statement[] } } };
 type InlinePolicy = { PolicyDocument: { Statement: Statement[] } };
 
@@ -49,8 +49,9 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
       ((resource.Properties.Policies ?? []) as InlinePolicy[]).flatMap((p) => p.PolicyDocument.Statement.map((s) => ({ id, s }))),
     ),
   ];
-  const INVOKE_ACTIONS = new Set(['lambda:InvokeFunction', 'lambda:InvokeFunctionUrl', 'lambda:*', '*']);
-  const invokes = (s: Statement): boolean => actions(s).some((a) => INVOKE_ACTIONS.has(a));
+  // Any action that can invoke a function: `*`, a lambda wildcard, or the two invoke actions.
+  const invokes = (s: Statement): boolean => actions(s).some((a) => a === '*' || /^lambda:(.*\*.*|InvokeFunction|InvokeFunctionUrl)$/.test(a));
+  const apiInvokes = (s: Statement): boolean => actions(s).some((a) => /^execute-api:(.*\*.*|Invoke)$/.test(a));
 
   test('only the dispatcher role may invoke the receiver, through its URL', () => {
     const grants = statements().filter(({ s }) => JSON.stringify(s.Resource ?? '').includes(receiverId));
@@ -62,9 +63,29 @@ describe('demo HTTP sink receiver (threat model, Epoxy 30409050, 30408780)', () 
     }
   });
 
-  test('no identity statement grants invoke on every function', () => {
-    const wildcard = statements().filter(({ s }) => invokes(s) && (s.Resource === '*' || (Array.isArray(s.Resource) && s.Resource.includes('*'))));
+  // A resource that covers more than named functions or APIs: `*`, any function (`function:*`),
+  // any Region or account in a Lambda ARN, or any API. A version qualifier (`<arn>:*`) stays allowed.
+  const BROAD_RESOURCE = /^"\*"$|function:\*|:lambda:\*|:lambda:[^:"]*:\*|execute-api:\*|execute-api:[^:"]*:\*|execute-api:[^:"]*:[^:"]*:\*/;
+  const broad = (s: Statement): boolean => {
+    const resources = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
+    return resources.some((r) => BROAD_RESOURCE.test(JSON.stringify(r ?? '')));
+  };
+
+  test('no identity statement grants invoke on every function or API', () => {
+    const wildcard = statements().filter(({ s }) => s.Effect !== 'Deny' && (invokes(s) || apiInvokes(s)) && (broad(s) || s.NotResource !== undefined));
     expect(wildcard).toEqual([]);
+    const notAction = statements().filter(({ s }) => s.Effect !== 'Deny' && s.NotAction !== undefined);
+    expect(notAction).toEqual([]);
+  });
+
+  test('the wildcard check catches the broad shapes (review v3 #1)', () => {
+    const allow = (Action: string, Resource: unknown): Statement => ({ Effect: 'Allow', Action, Resource });
+    const fnArn = { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':lambda:eu-central-1:111122223333:function:*']] };
+    expect(invokes(allow('lambda:Invoke*', 'x')) && broad(allow('lambda:Invoke*', fnArn))).toBe(true);
+    expect(broad(allow('lambda:InvokeFunction', '*'))).toBe(true);
+    expect(broad(allow('lambda:InvokeFunction', 'arn:aws:lambda:*:*:function:x'))).toBe(true);
+    expect(apiInvokes(allow('execute-api:Invoke', 'x')) && broad(allow('execute-api:Invoke', 'arn:aws:execute-api:eu-central-1:111122223333:*'))).toBe(true);
+    expect(broad(allow('lambda:InvokeFunction', { 'Fn::Join': ['', [{ 'Fn::GetAtt': ['Fn', 'Arn'] }, ':*']] }))).toBe(false);
   });
 
   test('without integHttpReceiver there is no function URL at all', () => {
