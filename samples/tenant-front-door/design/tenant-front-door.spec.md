@@ -1917,7 +1917,7 @@ Limits of these promises:
 |---|---|---|
 | `control-plane` | its API (`GetCell`, `GetDeployment`, `GetTenant`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its global hooks (R-39 to R-46, control-plane ADR-0044): `PutHook`, the `<fleet>-global-hook` role and `globalHookManagedPolicyArns`, the hook environment and `SCRIPT_OUTPUTS`. A prerequisite: without hooks the front door registers no route, and ADR-0044 is on `main` but still Proposed (Q-5) | placement checks, route registration, the integration test |
 | `tenant-identity` `shared-pool` and `shared-pool-multi-tenant` | its published parameters; the second topology also mints the `tenants` token and serves the token exchange (§3.5), whose `allowedOrigins` input lists the app's origins (`tenant-identity` §5.4.1 and ADR-0040; the values are in §6.1). Step 5 of §10 uses a `tenants` token only to check the edge's 401 and calls no exchange. | the demo issuer and the integration test |
-| `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter: `baseUrl` gives the `agentIngress` origin's domain and origin path | `/agents/*`, optional |
+| `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter: `baseUrl` gives the `agentIngress` origin's domain and origin path. The integration test does not compose it: step 23 runs against a stand-in ingress (ADR-0024) | `/agents/*`, optional |
 
 What the front door assumes of the agent ingress's paths (ADR-0019):
 the origin path is the path of the published `baseUrl`, the stage
@@ -2133,6 +2133,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0021](../adr/0021-add-a-per-ip-rate-rule-ahead-of-the-per-host-rule.md) | In `host` mode, a rate rule aggregated on `Host` and client IP, `ipRequestsPer5Min` (500, chosen, not measured), ahead of the per-host rule; amends ADR-0009 | no per-IP rule; an IP-only rule; a `Host`-and-IP aggregate |
 | [ADR-0022](../adr/0022-pin-each-sweeper-page-to-the-listers-date-and-re-read-the-route-table.md) | Pin each sweeper page to the lister's date, which it must match to today and then uses for every read and write; count three misses only on a miss; re-read each passed tenant's entry with `GetKey`, 10 at a time, with no scan (page bound 842 s); grant `BatchWriteItem`; amends ADR-0020 | no date passed; a date the page trusts; a date the page must match to today; a `ListKeys` scan with a deadline; a `GetKey` per passed id |
 | [ADR-0023](../adr/0023-pin-imported-spa-chunks-with-an-import-map-integrity.md) | Pin each imported SPA chunk with an `integrity` entry in an import map, and the entry script with `integrity`; the import map's hash joins the entry's in the CSP; amends ADR-0008 | an import map with `integrity`; one bundle with no imports; one hash per chunk in the CSP |
+| [ADR-0024](../adr/0024-test-the-agent-route-against-a-stand-in-ingress.md) | Test the agent route against the stand-in ingress of spike S-5, not a composed `agentic-runtime-isolation` | compose `agentic-runtime-isolation` (deploy or reuse); a stand-in |
 
 ## 9. Spikes
 
@@ -2601,5 +2602,4 @@ step 14 checks the metric count the re-check alarm watches.
 
 | # | Question | Needed by |
 |---|---|---|
-| Q-4 | Should the integration test also compose `agentic-runtime-isolation` for `/agents/*`, or reuse a deployment only when one is found? Until then step 23 runs against a stand-in. | integration test |
 | Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are on `main` and Proposed. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted | build start |
