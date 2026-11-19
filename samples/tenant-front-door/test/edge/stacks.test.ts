@@ -68,13 +68,11 @@ describe('the four stacks of spec §3.1 (wave 1: three edge-account stacks)', ()
     }
   });
 
-  it('refuses dedicatedDomains on at synth: it arrives in build slice S6', () => {
-    expect(() => synth({ ...BASE_PROPS, dedicatedDomains: true })).toThrow(/build slice S6/);
-  });
-
-  it('passes cdk-nag AwsSolutionsChecks with its own acknowledgements, both modes (standard §4.3, §4.5)', () => {
+  it('passes cdk-nag AwsSolutionsChecks with its own acknowledgements, both modes, dedicatedDomains off and on (standard §4.3, §4.5)', () => {
     expect(() => synth(BASE_PROPS, true)).not.toThrow();
     expect(() => synth(FULL_HOST_PROPS, true)).not.toThrow();
+    expect(() => synth({ ...BASE_PROPS, dedicatedDomains: true }, true)).not.toThrow();
+    expect(() => synth({ ...FULL_HOST_PROPS, dedicatedDomains: true }, true)).not.toThrow();
   });
 });
 
