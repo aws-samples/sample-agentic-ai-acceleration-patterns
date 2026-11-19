@@ -29,7 +29,7 @@ Reusing a found deployment makes the test depend on what the account
 happens to hold.
 ### Option 2: The stand-in of spike S-5
 A REST API with a REQUEST authoriser and a streaming Lambda proxy that
-records what reaches it. Pros: deploys in seconds; asserts exactly what
+records what reaches it. Pros: deploys in about a minute (67 s in S-5); asserts exactly what
 the front door owns: the rewritten path `<stage>/<backend>/invocations`,
 the forwarded bearer and `x-tenant-route`, and unbuffered streaming; and
 records that a refused path never reaches it. Cons: the real ingress's
@@ -39,17 +39,28 @@ routes are not exercised behind the edge.
 Option 2. The test checks what the front door is responsible for, and
 the stand-in records it more precisely than the real ingress would. The
 path filter refuses every path that is not `/agents/<backend>/invocations`
-before any request leaves the edge (ADR-0019), so what the real ingress
-does with its other routes is not reached through the front door, and it
-is that sample's own test that covers them.
+before any request leaves the edge (ADR-0019), so only that shape reaches
+the ingress. Which of the ingress's resources it lands on is the
+ingress's decision: a backend name equal to one of its static top-level
+resources (`entitlements`, `invocations`) resolves into that resource's
+tree, not `{backend}`, and as of this record answers 403 there. The
+stand-in cannot show that, and `agentic-runtime-isolation`'s own test is
+what covers its resource tree.
 
 ## Consequences
 - §10 step 23 runs against the stand-in; §11 no longer lists Q-4.
 - Threat model T-16 stays mitigated by the path filter, with the residual
   that the real ingress is not driven through the edge in this sample's
   test.
-- An `agentcore-gateway` ingress behind `/agents/*` has a different URL
-  form, which ADR-0019 says to check first; a deployer who uses one checks
-  it with this stand-in's assertions against that ingress.
+- Step 23 also sends `/agents/entitlements/invocations`, which passes
+  the router, so the stand-in records that a static-resource name is
+  forwarded, and checks a suspended tenant's 503 on the route (two
+  60 s propagation waits).
+- A deployer who puts an `agentcore-gateway` ingress behind `/agents/*`
+  runs step 23's assertions against it, after checking its URL form
+  (ADR-0019).
+- A new `entitlements/invocations` or `invocations/invocations` resource
+  in `agentic-runtime-isolation` would be reachable through the edge; that
+  is the "route shape" change ADR-0019 names as its revisit trigger.
 - Revisit if the front door takes on a check that only the real ingress
   can answer, for example an ingress-side refusal the edge relies on.
