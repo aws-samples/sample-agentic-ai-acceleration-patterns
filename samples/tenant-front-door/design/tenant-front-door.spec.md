@@ -624,7 +624,7 @@ On every write:
       the domain before then. Once `host#<d>` exists, a repeat looks
       nothing up, changes nothing and answers 200.
    6. Certificate failed, or validation timed out (ACM stops waiting
-      after 72 hours): 422 with ACM's reason. The operator drops the
+      after 72 hours): 422 whose `message` carries ACM's failure reason. The operator drops the
       domain and sets it again, which also issues a new challenge.
 
    The token binds the challenge to one tenant and one domain: it lives
@@ -1103,7 +1103,9 @@ the control plane's hook environment (control-plane R-42):
    container could read. Then wait for propagation as §4.2 says.
 4. Act on the answer. 200 or 202: exit 0. 503, 429, another 5xx, or no
    answer: retry inside the build, five attempts with jittered backoff over
-   about two minutes, then fail; the control plane does not retry a
+   about two minutes, then fail (the hook never sends `customDomain`, so
+   its 429 is always a throttle, never `certificate-quota`); the
+   control plane does not retry a
    create or update hook, so a hook that wants retries makes them
    itself (control-plane R-46). 400, 403, 409 or 507: fail at once,
    printing the status and the registrar's message. The cause is in the
@@ -1607,11 +1609,12 @@ parse (the write is refused, never made unchecked), or when the store's
 ETag still conflicts after five
 attempts (§3.4 step 5).
 
-Every registrar error body is `{message, reason?}`. `reason` is set only
-where a status alone does not tell the caller what to do, which is
-only `certificate-quota` on 429. A 429 from the registrar's API Gateway
-stage throttle carries no `reason` and is retried with backoff; a 429
-with `reason: certificate-quota` is not.
+Every error body the registrar function writes is `{message, reason?}`.
+`reason` is set only where a status alone does not tell the caller what
+to do, which is only `certificate-quota` on 429. API Gateway's own
+answers, the resource-policy 403 and the stage throttle 429, carry its
+default body and no `reason`. A 429 with no `reason` is retried with
+backoff; a 429 with `reason: certificate-quota` is not.
 
 ### 5.2 Script and construct forms
 

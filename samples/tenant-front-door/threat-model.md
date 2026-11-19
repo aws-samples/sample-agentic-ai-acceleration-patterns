@@ -155,7 +155,7 @@ spec §11 question, and the build gate M-40 holds the dependent code).
 | T-29 | B5 | T | A cell script in a tenant-owned account writes outputs that steer the hook: a repeated key, a missing key, shell metacharacters, an oversized value | Mitigated | M-12, M-8 |
 | T-30 | B5 | I | The hook's credentials leak: build logs, the process list, other processes in the build container | Mitigated; residual AR-1 | M-12 |
 | T-31 | B5 | D, T | The control plane cannot be read, so registrar writes are refused and creates fail. A delete hook fails three times and is skipped, which leaves a route | Mitigated; residual AR-23 | M-13, M-14, M-9 |
-| T-32 | B5 | T | The registrar misreads the deployment's `createdAt`. The control plane may return one instant in two forms (with or without a zero fraction), so a string comparison would make a repeat look like a new deployment and replace the entry, dropping its dedicated domain, or let a new deployment inherit a stale entry | Mitigated: the registrar parses `createdAt` to Unix milliseconds before it stores or compares `dt`, and refuses a value that does not parse (spec §4.1) | M-9 |
+| T-32 | B5 | T | The registrar misreads the deployment's `createdAt`. The control plane may return one instant in two forms (with or without a zero fraction), so a string comparison would make a repeat look like a new deployment and replace the entry, dropping its dedicated domain, or let a new deployment keep a stale entry's cell and domain | Mitigated: the registrar parses `createdAt` to Unix milliseconds before it stores or compares `dt`, and refuses a value that does not parse (spec §4.1) | M-9 |
 | T-33 | B5 | E | The control plane's global hooks do not land, or change shape (Q-5). Cell accounts' provisioning roles are then admitted again, and the gap of ADR-0013 returns: a tenant-owned account can delete its suspended route and put it again, which starts `active`, and can rewrite its own route | Open (Q-5). This model is redone if ADR-0017 is revisited (Open items) | M-40 |
 | T-34 | B6 | S | A `state` is forged, or the `signin` key leaks, so the sign-in host forwards a code to a tenant host of the attacker's choosing | Mitigated | M-19, M-20 |
 | T-35 | B6 | S | A `state` is replayed, or a code is stolen from a URL and redeemed | Mitigated | M-19, M-32 |
@@ -493,8 +493,8 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
     `single` mode, 8,583 in `host` mode or about 3,472 dedicated tenants the
     store is full; ACM's 2,500-certificate default binds before that, and a
     domain dropped and set again uses the 5,000 requests in 365 days. A
-    create then fails with 507, or with 429 and `reason: certificate-quota`
-    past ACM's quota. *Why:* sharding by distribution is a plan,
+    create then fails with 507, and past ACM's quota an operator's domain
+    call fails with 429 and `reason: certificate-quota`. *Why:* sharding by distribution is a plan,
     not a build (ADR-0012). *Bounded by:* the 80 % alarm; only the edge
     operator role sets a domain. Deployer action: raise the ACM quota first.
 - **AR-19: Compromised code in the registrar, sweeper, router or a custom
