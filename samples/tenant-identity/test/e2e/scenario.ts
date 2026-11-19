@@ -838,6 +838,38 @@ export function defineScenario(topology: Topology): void {
       }
     });
 
+    // -- step 6a: RefreshToken binds the refreshed token (ADR-0041) --------
+    // Two refresh tokens on A's path naming u1, a real user of A; neither
+    // is u1's, so neither may be served. u2's (tenant B): the non-member
+    // 404, except in pool-per-tenant, where A's own app client refuses B's
+    // pool's token before the binding runs (409). a1's (another user of
+    // A, same pool in every topology): 404 everywhere, which is the only
+    // live case that reaches the binding in pool-per-tenant.
+    test('step 6a: RefreshToken refuses another tenant\'s refresh token (R-12 binding)', async () => {
+      const r = await platform.call<Record<string, unknown>>(
+        'POST',
+        `platform/tenants/${tenantIds.A}/users/${usernames.u1}/token/refresh`,
+        { refreshToken: tokens.u2.refreshToken },
+      );
+      coverage.record('RefreshToken');
+      expectStatus(r, topology === 'pool-per-tenant' ? 409 : 404, 'RefreshToken A/u1 with B/u2 refresh token');
+      expect(r.body?.accessToken).toBeUndefined();
+      expect(r.body?.idToken).toBeUndefined();
+    });
+
+    test('step 6a: RefreshToken refuses another user\'s refresh token in the same tenant (R-12 binding)', async () => {
+      const a1 = await issueToken('A', 'a1');
+      const r = await platform.call<Record<string, unknown>>(
+        'POST',
+        `platform/tenants/${tenantIds.A}/users/${usernames.u1}/token/refresh`,
+        { refreshToken: a1.refreshToken },
+      );
+      coverage.record('RefreshToken');
+      expectStatus(r, 404, 'RefreshToken A/u1 with A/a1 refresh token');
+      expect(r.body?.accessToken).toBeUndefined();
+      expect(r.body?.idToken).toBeUndefined();
+    });
+
     // -- step 6: refresh re-runs the trigger (topology 3) -------------------
     test('step 6: refresh re-runs the trigger (shared-pool-multi-tenant)', async () => {
       if (topology !== 'shared-pool-multi-tenant') {

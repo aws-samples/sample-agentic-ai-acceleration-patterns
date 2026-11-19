@@ -17,7 +17,7 @@ import {
   ListUsersInGroupCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import 'aws-sdk-client-mock-jest';
-import { AnyMock, cognitoError, cognitoMock, depsFor, IDS, tenant } from './helpers';
+import { accessJwt, AnyMock, authResult, cognitoError, cognitoMock, depsFor, IDS, tenant } from './helpers';
 import { ConflictError, InvalidInputError, NotFoundError, UnsupportedInTopologyError } from '../../src/shared/errors';
 import { SharedPoolProvisioner } from '../../src/topology/shared-pool';
 
@@ -206,6 +206,71 @@ describe('SharedPoolProvisioner (spec §7.2)', () => {
       const tokens = await provisioner().issueToken(tenantA(), 'u1', 'pw');
       expect(tokens.accessToken).toBe('a');
       expect(cognito.commandCalls(AdminInitiateAuthCommand)[0].args[0].input.ClientId).toBe(CLIENT);
+    });
+  });
+
+  describe('refreshToken binds the result to the path\'s user and tenant (ADR-0041)', () => {
+    beforeEach(() =>
+      cognito.on(AdminGetUserCommand).resolves({
+        Username: 'u1',
+        UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }, { Name: 'sub', Value: 'sub-u1' }],
+        UserStatus: 'CONFIRMED',
+      }),
+    );
+
+    it('serves the path user\'s own token (200)', async () => {
+      const own = accessJwt({ sub: 'sub-u1', tenant_id: IDS.a });
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(own));
+      const tokens = await provisioner().refreshToken(tenantA(), 'u1', 'rt');
+      expect(tokens.accessToken).toBe(own);
+      expect(cognito.commandCalls(AdminInitiateAuthCommand)[0].args[0].input.AuthFlow).toBe('REFRESH_TOKEN_AUTH');
+      expect(cognito).toHaveReceivedCommandTimes(AdminGetUserCommand as AnyMock, 1);
+    });
+
+    it('refuses a foreign tenant\'s token on this tenant\'s path with the non-member 404', async () => {
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-b1', tenant_id: IDS.b })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt-of-b')).rejects.toMatchObject({
+        name: 'NotFoundError',
+        message: 'User not found in tenant',
+      });
+    });
+
+    it('refuses another user\'s token from the same tenant with 404', async () => {
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-u2', tenant_id: IDS.a })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt-of-u2')).rejects.toBeInstanceOf(NotFoundError);
+    });
+
+    it('refuses the user\'s own sub when the tenant claim names another tenant', async () => {
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-u1', tenant_id: IDS.b })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt')).rejects.toBeInstanceOf(NotFoundError);
+    });
+
+    it('refuses an ID token in the access slot', async () => {
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ token_use: 'id', sub: 'sub-u1', tenant_id: IDS.a })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt')).rejects.toBeInstanceOf(NotFoundError);
+    });
+
+    it('fails closed (500, not served) when Cognito returns an unreadable token', async () => {
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult('not-a-jwt'));
+      const error = await provisioner().refreshToken(tenantA(), 'u1', 'rt').catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(NotFoundError);
+    });
+
+    it('refuses a non-member with 404 before any refresh (R-12)', async () => {
+      cognito.on(AdminGetUserCommand).resolves({
+        Username: 'u1',
+        UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.b }, { Name: 'sub', Value: 'sub-u1' }],
+        UserStatus: 'CONFIRMED',
+      });
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt')).rejects.toBeInstanceOf(NotFoundError);
+      expect(cognito).toHaveReceivedCommandTimes(AdminInitiateAuthCommand as AnyMock, 0);
+    });
+
+    it('refuses when the user record has no sub', async () => {
+      cognito.on(AdminGetUserCommand).resolves({ Username: 'u1', UserAttributes: [{ Name: TENANT_ATTR, Value: IDS.a }] });
+      cognito.on(AdminInitiateAuthCommand).resolves(authResult(accessJwt({ sub: 'sub-u1', tenant_id: IDS.a })));
+      await expect(provisioner().refreshToken(tenantA(), 'u1', 'rt')).rejects.toBeInstanceOf(NotFoundError);
     });
   });
 

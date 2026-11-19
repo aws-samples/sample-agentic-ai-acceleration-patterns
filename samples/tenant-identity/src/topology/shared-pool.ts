@@ -28,6 +28,7 @@ import {
   adminGetUserToView,
   adminPasswordSignIn,
   adminRefresh,
+  assertRefreshedFor,
   attr,
   COGNITO,
   findUserByEmail,
@@ -221,8 +222,12 @@ export class SharedPoolProvisioner implements Provisioner {
   }
 
   async refreshToken(tenant: TenantRecord, username: string, refreshToken: string): Promise<TokenSet> {
-    await this.assertMember(tenant, username);
-    return adminRefresh(this.cognito, this.userPoolId, this.appClientId, refreshToken);
+    // R-12, then bind the refreshed token to the path's user and tenant
+    // (ADR-0041): the refresh token alone says nothing about either.
+    const user = await this.member(tenant, username);
+    const tokens = await adminRefresh(this.cognito, this.userPoolId, this.appClientId, refreshToken);
+    assertRefreshedFor(tokens, attr(user.attributes, 'sub'), tenant.tenantId, 'tenant_id');
+    return tokens;
   }
 
   /**
