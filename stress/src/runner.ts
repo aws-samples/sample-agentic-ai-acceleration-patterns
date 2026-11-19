@@ -320,6 +320,11 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     // Verb output lands in run.log: keep the run folder to its owner.
     fs.mkdirSync(resultsDir, { recursive: true, mode: 0o700 });
 
+    // A scenario no slice declares fails before anything runs.
+    const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices))];
+    const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
+    if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
+
     // Budget first: nothing is deployed when a sum is over a limit.
     const draws: Draw[] = [];
     for (const s of slices) {
@@ -355,11 +360,16 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
       if (!(await verb(s, 'seed'))) throw new Error(`${s.name} seed failed`);
       stopIfAborted();
     }
-    const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices))];
-    const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
-    if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
     for (const sc of scenarios) {
       for (const s of slices.filter((x) => x.scenarios.includes(sc))) {
+        // A record that is there before its run was written by another verb:
+        // refuse it and remove it, so the hash after the run covers only
+        // what this run wrote.
+        const early = `${s.name}.${sc}.json`;
+        if (fs.existsSync(path.join(resultsDir, early))) {
+          failures.push(`${early}: written before its run`);
+          fs.rmSync(path.join(resultsDir, early), { force: true });
+        }
         ran.set(`${s.name}.${sc}`, await verb(s, 'run', [sc]));
         own(s, sc);
         stopIfAborted();
@@ -406,7 +416,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   let resultsFile: string | undefined;
   if (records.length > 0) {
     resultsFile = path.join(runDir, 'results.md');
-    fs.writeFileSync(resultsFile, renderResults(records));
+    fs.writeFileSync(resultsFile, renderResults(records, failures));
   }
   return { runId: opts.runId, mode, order: slices.map((s) => s.name), failures, ...(signal === undefined ? {} : { signal }), resultsFile };
 
@@ -440,8 +450,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
  * that does not parse, does not belong to the run, is for a slice or
  * scenario the run did not run, or changed after its own `run` (or
  * `collect`) last wrote it; a `run` that exited 0 but wrote no record;
- * a scenario record with no isolation assertion (P-1); and the pass
- * criteria of each record (spec §7).
+ * and the pass criteria of each record (spec §7), P-1 included.
  */
 function checkRecords(
   dir: string,
@@ -467,9 +476,6 @@ function checkRecords(
     if (wrong.length > 0) {
       failures.push(`${f}: does not belong to this run (${wrong.join(', ')})`);
       continue;
-    }
-    if (r.scenario !== 'lifecycle' && r.isolation.assertions === 0) {
-      failures.push(`${f}: no isolation assertion (P-1)`);
     }
     failures.push(...recordFailures(r));
     records.push(r);

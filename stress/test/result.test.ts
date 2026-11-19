@@ -46,6 +46,20 @@ describe('result records (spec §4.3)', () => {
     ]);
   });
 
+  it('fails a scenario record with no isolation assertion, but not a lifecycle record (P-1)', () => {
+    const none = { isolation: { assertions: 0, mismatches: 0 } };
+    expect(recordFailures(record(none))).toEqual(['agentic-runtime-isolation PS-2: no isolation assertion (P-1)']);
+    expect(recordFailures(record({ ...none, scenario: 'lifecycle' }))).toEqual([]);
+  });
+
+  it('states the run verdict only when the runner passes its failures', () => {
+    expect(renderResults([record()])).not.toContain('- Run:');
+    expect(renderResults([record()], [])).toContain('- Run: PASSED');
+    const failed = renderResults([record()], ['x deploy exited 1']);
+    expect(failed).toContain('- Run: FAILED (1 failures, see below)');
+    expect(failed).toContain('## Failures\n\n- x deploy exited 1\n');
+  });
+
   it('renders one run, with lifecycle times and the slowest hop', () => {
     const md = renderResults([
       record(),

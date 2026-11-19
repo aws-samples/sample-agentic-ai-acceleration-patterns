@@ -118,9 +118,13 @@ export function parseRecord(text: string, file: string): ResultRecord {
   return doc as ResultRecord;
 }
 
-/** The pass criteria a single record can show (spec §7): isolation and attribution. */
+/**
+ * The pass criteria a single record can show (spec §7): a scenario that
+ * made isolation assertions (P-1), no mismatch, and no unattributed refusal.
+ */
 export function recordFailures(r: ResultRecord): string[] {
   const f: string[] = [];
+  if (r.scenario !== 'lifecycle' && r.isolation.assertions === 0) f.push(`${r.slice} ${r.scenario}: no isolation assertion (P-1)`);
   if (r.isolation.mismatches > 0) f.push(`${r.slice} ${r.scenario}: ${r.isolation.mismatches} isolation mismatches`);
   if (r.refusals.unattributed > 0) f.push(`${r.slice} ${r.scenario}: ${r.refusals.unattributed} unattributed refusals`);
   return f;
@@ -133,8 +137,12 @@ function fmt(n: number | undefined, digits = 0): string {
 /**
  * The results file of one run. The runner writes it next to the records;
  * a person checks it and commits it as `stress/results/<date>-<tier>.md`.
+ * `runFailures` is every failure the runner found (verbs, missing or
+ * refused records, interrupts, pass criteria); when given, the file states
+ * the run's verdict and lists them. `report` re-renders from the records
+ * alone and leaves the verdict out.
  */
-export function renderResults(records: readonly ResultRecord[]): string {
+export function renderResults(records: readonly ResultRecord[], runFailures?: readonly string[]): string {
   if (records.length === 0) throw new Error('no result records to render');
   const first = records[0];
   for (const k of ['runId', 'tier', 'mode'] as const) {
@@ -154,11 +162,13 @@ export function renderResults(records: readonly ResultRecord[]): string {
     '-->',
     `# Platform stress run ${first.runId}: ${first.tier}`,
     '',
+    ...(runFailures === undefined ? [] : [`- Run: ${runFailures.length === 0 ? 'PASSED' : `FAILED (${runFailures.length} failures, see below)`}`]),
     `- Window: ${start} to ${end} (UTC)`,
     `- Mode: ${first.mode}`,
     `- Commits: ${[...commits].sort().map(([s, c]) => `${s} ${c.slice(0, 7)}`).join(', ')}`,
     `- Pass criteria (isolation, attribution): ${failures.length === 0 ? 'met' : `not met: ${failures.join('; ')}`}`,
     '',
+    ...(runFailures === undefined || runFailures.length === 0 ? [] : ['## Failures', '', ...runFailures.map((f) => `- ${f}`), '']),
     '## Deploy and destroy',
     '',
     '| Slice | Deploy (s) | Destroy (s) |',

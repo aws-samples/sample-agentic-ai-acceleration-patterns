@@ -232,8 +232,55 @@ describe('runner (spec §3.5)', () => {
     const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec });
     expect(summary.failures).toEqual([
       'control-plane.PS-1.json: does not belong to this run (not run by this run)',
-      'tenant-identity.PS-1.json: no isolation assertion (P-1)',
+      'tenant-identity PS-1: no isolation assertion (P-1)',
       'tenant-identity.PS-2.json: does not belong to this run (runId, not run by this run)',
+    ]);
+  });
+
+  it('states a failed run in results.md, P-1 and run-level failures included', async () => {
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1', 'PS-2'] } });
+    const exec: Exec = async (_script, args, env) => {
+      if (args[0] === 'budget') return { status: 0, stdout: '{"draws":[]}' };
+      if (args[0] === 'run' && args[1] === 'PS-1') {
+        const r = record({ slice: 'tenant-identity', scenario: 'PS-1', runId: env.STRESS_RUN_ID!, mode: 'slice', isolation: { assertions: 0, mismatches: 0 } });
+        fs.writeFileSync(path.join(env.STRESS_RESULTS!, 'tenant-identity.PS-1.json'), JSON.stringify(r));
+      }
+      return { status: 0, stdout: '' };
+    };
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec });
+    expect(summary.failures).toEqual([
+      'tenant-identity PS-1: no isolation assertion (P-1)',
+      'tenant-identity run PS-2 exited 0 but wrote no tenant-identity.PS-2.json',
+    ]);
+    const md = fs.readFileSync(summary.resultsFile!, 'utf8');
+    expect(md).toContain('- Run: FAILED (2 failures, see below)');
+    expect(md).toContain('Pass criteria (isolation, attribution): not met: tenant-identity PS-1: no isolation assertion (P-1)');
+    expect(md).toContain('## Failures\n\n- tenant-identity PS-1: no isolation assertion (P-1)\n- tenant-identity run PS-2 exited 0 but wrote no tenant-identity.PS-2.json\n');
+  });
+
+  it('states a passed run in results.md', async () => {
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] } });
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec: stub().exec });
+    const md = fs.readFileSync(summary.resultsFile!, 'utf8');
+    expect(md).toContain('- Run: PASSED');
+    expect(md).not.toContain('## Failures');
+  });
+
+  it('refuses a record another slice wrote before its run, even when the run writes none', async () => {
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-2'] } });
+    const { exec } = stub({ silent: ['control-plane'] });
+    const plant: Exec = async (script, args, env, capture, onStart) => {
+      const r = await exec(script, args, env, capture, onStart);
+      if (args[0] === 'run' && script.includes('tenant-identity')) {
+        const planted = record({ slice: 'control-plane', scenario: 'PS-2', runId: env.STRESS_RUN_ID!, mode: 'platform' });
+        fs.writeFileSync(path.join(env.STRESS_RESULTS!, 'control-plane.PS-2.json'), JSON.stringify(planted));
+      }
+      return r;
+    };
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec: plant });
+    expect(summary.failures).toEqual([
+      'control-plane.PS-2.json: written before its run',
+      'control-plane run PS-2 exited 0 but wrote no control-plane.PS-2.json',
     ]);
   });
 
@@ -299,9 +346,10 @@ describe('runner (spec §3.5)', () => {
 
   it('refuses an unknown scenario, a reused run id, a bad id and a second run on the same prefix', async () => {
     const { root, home } = fixture(slices);
-    const { exec } = stub();
+    const { calls, exec } = stub();
     const first = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], scenarios: ['PS-9'], exec });
-    expect(first.failures.join()).toMatch(/declares PS-9/);
+    expect(first.failures).toEqual(['no slice in the run declares PS-9']);
+    expect(calls).toEqual([]);
     await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec })).rejects.toThrow(/use a new STRESS_RUN_ID/);
     await expect(runStress({ ...base, runId: '../x', repoRoot: root, home, tier: 'small', slices: ['tenant-identity'], exec })).rejects.toThrow(/STRESS_RUN_ID must match/);
     fs.writeFileSync(path.join(home, 'stress', 'run.lock'), 'other');

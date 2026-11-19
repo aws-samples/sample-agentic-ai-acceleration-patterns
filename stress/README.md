@@ -50,11 +50,13 @@ run. The runner times `deploy` and `teardown` itself and writes one
 `lifecycle` record per slice with the deploy and destroy seconds.
 
 Scenarios run platform scenarios first (`PS-1`, `PS-2`, ... by number),
-then each slice's own scenarios in slice order. A run fails when a
+then each slice's own scenarios in slice order. A scenario no slice
+declares fails the run before `budget`. A run fails when a
 scenario's record is missing, does not parse, belongs to another run, or
 makes no isolation assertion, when a record names a slice or a scenario
-the run did not run, and when a record changed after its own `run`
-returned (another slice rewrote it). Only the slice's own `collect` may
+the run did not run, when a record is already there before its own `run`
+starts (the runner removes it), and when a record changed after its own
+`run` returned (another slice rewrote it). Only the slice's own `collect` may
 change its records after `run`, and only records nobody else changed.
 
 Each verb runs in its own session and process group with no stdin, so
@@ -93,7 +95,10 @@ run exits 1. Long runs belong in `tmux` or `screen`, or
 `setsid ./run.sh run ... > run.out 2>&1 &`, so a dropped connection does not
 interrupt them. `nohup` does not help: Node resets the ignored SIGHUP.
 
-The run writes `$STRESS_HOME/$STRESS_PREFIX/<run id>/results.md`. To keep a
+The run writes `$STRESS_HOME/$STRESS_PREFIX/<run id>/results.md`, with the
+run's verdict (`PASSED` or `FAILED`) and every failure the runner found.
+`run.sh report` renders the same tables from the records alone, without
+the verdict. To keep a
 run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 (spec §4.3); the raw records and logs stay outside the repository.
 
