@@ -192,7 +192,10 @@ describe('API (spec §3.2, §5)', () => {
     expect(allows.length).toBe(4);
     expect(denies.length).toBe(4);
     const ingestDeny = denies.find((s) => s.Sid === 'DenyIngestToOtherPrincipals')!;
-    expect(ingestDeny.Condition).toEqual({ ArnNotLike: { 'aws:PrincipalArn': 'arn:aws:iam::*:role/demo-ue-*' } });
+    // The stack's own partition, not a hard-coded `aws`.
+    expect(ingestDeny.Condition).toEqual({
+      ArnNotLike: { 'aws:PrincipalArn': { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':iam::*:role/demo-ue-*']] } },
+    });
     const registrarDeny = denies.find((s) => s.Sid === 'DenyRegistrarRoutesToOthers')!;
     expect(registrarDeny.Resource).toEqual(expect.arrayContaining(['execute-api:/*/PUT/cells/*/emitter', 'execute-api:/*/DELETE/cells/*/tenants/*']));
     expect(registrarDeny.Condition).toEqual({ ArnNotEquals: { 'aws:PrincipalArn': [REGISTRAR] } });

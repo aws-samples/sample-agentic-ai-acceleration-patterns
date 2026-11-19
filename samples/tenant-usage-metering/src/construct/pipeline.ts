@@ -10,15 +10,20 @@
  * has a resource policy that denies publishing to every principal but its
  * one writer, so no other principal in the account can put a raw event or
  * a `UsageRecorded` on them.
+ *
+ * A bus with subscriber accounts is shared with them through AWS RAM under
+ * the managed SubscribeOnly permission (spec §3.2, ADR-0006), after the
+ * share guard has checked that none of them holds a cell.
  */
 
-import { Duration, Stack, Validations } from 'aws-cdk-lib';
+import { Aws, Duration, Stack, Validations } from 'aws-cdk-lib';
 import * as eventsv2 from 'aws-cdk-lib/aws-eventsv2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as firehose from 'aws-cdk-lib/aws-kinesisfirehose';
+import * as ram from 'aws-cdk-lib/aws-ram';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
-import { Construct } from 'constructs';
+import { Construct, type IDependable } from 'constructs';
 import type { IngestPath, ResolvedProps } from './props';
 import type { ServiceRoles } from './roles';
 import { FIREHOSE_ERROR_PREFIX, RAW_PREFIX } from './storage';
@@ -43,7 +48,12 @@ export interface PipelineNames {
   readonly ingestBusName: string;
   readonly usageBusName: string;
   readonly ingestSubscriberName: string;
+  readonly ingestShareName: string;
+  readonly usageShareName: string;
 }
+
+/** The AWS RAM managed permission a bus is shared under: subscribe, never publish. */
+export const BUS_SHARE_PERMISSION = 'AWSRAMEventBridgeEventBusV2SubscribeOnly';
 
 /** The JQ query that names an object's hour partition (spec §4.8). */
 export function hourQuery(path: IngestPath): string {
@@ -52,7 +62,7 @@ export function hourQuery(path: IngestPath): string {
 
 function publishOnlyBy(scope: Construct, id: string, bus: eventsv2.CfnEventBus, writer: iam.Role): void {
   // The deny only removes every other principal; the writer still needs an
-  // identity allow (test account, 2026-11-18: without it the writer was refused too).
+  // identity allow (seen in a test account: without it the writer was refused too).
   writer.addToPolicy(new iam.PolicyStatement({ actions: ['events:PutEvents'], resources: [bus.attrEventBusArn] }));
   new eventsv2.CfnResourcePolicy(scope, id, {
     eventBusArn: bus.attrEventBusArn,
@@ -70,6 +80,43 @@ function publishOnlyBy(scope: Construct, id: string, bus: eventsv2.CfnEventBus, 
       ],
     },
   });
+}
+
+/**
+ * Shares each bus with its subscriber accounts through AWS RAM: the ingest
+ * bus (on `BUS` only) with `rawSubscriberAccountIds`, the usage bus with
+ * `usageSubscriberAccountIds`. A bus with an empty list is not shared.
+ * Every share depends on `guard`, the registry check of ADR-0006.
+ */
+export function shareBuses(
+  scope: Construct,
+  props: ResolvedProps,
+  pipeline: Pipeline,
+  names: PipelineNames,
+  guard: IDependable,
+): ram.CfnResourceShare[] {
+  const permissionArn = `arn:${Aws.PARTITION}:ram::aws:permission/${BUS_SHARE_PERMISSION}`;
+  const shares: Array<[string, string, eventsv2.CfnEventBus | undefined, string[]]> = [
+    ['IngestBusShare', names.ingestShareName, pipeline.ingestBus, props.rawSubscriberAccountIds],
+    ['UsageBusShare', names.usageShareName, pipeline.usageBus, props.usageSubscriberAccountIds],
+  ];
+  const out: ram.CfnResourceShare[] = [];
+  for (const [id, name, bus, accountIds] of shares) {
+    if (bus === undefined || accountIds.length === 0) {
+      continue;
+    }
+    const share = new ram.CfnResourceShare(scope, id, {
+      name,
+      resourceArns: [bus.attrEventBusArn],
+      principals: [...new Set(accountIds)],
+      permissionArns: [permissionArn],
+      // Vendor accounts need not be in this account's organization.
+      allowExternalPrincipals: true,
+    });
+    share.node.addDependency(guard);
+    out.push(share);
+  }
+  return out;
 }
 
 export function createPipeline(scope: Construct, props: ResolvedProps, roles: ServiceRoles, rawBucket: s3.Bucket, names: PipelineNames): Pipeline {

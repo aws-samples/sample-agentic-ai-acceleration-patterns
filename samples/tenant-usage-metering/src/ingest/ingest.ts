@@ -81,7 +81,7 @@ export class Ingest {
   private readonly bindings = new TtlCache<BindingItem | undefined>(REGISTRY_CACHE_MS);
   private readonly meters = new TtlCache<MeterVersionItem[]>(REGISTRY_CACHE_MS);
   private readonly logged = new Map<string, number>();
-  /** When each key was last read past the cache: at most once per FRESH_READ_MS (review v2 #5, v3 #1). */
+  /** When each key was last read past the cache: at most once per FRESH_READ_MS. */
   private readonly freshAt = new Map<string, number>();
   private readonly now: () => number;
 
@@ -221,7 +221,7 @@ export class Ingest {
 
     // A placement refusal may come from a cached miss or a cached CLOSING
     // item that a hook has just changed: re-read those registrations
-    // uncached once, so a fresh (re)activation counts at once (review v1 #10).
+    // uncached once, so a fresh (re)activation counts at once.
     const placement = new Set<RefusalReason>(['TENANT_NOT_IN_CELL', 'REGISTRATION_CLOSED']);
     const stale = reasons.flatMap((reason, index) => (reason !== undefined && placement.has(reason) ? [index] : []));
     if (stale.length > 0) {

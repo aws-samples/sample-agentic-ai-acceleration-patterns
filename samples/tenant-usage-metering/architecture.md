@@ -4,40 +4,26 @@ SPDX-License-Identifier: MIT-0
 -->
 # Tenant Usage Metering: Architecture
 
-> **Status: implemented and verified in a non-production account in
-> eu-central-1 on 2026-11-19.** Two demo stacks ran the integration test
-> ([`integration-test.md`](integration-test.md)) side by side, one with
-> `ingestPath: BUS` and one with `DIRECT`: deploy 223 s and 249 s, test
-> about 85 minutes each, delete 183 s each, nothing left but the CDK
-> provider log groups (§11). 47 of 48 checks passed in each. The one that
-> failed, the `UsageSubscriber` filtered on a meter, matched nothing: its
-> pattern was written against the record, and EventBridge matches a
-> `PutEvents` event's `DATA` against the envelope, with the record under
-> `detail`. The fix was deployed during the BUS run and the filtered
-> reader then received the next record (an `ADJUSTMENT`) and no
-> `agent.calls` record. The run also proved the `HTTP` sink's `FAILED`
-> (403) and `BLOCKED` paths, `RESEND_BLOCKED` to revision 2,
-> `SINK_REDRIVE` (backfill and `FAILED`), `StartIngestRedrive` (BUS: empty
-> queue; DIRECT: 400) and the `DeliveriesFailed` alarm. A run of
-> 2026-11-18 proved the stack update through the bucket configuration
-> deny (116 s). Unit tests: 107.
-> A third run on 2026-11-19 (`BUS`, after the filter fix and with
-> `AWS_IAM` HTTP sinks) passed all 54 checks: deploy 228 s, test 40
-> minutes, delete 183 s. It proved an `HTTP` sink `SENT` to an `AWS_IAM`
-> function URL (SigV4 as the dispatcher role), revision 2 `SENT` after the
-> resend, and the receiver's log of both records.
-> A fourth run the same day, with `ingestPath: DIRECT` on the same code as
-> the third run (the first `AWS_IAM` sink code, before the review fixes),
-> also passed all 54 checks (deploy 233 s, test 80 minutes, delete 182 s).
-> A fifth run (`BUS`), after the review fixes of the `AWS_IAM` sink code
-> (ADR-0007; later review rounds changed only tests and docs), passed all
-> 54 checks: deploy 229 s, test 50 minutes, delete 182 s. The receiver
-> refused an unsigned call with 403 `AccessDenied`, and signed deliveries
-> to its URL with a repeated query key (`?tag=a&tag=b`) reached `SENT`.
-> Unit tests (current build): 159.
-> **Not exercised live yet:** `StartIngestRedrive` with messages in the queue, the
-> close of an hour after `recountWindowHours`, a cell in a second account,
-> and the hook script against a deployed API.
+> **Status: implemented and verified.** The integration test
+> ([`integration-test.md`](integration-test.md)) last passed in a
+> non-production account in eu-central-1 on 2026-11-19 on both ingest
+> paths, 54 of 54 checks each: `ingestPath: BUS` (deploy 228 s, test about
+> 40 minutes, delete 183 s) and `ingestPath: DIRECT` (deploy 233 s, test
+> 80 minutes, delete 182 s). The runs covered registration and
+> offboarding, admission and per-event refusals, the hourly count, a late
+> event's `ADJUSTMENT`, re-admission, the `S3_EXPORT` sink, the `HTTP` sink
+> (`SENT` to an `AWS_IAM` function URL signed as the dispatcher role,
+> `FAILED`, `BLOCKED`, `RESEND_BLOCKED` to revision 2, `SINK_REDRIVE`),
+> `StartIngestRedrive`, the `DeliveriesFailed` alarm, `UsageSubscriber`
+> readers on the usage bus (and, on `BUS`, on the ingest bus), and a stack
+> update through the raw bucket's configuration deny. The two paths differ
+> only before the raw store; the `BUS` run is on the current code. A
+> delete leaves only the CDK provider log groups (§11). Unit tests:
+> 177.
+> **Not exercised live:** `StartIngestRedrive` with messages in the queue,
+> the close of an hour after `recountWindowHours`, a cell or a bus
+> subscriber in a second account (the AWS RAM shares and the share guard
+> of §4.1), and the hook script against a deployed API.
 
 This document describes what is built. The design is in
 [`design/tenant-usage-metering.spec.md`](design/tenant-usage-metering.spec.md),
@@ -61,15 +47,15 @@ usage bus.
 | Registrar (`<fleet>-global-hook`) | SigV4 as a role in `registrarPrincipalArns` | the four registration writes |
 | Operator | SigV4 as a role in `operatorPrincipalArns` | every admin route but the registration writes |
 | Reader | SigV4 as a role in `readerPrincipalArns` | `GetUsage`, `ListUsage` |
-| Bus reader | its account (the metering account or a shared one) | its own `UsageSubscriber` |
+| Bus reader | its account: the metering account, or one the bus is shared with through AWS RAM (§4.1) | its own `UsageSubscriber` |
 
 Two layers check each route, from one table
 ([`src/api/routes.ts`](src/api/routes.ts)):
 
 1. The API's resource policy has an allow and an explicit deny per caller
    set, keyed on `aws:PrincipalArn`. The ingest route admits
-   `arn:aws:iam::*:role/<fleet>-ue-*`; every other route admits only its
-   listed roles.
+   `arn:<partition>:iam::*:role/<fleet>-ue-*`; every other route admits
+   only its listed roles.
 2. The admin function reduces the verified caller ARN to its role and
    checks the same table again before it runs an operation. The ingest
    function reduces it to an emitter role and looks the role up in the
@@ -85,13 +71,15 @@ Two layers check each route, from one table
 | Ingest bus | EventBridge Custom Event Bus; resource policy lets only the ingest role publish | [`src/construct/pipeline.ts`](src/construct/pipeline.ts) |
 | Ingest subscriber | `AWS::EventsV2::Subscriber` to Firehose, batches of 500, 24 h and 185 attempts, SQS dead-letter queue | same |
 | Raw stream | Firehose, dynamic partitioning on the event hour into `raw/hour=…/` | same |
+| Bus shares | one AWS RAM resource share per bus with a non-empty subscriber list, managed permission `AWSRAMEventBridgeEventBusV2SubscribeOnly` | same |
+| Share guard | custom resource that reads the registry before the shares change and fails the deploy if a listed account holds a registered cell | [`src/guard/share-guard.function.ts`](src/guard/share-guard.function.ts) |
 | Table | DynamoDB `TableV2`, on demand, PITR, TTL, stream with both images, three sparse indexes | [`src/construct/table.ts`](src/construct/table.ts) |
 | Object tracker | Lambda on S3 notifications for `raw/`, `readmitted/` and `firehose-error/`; on-failure queue | [`src/tracker/`](src/tracker/) |
 | Recounter | Step Functions Standard, 25-minute timeout; one Lambda task (`count`, and `fail` on the catch path) | [`src/recount/`](src/recount/) |
 | Scheduler | Lambda on an EventBridge Scheduler schedule, every 5 minutes, in the stack's own schedule group | [`src/scheduler/`](src/scheduler/) |
 | Record publisher | Lambda on the table stream (filtered to usage records holding a marker), and on a second 5-minute schedule for the sweep | [`src/publisher/`](src/publisher/) |
 | Usage bus | EventBridge Custom Event Bus; only the publisher role may publish | [`src/construct/pipeline.ts`](src/construct/pipeline.ts) |
-| Sink dispatcher | Lambda on the delivery queue (batch 10, at most 10 concurrent) | [`src/dispatcher/`](src/dispatcher/) |
+| Sink dispatcher | Lambda on the delivery queue (batch 10, at most 10 concurrent); published as `dispatcherRole` for `AWS_IAM` sink grants | [`src/dispatcher/`](src/dispatcher/) |
 | Job workers | three Lambda handlers in one bundle: jobs (`RECOUNT`, `SINK_REDRIVE`, `RESEND_BLOCKED`), re-admission, ingest redrive | [`src/jobs/`](src/jobs/) |
 | `UsageSubscriber` | published construct: a subscriber, a dead-letter queue, two alarms | [`src/subscriber/`](src/subscriber/) |
 
@@ -111,7 +99,8 @@ its own log group, its own role with no managed policy.
 | recounter | usage records, hour items | `raw/`, `readmitted/`, table |
 | scheduler | hour items; starts recounter executions | the `pending` index, the tracker failure queue |
 | publisher | removes markers | stream, outbox index; publishes to the usage bus; the delivery queue |
-| dispatcher | sink states, revision-2 records; the export bucket | table, secrets under `<fleet>/metering/sinks/` |
+| dispatcher | sink states, revision-2 records; the export bucket; invokes the `AWS_IAM` sink endpoints the deployer grants | table, secrets under `<fleet>/metering/sinks/` (`SECRET` sinks) |
+| share guard | | registry |
 | firehose | `raw/`, `firehose-error/` | |
 | subscriber | Firehose; the ingest dead-letter queue | |
 | schedule | invokes the scheduler and the publisher | |
@@ -136,6 +125,27 @@ Resource policies deny every principal but these roles (spec §3.5):
 Trust: Firehose on its stream ARN; the subscriber role on its subscriber
 ARN pattern; Scheduler on the stack's schedule group ARN (Scheduler sets
 `aws:SourceArn` to the group, not the schedule).
+
+### 4.1 Bus sharing
+
+`rawSubscriberAccountIds` (`BUS` only) and `usageSubscriberAccountIds`
+name the vendor accounts that read a bus (ADR-0006). For a non-empty list
+the construct creates an AWS RAM resource share of that bus with those
+accounts and the managed permission
+`AWSRAMEventBridgeEventBusV2SubscribeOnly`: the account may create, update
+and describe its own subscribers, and may not publish. External principals
+are allowed, so an account outside the metering account's organization
+can be listed; it accepts the resource share invitation before it can use
+the bus. Every subscriber account then attaches a `UsageSubscriber`.
+
+No account may hold cells and read a bus. The check runs at both ends:
+`PutCellEmitter` refuses a cell in a listed account or the metering
+account (`ACCOUNT_NOT_ALLOWED`), and the share guard, a custom resource
+that runs before the shares change, reads the registry and fails the
+deploy if any listed account already holds a registered cell. A subscriber
+created while its account was listed keeps delivering after the account
+is removed from the share; the vendor revokes it with EventBridge
+`RevokeResource`.
 
 ## 5. Data model
 
@@ -212,6 +222,15 @@ queued. A record without `billingAccount` for a sink that needs one
 follows spec §4.7: revision 2 when the binding has an account, `BLOCKED`
 otherwise.
 
+An `HTTP` sink authenticates in one of two ways (spec §4.4). `SECRET`
+reads the sink's secret under `<fleet>/metering/sinks/` and sends it as a
+header; a stored `SECRET` sink without a secret name is `FAILED` at once.
+`AWS_IAM` signs each delivery with SigV4 as the dispatcher role, only for a
+Lambda function URL or API Gateway host, checked again before each send; a
+stored sink that fails the check is `FAILED` with `AUTH_TARGET_INVALID`
+(ADR-0007). The deployer grants `dispatcherRole` invoke on the billing
+endpoint.
+
 ## 9. Jobs
 
 `Start*` writes the job `RUNNING` and invokes its worker asynchronously.
@@ -220,13 +239,73 @@ with that reason and can be started again. `READMIT` judges each event
 with its `receivedAt` as the clock and applies the close guard on the real
 clock before each write.
 
-## 10. Observability
+## 10. Observability and costs
 
-Metrics are written in the embedded metric format, namespace
-`TenantUsageMetering/<construct id>`, no tenant dimension. Sixteen alarms
-(spec §3.1, §3.2, §3.5, §4.5, §4.7), all sent to `alarmTopicArn` when one is
-given, including the two heartbeats: the scheduler has not run for 15
-minutes, and hours wait past their grace with none counted for 2 hours.
+**Logs.** Every function writes JSON lines through one logger
+([`src/shared/logger.ts`](src/shared/logger.ts)) that keeps only
+allow-listed fields and drops any value that looks like a URL, a header or
+a SigV4 parameter. `tenantId` is an allow-listed field. The lines the
+functions write name the cell, application, meter, sink, hour or job, and
+none names a tenant, because a batch, an hour and a delivery each span
+tenants. API Gateway access logs carry the caller ARN (for an emitter,
+`<fleet>-ue-<cellId>`) and the request id. The per-tenant view is the
+service's own output: every event in the raw and error objects carries its
+`tenantId`, and usage records are keyed by tenant (`GetUsage`,
+`ListUsage`).
+
+**Metrics.** Embedded metric format, namespace
+`TenantUsageMetering/<construct id>`
+([`src/shared/metrics.ts`](src/shared/metrics.ts)). Dimensions have low
+cardinality (a reason, a sink id); no metric has a tenant dimension.
+CloudWatch bills each custom metric, that is each unique combination of
+name and dimensions, per month
+([CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/)), so a
+tenant dimension would add one billed metric per tenant for each metric
+name, while the usage records already hold exact per-tenant counts for
+every hour. Sixteen alarms (spec §3.1, §3.2, §3.5, §4.5, §4.7), all sent
+to `alarmTopicArn` when one is given, including the two heartbeats: the
+scheduler has not run for 15 minutes, and hours wait past their grace
+with none counted for 2 hours.
+
+**Costs.** Every resource is pooled; nothing is tagged per tenant. The
+sample's own records are the attribution data. Each usage record carries
+`eventCount`, the accepted and deduplicated events of one tenant,
+application and meter in one hour; on an `ADJUSTMENT` it is the new count
+for that key, so the latest record of each key holds the count. A
+tenant's share of an hour is
+
+```
+share(t, h) = Σ eventCount(t, *, *, h) / Σ eventCount(*, *, *, h)
+records(t, h) = number of records of tenant t in hour h, all revisions
+```
+
+and its cost
+
+```
+tenant cost ≈ Σ over hours h:  share(t, h) × per-event cost(h)
+                             + records(t, h) / records(*, h) × per-record cost(h)
+            + fixed cost of the month / tenants with a record in the month
+```
+
+- **Per-event cost**: API Gateway requests and ingest Lambda time (one
+  call carries up to 100 events of several tenants, so they are split by
+  event), ingest bus publishes and deliveries, Firehose ingestion, S3
+  writes and storage of `raw/`, and the recounter's execution and reads.
+  Firehose and S3 bill by bytes; when tenants' events differ much in size,
+  split those two by each tenant's bytes in the hour's raw objects instead.
+- **Per-record cost**: table writes and stream reads of records, usage
+  bus publishes and subscriber deliveries, sink deliveries.
+- **Fixed cost, split equally**: the two 5-minute schedules and the
+  functions they run, the alarms, the secrets of `SECRET` sinks, the
+  table's storage of registrations, meters and sinks, and the log groups.
+- **Unattributable remainder**: refused events and calls from unregistered
+  roles, whose `tenantId` is only the emitter's claim, and the cost of
+  jobs (re-admission, redrives, recounts). Refusals can be charged to the
+  emitter's cell, which the `error/` objects and the access log name; the
+  rest is vendor overhead.
+
+Unit prices come from each service's pricing page; the sample states no
+figures.
 
 ## 11. Deployment and teardown
 
@@ -241,6 +320,8 @@ which CDK creates outside the stack.
 - An alarm fires when a delivery becomes `BLOCKED`, not after 24 hours
   `BLOCKED`; the timed alarm needs an index of blocked deliveries.
 - `SINK_REDRIVE` scans the usage records.
+- No log line or metric names a tenant (§10); per-tenant questions are
+  answered from the raw objects and the usage records.
 - The integration test reads stack outputs for the stand-in callers' role
   ARNs; a consumer reads the published parameter instead (integration-test.md,
   test-only shortcuts).

@@ -32,7 +32,7 @@ function items(byKey: Record<string, Record<string, unknown>>) {
 }
 const transactions = () => ddb.commandCalls(TransactWriteCommand).map((call) => call.args[0].input.TransactItems!);
 
-describe('registrations under TTL (review v1 #2, #3, #5)', () => {
+describe('registrations under TTL', () => {
   test('a first PutCellEmitter guards the cell item against another account', async () => {
     items({});
     await putCellEmitter(deps, ctx, { cellId: CELL, applicationId: 'demo-app', accountId: '111122223333', trace: {} });
@@ -69,7 +69,7 @@ describe('registrations under TTL (review v1 #2, #3, #5)', () => {
     expect(first[0].Put?.Item).toMatchObject({ PK: `CELL#${CELL}`, billingAccount: 'acct-1', resendPending: true });
     expect(first[1].Put?.Item).toMatchObject({ PK: 'TENANT#t1', SK: `APP#demo-app#CELL#${CELL}`, billingAccount: 'acct-1' });
     expect(first[1].Put?.ConditionExpression).toBeUndefined();
-    // The flag is cleared alone, on a condition that it is still set (review v2 #1).
+    // The flag is cleared alone, on a condition that it is still set.
     const clears = ddb.commandCalls(UpdateCommand).map((call) => call.args[0].input);
     expect(clears.map((input) => [input.UpdateExpression, input.ConditionExpression])).toEqual([
       ['REMOVE resendPending', 'resendPending = :true AND billingAccount = :b'],
@@ -90,7 +90,7 @@ describe('registrations under TTL (review v1 #2, #3, #5)', () => {
   });
 });
 
-describe('metrics (review v1 #1)', () => {
+describe('metrics', () => {
   test('a dimensioned metric is also written without dimensions, which the alarms read', () => {
     const lines: string[] = [];
     const write = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {

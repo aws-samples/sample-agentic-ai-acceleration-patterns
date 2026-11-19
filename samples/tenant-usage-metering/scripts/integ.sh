@@ -8,8 +8,21 @@
 #
 #   AWS_REGION=eu-central-1 npx projen integ
 #
-# Knobs: INTEG_KEEP_STACK=1 skips the destroy; INTEG_LATE_GRACE_MINUTES
-# (default 6) is the demo stack's lateGraceMinutes.
+# Knobs:
+#   INTEG_STACK_NAME                 stack name (default TenantUsageMetering)
+#   INTEG_FLEET                      the demo stack's fleetName (default demo)
+#   INTEG_INGEST_PATH                BUS or DIRECT (default BUS)
+#   INTEG_PUBLISH_SERVICE_PARAMETER  true or false: write the published
+#                                    parameter (default true; false for a
+#                                    second stack in the same account)
+#   INTEG_LATE_GRACE_MINUTES         the demo stack's lateGraceMinutes (default 6)
+#   INTEG_KEEP_STACK=1               skips the destroy
+#
+# A DIRECT run beside a BUS stack:
+#
+#   INTEG_STACK_NAME=TenantUsageMeteringDirect INTEG_FLEET=demo2 \
+#     INTEG_INGEST_PATH=DIRECT INTEG_PUBLISH_SERVICE_PARAMETER=false \
+#     AWS_REGION=eu-central-1 npx projen integ
 
 set -uo pipefail
 
@@ -23,11 +36,23 @@ export CDK_DEFAULT_ACCOUNT
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
-stack=TenantUsageMetering
-out="cdk.integ.out"
+stack="${INTEG_STACK_NAME:-TenantUsageMetering}"
+fleet="${INTEG_FLEET:-demo}"
+ingest_path="${INTEG_INGEST_PATH:-BUS}"
+publish="${INTEG_PUBLISH_SERVICE_PARAMETER:-true}"
+if [[ "$ingest_path" != BUS && "$ingest_path" != DIRECT ]]; then
+  echo "INTEG_INGEST_PATH must be BUS or DIRECT, got '$ingest_path'" >&2
+  exit 2
+fi
+if [[ "$publish" != true && "$publish" != false ]]; then
+  echo "INTEG_PUBLISH_SERVICE_PARAMETER must be true or false, got '$publish'" >&2
+  exit 2
+fi
+out="cdk.integ.out/${stack}"
 grace="${INTEG_LATE_GRACE_MINUTES:-6}"
 mkdir -p "$out"
-context=(-c integLocalCell=true -c integHttpReceiver=true -c "lateGraceMinutes=${grace}")
+context=(-c "stackName=${stack}" -c "fleetName=${fleet}" -c "ingestPath=${ingest_path}" -c "publishServiceParameter=${publish}"
+  -c integLocalCell=true -c integHttpReceiver=true -c "lateGraceMinutes=${grace}")
 
 teardown() {
   if [[ "${INTEG_KEEP_STACK:-0}" == 1 ]]; then

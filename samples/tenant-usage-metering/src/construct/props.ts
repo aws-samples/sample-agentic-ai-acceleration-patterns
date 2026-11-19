@@ -40,9 +40,19 @@ export interface TenantUsageMeteringProps {
   readonly ingestBusRetentionDays?: number;
   /** Usage bus retention, days. @default 7 */
   readonly usageBusRetentionDays?: number;
-  /** Vendor accounts the ingest bus is shared with. @default [] */
+  /**
+   * Vendor accounts the ingest bus is shared with through AWS RAM, under the
+   * SubscribeOnly permission (`BUS` only; ADR-0006). None of them may hold a
+   * cell: `PutCellEmitter` refuses one there, and a deploy that adds an
+   * account already holding a registered cell fails. @default []
+   */
   readonly rawSubscriberAccountIds?: string[];
-  /** Vendor accounts the usage bus is shared with. @default [] */
+  /**
+   * Vendor accounts the usage bus is shared with through AWS RAM, under the
+   * SubscribeOnly permission (ADR-0006). None of them may hold a cell:
+   * `PutCellEmitter` refuses one there, and a deploy that adds an account
+   * already holding a registered cell fails. @default []
+   */
   readonly usageSubscriberAccountIds?: string[];
   /**
    * The role CloudFormation runs as, exempt from the bucket configuration

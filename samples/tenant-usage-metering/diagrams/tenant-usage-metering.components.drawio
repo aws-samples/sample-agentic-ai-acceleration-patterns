@@ -104,7 +104,7 @@
         <mxCell id="c96" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;strokeColor=#545B64;strokeWidth=1.5;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="c59" target="c67"><mxGeometry relative="1" as="geometry"><mxPoint x="1398" y="520" as="sourcePoint"/><mxPoint x="1675" y="520" as="targetPoint"/></mxGeometry></mxCell>
         <mxCell id="c97" value="UsageRecorded" style="text;html=0;align=center;verticalAlign=bottom;fontSize=10;fontStyle=0;fontColor=#545B64;spacing=0;spacingTop=0;" vertex="1" parent="1"><mxGeometry x="1408" y="500" width="100" height="14" as="geometry"/></mxCell>
         <mxCell id="c98" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;strokeColor=#545B64;strokeWidth=1.5;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="c43" target="c63"><mxGeometry relative="1" as="geometry"><mxPoint x="1592" y="344" as="sourcePoint"/><mxPoint x="1675" y="344" as="targetPoint"/></mxGeometry></mxCell>
-        <mxCell id="c99" value="HTTPS" style="text;html=0;align=center;verticalAlign=bottom;fontSize=10;fontStyle=0;fontColor=#545B64;spacing=0;spacingTop=0;" vertex="1" parent="1"><mxGeometry x="1612" y="324" width="44" height="14" as="geometry"/></mxCell>
+        <mxCell id="c99" value="HTTPS,&#xa;secret or&#xa;SigV4" style="text;html=0;align=center;verticalAlign=bottom;fontSize=10;fontStyle=0;fontColor=#545B64;spacing=0;spacingTop=0;" vertex="1" parent="1"><mxGeometry x="1610" y="296" width="64" height="42" as="geometry"/></mxCell>
       </root>
     </mxGraphModel>
   </diagram>

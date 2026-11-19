@@ -39,12 +39,17 @@ export function emitterRoleName(fleet: string, cellId: string): string {
   return `${fleet}-ue-${cellId}`;
 }
 
-/** The `aws:PrincipalArn` pattern the ingest route's resource policy admits. */
-export function emitterRolePattern(fleet: string): string {
+/**
+ * The `aws:PrincipalArn` pattern the ingest route's resource policy admits.
+ * `partition` is the stack's partition (`Aws.PARTITION` at synth), so the
+ * pattern matches what `ASSUMED_ROLE` accepts at run time in any `aws*`
+ * partition.
+ */
+export function emitterRolePattern(fleet: string, partition: string): string {
   if (!FLEET.test(fleet)) {
     throw new Error(`fleet name ${JSON.stringify(fleet)} is outside [a-z0-9][a-z0-9-]{0,31}`);
   }
-  return `arn:aws:iam::*:role/${fleet}-ue-*`;
+  return `arn:${partition}:iam::*:role/${fleet}-ue-*`;
 }
 
 /**

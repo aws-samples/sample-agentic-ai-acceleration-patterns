@@ -259,7 +259,7 @@ export class Scheduler {
     while (replayed < MAX_REPLAYS_PER_RUN) {
       const out = await this.deps.sqs.send(
         // Hidden for the scheduler's whole run, so a failed replay is not received
-        // again and counted twice (review v3 #2).
+        // again and counted twice.
         new ReceiveMessageCommand({
           QueueUrl: this.deps.trackerFailureQueueUrl,
           MaxNumberOfMessages: 10,
@@ -295,7 +295,7 @@ export class Scheduler {
         }
       }
     }
-    // Visible again for the next run, which then gates only their hours (review v4 #1).
+    // Visible again for the next run, which then gates only their hours.
     for (const receipt of receipts) {
       await this.deps.sqs
         .send(new ChangeMessageVisibilityCommand({ QueueUrl: this.deps.trackerFailureQueueUrl, ReceiptHandle: receipt, VisibilityTimeout: 0 }))

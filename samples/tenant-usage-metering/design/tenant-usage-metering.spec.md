@@ -157,6 +157,8 @@ All in the metering account, one stack.
 | Sinks | `HTTP` (any billing API, field mapping by configuration), `S3_EXPORT` (JSON lines into the sample's separate export bucket, §3.5) |
 | Error store | S3 `error/hour=YYYY-MM-DDTHH/`, one object per batch with refused events, each with its reason |
 | `UsageSubscriber` | Published construct that attaches a reader to the ingest bus (`raw`) or the usage bus (`usage`) with a dead-letter queue, a retry policy and alarms built in (ADR-0006) |
+| Bus shares | One AWS RAM resource share per bus whose subscriber list is not empty, with the managed permission `AWSRAMEventBridgeEventBusV2SubscribeOnly`, external principals allowed (§3.2) |
+| Share guard | A custom resource that runs before the shares change: reads the registry and fails the deploy if an account on either subscriber list already holds a registered cell (ADR-0006) |
 
 ### 3.2 Callers and identity
 
@@ -220,8 +222,19 @@ every tenant's count of it; a distributed map in the recount is a seam
 **Bus sharing.** The ingest bus carries every tenant's checked events, and
 the usage bus every tenant's counted records, so both are shared only with
 vendor accounts: `rawSubscriberAccountIds` and `usageSubscriberAccountIds`.
+For a non-empty list the construct creates an AWS RAM resource share of
+that bus with those accounts and the managed permission
+`AWSRAMEventBridgeEventBusV2SubscribeOnly`: the account may create and
+update its own subscribers and describe the bus, and may not publish.
+External principals are allowed; an account outside the organization
+accepts the resource share invitation before it can use the bus.
 `PutCellEmitter` refuses a cell in any account on either list, vendor-owned
-or not, and in the metering account itself (ADR-0006). `UsageSubscriber`'s `meters` and `tenants` filters (a `DATA` pattern under `detail`, since `DATA` is the `PutEvents` envelope) are a
+or not, and in the metering account itself (`ACCOUNT_NOT_ALLOWED`), and
+a deploy-time guard reads the registry before the shares change and fails
+a deploy that lists an account already holding a registered cell
+(ADR-0006). A subscriber created while its account was listed keeps
+delivering after the account leaves the share, until the vendor revokes
+it with EventBridge `RevokeResource`. `UsageSubscriber`'s `meters` and `tenants` filters (a `DATA` pattern under `detail`, since `DATA` is the `PutEvents` envelope) are a
 convenience; an account a bus is shared with can create an unfiltered
 subscriber.
 
@@ -243,8 +256,8 @@ subscriber.
 | `ingestPath` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose, events packed per hour) | `BUS` |
 | `ingestBusRetentionDays` | ingest bus retention | `1` |
 | `usageBusRetentionDays` | usage bus retention | `7` |
-| `rawSubscriberAccountIds` | vendor accounts the ingest bus is shared with | `[]` |
-| `usageSubscriberAccountIds` | vendor accounts the usage bus is shared with | `[]` |
+| `rawSubscriberAccountIds` | vendor accounts the ingest bus is shared with through AWS RAM, subscribe only (`BUS` only); none may hold a cell | `[]` |
+| `usageSubscriberAccountIds` | vendor accounts the usage bus is shared with through AWS RAM, subscribe only; none may hold a cell | `[]` |
 | `deploymentRoleArn` | the role CloudFormation runs as, exempt from the bucket configuration denies (§3.5) | the bootstrap `cfn-exec` role |
 | `alarmTopicArn` | optional SNS topic for every alarm of the stack | none |
 | `testOnlyAllowCellsInMeteringAccount` | test only: lets `PutCellEmitter` register a cell in the metering account, so a one-account integration test can run an emitter; never set in a deployment | `false` |
@@ -329,7 +342,7 @@ URL as its default (control-plane R-34).
 |---|---|
 | Raw bucket (`raw/`, `readmitted/`, `error/`, `firehose-error/`) | The bucket policy is written as explicit denies with `aws:PrincipalArn` conditions, so an identity-policy allow in the metering account does not get around it: `s3:PutObject` is denied under `raw/` and `firehose-error/` to all but the Firehose role, under `readmitted/` to all but the re-admission function, and under `error/` to all but the ingest, re-admission and redrive functions; `s3:DeleteObject` and `s3:DeleteObjectVersion` are denied to all but the stack's auto-delete-objects provider role, which acts only when the stack is deleted; `s3:PutLifecycleConfiguration`, `s3:PutBucketVersioning`, `s3:PutBucketPolicy`, `s3:DeleteBucketPolicy` and `s3:PutBucketNotification` are denied to all but the deployment role and the auto-delete-objects and bucket-notifications provider roles. Versioning is on, so an overwrite keeps the earlier version for audit. Lifecycle expires current versions after `rawRetentionDays` (`raw/`, `readmitted/`, `firehose-error/`) or `errorRetentionDays` (`error/`), expires noncurrent versions 7 days later, and removes expired delete markers. Object Lock is a production option |
 | Export bucket | A separate bucket. Its policy denies `s3:PutObject` to all but the dispatcher, and deletes and configuration changes as on the raw bucket; lifecycle expires objects after `rawRetentionDays`. An `S3_EXPORT` sink names only a key prefix inside it |
-| Ingest bus | The bus resource policy denies `events:PutEvents` to all but the ingest function role. The deny grants nothing, so each bus writer also has an identity allow (verified in a test account, 2026-11-18) |
+| Ingest bus | The bus resource policy denies `events:PutEvents` to all but the ingest function role. The deny grants nothing, so each bus writer also has an identity allow |
 | Usage bus | The bus resource policy denies `events:PutEvents` to all but the record publisher role, which also runs the scheduler's `publishPending` sweep, so no other principal can publish a `UsageRecorded` that readers would bill from |
 | Table | A DynamoDB resource-based policy denies `dynamodb:PutItem`, `UpdateItem`, `DeleteItem`, `BatchWriteItem`, `PartiQLInsert`, `PartiQLUpdate`, `PartiQLDelete` and `ConditionCheckItem` on the table to all but the stack's function and state machine roles, so no other principal can write a registration, meter, sink or record |
 | Ingest dead-letter queue | The queue policy denies `sqs:SendMessage` to all but `events.amazonaws.com` with `aws:SourceArn` = the ingest subscriber |
@@ -780,7 +793,15 @@ Errors:
   400 or a 413 is not resent. A batch never exceeds 1,048,576 bytes of UTF-8;
   an emitter measures the encoded body and splits a larger one before it
   sends.
-- For an `HTTP` sink: the endpoint and a secret in Secrets Manager.
+- For an `HTTP` sink: the endpoint, and either a secret in Secrets
+  Manager under `<fleet>/metering/sinks/` (`auth: SECRET`) or, for
+  `auth: AWS_IAM`, an invoke grant to the published `dispatcherRole` on
+  that endpoint only (`lambda:InvokeFunctionUrl` or `execute-api:Invoke`),
+  plus, for an endpoint in another account, a resource policy there that
+  names the role (ADR-0007).
+- **In each subscriber account**: acceptance of the AWS RAM resource
+  share invitation when the account is outside the metering account's
+  organization, and a `UsageSubscriber` with its own target and role.
 
 ### 6.2 What the sample promises
 
@@ -812,7 +833,9 @@ Errors:
 - Construct `TenantUsageMetering` (`src/index.ts`): the props of §3.3;
   exposes `apiUrl`, `ingestStatement` and `registrarStatement` (IAM
   policy statements a deployer places in other accounts),
-  `ingestBusArn`, `usageBusArn`, `emitterRoleNamePattern`.
+  `ingestBusArn`, `usageBusArn`, `emitterRoleNamePattern`, and
+  `dispatcherRole` (`iam.IRole`), the role an `AWS_IAM` sink endpoint
+  grants invoke to (ADR-0007).
 - Construct `UsageSubscriber` (`src/index.ts`, ADR-0006):
 
   | Prop | Meaning | Default |
@@ -854,8 +877,8 @@ Errors:
 ## 7. Open questions
 
 1. The `PutEvents` throttle near 1,400 events a second (§5.1): which
-   quota it is, and whether it can be raised, needs an answer from the
-   EventBridge team.
+   Custom Event Bus quota it is, and whether it is adjustable, is not
+   yet documented.
 2. Application lifecycle events: does metering need `PutApplication` and
    `DeleteApplication` hooks (a new control-plane event), or do cell
    events cover it?

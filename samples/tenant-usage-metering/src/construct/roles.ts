@@ -68,7 +68,7 @@ export interface RoleNames {
   /**
    * The stack's own EventBridge Scheduler schedule group. Scheduler sets
    * `aws:SourceArn` to the schedule group, not the schedule, when it assumes
-   * its role (verified in a test account, 2026-11-18: a schedule ARN is refused).
+   * its role (verified in a test account: a schedule ARN is refused).
    */
   readonly scheduleGroupName: string;
 }

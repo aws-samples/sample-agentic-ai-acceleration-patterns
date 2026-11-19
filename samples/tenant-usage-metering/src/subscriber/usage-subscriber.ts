@@ -67,7 +67,7 @@ export function subscriberFilters(meters: string[] | undefined, tenants: string[
   }
   // For PutEvents, DATA is the EventBridge envelope and the record is under
   // `detail` (EventBridge user guide, "Filtering events for a subscriber").
-  // A pattern on the top-level fields matched nothing (test account, 2026-11-19).
+  // A pattern on the top-level fields matched nothing (seen in a test account).
   return Object.keys(data).length > 0 ? [{ scope: 'DATA', pattern: JSON.stringify({ detail: data }) }] : [];
 }
 

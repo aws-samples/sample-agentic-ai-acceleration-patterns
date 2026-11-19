@@ -28,7 +28,7 @@ export function bodyBytes(body: string | null | undefined, isBase64Encoded: bool
  * The event with lowercase header names. API Gateway keeps the client's
  * casing (`X-Control-Plane-Execution-Id`), and the SSDK's deserialisers read
  * modelled headers by their lowercase names, so a header sent in another
- * case was dropped (test account, 2026-11-18).
+ * case was dropped (seen in a test account).
  */
 export function lowercaseHeaders(event: APIGatewayProxyEvent): APIGatewayProxyEvent {
   const lower = <T>(headers: Record<string, T> | null | undefined): Record<string, T> =>

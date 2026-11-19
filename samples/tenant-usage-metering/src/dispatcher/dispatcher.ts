@@ -87,6 +87,21 @@ export function needsBillingAccount(sink: Pick<SinkItem, 'type' | 'mapping'>): b
   return sink.type === 'HTTP' && Object.values(sink.mapping ?? {}).some((source) => 'recordField' in source && source.recordField === 'billingAccount');
 }
 
+/**
+ * Why a stored `HTTP` sink can never deliver, or undefined: an `AWS_IAM`
+ * endpoint that is not a function URL or API Gateway host, or a `SECRET`
+ * sink that names no secret.
+ */
+export function malformedSinkReason(sink: Pick<SinkItem, 'type' | 'auth' | 'endpoint' | 'secretName'>): string | undefined {
+  if (sink.type !== 'HTTP') {
+    return undefined;
+  }
+  if (sink.auth === 'AWS_IAM') {
+    return iamSinkTarget(sink.endpoint) === undefined ? 'AUTH_TARGET_INVALID' : undefined;
+  }
+  return sink.secretName === undefined || sink.secretName.length === 0 ? 'SECRET_NAME_MISSING' : undefined;
+}
+
 /** Backoff of a retried delivery: 30 s doubling per receive, at most 15 minutes. */
 export function retryDelaySeconds(receiveCount: number): number {
   return Math.min(900, 30 * 2 ** Math.max(0, receiveCount - 1));
@@ -157,13 +172,14 @@ export class Dispatcher {
       return { done: true };
     }
 
-    // CreateSink and UpdateSink refuse such an endpoint, so only a direct
-    // table write gets here; it can never succeed, so it fails at once.
-    if (sink.type === 'HTTP' && sink.auth === 'AWS_IAM' && iamSinkTarget(sink.endpoint) === undefined) {
-      if (await this.setState(record, message.sinkId, { status: 'FAILED', reason: 'AUTH_TARGET_INVALID' })) {
+    // CreateSink and UpdateSink refuse such a sink, so only a direct table
+    // write gets here; it can never succeed, so it fails at once.
+    const malformed = malformedSinkReason(sink);
+    if (malformed !== undefined) {
+      if (await this.setState(record, message.sinkId, { status: 'FAILED', reason: malformed })) {
         metrics.add(METRIC.deliveryFailed, 1, { sinkId: message.sinkId });
       }
-      log.warn('delivery failed', { sinkId: sink.sinkId, reason: 'AUTH_TARGET_INVALID' });
+      log.warn('delivery failed', { sinkId: sink.sinkId, reason: malformed });
       return { done: true };
     }
 
@@ -190,7 +206,7 @@ export class Dispatcher {
     // A redirect is not followed, so it can never succeed; nor can a 4xx but 408 and 429.
     const permanent = (status >= 300 && status < 400) || (status >= 400 && status < 500 && status !== 408 && status !== 429);
     if (permanent || this.now() - Date.parse(message.firstQueuedAt) >= DELIVERY_WINDOW_MS) {
-      // Counted only when the write took: a duplicate that already delivered keeps SENT (review v2 #3).
+      // Counted only when the write took: a duplicate that already delivered keeps SENT.
       if (await this.setState(record, sink.sinkId, { status: 'FAILED', reason: permanent ? `HTTP_${status}` : 'RETRIES_EXHAUSTED' })) {
         metrics.add(METRIC.deliveryFailed, 1, { sinkId: sink.sinkId });
       }
@@ -302,7 +318,11 @@ export class Dispatcher {
       const response = await this.deps.send(sink.endpoint, { ...init, headers: await this.deps.sign(sink.endpoint, init, target) });
       return response.status;
     }
-    const [header, value] = authHeader(await this.secret(sink.secretName!));
+    if (sink.secretName === undefined || sink.secretName.length === 0) {
+      // dispatch() already failed such a sink; kept so send() never reads an unnamed secret.
+      throw new Error('the SECRET sink names no secret');
+    }
+    const [header, value] = authHeader(await this.secret(sink.secretName));
     const response = await this.deps.send(sink.endpoint, { ...init, headers: { ...init.headers, [header]: value } });
     return response.status;
   }

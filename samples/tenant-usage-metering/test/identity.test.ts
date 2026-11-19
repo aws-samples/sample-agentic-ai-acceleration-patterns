@@ -36,6 +36,10 @@ describe('emitter identity (spec §3.2, ADR-0001)', () => {
     expect(emitterRoleName(fleet, CELL).length).toBe(62);
     expect(() => emitterRoleName('Bad_Fleet', CELL)).toThrow(/outside/);
     expect(() => emitterRoleName('demo', 'x')).toThrow(/ULID/);
-    expect(emitterRolePattern('demo')).toBe('arn:aws:iam::*:role/demo-ue-*');
+    expect(emitterRolePattern('demo', 'aws')).toBe('arn:aws:iam::*:role/demo-ue-*');
+    expect(emitterRolePattern('demo', 'aws-cn')).toBe('arn:aws-cn:iam::*:role/demo-ue-*');
+    // The pattern and the run-time check agree in another partition.
+    const caller = emitterFromCallerArn(`arn:aws-cn:sts::111122223333:assumed-role/${emitterRoleName('demo', CELL)}/s1`, 'demo');
+    expect(caller?.roleArn).toMatch(/^arn:aws-cn:iam::111122223333:role\/demo-ue-/);
   });
 });

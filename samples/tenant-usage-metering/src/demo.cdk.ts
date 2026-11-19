@@ -157,7 +157,7 @@ export class TenantUsageMeteringDemoStack extends Stack {
           reservedConcurrentExecutions: 2,
         });
         const url = receiver.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
-        receiver.grantInvokeUrl(this.metering.roles.dispatcher);
+        receiver.grantInvokeUrl(this.metering.dispatcherRole);
         new CfnOutput(this, 'HttpReceiverUrl', { value: url.url });
         new CfnOutput(this, 'HttpReceiverLogGroup', { value: receiver.logGroup.logGroupName });
       }
@@ -213,6 +213,33 @@ export class TenantUsageMeteringDemoStack extends Stack {
     new CfnOutput(this, 'UsageAllQueueUrl', { value: allQueue.queueUrl });
     new CfnOutput(this, 'UsageAllReaderDlqUrl', { value: unfiltered.deadLetterQueue.queueUrl });
     new CfnOutput(this, 'UsageAllReaderArn', { value: unfiltered.subscriber.attrSubscriberArn });
+
+    // A reader of the ingest bus (`raw`, ADR-0006): every checked usage event
+    // into a queue. `BUS` only: `DIRECT` has no ingest bus.
+    if (this.metering.ingestBusArn !== undefined) {
+      const rawQueue = new sqs.Queue(this, 'DemoRawQueue', {
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        enforceSSL: true,
+        retentionPeriod: Duration.days(4),
+      });
+      Validations.of(rawQueue).acknowledge({
+        id: 'AwsSolutions-SQS3',
+        reason: 'The demo reader queue is the target of a UsageSubscriber, whose own dead-letter queue catches failed deliveries (ADR-0006).',
+      });
+      const rawRole = new iam.Role(this, 'DemoRawReaderRole', {
+        assumedBy: new iam.ServicePrincipal('events.amazonaws.com'),
+        description: 'Delivers checked usage events to the demo raw reader queue',
+      });
+      rawQueue.grantSendMessages(rawRole);
+      const raw = new UsageSubscriber(this, 'DemoRawReader', {
+        busArn: this.metering.ingestBusArn,
+        stream: 'raw',
+        targetArn: rawQueue.queueArn,
+        role: rawRole,
+      });
+      new CfnOutput(this, 'RawQueueUrl', { value: rawQueue.queueUrl });
+      new CfnOutput(this, 'RawReaderDlqUrl', { value: raw.deadLetterQueue.queueUrl });
+    }
 
     acknowledgeWildcards(this, (path) =>
       /\/Demo[A-Za-z]+\/DefaultPolicy\//.test(path)

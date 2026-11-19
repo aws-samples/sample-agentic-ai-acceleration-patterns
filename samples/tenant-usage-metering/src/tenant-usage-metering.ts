@@ -7,7 +7,7 @@
  * ingest pipeline, the recounter and the sinks (spec §3.1).
  */
 
-import { Names } from 'aws-cdk-lib';
+import { Aws, Names } from 'aws-cdk-lib';
 import type * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import type * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -18,9 +18,10 @@ import { ADMIN_ROUTES, INGEST_ROUTE } from './api/routes';
 import { createAlarms } from './construct/alarms';
 import { createApi, STAGE_NAME } from './construct/api';
 import { type Compute, createCompute } from './construct/compute';
-import { createPipeline, type Pipeline } from './construct/pipeline';
+import { createPipeline, type Pipeline, shareBuses } from './construct/pipeline';
 import { resolveProps, type ResolvedProps, type TenantUsageMeteringProps } from './construct/props';
 import { createServiceRoles, type ServiceRoles, tableWriters } from './construct/roles';
+import { createShareGuard, SHARE_GUARD_PROVIDER_ID } from './construct/share-guard';
 import { createStorage, denyConfigurationChanges } from './construct/storage';
 import { createTable } from './construct/table';
 import { emitterRolePattern } from './shared/identity';
@@ -34,6 +35,13 @@ export class TenantUsageMetering extends Construct {
   public readonly rawBucket: s3.Bucket;
   public readonly exportBucket: s3.Bucket;
   public readonly roles: ServiceRoles;
+  /**
+   * The sink dispatcher's role. For an `AWS_IAM` HTTP sink the deployer
+   * grants this role invoke on the billing endpoint (a function URL or an
+   * API Gateway route), and across accounts names it in the endpoint's
+   * resource policy (ADR-0007).
+   */
+  public readonly dispatcherRole: iam.IRole;
   public readonly pipeline: Pipeline;
   public readonly compute: Compute;
   public readonly api: apigateway.RestApi;
@@ -66,11 +74,14 @@ export class TenantUsageMetering extends Construct {
       ingestBusName: `${unique}-ingest`,
       usageBusName: `${unique}-usage`,
       ingestSubscriberName: `${unique}-ingest-to-firehose`,
+      ingestShareName: `${unique}-ingest-share`,
+      usageShareName: `${unique}-usage-share`,
       scheduleGroupName: unique,
     };
     const namespace = `${DEFAULT_NAMESPACE}/${unique}`;
 
     this.roles = createServiceRoles(this, names);
+    this.dispatcherRole = this.roles.dispatcher;
     this.table = createTable(this, tableWriters(this.roles));
     const storage = createStorage(this, this.config, this.roles);
     this.rawBucket = storage.rawBucket;
@@ -78,7 +89,13 @@ export class TenantUsageMetering extends Construct {
     this.pipeline = createPipeline(this, this.config, this.roles, this.rawBucket, names);
     this.ingestBusArn = this.pipeline.ingestBusArn;
     this.usageBusArn = this.pipeline.usageBusArn;
-    this.emitterRoleNamePattern = emitterRolePattern(this.config.fleetName);
+    // The AWS RAM shares and, before them, the registry check (ADR-0006).
+    const sharedAccounts = [...this.config.rawSubscriberAccountIds, ...this.config.usageSubscriberAccountIds];
+    if (sharedAccounts.length > 0) {
+      const guard = createShareGuard(this, this.table, sharedAccounts);
+      shareBuses(this, this.config, this.pipeline, names, guard);
+    }
+    this.emitterRoleNamePattern = emitterRolePattern(this.config.fleetName, Aws.PARTITION);
 
     this.compute = createCompute(this, {
       config: this.config,
@@ -127,6 +144,9 @@ export class TenantUsageMetering extends Construct {
     });
 
     acknowledgeWildcards(this, (path) => {
+      if (path.includes(`/${SHARE_GUARD_PROVIDER_ID}/`)) {
+        return 'The custom-resource provider framework invokes the share guard function and its versions (`<arn>:*`); CDK owns the framework (ADR-0006).';
+      }
       if (path.includes('/FirehoseRole/')) {
         return 'Firehose writes objects under the raw/ and firehose-error/ prefixes it names at run time (hour partitions, error types); grantPut adds the multipart actions it needs (spec §3.5).';
       }

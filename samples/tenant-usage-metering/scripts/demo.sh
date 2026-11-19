@@ -72,20 +72,31 @@ call 201 "$op_key" "$op_secret" "$op_token" POST /meters \
 echo "== 4 send usage: one bound tenant, one that is not"
 sleep 2
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+hour="${now:0:13}"
 results="$(call 200 "$em_key" "$em_secret" "$em_token" POST /usage-events "$(jq -nc --arg m "$meter" --arg t "$tenant" --arg now "$now" \
   --arg e1 "$(uuidgen | tr 'A-Z' 'a-z')" --arg e2 "$(uuidgen | tr 'A-Z' 'a-z')" \
   '{events: [{eventId: $e1, tenantId: $t, meterId: $m, value: "1", time: $now}, {eventId: $e2, tenantId: "someone-else", meterId: $m, value: "1", time: $now}]}')")"
 echo "$results" | jq -c '.results'
 echo "$results" | jq -e '.results[0].result == "ACCEPTED" and .results[1].reason == "TENANT_NOT_IN_CELL"' >/dev/null
 
-echo "== 5 the hour is tracked once Firehose writes the object (up to 90 s)"
-hour="$(date -u +%Y-%m-%dT%H)"
+echo "== 5 the event's hour is tracked, OPEN, once Firehose writes the object (up to 90 s)"
+summary=""
 for _ in $(seq 1 18); do
-  if call 200 "$op_key" "$op_secret" "$op_token" GET "/hours/${hour}" 2>/dev/null | jq -e '.hourSummary.status' >/dev/null; then
-    call 200 "$op_key" "$op_secret" "$op_token" GET "/hours/${hour}" | jq -c '.hourSummary'
+  if summary="$(call 200 "$op_key" "$op_secret" "$op_token" GET "/hours/${hour}" 2>/dev/null)" &&
+    echo "$summary" | jq -e '.hourSummary.status' >/dev/null; then
     break
   fi
+  summary=""
   sleep 5
 done
+if [[ -z "$summary" ]]; then
+  echo "FAIL hour ${hour} was not tracked within 90 s" >&2
+  exit 1
+fi
+echo "$summary" | jq -c '.hourSummary'
+if ! echo "$summary" | jq -e '.hourSummary.status == "OPEN"' >/dev/null; then
+  echo "FAIL hour ${hour} is $(echo "$summary" | jq -r '.hourSummary.status'), expected OPEN" >&2
+  exit 1
+fi
 
 echo "== done: the hour is counted after it ends and its grace passes; read it with GET /tenants/${tenant}/applications/demo-app/usage?from=${hour}&to=${hour}"

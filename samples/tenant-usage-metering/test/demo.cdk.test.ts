@@ -225,3 +225,23 @@ describe('demo HTTP sink receiver (threat model T-17, M-17)', () => {
     expect(synthDemo({ integLocalCell: 'true' }).findResources('AWS::Lambda::Url')).toEqual({});
   });
 });
+
+describe('demo bus readers (ADR-0006)', () => {
+  const subscriberBuses = (template: Template): string[] =>
+    Object.values(template.findResources('AWS::EventsV2::Subscriber')).map((resource) => JSON.stringify(resource.Properties.EventBusArn));
+
+  test('BUS: a raw-stream reader on the ingest bus, with its queue and dead-letter queue as outputs', () => {
+    const template = synthDemo({});
+    expect(subscriberBuses(template).filter((arn) => arn.includes('MeteringIngestBus'))).toHaveLength(2); // the Firehose subscriber and the reader
+    const outputs = template.findOutputs('*');
+    expect(Object.keys(outputs)).toEqual(expect.arrayContaining(['RawQueueUrl', 'RawReaderDlqUrl']));
+  });
+
+  test('DIRECT: no ingest bus, so no raw-stream reader and no raw outputs', () => {
+    const template = synthDemo({ ingestPath: 'DIRECT' });
+    expect(subscriberBuses(template).filter((arn) => arn.includes('MeteringIngestBus'))).toHaveLength(0);
+    const outputs = Object.keys(template.findOutputs('*'));
+    expect(outputs).not.toContain('RawQueueUrl');
+    expect(outputs).not.toContain('RawReaderDlqUrl');
+  });
+});

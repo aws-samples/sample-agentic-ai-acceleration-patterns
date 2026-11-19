@@ -123,7 +123,7 @@ function update(
  * A registration item that TTL has not removed yet but whose `expiresAt` has
  * passed counts as absent. DynamoDB deletes expired items late, and deletes
  * the two items of a pair separately, so every read treats them alike and
- * every write repairs the other item of the pair (review v1 #2).
+ * every write repairs the other item of the pair.
  */
 function live<T extends { expiresAt?: number }>(item: T | undefined, nowMs: number): T | undefined {
   return item !== undefined && (item.expiresAt === undefined || item.expiresAt * 1000 > nowMs) ? item : undefined;
@@ -298,7 +298,7 @@ export async function listCellEmitters(
     }),
   );
   return {
-    // An item past its expiresAt is absent, as Get* treats it (review v2 #6).
+    // An item past its expiresAt is absent, as Get* treats it.
     emitters: ((page.Items ?? []) as EmitterItem[]).filter((item) => live(item, nowOf(deps)) !== undefined),
     nextToken: encodeToken(query, page.LastEvaluatedKey as Record<string, string> | undefined),
   };
@@ -311,7 +311,7 @@ export async function listCellEmitters(
 /**
  * Writes a binding: the cell copy (what ingest reads) under `condition`,
  * and the tenant copy as a full put, so a copy TTL removed early is
- * rewritten rather than failing the call (review v1 #2).
+ * rewritten rather than failing the call.
  */
 function bindingWrites(
   tableName: string,
@@ -350,7 +350,7 @@ export async function putTenantBinding(
     throw apiError.conflict('PLACEMENT_MISMATCH', 'the tenant is bound to this cell for another application');
   }
   const billingChanged = input.billingAccount !== undefined && input.billingAccount !== stored?.billingAccount;
-  // A resend that could not be started last time is started now (review v1 #5).
+  // A resend that could not be started last time is started now.
   const resend = billingChanged || stored?.resendPending === true;
   const billing = billingChanged ? { billingAccount: input.billingAccount, resendPending: true } : {};
 
@@ -410,7 +410,7 @@ export async function putTenantBinding(
   // A billing account just set unblocks the tenant's BLOCKED deliveries (spec §4.7).
   const job = await startJob(deps, ctx, 'RESEND_BLOCKED', { tenantId: input.tenantId, applicationId: input.applicationId });
   // Clear the flag alone, on each copy that still holds it, so a delete or
-  // a billing change committed in between is left as it is (review v2 #1).
+  // a billing change committed in between is left as it is.
   for (const key of [
     keys.binding(binding.cellId, binding.tenantId),
     keys.bindingLookup(binding.tenantId, binding.applicationId, binding.cellId),
@@ -421,7 +421,7 @@ export async function putTenantBinding(
           TableName: tableName,
           Key: key,
           UpdateExpression: 'REMOVE resendPending',
-          // Only this call's flag: a newer billing change keeps its own (review v3 #3).
+          // Only this call's flag: a newer billing change keeps its own.
           ConditionExpression: 'resendPending = :true AND billingAccount = :b',
           ExpressionAttributeValues: { ':true': true, ':b': binding.billingAccount },
         }),

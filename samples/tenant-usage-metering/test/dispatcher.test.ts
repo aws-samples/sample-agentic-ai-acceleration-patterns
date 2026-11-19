@@ -92,6 +92,18 @@ describe('AWS_IAM sinks (spec §4.4)', () => {
     expect(update.ExpressionAttributeValues?.[':state']).toEqual({ status: 'FAILED', reason: 'AUTH_TARGET_INVALID' });
   });
 
+  test.each([
+    ['no secretName', {}],
+    ['an empty secretName', { secretName: '' }],
+  ])('a stored SECRET sink with %s fails at once, unsent', async (_name, overrides) => {
+    const { dispatcher, sent } = setup(sinkItem({ auth: 'SECRET', ...overrides }));
+    expect(await dispatcher.dispatch(message, 1)).toEqual({ done: true });
+    expect(sent).toHaveLength(0);
+    expect(secretsMock.commandCalls(GetSecretValueCommand)).toHaveLength(0);
+    const update = ddb.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(update.ExpressionAttributeValues?.[':state']).toEqual({ status: 'FAILED', reason: 'SECRET_NAME_MISSING' });
+  });
+
   test('sigV4Signer signs for the target, over the delivery headers, with every value of a repeated query key', async () => {
     const headers = await sigV4Signer({ accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'example-only' })(
       'https://abc123.lambda-url.eu-central-1.on.aws/usage?tag=a&tag=b&x=1',

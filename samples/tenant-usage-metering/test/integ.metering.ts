@@ -42,8 +42,10 @@ const emitter = as(outputs.EmitterRoleArn);
 const CELL = outputs.CellId;
 const ACCOUNT = outputs.EmitterRoleArn.split(':')[4];
 
+let checks = 0;
 let failures = 0;
 function check(name: string, ok: boolean, detail: unknown = ''): void {
+  checks++;
   if (!ok) {
     failures++;
   }
@@ -245,6 +247,32 @@ async function main(): Promise<void> {
   check('an unchanged resend is ACCEPTED again', resend.status === 200 && resend.body.results?.[0]?.result === 'ACCEPTED', resend);
   const notEmitter = await call(operator, 'POST', '/usage-events', { events: [batch[1]] });
   check('a caller that is not an emitter role gets 403', notEmitter.status === 403, notEmitter);
+
+  // The reader on the ingest bus (`raw` stream, ADR-0006): BUS only -------------------------
+  if (outputs.RawQueueUrl !== undefined) {
+    const rawSqs = new SQSClient({ region: REGION });
+    const accepted = new Set(batch.slice(0, 4).map((event) => event.eventId));
+    const rawSeen = new Set<string>();
+    await waitFor('accepted events on the raw-stream reader', 3 * 60_000, async () => {
+      const out = await rawSqs.send(new ReceiveMessageCommand({ QueueUrl: outputs.RawQueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 5 }));
+      for (const message of out.Messages ?? []) {
+        const body = JSON.parse(message.Body ?? '{}');
+        const detail = typeof body.detail === 'object' && body.detail !== null ? body.detail : body;
+        rawSeen.add(detail.eventId);
+      }
+      return [...accepted].every((id) => rawSeen.has(id)) ? true : undefined;
+    });
+    check('the raw-stream reader receives every accepted event', [...accepted].every((id) => rawSeen.has(id)), {
+      accepted: [...accepted],
+      seen: [...rawSeen],
+    });
+    const rawDlq = await rawSqs.send(
+      new ReceiveMessageCommand({ QueueUrl: outputs.RawReaderDlqUrl, MaxNumberOfMessages: 1, WaitTimeSeconds: 1, VisibilityTimeout: 0 }),
+    );
+    check('the raw-stream reader dead-letter queue stays empty', (rawDlq.Messages ?? []).length === 0, rawDlq.Messages?.[0]?.Body?.slice(0, 600));
+  } else {
+    process.stdout.write('SKIP the raw-stream reader checks: ingestPath DIRECT has no ingest bus\n');
+  }
 
   // The count ------------------------------------------------------------------------
   const usagePath = (tenantId: string, meterId: string) =>
@@ -518,7 +546,7 @@ async function main(): Promise<void> {
   const missing = await call(registrar, 'DELETE', `/cells/${CELL}/tenants/never-bound`);
   check('a delete of a missing binding succeeds', missing.status === 200, missing);
 
-  process.stdout.write(`${JSON.stringify({ failures, seconds: Math.round((Date.now() - t0) / 1000) })}\n`);
+  process.stdout.write(`${JSON.stringify({ checks, passed: checks - failures, failures, seconds: Math.round((Date.now() - t0) / 1000) })}\n`);
   process.exit(failures === 0 ? 0 : 1);
 }
 
