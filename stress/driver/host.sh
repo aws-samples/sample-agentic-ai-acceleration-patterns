@@ -108,7 +108,8 @@ while (( SECONDS < DEADLINE )); do
       ;;
     Success)
       # The command finished but its output is not in the bucket: the host could not upload it.
-      finished=$((finished + 1))
+      # Only while reads answer NoSuchKey: during read errors the read budget decides.
+      (( read_errors > 0 )) || finished=$((finished + 1))
       (( finished < 6 )) || { DONE=1; echo "the command succeeded but wrote no output to the results bucket (command ${COMMAND_ID})" >&2; exit 1; }
       ;;
   esac

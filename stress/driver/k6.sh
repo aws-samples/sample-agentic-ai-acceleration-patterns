@@ -100,7 +100,7 @@ fi
   # k6 cannot refresh this copy: refuse to start a run that would outlive it (K6_TIMEOUT + 300 s).
   echo "need=$((TIMEOUT + 300))"
   echo 'exp=0'
-  echo '[ -z "${AWS_CREDENTIAL_EXPIRATION:-}" ] || exp="$(date -d "$AWS_CREDENTIAL_EXPIRATION" +%s 2>/dev/null || echo 0)"'
+  echo 'if [ -n "${AWS_CREDENTIAL_EXPIRATION:-}" ]; then exp="$(date -d "$AWS_CREDENTIAL_EXPIRATION" +%s 2>/dev/null)" || { echo "the host credentials carry an expiration date cannot read; refusing to start k6" >&2; exit 3; }; fi'
   echo 'left=$((exp - $(date +%s)))'
   echo 'if [ "$exp" -eq 0 ]; then echo "warning: the host credentials carry no expiration; k6 cannot refresh them" >&2;'
   echo 'elif [ "$left" -lt "$need" ]; then echo "the instance role credentials on the host expire in ${left} s, sooner than K6_TIMEOUT + 300 s (${need} s): k6 cannot refresh them; retry in a few minutes, when the host has fresh ones, or lower K6_TIMEOUT" >&2; exit 3; fi'
@@ -130,9 +130,12 @@ fi
 # host.sh runs in the background so a SIGINT or SIGTERM here reaches it as a SIGTERM (a
 # background job of a script ignores SIGINT), and it cancels the command on the host. `wait`
 # returns early on a trapped signal, so wait again for host.sh to finish its cleanup.
+HOST_PID=""
+STOPPED=0
+trap 'STOPPED=1; [[ -z "$HOST_PID" ]] || kill -s TERM "$HOST_PID" 2>/dev/null || true' INT TERM
 HOST_TIMEOUT="$TIMEOUT" "${HERE}/host.sh" "$(cat "${TMP}/remote.sh")" >"${TMP}/host.out" &
 HOST_PID=$!
-trap 'kill -s TERM "$HOST_PID" 2>/dev/null || true' INT TERM
+(( STOPPED == 0 )) || kill -s TERM "$HOST_PID" 2>/dev/null || true
 code=0
 while :; do
   wait "$HOST_PID" && code=0 || code=$?
