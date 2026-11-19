@@ -876,22 +876,22 @@ integ.assertions
 
 // 1 (deployment inputs). ADR-0046: all four projects, the two hook projects
 // included, carry the deployer's cap.
-integ.assertions
-  // outputPaths keeps only the four limits: four whole project descriptions
-  // exceed the 4 KB custom resource response ("Response object is too long").
-  // A flattened response is checked path by path; `expect` sees no object.
-  .awsApiCall('codebuild', 'batchGetProjects', {
-    names: [
-      stack.provisioning.cellProject.projectName,
-      stack.provisioning.tenantProject.projectName,
-      stack.provisioning.globalHookProject.projectName,
-      stack.provisioning.appHookProject.projectName,
-    ],
-  }, [0, 1, 2, 3].map((i) => `projects.${i}.concurrentBuildLimit`))
-  .assertAtPath('projects.0.concurrentBuildLimit', ExpectedResult.exact(INTEG_CONCURRENT_BUILD_LIMIT))
-  .assertAtPath('projects.1.concurrentBuildLimit', ExpectedResult.exact(INTEG_CONCURRENT_BUILD_LIMIT))
-  .assertAtPath('projects.2.concurrentBuildLimit', ExpectedResult.exact(INTEG_CONCURRENT_BUILD_LIMIT))
-  .assertAtPath('projects.3.concurrentBuildLimit', ExpectedResult.exact(INTEG_CONCURRENT_BUILD_LIMIT));
+// One call per project, each reading only its limit: four whole project
+// descriptions exceed the 4 KB custom resource response ("Response object is
+// too long"). A call holds one `assertAtPath`, and the provider does not
+// decode `ExpectedResult.exact` on a number, so the expected value is the bare
+// JSON number, which it matches exactly.
+const limitIs = { result: JSON.stringify(INTEG_CONCURRENT_BUILD_LIMIT) } as ExpectedResult;
+for (const project of [
+  stack.provisioning.cellProject,
+  stack.provisioning.tenantProject,
+  stack.provisioning.globalHookProject,
+  stack.provisioning.appHookProject,
+]) {
+  integ.assertions
+    .awsApiCall('codebuild', 'batchGetProjects', { names: [project.projectName] })
+    .assertAtPath('projects.0.concurrentBuildLimit', limitIs);
+}
 // ADR-0047: B's cell role carries the owner's policy; B's tenant role is
 // not asked, the unit tests pin that it gets none.
 integ.assertions
