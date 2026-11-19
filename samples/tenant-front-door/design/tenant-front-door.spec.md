@@ -585,7 +585,9 @@ given below):
       bytes from a cryptographic random source, base64url without
       padding (43 characters); `dx` is its expiry, 7 days out. Answer
       202 with `stage: "domain-challenge"`, the record to publish,
-      `_tfd-challenge.<d>` TXT `tfd-verify=<dk>`, and the expiry. This
+      `_tfd-challenge.<d>` TXT `tfd-verify=<dk>`, and the expiry as
+      `expiresAt` (`dx`, Unix seconds). Every 202 with
+      `stage: "domain-challenge"` carries `expiresAt`. This
       call looks nothing up: no record can hold a token that did not
       exist before it.
    2. Challenge open (`dx` present): when `dx` has passed, issue a new
@@ -630,7 +632,11 @@ given below):
       with `GetDistributionTenantByDomain`.
    4. Certificate pending: answer 202 with `stage: "certificate"` and
       ACM's validation record. The operator repeats the call once the
-      tenant has published the record in the domain's DNS.
+      tenant has published the record in the domain's DNS. ACM attaches
+      a new certificate's validation record a few seconds after the
+      request; the registrar reads the certificate up to five times, 1 s
+      apart, and when the record is still not there it answers the 202
+      without `record`, and the operator repeats the call to get it.
    5. Certificate issued: resolve `_tfd-challenge.<d>` again as in
       sub-step 2, because up to 72 hours may have passed since the
       challenge did. When the challenge passed in sub-step 2 of the same
@@ -1634,7 +1640,7 @@ Modelled in Smithy; all operations `AWS_IAM`, all idempotent.
 |---|---|---|---|
 | `PutCellRoute` | `PUT /cells/{cellId}` | global hook role (route hook, cell create and update); edge operator role, for backfill and origin changes (§3.4) | Body `{apiDomain}`, from the cell script's `frontDoorApiDomain` output, or from the operator. A Lambda function URL host in the control plane's Region (400 otherwise). Account taken from the control plane, never the body. For the global hook role, 409 while the cell is neither `CREATING` nor `UPDATING`, and 409 when `cell#` holds another origin: the origin is write-once for it. Checks §3.4. 200 |
 | `DeleteCellRoute` | `DELETE /cells/{cellId}` | global hook role (route hook, cell delete); edge operator role, to clear a route a skipped hook left | For the global hook role, 409 while the cell is neither missing nor `DELETING` (§3.4). It does not look for tenant routes that name the cell (§3.4). 200, also when absent |
-| `PutTenantRoute` | `PUT /tenants/{tenantId}` | global hook role (route hook, deployment create and update); edge operator role to set `customDomain` | Body `{customDomain?}`, which only the edge operator role may send (below). The display name and the cell come from the control plane, never the body. The entry records the deployment's `createdAt` as `dt`. A `tenant#` entry with no entry before it gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. A hook put whose deployment `createdAt` differs from the stored `dt` replaces the entry and keeps its `s` (§3.4 step 5). Checks §3.4. 200 with `dt`, or 202 while the challenge is open (`domain-challenge`), the certificate is pending (`certificate`) or the record is gone after the certificate issued (`challenge-recheck`) |
+| `PutTenantRoute` | `PUT /tenants/{tenantId}` | global hook role (route hook, deployment create and update); edge operator role to set `customDomain` | Body `{customDomain?}`, which only the edge operator role may send (below). The display name and the cell come from the control plane, never the body. The entry records the deployment's `createdAt` as `dt`. A `tenant#` entry with no entry before it gets `s: active`; a write to an existing entry keeps its `s`, from either role, and only `UpdateTenantRouteStatus` changes it. A hook put whose deployment `createdAt` differs from the stored `dt` replaces the entry and keeps its `s` (§3.4 step 5). Checks §3.4. 200 with `dt`, or 202 with `stage`, `record` and, after a lookup, `challenge` while the challenge is open (`domain-challenge`, also with `expiresAt`), the certificate is pending (`certificate`, without `record` until ACM attaches it) or the record is gone after the certificate issued (`challenge-recheck`) |
 | `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | global hook role (route hook, deployment delete); edge operator role, to clear a route a skipped hook left | Removes the `tenant#` key, the pooled host's `host#` key and the `host#<d>` key its `d` names, each `host#` key only when its `t` names the tenant (§3.4). It disables the distribution tenant of that `d`, and the sweeper deletes it and its certificate, each only when its tags name this tenant (§3.4 step 5). For the global hook role, 409 while the deployment is neither missing nor `DELETING`. 200, also when absent |
 | `DeleteHostRoute` | `DELETE /hosts/{host}` | edge operator role | Removes one `host#` key whatever its `t` and `ac`, and the `d` of the tenant it names when `d` is that host, to clear a key left behind. That domain's distribution tenant and certificate then go in two phases (§3.4 step 5). 200, also when absent |
 | `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role | Body `{status}` |
@@ -1648,7 +1654,8 @@ of at most 64 characters with no wildcard, outside `appDomain` and held
 by no other tenant. The call writes it as `d` on `tenant#` first, with a
 domain challenge for this tenant and domain, and answers 202 with
 `stage: "domain-challenge"` and the TXT record to publish,
-`_tfd-challenge.<d>` `tfd-verify=<token>`, valid for 7 days. A repeat
+`_tfd-challenge.<d>` `tfd-verify=<token>`, valid for 7 days, with its
+expiry as `expiresAt` (Unix seconds). A repeat
 resolves that record: until it holds this tenant's token the call answers
 202 again, with `challenge: "missing"`, `"mismatch"` or `"unresolved"` (a
 resolver error, never a pass), and an expired challenge gets a new token.
@@ -1656,8 +1663,9 @@ resolver error, never a pass), and an expired challenge gets a new token.
 Once the challenge passes, the call requests the domain's ACM certificate
 in `us-east-1`, which validates by DNS once the tenant publishes ACM's
 validation record, and answers 202 with `stage: "certificate"` and that
-record until then; a repeat finds the certificate and creates nothing
-twice (ADR-0018). Once the certificate has validated, the call resolves
+record until then (a 202 `certificate` without `record` means ACM has
+not attached it yet, and the operator repeats the call); a repeat finds
+the certificate and creates nothing twice (ADR-0018). Once the certificate has validated, the call resolves
 the record again. Unless it still holds the token, the call answers 202
 with `stage: "challenge-recheck"`, the record and its `challenge` value,
 and writes no `host#` key. Otherwise it creates the dedicated
