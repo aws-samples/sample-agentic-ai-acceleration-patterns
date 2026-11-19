@@ -33,6 +33,7 @@ import {
   pacing,
   RUN_ID,
   refreshIfNeeded,
+  selectTenants,
   setupTokens as setupTokensShared,
   summarize as summarizeShared,
   timed,
@@ -42,6 +43,7 @@ import {
 } from '../../../../../stress/k6/lib.js';
 
 export {
+  iterationSkipped,
   loadManifest,
   plan,
   scenarioSeconds,
@@ -93,15 +95,16 @@ export function loadTier() {
 }
 
 /**
- * Options common to every scenario file. One `tenant_429{tenant:<id>}` threshold per manifest
- * tenant makes k6 keep each tenant's 429 count in the summary; collect.sh caps each tenant's
- * logged 429 lines at it (attribute.jq, P-7).
- * shortcut: k6 matches every submetric on every 429 sample; past a few thousand tenants, move
- * the per-tenant count to the tenant_minute ledger instead.
+ * Options common to every scenario file. One `tenant_429{tenant:<id>}` threshold per tenant
+ * the scenario's plan uses (P.tenants, picked as plan() and setupTokens() pick them) makes k6
+ * keep each tenant's 429 count in the summary; collect.sh caps each tenant's logged 429 lines
+ * at it (attribute.jq, P-7). EXTRA adds a scenario's own thresholds.
+ * shortcut: k6 matches every submetric on every 429 sample; past a few thousand tenants in one
+ * scenario, move the per-tenant count to the tenant_minute ledger instead.
  */
-export function buildOptions(scenarios, p, mode) {
-  const thresholds = { positive_control_fail: ['count==0'] };
-  for (const t of loadManifestShared().tenants) {
+export function buildOptions(scenarios, p, mode, extra = {}) {
+  const thresholds = Object.assign({ positive_control_fail: ['count==0'] }, extra);
+  for (const t of selectTenants(loadManifestShared(), p.tenants)) {
     thresholds[`tenant_429{tenant:${t.tenantId}}`] = ['count>=0'];
   }
   return buildOptionsShared(scenarios, p, mode, thresholds);
@@ -445,13 +448,13 @@ export function warmAll(data, pool, slots, conversations, filter) {
  * One timed iteration: the VU's next owned entry with a usable token (round robin, so a VU
  * walks its tenants in turn), its conversation opened once if WARM (paced, untimed), then
  * the probe KIND() names. ENSURE: issue a missing token here (paced), for a pool with no
- * warm-up of its own.
+ * warm-up of its own. Returns true when it sent a request.
  */
 export function step(data, opts) {
   const owned = adopt(data, opts.pool, opts.slots, opts.filter, opts.suffix);
   if (owned.length === 0) {
     iterationSkipped.add(1, { reason: 'unowned' });
-    return;
+    return false;
   }
   vu.cursor = vu.cursor || {};
   for (let tries = 0; tries < owned.length; tries++) {
@@ -474,11 +477,12 @@ export function step(data, opts) {
       if (probe(entry, 'report', Object.assign({}, opts, { phase: 'warm' })).status === 200) {
         vu.warmed[key] = true;
       }
-      return;
+      return true;
     }
     vu.warmed[key] = true;
     probe(entry, opts.kind(), opts);
-    return;
+    return true;
   }
   iterationSkipped.add(1, { reason: 'no usable entry' });
+  return false;
 }

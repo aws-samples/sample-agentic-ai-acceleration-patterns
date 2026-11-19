@@ -17,10 +17,16 @@
 // of them 429). Here the ids are fixed, and each steady VU's rate is its owned tenants'
 // share of the steady rate divided by the VUs sharing its slot, so every steady tenant gets
 // steadyRps / tenants.
+//
+// A VU that falls behind its pace skips the requests it missed rather than bursting, and
+// counts them (`iteration_skipped{reason:behind}`). `steady_sent` counts the steady requests
+// sent and `steady_expected` holds steadyRps x seconds; collect.sh fails the scenario when the
+// steady VUs sent more than 5 % under it (delivered.jq).
 
 import { sleep } from 'k6';
 import exec from 'k6/execution';
-import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds, adopt } from './probe.js';
+import { Counter } from 'k6/metrics';
+import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds, adopt, iterationSkipped } from './probe.js';
 
 const tier = loadTier();
 const manifest = loadManifest();
@@ -37,6 +43,9 @@ const slots = Math.min(vus, steadyPlan.tenants);
 const mode = tokenMode(p, totalVus);
 const warm = warmupScenario(vus, steadyPlan, mode, true);
 setPacing(totalVus);
+
+const steadySent = new Counter('steady_sent');
+const steadyExpected = new Counter('steady_expected');
 
 const steadyOnly = (e) => e.tenantIndex !== noisyIndex;
 const noisyOnly = (e) => e.tenantIndex === noisyIndex && e.userIndex === 0;
@@ -55,9 +64,12 @@ export const options = buildOptions(
   },
   p,
   mode,
+  { 'iteration_skipped{reason:behind}': ['count>=0'] },
 );
 
 export function setup() {
+  steadyExpected.add(rate * seconds);
+  steadySent.add(0);
   const data = setupTokens(manifest, tier, { mode });
   const noisy = data.entries.find((e) => e.tenantIndex === noisyIndex);
   console.log(JSON.stringify({ kind: 'noisy_tenant', tenantId: noisy ? noisy.tenantId : null }));
@@ -100,13 +112,26 @@ export function main(data) {
     sleep((pace.next - now) / 1000);
   }
   if (isSteady()) {
-    step(data, { pool: 'steady', slots, filter: steadyOnly, kind: pickProbe });
+    if (step(data, { pool: 'steady', slots, filter: steadyOnly, kind: pickProbe })) {
+      steadySent.add(1);
+    }
   } else {
     // One conversation per noisy VU (`n<vu>`), its token issued or refreshed by that VU.
     step(data, { pool: 'noisy', slots: 1, filter: noisyOnly, suffix: (id) => `n${id}`, kind: () => 'report', ensure: true });
   }
-  // A VU that falls behind does not burst to catch up.
-  pace.next = Math.max(pace.next + pace.every, Date.now());
+  // A VU that falls behind does not burst to catch up: the next request goes now, and the
+  // ones whose time has already passed are skipped and counted.
+  const after = Date.now();
+  const next = pace.next + pace.every;
+  if (next < after) {
+    const missed = Math.floor((after - next) / pace.every);
+    if (missed > 0) {
+      iterationSkipped.add(missed, { reason: 'behind', pool: isSteady() ? 'steady' : 'noisy' });
+    }
+    pace.next = after;
+  } else {
+    pace.next = next;
+  }
 }
 
 export function handleSummary(data) {

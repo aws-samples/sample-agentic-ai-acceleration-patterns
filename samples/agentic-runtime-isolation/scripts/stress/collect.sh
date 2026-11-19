@@ -17,7 +17,9 @@
 #     `sdk retried` sum(attempts - 1) by service (§7.1);
 #   - CloudWatch: API Gateway Count/4XXError/5XXError/Latency, Lambda
 #     Throttles/ConcurrentExecutions for the authoriser and the ingress function,
-#     DynamoDB ThrottledRequests on the entitlement store;
+#     DynamoDB ThrottledRequests on the entitlement store, over the scenario's own whole
+#     minutes (window.sh metric_window: its start minute to one past its end minute; slice.sh
+#     starts the next scenario after them), the per-minute datapoints kept in cloudwatch/;
 #   - the k6 summary the run kept next to the records.
 # It fills the record's late fields, only in records this run wrote and nobody else
 # changed (the runner checks): `refusals` (the driver's refusals matched with the
@@ -83,6 +85,8 @@ if (( ${#RECORDS[@]} == 0 )); then
 fi
 mkdir -p -m 700 "$RAW_DIR"
 
+# shellcheck source=window.sh
+source "${SCRIPT_DIR}/window.sh"
 iso() { date -u -d "@$1" +%FT%TZ; }
 epoch() { date -u -d "$1" +%s; }
 
@@ -126,14 +130,19 @@ insights() {
   echo "  insights ${name}: $(jq length "${OUT}/insights-${name}.json") rows"
 }
 
-# metric NAMESPACE NAME STAT DIMENSIONS... -> the sum (Sum) or the max (Maximum, Average) over the window.
+# metric KEY NAMESPACE NAME STAT DIMENSIONS... -> the sum (Sum) or the max (Maximum, Average)
+# over the scenario's metric minutes [MSTART, MEND); the per-minute datapoints go to
+# $OUT/cloudwatch/KEY.json.
 metric() {
-  local ns="$1" name="$2" stat="$3" agg
-  shift 3
+  local key="$1" ns="$2" name="$3" stat="$4" agg raw
+  shift 4
   [[ "$stat" == Sum ]] && agg='add // 0' || agg='max // 0'
+  raw="${OUT}/cloudwatch/${key}.json"
   aws cloudwatch get-metric-statistics --namespace "$ns" --metric-name "$name" --statistics "$stat" --period 60 \
-    --start-time "$(iso "$QSTART")" --end-time "$(iso "$QEND")" --dimensions "$@" --output json \
-    | jq "[.Datapoints[].${stat}] | ${agg}"
+    --start-time "$(iso "$MSTART")" --end-time "$(iso "$MEND")" --dimensions "$@" --output json \
+    | jq --arg s "$stat" '{label: .Label, stat: $s, datapoints: (.Datapoints | map({minute: .Timestamp, value: .[$s]}) | sort_by(.minute))}' >"$raw" \
+    || fail "get-metric-statistics ${key}"
+  jq "[.datapoints[].value] | ${agg}" "$raw"
 }
 
 API_NAME="$(aws apigateway get-rest-api --rest-api-id "$REST_API_ID" --query name --output text)"
@@ -149,7 +158,7 @@ ANY_FAIL=0
 
 # collect_one RECORD: reads the record's window, fills its late fields, writes its section.
 collect_one() {
-  local record="$1" SCENARIO W_START W_END QSTART QEND OUT C ROWS SUMMARY
+  local record="$1" SCENARIO W_START W_END QSTART QEND MSTART MEND NEXT_START OUT C ROWS SUMMARY
   SCENARIO="$(jq -r .scenario "$record")"
   W_START="$(epoch "$(jq -r .window.start "$record")")"
   W_END="$(epoch "$(jq -r .window.end "$record")")"
@@ -157,9 +166,17 @@ collect_one() {
   # a second or two, and a request in flight at the end is logged after it.
   QSTART=$((W_START - 10))
   QEND=$((W_END + 20))
+  read -r MSTART MEND < <(metric_window "$W_START" "$W_END")
+  # The next record's start, to check that no other scenario's traffic is in these minutes.
+  NEXT_START=0
+  local r2 s2
+  for r2 in "${RECORDS[@]}"; do
+    s2="$(epoch "$(jq -r .window.start "$r2")")"
+    if (( s2 > W_START )) && { (( NEXT_START == 0 )) || (( s2 < NEXT_START )); }; then NEXT_START=$s2; fi
+  done
   OUT="${RAW_DIR}/${SCENARIO}"
-  mkdir -p -m 700 "$OUT"
-  echo "== ${SCENARIO}: window $(iso "$W_START") .. $(iso "$W_END")"
+  mkdir -p -m 700 "$OUT" "${OUT}/cloudwatch"
+  echo "== ${SCENARIO}: window $(iso "$W_START") .. $(iso "$W_END"); CloudWatch minutes $(iso "$MSTART") .. $(iso "$MEND")"
 
   echo "-- Logs Insights"
   insights served 'filter message = "request served"
@@ -183,20 +200,22 @@ collect_one() {
 
   echo "-- CloudWatch metrics"
   local ddb
-  ddb="$(aws cloudwatch get-metric-data --start-time "$(iso "$QSTART")" --end-time "$(iso "$QEND")" --output json \
+  aws cloudwatch get-metric-data --start-time "$(iso "$MSTART")" --end-time "$(iso "$MEND")" --output json \
     --metric-data-queries "$(jq -nc --arg t "$ENT_TABLE" '[{Id: "t", ReturnData: true,
       Expression: ("SUM(SEARCH(\u0027{AWS/DynamoDB,TableName,Operation} MetricName=\"ThrottledRequests\" TableName=\"" + $t + "\"\u0027, \u0027Sum\u0027, 60))")}]')" \
-    | jq '[.MetricDataResults[].Values[]] | add // 0')"
+    | jq '{label: "entitlements ThrottledRequests", stat: "Sum", datapoints: ([.MetricDataResults[] | [.Timestamps, .Values] | transpose[] | {minute: .[0], value: .[1]}] | sort_by(.minute))}' \
+    >"${OUT}/cloudwatch/ddb-entitlements-throttled.json" || fail "get-metric-data DynamoDB ThrottledRequests"
+  ddb="$(jq '[.datapoints[].value] | add // 0' "${OUT}/cloudwatch/ddb-entitlements-throttled.json")"
   jq -n \
-    --argjson count "$(metric AWS/ApiGateway Count Sum "${APIGW[@]}")" \
-    --argjson e4 "$(metric AWS/ApiGateway 4XXError Sum "${APIGW[@]}")" \
-    --argjson e5 "$(metric AWS/ApiGateway 5XXError Sum "${APIGW[@]}")" \
-    --argjson lat "$(metric AWS/ApiGateway Latency Maximum "${APIGW[@]}")" \
-    --argjson lat_avg "$(metric AWS/ApiGateway Latency Average "${APIGW[@]}")" \
-    --argjson authThr "$(metric AWS/Lambda Throttles Sum Name=FunctionName,Value="$AUTHORIZER_FN")" \
-    --argjson ingThr "$(metric AWS/Lambda Throttles Sum Name=FunctionName,Value="$INGRESS_FN")" \
-    --argjson authConc "$(metric AWS/Lambda ConcurrentExecutions Maximum Name=FunctionName,Value="$AUTHORIZER_FN")" \
-    --argjson ingConc "$(metric AWS/Lambda ConcurrentExecutions Maximum Name=FunctionName,Value="$INGRESS_FN")" \
+    --argjson count "$(metric apigw-count AWS/ApiGateway Count Sum "${APIGW[@]}")" \
+    --argjson e4 "$(metric apigw-4xx AWS/ApiGateway 4XXError Sum "${APIGW[@]}")" \
+    --argjson e5 "$(metric apigw-5xx AWS/ApiGateway 5XXError Sum "${APIGW[@]}")" \
+    --argjson lat "$(metric apigw-latency-max AWS/ApiGateway Latency Maximum "${APIGW[@]}")" \
+    --argjson lat_avg "$(metric apigw-latency-avg AWS/ApiGateway Latency Average "${APIGW[@]}")" \
+    --argjson authThr "$(metric authorizer-throttles AWS/Lambda Throttles Sum Name=FunctionName,Value="$AUTHORIZER_FN")" \
+    --argjson ingThr "$(metric ingress-throttles AWS/Lambda Throttles Sum Name=FunctionName,Value="$INGRESS_FN")" \
+    --argjson authConc "$(metric authorizer-concurrency AWS/Lambda ConcurrentExecutions Maximum Name=FunctionName,Value="$AUTHORIZER_FN")" \
+    --argjson ingConc "$(metric ingress-concurrency AWS/Lambda ConcurrentExecutions Maximum Name=FunctionName,Value="$INGRESS_FN")" \
     --argjson ddb "$ddb" \
     '{apiGateway: {count: $count, "4xx": $e4, "5xx": $e5, latencyMaxMs: $lat, latencyAvgMaxMs: $lat_avg},
       lambda: {authorizerThrottles: $authThr, ingressThrottles: $ingThr, authorizerConcurrencyMax: $authConc, ingressConcurrencyMax: $ingConc},
@@ -347,6 +366,22 @@ collect_one() {
     row "429 only on the noisy tenant (S3)" "noisy tenant $([[ -n "$NOISY" ]] && echo named || echo 'not named by k6'), its 429 $(jq .noisy429 <<<"$NOISY_OUT"); 429 on other tenants $(jq .others429 <<<"$NOISY_OUT") over $(jq .otherTenants <<<"$NOISY_OUT") tenants" \
       "$([[ "$(jq .pass <<<"$NOISY_OUT")" == true ]] && echo PASS || echo FAIL)"
   fi
+  if [[ "$SCENARIO" == S3 ]]; then
+    # Plan §5: the steady tenants get steadyRps for the scenario. A self-paced VU that falls
+    # behind skips the requests it missed (s3-noisy.js counts them); more than 5 % under the
+    # expected count fails (delivered.jq).
+    local DEL
+    DEL="$(jq -c -f "${SCRIPT_DIR}/delivered.jq" "$SUMMARY")"
+    row "S3 steady load delivered (under 5 % short)" "sent $(jq .sent <<<"$DEL") of $(jq .expected <<<"$DEL") steady requests ($(jq .shortPct <<<"$DEL") % short); requests skipped behind pace, steady and noisy VUs, $(jq .behind <<<"$DEL")" \
+      "$([[ "$(jq .pass <<<"$DEL")" == true ]] && echo PASS || echo FAIL)"
+  fi
+  # The CloudWatch rows read whole minutes; they are this scenario's only when the next one
+  # started after them (slice.sh waits for that).
+  if (( NEXT_START > 0 && MEND > NEXT_START )); then
+    row "CloudWatch minutes this scenario's own" "metric window ends $(iso "$MEND"), the next scenario started $(iso "$NEXT_START"): the CloudWatch rows mix the two" FAIL
+  else
+    row "CloudWatch minutes this scenario's own" "$(iso "$MSTART") to $(iso "$MEND"), $(( (MEND - MSTART) / 60 )) minutes, none shared with another scenario" PASS
+  fi
   row "Refusals attributed to a tenant (P-7)" "driver saw ${SEEN}; logged with a tenant $(jq '[.byTenantReason[].count] | add // 0' <<<"$ATT") over $(jq '[.byTenantReason[].tenant] | unique | length' <<<"$ATT") tenants; unattributed $(jq .unattributed <<<"$ATT")" \
     "$(pf zero "$(jq .unattributed <<<"$ATT")")"
   local STS KMS
@@ -384,8 +419,8 @@ collect_one() {
   local SECTION="${LIB_TMP}/section.md"
   {
     printf '\n## %s %s\n\n' "$STRESS_RUN_ID" "$SCENARIO"
-    printf -- '- Commit tested: `%s`\n- Scale: %s\n- Scenario: %s\n- Run window (UTC): %s to %s (%s s)\n\n' \
-      "${STRESS_COMMIT:0:7}" "$SCALE" "$SCENARIO" "$(iso "$W_START")" "$(iso "$W_END")" "$((W_END - W_START))"
+    printf -- '- Commit tested: `%s`\n- Scale: %s\n- Scenario: %s\n- Run window (UTC): %s to %s (%s s)\n- CloudWatch minutes (UTC): %s to %s\n\n' \
+      "${STRESS_COMMIT:0:7}" "$SCALE" "$SCENARIO" "$(iso "$W_START")" "$(iso "$W_END")" "$((W_END - W_START))" "$(iso "$MSTART")" "$(iso "$MEND")"
     printf '| Check | Measured | Result |\n|---|---|---|\n'
     awk -F'|' '{ printf "| %s | %s | %s |\n", $1, $2, $3 }' "$ROWS"
     printf '\n| Counter | Value |\n|---|---|\n'

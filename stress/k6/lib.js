@@ -239,7 +239,8 @@ export function loadManifest() {
 }
 
 /** COUNT tenants: those marked active first, then the rest, in manifest order. */
-function selectTenants(manifest, count) {
+/** The COUNT tenants a scenario uses: the active ones first, in manifest order. */
+export function selectTenants(manifest, count) {
   const flagged = manifest.tenants.some((t) => typeof t.active === 'boolean');
   const ordered = flagged
     ? manifest.tenants.filter((t) => t.active === true).concat(manifest.tenants.filter((t) => t.active !== true))

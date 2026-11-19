@@ -59,9 +59,6 @@ command -v jq >/dev/null 2>&1 || { echo "slice.sh: jq is not installed" >&2; exi
 export STRESS_SCALE="$STRESS_TIER"
 export STRESS_STATE_DIR="${STRESS_HOME}/${STRESS_PREFIX}/agentic-runtime-isolation"
 
-# Installs on a fresh checkout and again when node_modules lacks a declared dependency
-# (`npm ls` exits non-zero on a missing or wrong version). `budget` runs with an empty
-# HOME; npm's cache goes there.
 # The packages package.json declares that node_modules lacks, one per line. Extraneous
 # packages (a linked node_modules in a worktree) do not count.
 missing_packages() {
@@ -224,13 +221,27 @@ case "$verb" in
     fi
 
     # The per-tenant limit is a fixed one-minute window (ADR-0020): a scenario that starts in
-    # the minute the previous one filled inherits its 429s (S4 after S3, 2026-11-09). Start at
-    # least 3 s into a fresh minute.
+    # the minute the previous one filled inherits its 429s (S4 after S3, 2026-11-09). And
+    # collect.sh reads CloudWatch by whole minutes, one past the scenario's last (API Gateway
+    # stamps a minute late): a scenario that starts inside the previous one's minutes mixes
+    # their metrics (S4 carried S3's 4XX, 2026-11-19). So start on a fresh minute, past the
+    # last recorded scenario's metric window (window.sh, ADR-0052).
+    # shellcheck source=window.sh
+    source "${here}/window.sh"
+    prev_end=0
+    shopt -s nullglob
+    for r in "${STRESS_RESULTS}"/agentic-runtime-isolation.S[1-7].json; do
+      end_iso="$(jq -r '.window.end // empty' "$r" 2>/dev/null)" || continue
+      [[ -n "$end_iso" ]] || continue
+      e="$(date -u -d "$end_iso" +%s 2>/dev/null)" || continue
+      if (( e > prev_end )); then prev_end=$e; fi
+    done
+    shopt -u nullglob
     now="$(date +%s)"
-    if (( now % 60 > 3 )); then
-      wait_s=$(( 60 - now % 60 + 3 ))
-      echo "waiting ${wait_s}s for a fresh limiter minute"
-      sleep "$wait_s"
+    start="$(start_at "$prev_end" "$now")"
+    if (( start > now )); then
+      echo "waiting $(( start - now ))s for a fresh minute past the last scenario's metric window"
+      sleep "$(( start - now ))"
     fi
 
     # The scenario's own time, its token set-up and warm-up, and room for a slow host.

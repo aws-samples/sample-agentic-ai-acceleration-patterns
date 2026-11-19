@@ -240,3 +240,79 @@ describe('slice.sh', () => {
     expect(noisy('n', []).pass).toBe(false);
   });
 });
+
+describe('window.sh (CloudWatch minutes, ADR-0052)', () => {
+  const WINDOW_SH = path.join(STRESS_DIR, 'window.sh');
+  function call(fn: string, ...args: number[]): number[] {
+    const r = spawnSync('bash', ['-c', `source "$0"; ${fn} "$@"`, WINDOW_SH, ...args.map(String)], { encoding: 'utf8' });
+    expect(r.status).toBe(0);
+    return r.stdout.trim().split(' ').map(Number);
+  }
+  const at = (hh: number, mm: number, ss: number) => Date.UTC(2026, 10, 19, hh, mm, ss) / 1000;
+
+  it('runs from the start minute to one minute past the end minute (API Gateway stamps a minute late)', () => {
+    // S3 of the 2026-11-19 run: 18:04:05 .. 18:06:42 holds its own 18:07 datapoints.
+    expect(call('metric_window', at(18, 4, 5), at(18, 6, 42))).toEqual([at(18, 4, 0), at(18, 8, 0)]);
+    expect(call('metric_window', at(18, 4, 0), at(18, 6, 0))).toEqual([at(18, 4, 0), at(18, 8, 0)]);
+  });
+
+  it('starts the next scenario 3 s past the previous metric window, on a fresh minute', () => {
+    expect(call('start_at', at(18, 6, 42), at(18, 6, 50))).toEqual([at(18, 8, 3)]);
+    expect(call('start_at', at(18, 6, 42), at(18, 9, 30))).toEqual([at(18, 10, 3)]);
+    expect(call('start_at', at(18, 6, 42), at(18, 9, 2))).toEqual([at(18, 9, 2)]);
+  });
+
+  it('only waits for a fresh minute when there is no previous scenario', () => {
+    expect(call('start_at', 0, at(18, 0, 2))).toEqual([at(18, 0, 2)]);
+    expect(call('start_at', 0, at(18, 0, 20))).toEqual([at(18, 1, 3)]);
+  });
+
+  it('never lets two consecutive scenarios share a metric minute', () => {
+    for (let end = at(18, 0, 0); end < at(18, 2, 0); end += 7) {
+      const [, mend] = call('metric_window', at(17, 58, 0), end);
+      const next = call('start_at', end, end + 1)[0];
+      const [mstart] = call('metric_window', next, next + 60);
+      expect(mstart).toBeGreaterThanOrEqual(mend);
+    }
+  });
+});
+
+(hasJq ? describe : describe.skip)('delivered.jq (S3 steady load)', () => {
+  function delivered(summary: object): { sent: number; expected: number; behind: number; shortPct: number; pass: boolean } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delivered-'));
+    try {
+      const file = path.join(dir, 'summary.json');
+      fs.writeFileSync(file, JSON.stringify(summary));
+      const r = spawnSync('jq', ['-c', '-f', path.join(STRESS_DIR, 'delivered.jq'), file], { encoding: 'utf8' });
+      expect(r.status).toBe(0);
+      return JSON.parse(r.stdout);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const counters = (expected: number, sent: number, behind?: number) => ({
+    metrics: {
+      steady_expected: { values: { count: expected } },
+      steady_sent: { values: { count: sent } },
+      ...(behind === undefined ? {} : { 'iteration_skipped{reason:behind}': { values: { count: behind } } }),
+    },
+  });
+
+  it('passes at 5 % short and fails just past it', () => {
+    expect(delivered(counters(6000, 5700, 300))).toEqual({ sent: 5700, expected: 6000, behind: 300, shortPct: 5, pass: true });
+    expect(delivered(counters(6000, 5699)).pass).toBe(false);
+  });
+
+  it('passes when the VUs sent more than expected (one request in the graceful stop)', () => {
+    expect(delivered(counters(6000, 6012))).toEqual({ sent: 6012, expected: 6000, behind: 0, shortPct: 0, pass: true });
+  });
+
+  it('reads the summary-export layout too', () => {
+    expect(delivered({ metrics: { steady_expected: { count: 100 }, steady_sent: { count: 99 } } }).pass).toBe(true);
+  });
+
+  it('fails closed on a summary without the counters', () => {
+    expect(delivered({ metrics: {} })).toEqual({ sent: 0, expected: 0, behind: 0, shortPct: 100, pass: false });
+    expect(delivered({ error: 'file withheld' }).pass).toBe(false);
+  });
+});

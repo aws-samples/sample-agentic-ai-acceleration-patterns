@@ -77,6 +77,8 @@ Pass criteria, every scenario:
 | KMS `Sign` throttles (CloudTrail) | 0 |
 | Lambda `Throttles` | 0 |
 | DynamoDB `ThrottledRequests` (entitlement store, `TenantLimits`) | 0 |
+| CloudWatch minutes this scenario's own | the CloudWatch rows read the scenario's start minute to one minute past its end minute (API Gateway stamps a minute late); the next scenario starts after them (ADR-0052) |
+| S3 steady load delivered | the steady VUs sent at least 95 % of `steadyRps × seconds`; a VU that falls behind its pace skips and counts the requests it missed (`iteration_skipped{reason:behind}`) |
 | p90 TTFB, `report` probe, warm | within 1.5x of the single-tenant `perf.sh` figure of the same day |
 | p90 TTFB flat | the 1,000-tenant steady run and a 100-tenant run differ by under 20 % |
 | Per-tenant cost attribution (P-10) | every `request served` line carries a `tenantId` and `backendInvokeSeconds`; 0 served lines without a tenant; the per-tenant sum equals the run's backend time, and the day's sum tracks the Runtime line in Cost Explorer (§11.2) |
@@ -219,7 +221,7 @@ scripts/stress/
   teardown.sh        deletes the seeded tenants at 2 a second (4 in flight, up to three passes), then the stacks; prints the destroy times
 ```
 
-Since W-3 the scripts run as a slice of the platform stress contract (ADR-0052): `stress/run.sh run --tier <tier> --slices agentic-runtime-isolation` calls `slice.sh` for `deploy`, `seed`, `run S1`..`S7`, `collect` and `teardown`, and `run.sh` is gone. `collect` writes each record's late fields; the pass table below gains one row, S3's `429 only on the noisy tenant` (plan §5: every other tenant 0 429). The scenario ids are `S1` to `S7`.
+Since W-3 the scripts run as a slice of the platform stress contract (ADR-0052): `stress/run.sh run --tier <tier> --slices agentic-runtime-isolation` calls `slice.sh` for `deploy`, `seed`, `run S1`..`S7`, `collect` and `teardown`, and `run.sh` is gone. `collect` writes each record's late fields; the pass table gains S3's `429 only on the noisy tenant` (plan §5: every other tenant 0 429) and `S3 steady load delivered` (at most 5 % under `steadyRps × seconds`), and every scenario's `CloudWatch minutes this scenario's own` (§4). The scenario ids are `S1` to `S7`.
 
 The driver host and the shared k6 library are the repository's stress assets, `stress/driver/` and `stress/k6/` (stress ADR-0007, ADR-0008, ADR-0009). This slice deploys the host through `stress/driver/deploy.sh` and keeps only its own calls and assertions, in `k6/probe.js`.
 
