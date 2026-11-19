@@ -24,7 +24,9 @@ const apigateway = require('aws-cdk-lib/aws-apigateway');
 
 const app = new App();
 const env = { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION };
-const owner = { env, synthesizer: new LegacyStackSynthesizer() };
+// The stack tag is how the control-plane slice's account check tells the
+// owner's account-base stacks from any other stack (spec §3.7).
+const owner = { env, synthesizer: new LegacyStackSynthesizer(), tags: { 'stress:part': 'account-base' } };
 
 const policies = new Stack(app, 'CellPolicies-spike', owner);
 new CfnInclude(policies, 'Policies', { templateFile: path.join(__dirname, 'cell-policies.yaml') });
@@ -63,7 +65,7 @@ const probeRole = new iam.Role(probe, 'ProbeRole', {
   description: 'A compromised cell role: its own policy allows every escalation; the boundary must refuse',
 });
 probeRole.addToPolicy(new iam.PolicyStatement({
-  actions: ['iam:*', 'sts:AssumeRole', 'lambda:CreateFunction', 'lambda:DeleteFunction', 'ssm:PutParameter', 'ssm:DeleteParameter'],
+  actions: ['iam:*', 'sts:AssumeRole', 'lambda:CreateFunction', 'lambda:DeleteFunction', 'ssm:PutParameter', 'ssm:DeleteParameter', 'apigateway:PATCH'],
   resources: ['*'],
 }));
 new iam.Role(probe, 'PositiveControlRole', {

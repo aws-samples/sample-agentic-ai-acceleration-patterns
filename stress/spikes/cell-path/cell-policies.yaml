@@ -67,7 +67,7 @@ Resources:
           - Sid: CellServiceLinkedRoles
             Effect: Allow
             Action: iam:CreateServiceLinkedRole
-            Resource: '*'
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/*
             Condition:
               StringEquals:
                 iam:AWSServiceName:
@@ -133,6 +133,10 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/application-plane/shared/identity/*
               - !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/cdk-bootstrap/cell/*
+          - Sid: DenyApiGatewayAccountSettings
+            Effect: Deny
+            Action: [apigateway:PATCH, apigateway:PUT, apigateway:DELETE]
+            Resource: !Sub arn:${AWS::Partition}:apigateway:*::/account
   CellExecutionPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -181,7 +185,7 @@ Resources:
           - Sid: CellServiceLinkedRoles
             Effect: Allow
             Action: iam:CreateServiceLinkedRole
-            Resource: '*'
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/*
             Condition:
               StringEquals:
                 iam:AWSServiceName:

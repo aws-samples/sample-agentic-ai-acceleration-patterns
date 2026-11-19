@@ -33,7 +33,7 @@ expect_denied() {
   local out
   if out="$(probe "$@" 2>&1)"; then
     echo "FAIL  ${name}: allowed"; fails=$((fails + 1))
-  elif grep -q 'explicit deny in a permissions boundary' <<<"$out"; then
+  elif grep -qi 'explicit deny in a permissions boundary' <<<"$out"; then
     echo "PASS  ${name}: explicit deny in the permissions boundary"
   else
     echo "FAIL  ${name}: unexpected error: $(head -c 200 <<<"$out")"; fails=$((fails + 1))
@@ -71,6 +71,7 @@ expect_denied "CreatePolicyVersion on the boundary" iam create-policy-version --
 expect_denied "SetDefaultPolicyVersion on the execution policy" iam set-default-policy-version --policy-arn "arn:${partition}:iam::${account}:policy/cell-execution-policy" --version-id v1
 expect_denied "PutParameter over the identity pool id" ssm put-parameter --name /application-plane/shared/identity/userPoolId --type String --value q5 --overwrite
 expect_denied "PutParameter over the cell bootstrap version" ssm put-parameter --name /cdk-bootstrap/cell/version --type String --value 99 --overwrite
+expect_denied "UpdateAccount: point the API Gateway logs role at a /cell/ role" apigateway update-account --patch-operations "op=replace,path=/cloudwatchRoleArn,value=arn:${partition}:iam::${account}:role/cell/cell-spike-positive"
 expect_allowed "UpdateRoleDescription on a /cell/ role (positive control)" iam update-role-description --role-name cell-spike-positive --description "changed by the q5 probe"
 expect_allowed "GetRole on the role pair (read stays open)" iam get-role --role-name cell-spike-role-pair-stand-in --query Role.Path --output text
 
