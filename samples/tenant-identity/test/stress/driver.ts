@@ -273,44 +273,53 @@ async function apiSum(cw: CloudWatchClient, apiName: string, metric: string, sta
 }
 
 /**
- * Late fields (spec §3.4): API Gateway's own count of 5XX in each scenario's
- * window, minus the 5XX the driver saw, is a server error the driver cannot
- * attribute (P-7). CloudWatch delivers metrics late (finding F-6), so the
- * count of calls is waited for first, for up to four minutes.
+ * Late fields (spec §3.4): API Gateway's own count of 5XX over the run's
+ * scenarios, minus the 5XX the driver saw, is a server error the driver cannot
+ * attribute (P-7). Scenarios run back to back and CloudWatch's finest period
+ * is a minute, so adjacent scenarios share a bucket: the count is over the
+ * union of the windows, and what is left over goes on the latest record.
+ * CloudWatch delivers metrics late (finding F-6), so the count of calls is
+ * waited for first, for up to four minutes.
  */
 async function collect(stack: string): Promise<number> {
   const dir = need('STRESS_RESULTS');
   const cw = new CloudWatchClient({ region: region() });
   const apiName = `${stack}-api`;
-  let status = 0;
-  for (const file of fs.readdirSync(dir).filter((f) => f.startsWith('tenant-identity.') && !f.endsWith('.lifecycle.json') && f.endsWith('.json'))) {
-    const full = path.join(dir, file);
-    const doc = JSON.parse(fs.readFileSync(full, 'utf8')) as RecordFile;
-    const start = new Date(Math.floor(Date.parse(doc.window.start) / MINUTE) * MINUTE);
-    const end = new Date(Math.ceil(Date.parse(doc.window.end) / MINUTE) * MINUTE + MINUTE);
-    // A transport failure (status 0) never reached the API.
-    const reached = Object.entries(doc.requests).filter(([k]) => !k.startsWith('0:')).reduce((a, [, n]) => a + n, 0);
-    const deadline = Date.now() + 4 * MINUTE;
-    let counted = await apiSum(cw, apiName, 'Count', start, end);
-    while (counted < 0.9 * reached && Date.now() < deadline) {
-      await sleep(20_000);
-      counted = await apiSum(cw, apiName, 'Count', start, end);
-    }
-    const seen5xx = Object.entries(doc.requests).filter(([k]) => /^5\d\d/.test(k)).reduce((a, [, n]) => a + n, 0);
-    const api5xx = await apiSum(cw, apiName, '5XXError', start, end);
-    const extra = Math.max(0, Math.round(api5xx - seen5xx));
-    process.stdout.write(`collect ${file}: driver ${reached} calls, API Gateway counted ${Math.round(counted)}; 5XX driver ${seen5xx}, API ${Math.round(api5xx)}\n`);
-    if (counted < 0.9 * reached) {
-      process.stdout.write(`  warning: API Gateway metrics for ${file} had not caught up after 4 minutes\n`);
-    }
-    if (extra > 0) {
-      doc.refusals.unattributed += extra;
-      fs.writeFileSync(full, `${JSON.stringify(doc, null, 2)}\n`);
-      process.stdout.write(`  ${extra} 5XX the driver did not see, recorded as unattributed refusals\n`);
-      status = 1;
-    }
+  const files = fs.readdirSync(dir).filter((f) => f.startsWith('tenant-identity.') && !f.endsWith('.lifecycle.json') && f.endsWith('.json'));
+  const docs = files.map((file) => ({ file, full: path.join(dir, file), doc: JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8')) as RecordFile }));
+  if (docs.length === 0) {
+    process.stdout.write('collect: no record of this slice\n');
+    return 0;
   }
-  return status;
+  const first = Math.min(...docs.map((d) => Date.parse(d.doc.window.start)));
+  const last = Math.max(...docs.map((d) => Date.parse(d.doc.window.end)));
+  const start = new Date(Math.floor(first / MINUTE) * MINUTE);
+  const end = new Date(Math.ceil(last / MINUTE) * MINUTE + MINUTE);
+  const sum = (pick: (k: string) => boolean): number =>
+    docs.reduce((a, d) => a + Object.entries(d.doc.requests).filter(([k]) => pick(k)).reduce((b, [, n]) => b + n, 0), 0);
+  // A transport failure (status 0) never reached the API.
+  const reached = sum((k) => !k.startsWith('0:'));
+  const seen5xx = sum((k) => /^5\d\d/.test(k));
+  const deadline = Date.now() + 4 * MINUTE;
+  let counted = await apiSum(cw, apiName, 'Count', start, end);
+  while (counted < 0.9 * reached && Date.now() < deadline) {
+    await sleep(20_000);
+    counted = await apiSum(cw, apiName, 'Count', start, end);
+  }
+  const api5xx = await apiSum(cw, apiName, '5XXError', start, end);
+  const extra = Math.max(0, Math.round(api5xx - seen5xx));
+  process.stdout.write(`collect: driver ${reached} calls, API Gateway counted ${Math.round(counted)}; 5XX driver ${seen5xx}, API ${Math.round(api5xx)}\n`);
+  if (counted < 0.9 * reached) {
+    process.stdout.write('  warning: API Gateway metrics had not caught up after 4 minutes\n');
+  }
+  if (extra === 0) {
+    return 0;
+  }
+  const latest = docs.reduce((a, b) => (Date.parse(b.doc.window.end) >= Date.parse(a.doc.window.end) ? b : a));
+  latest.doc.refusals.unattributed += extra;
+  fs.writeFileSync(latest.full, `${JSON.stringify(latest.doc, null, 2)}\n`);
+  process.stdout.write(`  ${extra} 5XX the driver did not see, recorded as unattributed refusals on ${latest.file}\n`);
+  return 1;
 }
 
 // ---------------------------------------------------------------------------
