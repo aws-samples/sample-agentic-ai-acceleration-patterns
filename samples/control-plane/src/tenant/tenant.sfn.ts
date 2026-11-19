@@ -939,6 +939,22 @@ export class ProvisioningWorkflow extends Construct {
   }
 
   /**
+   * The outputs guard after a script task (R-43): a one-branch `Parallel`
+   * around a JSONata `Pass` that applies the guard. A `Pass` has no Catch;
+   * the `Parallel` fails with the branch's error name and catches it, so an
+   * evaluation error of the guard is told apart from the task's own errors.
+   * On delete it yields `{}`, on create and update it is a rejection.
+   */
+  private scriptOutputsCheck(id: string, phase: 'cellBuild' | 'tenantBuild', next: sfn.Choice): sfn.Parallel {
+    const guard = sfn.Pass.jsonata(this, `${id}Guard`, { outputs: scriptOutputsGuardOutput(phase) });
+    const check = sfn.Parallel.jsonata(this, id, { outputs: jsonata('$states.result[0]') });
+    check.branch(guard);
+    check.addCatch(next, { outputs: scriptOutputsErrorOutput(phase) });
+    check.next(next);
+    return check;
+  }
+
+  /**
    * One StartBuild.sync phase with a catchable task-level timeout (§7).
    *
    * Two task variants behind a Choice on the stamped supply-chain pin
@@ -955,26 +971,11 @@ export class ProvisioningWorkflow extends Construct {
    * fixed variables, and only a JSONata Catch can drop the raw error Cause
    * before it enters state. The task `Output` plays the part of a
    * `ResultSelector`: the state keeps its input plus `<resultField>.Build`
-   * with the build ARN and status only, because the CodeBuild result echoes
-   * the build's environment, values included, and a second copy of each
-   * parameter set would pass the 256 KiB state limit (§8.1).
+   * with the build ARN and status, and the raw `SCRIPT_OUTPUTS` for the
+   * guard state that follows (R-43), only, because the CodeBuild result
+   * echoes the build's environment, values included, and a second copy of
+   * each parameter set would pass the 256 KiB state limit (§8.1).
    */
-  /**
-   * The outputs guard after a script task (R-43): a one-branch `Parallel`
-   * around a JSONata `Pass` that applies the guard. A `Pass` has no Catch;
-   * the `Parallel` fails with the branch's error name and catches it, so an
-   * evaluation error of the guard is told apart from the task's own errors.
-   * On delete it yields `{}`, on create and update it is a rejection.
-   */
-  private scriptOutputsCheck(id: string, phase: 'cellBuild' | 'tenantBuild', next: sfn.Choice): sfn.Parallel {
-    const guard = sfn.Pass.jsonata(this, `${id}Guard`, { outputs: scriptOutputsGuardOutput(phase) });
-    const check = sfn.Parallel.jsonata(this, id, { outputs: jsonata('$states.result[0]') });
-    check.branch(guard);
-    check.addCatch(next, { outputs: scriptOutputsErrorOutput(phase) });
-    check.next(next);
-    return check;
-  }
-
   private buildTask(
     id: string,
     project: codebuild.Project,

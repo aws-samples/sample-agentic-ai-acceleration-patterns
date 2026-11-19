@@ -129,10 +129,9 @@ format check, not a trust boundary. The workflow checks the value
 again, by the same rule, in a state of its own after the script task
 (a `Pass` in a one-branch `Parallel`, so the guard has a `Catch` apart
 from the task's), with a linear regular expression that admits only
-the compact form, and never `$parse`, whose error would reach the
-failure write: an empty,
-over-long or malformed value fails a create or update and becomes `{}`
-on a delete. The pattern cannot see a repeated key, so a hook refuses
+the compact form, and never `$parse`, which raises on bad input: an
+empty, over-long or malformed value fails a create or update and
+becomes `{}` on a delete. The pattern cannot see a repeated key, so a hook refuses
 an object that has one. The control plane never reads the outputs, and
 hooks treat them as untrusted data.
 

@@ -2010,10 +2010,10 @@ and length checks only, which raise nothing. The guard state is a
 `Pass` inside a one-branch `Parallel`, whose `Output` is the branch's
 result: a `Pass` has no `Catch`, but a `Parallel` fails with its
 branch's error name and has one. The guard's `Output` drops
-`scriptOutputsRaw` and keeps an admitted value as `scriptOutputs`. It rejects a value
-that is absent or empty (the H-1 overflow, or a build that did not
-export), longer than 4,096 characters, or not a compact JSON object of
-printable ASCII string values. With printable ASCII, 4,096 characters
+`scriptOutputsRaw` and keeps an admitted value as `scriptOutputs`.
+It rejects a value that is absent or empty (the H-1 overflow, or a
+build that did not export), longer than 4,096 characters, or not a
+compact JSON object of printable ASCII string values. With printable ASCII, 4,096 characters
 are 4,096 bytes, so the guard and the buildspec enforce one rule. The
 last test is a regular expression over that grammar, and the pattern
 MUST be linear: no quantifier may hold another unbounded quantifier
