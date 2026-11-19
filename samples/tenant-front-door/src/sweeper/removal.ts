@@ -13,7 +13,10 @@
  *   once it is disabled and deployed; and deletes its certificate after it;
  * - deletes a registrar certificate that no distribution tenant uses and
  *   whose domain is no longer the `d` of the tenant it is tagged with (the
- *   domain was dropped or changed while the certificate was pending).
+ *   domain was dropped or changed while the certificate was pending), or
+ *   that is in a terminal status, whatever the tenant's `d`;
+ * - logs a disabled distribution tenant whose domain is still routed for
+ *   its tenant, which a removal racing the registrar's re-enable can leave.
  *
  * Before it touches a distribution tenant or a certificate it checks that
  * the resource's tags name this distribution and a tenant, so it never
@@ -47,8 +50,8 @@ import {
   ResourceNotFoundException,
 } from '@aws-sdk/client-cloudfront-keyvaluestore';
 import { errorName, logLine } from './log';
-import { TAG_DISTRIBUTION_ID, TAG_TENANT_ID } from '../shared/contracts';
-import { decodeTenantEntry, tenantKey, toStoredId } from '../shared/route-table';
+import { TAG_DISTRIBUTION_ID, TAG_TENANT_ID, TERMINAL_CERTIFICATE_STATUSES } from '../shared/contracts';
+import { decodeHostEntry, decodeTenantEntry, hostKey, tenantKey, toStoredId } from '../shared/route-table';
 
 export interface RemovalDeps {
   readonly cloudFront: Pick<CloudFrontClient, 'send'>;
@@ -63,6 +66,8 @@ export interface RemovalResult {
   readonly disabled: number;
   readonly deletedTenants: number;
   readonly deletedCertificates: number;
+  /** Disabled distribution tenants whose domain is still routed for their tenant: logged for the operator. */
+  readonly disabledRouted: number;
   readonly failures: number;
 }
 
@@ -88,27 +93,25 @@ function taggedTenant(tags: readonly { Key?: string; Value?: string }[] | undefi
 type Current = { readonly kind: 'domain'; readonly d: string | undefined } | { readonly kind: 'unreadable' };
 
 export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
-  const counts = { disabled: 0, deletedTenants: 0, deletedCertificates: 0, failures: 0 };
-  const currentDomains = new Map<string, Current>();
+  const counts = { disabled: 0, deletedTenants: 0, deletedCertificates: 0, disabledRouted: 0, failures: 0 };
 
-  /** The tenant's current `d`; undefined when the entry or its `d` is gone. */
+  /**
+   * The tenant's current `d`; undefined when the entry or its `d` is gone.
+   * Read again before every destructive call, never cached for the run, so
+   * a domain the registrar set again since an earlier read is not removed.
+   */
   const currentDomain = async (tenantId: string): Promise<Current> => {
-    const cached = currentDomains.get(tenantId);
-    if (cached !== undefined) return cached;
-    let current: Current;
     try {
       const value = (await deps.kvs.send(new GetKeyCommand({ KvsARN: deps.routeTableArn, Key: tenantKey(tenantId) }))).Value;
-      current = { kind: 'domain', d: value === undefined ? undefined : decodeTenantEntry(value).d };
+      return { kind: 'domain', d: value === undefined ? undefined : decodeTenantEntry(value).d };
     } catch (error) {
-      if (error instanceof ResourceNotFoundException) current = { kind: 'domain', d: undefined };
-      else if (errorName(error) === 'RouteTableError') current = { kind: 'unreadable' };
-      else throw error;
+      if (error instanceof ResourceNotFoundException) return { kind: 'domain', d: undefined };
+      if (errorName(error) === 'RouteTableError') return { kind: 'unreadable' };
+      throw error;
     }
-    currentDomains.set(tenantId, current);
-    return current;
   };
 
-  /** True when the resource for `domain` tagged with `tenantId` is no longer wanted. */
+  /** True when the resource for `domains` tagged with `tenantId` is no longer wanted. */
   const isOrphan = async (tenantId: string, domains: readonly string[]): Promise<boolean> => {
     const current = await currentDomain(tenantId);
     if (current.kind === 'unreadable') {
@@ -116,6 +119,17 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
       return false;
     }
     return current.d === undefined || !domains.includes(current.d);
+  };
+
+  /** `host#<domain>` names the tenant. A value that does not decode names no one. */
+  const isRouted = async (tenantId: string, domain: string): Promise<boolean> => {
+    try {
+      const value = (await deps.kvs.send(new GetKeyCommand({ KvsARN: deps.routeTableArn, Key: hostKey(domain) }))).Value;
+      return value !== undefined && decodeHostEntry(value).t === tenantId;
+    } catch (error) {
+      if (error instanceof ResourceNotFoundException || errorName(error) === 'RouteTableError') return false;
+      throw error;
+    }
   };
 
   const attempt = async (resource: Record<string, string>, work: () => Promise<void>): Promise<void> => {
@@ -132,15 +146,23 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
     }
   };
 
-  const deleteCertificate = async (arn: string, tenantId: string, domain: string): Promise<void> => {
-    const described = await deps.acm.send(new DescribeCertificateCommand({ CertificateArn: arn }));
-    if ((described.Certificate?.InUseBy?.length ?? 0) > 0) {
+  /**
+   * Deletes a registrar certificate that nothing uses: one in a terminal
+   * status whatever its tenant's `d` (it can never serve), any other once
+   * a fresh read shows its domain is no longer the tenant's `d`.
+   */
+  const deleteCertificate = async (arn: string, tenantId: string, domains: readonly string[]): Promise<void> => {
+    const domain = domains.join(',');
+    const certificate = (await deps.acm.send(new DescribeCertificateCommand({ CertificateArn: arn }))).Certificate;
+    if ((certificate?.InUseBy?.length ?? 0) > 0) {
       logLine('INFO', 'certificate still in use', { tenantId, domain, certificateArn: arn });
       return;
     }
+    const terminal = TERMINAL_CERTIFICATE_STATUSES.includes(certificate?.Status ?? '');
+    if (!terminal && !(await isOrphan(tenantId, domains))) return;
     await deps.acm.send(new DeleteCertificateCommand({ CertificateArn: arn }));
     counts.deletedCertificates++;
-    logLine('INFO', 'certificate deleted', { tenantId, domain, certificateArn: arn });
+    logLine('INFO', 'certificate deleted', { tenantId, domain, certificateArn: arn, status: terminal ? certificate?.Status : undefined });
   };
 
   // --- Distribution tenants -----------------------------------------------
@@ -162,8 +184,18 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
       const tenantId = taggedTenant(dtTags?.Items, deps.distributionId);
       if (tenantId === undefined) return;
       const domains = (dt.Domains ?? []).map((d) => d.Domain?.toLowerCase()).filter((d): d is string => d !== undefined);
-      if (!(await isOrphan(tenantId, domains))) return;
       const domain = domains.join(',');
+
+      // The fresh read of d comes right before the disable or the delete.
+      if (!(await isOrphan(tenantId, domains))) {
+        // Routed on a disabled distribution tenant: a removal raced the
+        // registrar's re-enable. Nothing repairs it; the operator does (§3.4 step 5).
+        if (dt.Enabled === false && (await Promise.all(domains.map((x) => isRouted(tenantId, x)))).some(Boolean)) {
+          counts.disabledRouted++;
+          logLine('WARN', 'distribution tenant disabled on a routed domain', { tenantId, domain, distributionTenantId: dt.Id });
+        }
+        return;
+      }
 
       if (dt.Enabled !== false) {
         await deps.cloudFront.send(new UpdateDistributionTenantCommand(disableRequest(dt, got.ETag)));
@@ -183,7 +215,7 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
       if (taggedTenant(tags.Tags, deps.distributionId) !== tenantId) return;
       // A certificate CloudFront has not released yet answers ResourceInUseException;
       // the certificate pass of a later run deletes it.
-      await deleteCertificate(arn, tenantId, domain);
+      await deleteCertificate(arn, tenantId, domains);
     });
   }
 
@@ -196,8 +228,7 @@ export async function runRemoval(deps: RemovalDeps): Promise<RemovalResult> {
       const tags = await deps.acm.send(new ListTagsForCertificateCommand({ CertificateArn: arn }));
       const tenantId = taggedTenant(tags.Tags, deps.distributionId);
       if (tenantId === undefined) return;
-      if (!(await isOrphan(tenantId, [domain]))) return;
-      await deleteCertificate(arn, tenantId, domain);
+      await deleteCertificate(arn, tenantId, [domain]);
     });
   }
 

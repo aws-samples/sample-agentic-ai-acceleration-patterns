@@ -933,8 +933,18 @@ given below):
    it. A registrar certificate that never had a distribution tenant
    (the domain was dropped or changed while the certificate was
    pending), and whose domain is no longer the `d` of the tenant it is
-   tagged with, is deleted on its own. The sweeper finds what a crashed
-   call left the same way. A changed domain is offline
+   tagged with, is deleted on its own. So is a registrar certificate in a
+   terminal status (sub-step 3) that no distribution tenant uses, whatever
+   its tenant's `d`, because it can never serve and counts against ACM's
+   quota. The sweeper reads the tenant's `d` with `GetKey` again right
+   before each disable and each delete, with no cache for the run, so a
+   domain the registrar set again meanwhile is left alone. A disabled
+   distribution tenant whose domain is its tenant's `d` and whose
+   `host#<d>` names that tenant is left as it is and logged as
+   `distribution tenant disabled on a routed domain`: a removal that raced
+   the registrar's re-enable can leave it, and a routed repeat looks
+   nothing up, so the operator drops the domain and sets it again. The
+   sweeper finds what a crashed call left the same way. A changed domain is offline
    from the write until the new one validates. Before it touches a
    distribution tenant or a certificate, the registrar checks that its
    tags name this tenant and this distribution (409 on a domain call, a

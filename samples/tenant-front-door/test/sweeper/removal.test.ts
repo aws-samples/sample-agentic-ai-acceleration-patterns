@@ -3,6 +3,7 @@
 
 import {
   ACMClient,
+  type CertificateStatus,
   DeleteCertificateCommand,
   DescribeCertificateCommand,
   ListCertificatesCommand,
@@ -98,13 +99,14 @@ interface FakeCertificate {
   readonly domain: string;
   readonly tags: { Key: string; Value: string }[];
   readonly inUseBy?: string[];
+  readonly status?: CertificateStatus;
 }
 
 function certificates(list: FakeCertificate[]): void {
   acm.on(ListCertificatesCommand).resolves({ CertificateSummaryList: list.map((c) => ({ CertificateArn: c.arn, DomainName: c.domain })) });
   for (const c of list) {
     acm.on(ListTagsForCertificateCommand, { CertificateArn: c.arn }).resolves({ Tags: c.tags });
-    acm.on(DescribeCertificateCommand, { CertificateArn: c.arn }).resolves({ Certificate: { CertificateArn: c.arn, InUseBy: c.inUseBy ?? [] } });
+    acm.on(DescribeCertificateCommand, { CertificateArn: c.arn }).resolves({ Certificate: { CertificateArn: c.arn, InUseBy: c.inUseBy ?? [], Status: c.status } });
   }
 }
 
@@ -176,7 +178,7 @@ describe('two-phase removal (spec §3.4 step 5, ADR-0018, M-25)', () => {
     const result = await runRemoval(deps());
     expect(cloudFront.commandCalls(DeleteDistributionTenantCommand)[0].args[0].input).toEqual({ Id: 'dt-old', IfMatch: 'etag-dt-old' });
     expect(deletedCertificates()).toEqual([cert(1)]);
-    expect(result).toEqual({ disabled: 0, deletedTenants: 1, deletedCertificates: 1, failures: 0 });
+    expect(result).toEqual({ disabled: 0, deletedTenants: 1, deletedCertificates: 1, disabledRouted: 0, failures: 0 });
   });
 
   it('keeps a distribution tenant whose certificate CloudFront has not released yet, for a later run', async () => {
@@ -254,13 +256,57 @@ describe('two-phase removal (spec §3.4 step 5, ADR-0018, M-25)', () => {
     expect(logLines().some((l) => l.message === 'tenant entry unreadable; resource kept')).toBe(true);
   });
 
-  it('reads each tenant entry once per run', async () => {
+  it('reads the tenant entry again before each destructive call, with no run cache', async () => {
     certificates([
       { arn: cert(1), domain: OLD_DOMAIN, tags: tags(TENANT_A) },
       { arn: cert(2), domain: 'older-a.example.com', tags: tags(TENANT_A) },
     ]);
     await runRemoval(deps());
-    expect(kvs.commandCalls(GetKeyCommand)).toHaveLength(1);
+    expect(kvs.commandCalls(GetKeyCommand).map((c) => c.args[0].input.Key)).toEqual([`tenant#${TENANT_A}`, `tenant#${TENANT_A}`]);
+  });
+
+  it('keeps the certificate when the domain was set again after its distribution tenant was deleted', async () => {
+    distributionTenants([{ id: 'dt-old', domain: OLD_DOMAIN, enabled: false, status: 'Deployed', tenantTag: TENANT_A, certificateArn: cert(1) }]);
+    certificates([{ arn: cert(1), domain: OLD_DOMAIN, tags: tags(TENANT_A) }]);
+    cloudFront.on(DeleteDistributionTenantCommand).callsFake(() => {
+      routeTable.set(`tenant#${TENANT_A}`, tenantValue({ d: OLD_DOMAIN, dk: TOKEN_A, dx: 1_900_000_000 }));
+      return {};
+    });
+    const result = await runRemoval(deps());
+    expect(result.deletedTenants).toBe(1);
+    expect(deletedCertificates()).toEqual([]);
+  });
+
+  it('logs a disabled distribution tenant whose domain is still routed for its tenant, and leaves it', async () => {
+    routeTable.set(`host#${DOMAIN_A}`, JSON.stringify({ v: 1, t: TENANT_A, ac: '111111111111' }));
+    distributionTenants([{ id: 'dt-a', domain: DOMAIN_A, enabled: false, status: 'Deployed', tenantTag: TENANT_A, certificateArn: cert(1) }]);
+    const result = await runRemoval(deps());
+    expect(result.disabledRouted).toBe(1);
+    expect(cloudFront.commandCalls(UpdateDistributionTenantCommand)).toHaveLength(0);
+    expect(cloudFront.commandCalls(DeleteDistributionTenantCommand)).toHaveLength(0);
+    expect(logLines()).toContainEqual({ level: 'WARN', message: 'distribution tenant disabled on a routed domain', tenantId: TENANT_A, domain: DOMAIN_A, distributionTenantId: 'dt-a' });
+  });
+
+  it('does not log a disabled distribution tenant of a pending domain', async () => {
+    distributionTenants([{ id: 'dt-a', domain: DOMAIN_A, enabled: false, status: 'Deployed', tenantTag: TENANT_A }]);
+    expect((await runRemoval(deps())).disabledRouted).toBe(0);
+  });
+
+  it.each(['FAILED', 'VALIDATION_TIMED_OUT', 'REVOKED', 'EXPIRED'] as CertificateStatus[])('deletes an unused certificate %s even for the tenant\'s current d', async (status) => {
+    certificates([{ arn: cert(1), domain: DOMAIN_A, tags: tags(TENANT_A), status }]);
+    await runRemoval(deps());
+    expect(deletedCertificates()).toEqual([cert(1)]);
+  });
+
+  it('keeps a terminal certificate that is in use, untagged or used by a listed distribution tenant', async () => {
+    distributionTenants([{ id: 'dt-a', domain: DOMAIN_A, enabled: true, status: 'Deployed', tenantTag: TENANT_A, certificateArn: cert(3) }]);
+    certificates([
+      { arn: cert(1), domain: DOMAIN_A, tags: tags(TENANT_A), status: 'EXPIRED', inUseBy: ['arn:aws:cloudfront::123456789012:distribution-tenant/x'] },
+      { arn: cert(2), domain: DOMAIN_A, tags: [], status: 'FAILED' },
+      { arn: cert(3), domain: DOMAIN_A, tags: tags(TENANT_A), status: 'EXPIRED' },
+    ]);
+    await runRemoval(deps());
+    expect(deletedCertificates()).toEqual([]);
   });
 
   it('defers a resource another writer changed first, without failing', async () => {
