@@ -529,7 +529,7 @@ class Executor:
                 return True
             if time.monotonic() >= limit:
                 return True
-            time.sleep(0.05)
+            time.sleep(min(0.05, max(0.0, limit - time.monotonic())))
 
     def kill_all(self) -> None:
         """On SIGTERM: end any job. No reap here: a job thread may still be in Popen.wait()."""

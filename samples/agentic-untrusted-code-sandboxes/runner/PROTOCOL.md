@@ -97,7 +97,8 @@ The tool waits at most `timeoutMs` + 5 s for an answer (spec §4.1 step
 one budget of 3 s, so the answer comes with 2 s to spare; a step cut short
 marks the sandbox `dirty`. On `agentcore` the job group's memory is read
 again for up to 1 s of that budget, so memory the sweep freed has time to
-leave the group's counters before the group counts as not drained. A backend reports a longer wait as
+leave the group's counters before the group counts as not drained. A
+backend reports a longer wait as
 `no_answer`, and the tool stops the sandbox and returns `timedOut`.
 
 ### `RunResult`: HTTP 200

@@ -219,6 +219,25 @@ class SettledDirtyTest(unittest.TestCase):
             self.assertTrue(self.ex.settled_dirty(time.monotonic() + 3))
         self.assertLess(time.monotonic() - started, 0.3)
 
+    def test_collect_polls_the_group_inside_the_post_job_budget(self):
+        job = mock.Mock(timeout_ms=60000, code=b"", input=b"")
+        job.max_output = 10
+        proc = mock.Mock(returncode=0)
+        proc.wait.return_value = 0
+        threads = [mock.Mock(is_alive=mock.Mock(return_value=False), data=b"", cut=False, join=mock.Mock()) for _ in range(4)]
+        seen = []
+        real = self.ex.settled_dirty
+        self.ex.settled_dirty = lambda deadline: (seen.append(deadline), real(deadline))[1]
+        self.drain_after(0.3)
+        with mock.patch.object(jb, "POST_JOB_DEADLINE_S", 2.0), mock.patch.object(jb, "log"), \
+                mock.patch.object(self.ex, "_oom_kills", return_value=0), mock.patch.object(self.ex, "_kill_group"), \
+                mock.patch.object(self.ex, "sweep", return_value=True):
+            before = time.monotonic()
+            result = self.ex._collect(job, proc, before, 0, *threads, threading.Event())
+        self.assertIs(result["dirty"], False)  # the group drained during the poll
+        self.assertLessEqual(seen[0] - before, 2.1)  # the deadline is the post-job one, not a later one
+        self.assertGreaterEqual(seen[0] - before, 1.9)
+
     def test_another_backend_is_never_dirty_by_memory(self):
         ex = jb.Executor("microvm", sz.Sizing("microvm", 1024 * MIB), FakeFilter(), uid=os.getuid() + 100000)
         self.assertFalse(ex.settled_dirty(time.monotonic() + 3))

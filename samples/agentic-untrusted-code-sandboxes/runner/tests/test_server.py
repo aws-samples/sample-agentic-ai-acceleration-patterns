@@ -630,6 +630,11 @@ class LimitsTest(unittest.TestCase):
         fake.run = lambda job: (_ for _ in ()).throw(ToolFailed(clean=True))
         run(sb, signed(NONCE))
         self.assertFalse(sb.dirty)
+        sb, fake = make("agentcore")  # a failed job carries no polled read: the group is read once
+        fake.left_dirty = True
+        fake.run = lambda job: (_ for _ in ()).throw(ToolFailed(clean=True))
+        run(sb, signed(NONCE), SESSION)
+        self.assertTrue(sb.dirty)
 
     def test_version_type_and_deep_json(self):
         for v in (True, 1.0, "1"):
