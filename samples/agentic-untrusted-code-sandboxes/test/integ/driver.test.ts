@@ -16,9 +16,9 @@ import { runPhase } from './runner';
 import { canonicalPath, presignUrl, signRequest } from './sigv4';
 import { matrix, SPEC_TABLE_ORDER, STEPS, unitKey, validateSteps, type StepSpec } from './steps';
 import { collectHandles, sameKeys } from './steps/basic';
-import { neededQuotaGb } from './steps/build';
+import { neededQuotaGb, slotsFree } from './steps/build';
 import { DRIVER_STEPS, IMPLS } from './steps/index';
-import { CONNECTED, egressFailed, failedProbe, noConnection } from './steps/probes';
+import { CONNECTED, LAMBDA_RESPONSE_BYTES, LOOKUP_SLOW, controlAnswered, controlOutputOk, denied, egressFailed, noConnection } from './steps/probes';
 import { lastJsonLine, parseFunctionResponse, parseGatewayResponse } from './tool-result';
 
 describe('step order and matrix', () => {
@@ -150,6 +150,23 @@ describe('the context', () => {
     const state = { prefix: 'P', region: 'r', stackName: 'P', startedAt: 't', destroyed: false, resources: [], policyBaseline: {}, runtimeNames: [], imageNames: [] };
     const found = await checkLeftovers(aws as never, 'P', state);
     expect(found.map((f) => f.id)).toEqual(['fresh']);
+  });
+
+  test('a blank image name in the run state is reported as a check that failed, and no log group is listed with an empty prefix', async () => {
+    const prefixes: Array<string | undefined> = [];
+    const aws = {
+      cfn: { send: async () => ({ Stacks: [] }) },
+      logs: {
+        send: async (cmd: { input: { logGroupNamePrefix?: string } }) => {
+          if ('logGroupNamePrefix' in cmd.input) prefixes.push(cmd.input.logGroupNamePrefix);
+          return { logGroups: [], resourcePolicies: [] };
+        },
+      },
+    };
+    const state = { prefix: 'P', region: 'r', stackName: 'P', startedAt: 't', destroyed: false, resources: [], policyBaseline: {}, runtimeNames: [], imageNames: ['', 'img'] };
+    const found = await checkLeftovers(aws as never, 'P', state);
+    expect(found).toEqual([{ kind: 'check-failed', id: 'image', detail: expect.stringMatching(/empty service name/) }]);
+    expect(prefixes).toEqual(['/aws/lambda-microvms/img']);
   });
 });
 
@@ -397,29 +414,82 @@ describe('the hostile probes', () => {
     expect(lines).toEqual([CONNECTED, 'ConnectionRefusedError', 'ProbeDeadline', 'True']);
   });
 
-  test('the checks count a completed connect as open, and only a failed connect (or a refused presigned PUT) as blocked', () => {
-    expect(failedProbe({ error: CONNECTED })).toBe(false);
-    expect(failedProbe({ error: 'ProbeDeadline' })).toBe(true);
-    expect(failedProbe({ status: 403 })).toBe(true);
-    expect(failedProbe({ status: 200 })).toBe(false);
+  test('the checks count a completed connect or a slow lookup as open, and only a failed connect (or a 403 where S3 is reachable) as denied', () => {
     expect(noConnection({ error: CONNECTED })).toBe(false);
+    expect(noConnection({ error: LOOKUP_SLOW })).toBe(false);
     expect(noConnection({ error: 'ConnectionRefusedError' })).toBe(true);
     expect(noConnection({ status: 404 })).toBe(false);
-    expect(egressFailed('https_name', { error: CONNECTED })).toBe(false);
-    expect(egressFailed('https_name', { outcome: 403 })).toBe(false);
-    expect(egressFailed('https_name', { error: 'gaierror' })).toBe(true);
-    expect(egressFailed('put_presigned', { outcome: 403 })).toBe(true);
-    expect(egressFailed('put_presigned', { outcome: 200 })).toBe(false);
-    expect(egressFailed('tcp_public_ip', { outcome: 'connected' })).toBe(false);
-    expect(egressFailed('tcp_public_ip', { error: 'timeout' })).toBe(true);
-    expect(egressFailed('tcp_public_ip', {})).toBe(false);
+    for (const b of ['microvm', 'nitro', 'agentcore'] as const) {
+      expect(denied('dynamodb', { error: 'ProbeDeadline' }, b)).toBe(true);
+      expect(denied('dynamodb', { status: 400 }, b)).toBe(false);
+      expect(denied('internet', { error: CONNECTED }, b)).toBe(false);
+      expect(denied('internet', { error: LOOKUP_SLOW }, b)).toBe(false);
+      expect(denied('internet', {}, b)).toBe(false);
+      expect(egressFailed('https_name', { error: 'gaierror' }, b)).toBe(true);
+      expect(egressFailed('https_name', { outcome: 403 }, b)).toBe(false);
+      expect(egressFailed('tcp_public_ip', { outcome: 'connected' }, b)).toBe(false);
+      expect(egressFailed('tcp_public_ip', { error: 'timeout' }, b)).toBe(true);
+    }
+    expect(denied('s3', { status: 403 }, 'agentcore')).toBe(true);
+    expect(denied('s3', { status: 500 }, 'agentcore')).toBe(false);
+    expect(denied('s3', { error: 'ProbeDeadline' }, 'agentcore')).toBe(false);
+    expect(denied('s3', { status: 403 }, 'nitro')).toBe(false);
+    expect(denied('s3', { error: 'ProbeDeadline' }, 'microvm')).toBe(true);
+    expect(egressFailed('put_presigned', { outcome: 403 }, 'agentcore')).toBe(true);
+    expect(egressFailed('put_presigned', { outcome: 500 }, 'agentcore')).toBe(false);
+    expect(egressFailed('put_presigned', { outcome: 400 }, 'agentcore')).toBe(false);
+    expect(egressFailed('put_presigned', { outcome: 403 }, 'nitro')).toBe(false);
+    expect(egressFailed('put_presigned', { error: 'ProbeDeadline' }, 'nitro')).toBe(true);
+    expect(controlAnswered({ outcome: 401 })).toBe(true);
+    expect(controlAnswered({ error: 'ProbeDeadline' })).toBe(false);
+    expect(controlAnswered(undefined)).toBe(false);
+  });
+
+  test('a lookup that neither answers nor fails is ProbeLookupSlow, not blocked; a failed lookup is raised', () => {
+    const lib = `CONFIG = {}\n${readFileSync(path.join(HOSTILE_DIR, '_lib.py'), 'utf8')}`;
+    const script = [
+      'LOOKUP_TIMEOUT = 1',
+      'real = socket.getaddrinfo',
+      'socket.getaddrinfo = lambda *a, **k: time.sleep(5)',
+      'try:',
+      '    http("GET", "http://slow.example.com/", timeout=1)',
+      'except BaseException as e:',
+      '    print(type(e).__name__)',
+      'def nxdomain(*a, **k):',
+      '    raise socket.gaierror(-2, "Name or service not known")',
+      'socket.getaddrinfo = nxdomain',
+      'try:',
+      '    http("GET", "http://gone.example.com/", timeout=1)',
+      'except BaseException as e:',
+      '    print(type(e).__name__)',
+    ].join('\n');
+    const lines = execFileSync('python3', ['-I', '-S', '-B', '-c', `${lib}\n${script}`], { encoding: 'utf8', timeout: 15_000 }).trim().split('\n');
+    expect(lines).toEqual([LOOKUP_SLOW, 'gaierror']);
+  });
+
+  test('the slot precheck needs every slot the stack creates', () => {
+    expect(slotsFree(7, 3)).toBe(true);
+    expect(slotsFree(8, 3)).toBe(false);
+    expect(slotsFree(9, 3)).toBe(false);
+    expect(slotsFree(10, 0)).toBe(true);
+  });
+
+  test('the control-byte print passes only cut, under the response limit, and all 0x01', () => {
+    const ok = { truncated: true, stdout: '\u0001'.repeat(1000) };
+    expect(controlOutputOk(ok)).toBe(true);
+    expect(controlOutputOk({ ...ok, truncated: false })).toBe(false);
+    expect(controlOutputOk({ ...ok, stdout: `${ok.stdout}x` })).toBe(false);
+    expect(controlOutputOk({ ...ok, stdout: '' })).toBe(false);
+    expect(controlOutputOk({ truncated: true, stdout: '\u0001'.repeat(Math.ceil(6_500_000 / 6)) })).toBe(false);
+    expect(Buffer.byteLength(JSON.stringify({ truncated: true, stdout: '\u0001'.repeat(Math.ceil(6_500_000 / 6)) }))).toBeGreaterThan(LAMBDA_RESPONSE_BYTES);
+    expect(controlOutputOk(undefined)).toBe(false);
   });
 
   test('the limits probe reads an input back whole and prints control bytes at the size it is given', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'rc-limits-'));
     const data = Buffer.from([0, 1, 2, 255, 10, 13]);
     writeFileSync(path.join(dir, 'input'), data);
-    const input = probeCode('limits', { mode: 'input' }).replace('/work/input', path.join(dir, 'input'));
+    const input = probeCode('limits', { mode: 'input' }).replaceAll('/work/input', path.join(dir, 'input'));
     expect(lastJsonLine(execFileSync('python3', ['-I', '-S', '-B', '-c', input], { encoding: 'utf8' }))).toEqual({
       sha256: createHash('sha256').update(data).digest('hex'), size: data.length,
     });

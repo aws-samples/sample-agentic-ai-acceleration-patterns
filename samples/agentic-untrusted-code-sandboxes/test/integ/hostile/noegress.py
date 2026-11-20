@@ -5,8 +5,9 @@
 # with no name lookup (so the route and the security group are tested even
 # when the firewall answers the name first), TCP to tenant B's sandbox
 # address, and a presigned PUT to a bucket outside the endpoint policy. Every
-# probe must fail within 2 s (no TCP connect: ProbeDeadline or a connect error),
-# and the IP-literal connect must not complete.
+# probe must make no TCP connection (a failed lookup or connect, or ProbeDeadline
+# after 2 s), except the presigned PUT on agentcore, which reaches S3 and must get
+# 403. A positive control to an allowed address must get a status in the same time.
 import threading
 
 
@@ -43,11 +44,20 @@ def https_peer():
     return http("GET", CONFIG["peer_url"])[0]
 
 
-ts = [probe("https_name", https_name), probe("tcp_public_ip", tcp_public), probe("put_presigned", put_presigned)]
+def control():
+    # The positive control: the same request code and deadline against an address the sandbox may reach (the
+    # metadata service on microvm and agentcore, the ECS credentials path on nitro). Any status is an answer.
+    if CONFIG["backend"] == "nitro":
+        return http("GET", "http://" + ".".join(["169", "254", "170", "2"]) + "/v2/credentials/none")[0]
+    return http("GET", "http://" + llink() + "/latest/meta-data/")[0]
+
+
+ts = [probe("control", control), probe("https_name", https_name), probe("tcp_public_ip", tcp_public), probe("put_presigned", put_presigned)]
 if CONFIG.get("peer_ip"):
     ts.append(probe("tcp_peer", tcp_peer))
 if CONFIG.get("peer_url"):
     ts.append(probe("https_peer", https_peer))
+# A lookup may take LOOKUP_TIMEOUT (10 s) before the 2 s connect and the 2 s request; the threads run side by side.
 for t in ts:
-    t.join(5)
+    t.join(15)
 done()

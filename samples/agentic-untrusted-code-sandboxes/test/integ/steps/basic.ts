@@ -17,14 +17,13 @@ import { REGISTRY, registryPk, registrySk } from '../../../src/env';
 import { MAX_INPUT_BYTES_CAP } from '../../../src/props';
 import { agentPath } from '../agent-path';
 import { callStandalone, sleep, until } from '../aws';
-import { clusterArn, liveHandles, sandboxState, stopOutOfBand, waitEnded } from '../cloud';
+import { clusterArn, liveHandles, microvmTerminatedAt, sandboxState, stopOutOfBand, waitEnded } from '../cloud';
 import { type Backend, TENANT } from '../common';
 import { type Ctx } from '../ctx';
 import { INPUT_AT_CAP, INPUT_OVER_CAP, INVOICES, inputAtCap } from '../fixtures';
 import { probeCode } from '../hostile';
 import { type Unit } from '../steps';
 import { parseFunctionResponse, lastJsonLine, type RunResult } from '../tool-result';
-
 
 const { a: A, b: B, c: C } = TENANT;
 
@@ -185,8 +184,10 @@ export async function deadHandle(c: Ctx, u: Unit): Promise<void> {
     c.rec.check('the stopped sandbox reports ended within 4 minutes', await waitEnded(c, backend, handle, 240_000));
     if (backend === 'microvm') {
       // The tool counts a MicroVM as dead only when terminatedAt is more than 2 s before its request left; a call
-      // inside that window is no_answer, and the tool stops the sandbox and returns timedOut (ADR-0044).
-      await sleep(3000);
+      // inside that window is no_answer, and the tool stops the sandbox and returns timedOut (ADR-0044). Wait until
+      // 4 s past terminatedAt on this clock, which leaves 2 s for a driver clock behind the platform's.
+      const endedAt = await microvmTerminatedAt(c, handle);
+      await sleep(Math.max(0, (endedAt ?? Date.now()) + 4000 - Date.now()));
     }
   } else {
     await sleep(5000);

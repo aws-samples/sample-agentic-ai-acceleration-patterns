@@ -44,6 +44,7 @@ def llink():
 
 
 PROBE_TIMEOUT = 2
+LOOKUP_TIMEOUT = 10
 
 
 class ProbeDeadline(socket.timeout):
@@ -52,6 +53,10 @@ class ProbeDeadline(socket.timeout):
 
 class ProbeConnected(Exception):
     """The TCP connect completed, then no answer came in time (or the request failed): the path is open, never blocked."""
+
+
+class ProbeLookupSlow(Exception):
+    """The name lookup neither answered nor failed within LOOKUP_TIMEOUT: nothing is known, so never blocked."""
 
 
 def _bounded(fn, timeout):
@@ -70,10 +75,27 @@ def _bounded(fn, timeout):
     return box[0] if box else None
 
 
-def _connect(url, timeout):
+def _resolve(url):
+    """The first TCP address of the URL's host and port. A failed lookup (gaierror) is raised; a slow one is ProbeLookupSlow."""
     u = urllib.parse.urlsplit(url)
     port = u.port or (443 if u.scheme == "https" else 80)
-    socket.create_connection((u.hostname, port), timeout=timeout).close()
+    got = _bounded(lambda: socket.getaddrinfo(u.hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM), LOOKUP_TIMEOUT)
+    if got is None:
+        raise ProbeLookupSlow("no lookup answer within " + str(LOOKUP_TIMEOUT) + " s")
+    if not got[0]:
+        raise got[1]
+    family, kind, proto, _name, addr = got[1][0]
+    return family, kind, proto, addr
+
+
+def _connect(target, timeout):
+    family, kind, proto, addr = target
+    s = socket.socket(family, kind, proto)
+    s.settimeout(timeout)
+    try:
+        s.connect(addr)
+    finally:
+        s.close()
 
 
 def _request(method, url, headers, body, timeout):
@@ -88,14 +110,17 @@ def _request(method, url, headers, body, timeout):
 def http(method, url, headers=None, body=None, timeout=PROBE_TIMEOUT):
     """One HTTP request; returns (status, bytes). A refusal status is data, not an error.
 
-    Two phases, each bounded to `timeout` seconds however many addresses the name has (urllib's
-    timeout is per address). First a TCP connect to the URL's host and port: a lookup or connect
-    that fails, or does not complete in time (ProbeDeadline), means the path is blocked. Only then
-    the request itself: if it gives no answer in time, or fails after the connect, it raises
-    ProbeConnected, which no check counts as blocked. So a slow but open path (a cold TLS
-    handshake through a NAT, a slow endpoint) never passes a negative check by its slowness.
+    Three steps. The name lookup gets LOOKUP_TIMEOUT seconds: a lookup that fails (no such name, a
+    firewall answer) is raised and means blocked; one that gives no answer in time raises
+    ProbeLookupSlow, which no check counts as blocked. Then a TCP connect to the first address,
+    bounded to `timeout` seconds: a connect that fails or does not complete in time (ProbeDeadline)
+    means the path is blocked. Only then the request itself, also bounded to `timeout` seconds
+    (urllib's own timeout is per address): no answer in time, or a failure after the connect, raises
+    ProbeConnected, which no check counts as blocked. So a slow but open path (a cold resolver, a
+    cold TLS handshake through a NAT, a slow endpoint) never passes a negative check by its slowness.
     """
-    first = _bounded(lambda: _connect(url, timeout), timeout)
+    target = _resolve(url)
+    first = _bounded(lambda: _connect(target, timeout), timeout)
     if first is None:
         raise ProbeDeadline("no connect within the deadline")
     if not first[0]:

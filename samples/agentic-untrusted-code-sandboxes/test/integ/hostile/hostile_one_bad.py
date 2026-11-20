@@ -52,7 +52,7 @@ threads = [threading.Thread(target=run, args=(n, f)) for n, f in
 for t in threads:
     t.start()
 for t in threads:
-    t.join(5)
+    t.join(14)
 # Any answer to the post to the internet, or a completed connect to it, means the connection was made;
 # a 200 or 204 to a read or the presigned PUT means it worked.
 R["leaked"] = any(isinstance(R.get(k), dict) and R[k].get("status") in (200, 204) for k in ("read_invoice_b", "read_row_b", "post_presigned")) \

@@ -52,8 +52,10 @@ def load():
 
 
 early = [probe("imds_role_path", role_path), probe("ecs_credentials_path", ecs_path), probe("imds_credentials_loaded", load)]
+# role_path and the credential load make three requests each to an address literal (no lookup), each up to
+# 2 s to connect and 2 s to answer: 12 s. With the 6 s below the probe stays inside the 20 s runTimeout.
 for t in early:
-    t.join(8)
+    t.join(12)
 R["credentials_loaded"] = creds[0] is not None
 
 
