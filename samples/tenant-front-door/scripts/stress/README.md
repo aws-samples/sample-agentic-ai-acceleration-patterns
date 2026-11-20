@@ -103,7 +103,7 @@ The router can log one value with `cf.logCustomData`, and it logs the
 tenant (ADR-0010). The slice adds no correlation header. Every response
 carries `x-amz-cf-id`, and CloudFront's standard log carries the same value
 as `x-edge-request-id`, so `collect` joins each request to its edge log line
-on it. In the live runs 6,682 of 6,682 and 6,681 of 6,681 requests joined.
+on it. In three live runs 6,682 of 6,682, 6,681 of 6,681 and 6,681 of 6,681 requests joined.
 The same join gives the edge's own time (`time-taken`) as the `edge` hop and
 shows that every router refusal is a `FunctionGeneratedResponse`. The origin
 is joined by its counts, not per request: the cell's log counts by status
@@ -121,38 +121,59 @@ reported as not checked when they were not.
 
 ## Measured (small tier)
 
-Two runs, 2026-11-20, a non-production test account, front door in eu-west-2,
-`tenant-identity` in eu-central-1, edge in us-east-1, driver on one host.
-Latencies include the driver host's network path to CloudFront.
+Three runs on 2026-11-20 from a non-production test account: front door in
+eu-west-2, `tenant-identity` in eu-central-1, edge in us-east-1, one driver
+host. Runs 1 and 2 are of the first commit of this slice; run 3 is the gate run
+of the final code, which `stress/run.sh run --tier small --slices
+tenant-front-door` reported as PASSED. Latencies include the driver host's
+network path to CloudFront.
 
-| Measure | Run 1 | Run 2 |
+| Measure | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Registrar write cycle p50 / p95 / p99 | 0.51 / 7.16 / 8.16 s | 0.50 / 7.49 / 8.33 s | 0.50 / 7.76 / 8.59 s |
+| Burst of 20 writes at once, time to write them all | 16 s | 16 s | 15 s |
+| Registrar 503 (`route-table-busy`) | 4 of 54 calls | 5 of 55 calls | 5 of 55 calls |
+| Time to routable p50 / p95 / p99 | 23.1 / 47.1 / 58.1 s | 40.1 / 49.1 / 50.1 s | 29.2 / 37.1 / 38.1 s |
+| Time to last miss p50 / p95 / p99 | 39.0 / 57.0 / 59.0 s | 41.0 / 52.0 / 54.0 s | 34.0 / 57.0 / 60.0 s |
+| Routes served once and then refused again | not counted | 30 of 50 routes, 75 requests | 29 of 50 routes, 210 requests |
+| Suspend call to five 503s in a row | 30 s | 30 s | 60 s |
+| Client latency, served `whoami`, p50 / p99 | 0.05 / 0.11 s | 0.05 / 0.11 s | 0.05 / 0.12 s |
+| Edge refusal latency, p50 / p99 | 4 / 9 ms | 3 / 7 ms | 3 / 8 ms |
+| Router compute utilization, highest minute | 94 % | 94 % | 94 % |
+| Isolation | 0 mismatches in 4,913 assertions | 0 in 4,680 | 0 in 5,120 |
+| Unattributed refusals | 0 | 0 | 0 |
+
+Deploy and destroy time, seconds, from the clean deploy of run 2 and the
+teardown of run 3 (the runner's own figures for run 3, 178 s to deploy and 913 s
+to destroy, include a deploy that reused stacks that were already up and a sweep
+of 71 tenants that took about 6.5 minutes):
+
+| Stack | Deploy | Destroy |
 |---|---|---|
-| Registrar write cycle p50 / p95 / p99 | 0.51 / 7.16 / 8.16 s | 0.50 / 7.49 / 8.33 s |
-| Burst of 20 writes at once, time to clear | 16 s | 16 s |
-| Registrar 503 (`route-table-busy`) | 4 of 54 calls | 5 of 55 calls |
-| Time to routable p50 / p95 / p99 | 23.1 / 47.1 / 58.1 s | 40.1 / 49.1 / 50.1 s |
-| Time to last miss p50 / p95 / p99 | 39.0 / 57.0 / 59.0 s | 41.0 / 52.0 / 54.0 s |
-| Routes served once and then refused again | not counted | 30 of 50 routes, 75 requests |
-| Client latency, served `whoami`, p50 / p99 | 0.05 / 0.11 s | 0.05 / 0.11 s |
-| Edge refusal latency, p50 / p99 | 4 / 9 ms | 3 / 7 ms |
-| Router compute utilization, highest minute | 94 % | 94 % |
-| Isolation | 0 mismatches in 4,913 assertions | 0 in 4,680 |
+| `<prefix>-support` | 54 | 23 |
+| `<prefix>-control-plane` (stand-in) | 70 | 43 |
+| `<prefix>-edge` (us-east-1) | 65 | 36 |
+| `<prefix>-main` (distribution, router, registrar) | 341 | 325 |
+| `<prefix>-edge-logging` (us-east-1) | 62 | 60 |
+| `<prefix>-cell` | 71 | 34 |
+| Total | 663 | 521 |
 
 What the numbers say:
 
 - A write takes half a second when alone and up to 8 s when 20 contend for the
   store's one ETag; about one call in ten ends in 503 after five attempts. The
-  route hook retries those. The 16 s the burst took includes the driver's own
-  wait (about 5 s) before it retries a 503, so it is an upper bound on the
-  store's time, not its throughput.
+  route hook retries those. The 15 to 16 s the burst took includes the
+  driver's own wait (about 5 s) before it retries a 503, so it is an upper
+  bound on the store's time, not its throughput.
 - A route is not seen everywhere at once. Edge locations learn a write at
-  different times, up to 59 s in these runs, and a request can see a route and
+  different times, up to 60 s in these runs, and a request can see a route and
   then lose it before it settles. That is longer than the 45 s the route hook
-  waits for propagation. After 90 s every request saw every route.
-- The router's compute utilization reaches 94 % in a minute with ordinary load,
-  and 46 % in the minute of run 2's `router-load` scenario with its padded tokens; the
-  metric has one point a minute, so a short scenario shares its minute with
-  its neighbours and the figure is an upper bound.
+  waits for propagation. A suspension took 30 to 60 s to show at the edge.
+  After 90 s every request saw every route.
+- The router's compute utilization reaches 94 % in a minute with ordinary
+  load. The metric has one point a minute, so a short scenario shares its
+  minute with its neighbours, and the figure is an upper bound for each of
+  them; the padded tokens of `router-load` do not stand out from it.
 
 ## Known limitations
 
