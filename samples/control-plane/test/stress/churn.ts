@@ -59,7 +59,7 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
   const existing = await deploymentsOf(s);
   const wanted = s.manifest.churn.slice(0, s.tier.churnPerRun);
   if (wanted.length < s.tier.churnPerRun) {
-    s.rec.finding(`the manifest lists ${s.manifest.churn.length} churn tenants of the ${s.tier.churnPerRun} the tier churns: PS-5 runs short`);
+    s.rec.finding(`churn tenants in the manifest: ${s.manifest.churn.length}, the tier churns ${s.tier.churnPerRun}: PS-5 runs short`);
   }
   const tenants = wanted.filter((t) => {
     if (!existing.has(t)) return true;

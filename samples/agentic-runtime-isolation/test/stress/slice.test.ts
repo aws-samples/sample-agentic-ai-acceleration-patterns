@@ -436,6 +436,17 @@ describe('slice.sh', () => {
         });
       });
 
+      it('shows the first line of an AWS error that has no code', () => {
+        withHome(ALL, (h) => {
+          const failing = path.join(fake, 'bin-nocreds');
+          fs.mkdirSync(failing, { recursive: true });
+          fs.writeFileSync(path.join(failing, 'aws'), '#!/usr/bin/env bash\necho "Unable to locate credentials. You can configure credentials by running aws configure." >&2\nexit 253\n', { mode: 0o755 });
+          const r = run(script(), { ...env(h), PATH: `${failing}:${process.env.PATH}` }, 'deploy');
+          expect(r.status).toBe(1);
+          expect(r.stderr).toContain('could not read the status of StressTest-driver (Unable to locate credentials.');
+        });
+      });
+
       it('keeps its ownership marker when the k6 host deploy failed after it made the stack, so teardown removes it', () => {
         withHome(ALL, (h) => {
           const driverDeploy = path.join(repo, 'stress', 'driver', 'deploy.sh');

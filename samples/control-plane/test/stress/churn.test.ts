@@ -251,7 +251,7 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
   it('runs short and says so when the manifest holds fewer churn tenants than the tier churns', async () => {
     const w = new World(1);
     await ps5(w.env({ manifest: one, tier: { ...w.env().tier, churnPerRun: 3 } }), w.timing);
-    expect(w.recorder.findings).toEqual(['the manifest lists 1 churn tenants of the 3 the tier churns: PS-5 runs short']);
+    expect(w.recorder.findings).toEqual(['churn tenants in the manifest: 1, the tier churns 3: PS-5 runs short']);
     expect(w.deleted.size).toBe(1);
   });
 

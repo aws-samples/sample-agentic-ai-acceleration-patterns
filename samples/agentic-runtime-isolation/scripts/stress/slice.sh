@@ -149,7 +149,7 @@ DRIVER_MARK="${STRESS_STATE_DIR}/platform-driver-owned"
 # exist; any other AWS error prints its code to stderr and fails, so an expired token is never
 # taken for "there" or for "absent".
 stack_status() {
-  local out errfile err
+  local out errfile err code
   errfile="$(mktemp)"
   if out="$(aws cloudformation describe-stacks --stack-name "$1" --query 'Stacks[0].StackStatus' --output text 2>"$errfile")"; then
     rm -f "$errfile"
@@ -162,7 +162,10 @@ stack_status() {
     echo absent
     return 0
   fi
-  echo "slice.sh: could not read the status of $1 ($(sed -n 's/.*An error occurred (\([A-Za-z0-9.]*\)).*/\1/p' <<<"$err" | head -n 1))" >&2
+  code="$(sed -n 's/.*An error occurred (\([A-Za-z0-9.]*\)).*/\1/p' <<<"$err" | head -n 1)"
+  # An error with no code (no credentials, no network) shows its first line instead.
+  [[ -n "$code" ]] || code="$(head -n 1 <<<"$err" | cut -c1-80)"
+  echo "slice.sh: could not read the status of $1 (${code:-no reason given})" >&2
   return 1
 }
 
