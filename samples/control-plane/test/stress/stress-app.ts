@@ -21,6 +21,7 @@
 import { App, CfnOutput, Duration, Fn, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import { stackNamesOf, parseBuildLimit } from './plan';
@@ -48,6 +49,7 @@ const vendorIdp = new cognito.UserPool(setup, 'VendorIdp', {
 const mintOperatorRole = new lambda.Function(setup, 'MintOperatorRole', {
   runtime: lambda.Runtime.NODEJS_24_X,
   handler: 'index.handler',
+  logGroup: new logs.LogGroup(setup, 'MintOperatorRoleLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: RemovalPolicy.DESTROY }),
   code: lambda.Code.fromInline(`
     exports.handler = async (event) => {
       event.response = { claimsOverrideDetails: { claimsToAddOrOverride: { role: 'operator' } } };
@@ -84,8 +86,12 @@ const source = new s3deploy.BucketDeployment(setup, 'SourceZip', {
   destinationKeyPrefix: 'source/',
   sources: [s3deploy.Source.asset(need('STRESS_SOURCE_ZIP'))],
   extract: false,
-  // One object per commit; an old one goes with the deployment that wrote it.
-  prune: true,
+  // One object per commit, and every one kept: a cell is stamped with the source it was
+  // created from (control-plane ADR-0032), and its later tenant builds and its delete fetch
+  // that object. The objects go with the bucket (`autoDeleteObjects`) on
+  // `teardown --fixtures`, after every cell is deleted.
+  prune: false,
+  logGroup: new logs.LogGroup(setup, 'SourceZipLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: RemovalPolicy.DESTROY }),
 });
 
 new CfnOutput(setup, 'UserPoolId', { value: vendorIdp.userPoolId });

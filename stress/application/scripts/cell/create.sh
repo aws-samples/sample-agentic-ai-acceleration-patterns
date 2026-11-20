@@ -53,8 +53,15 @@ start=$SECONDS
 echo "cell_synth_seconds=$((SECONDS - start)) peak_memory_mib=$(peak_memory_mib)"
 
 start=$SECONDS
-(cd "$SAMPLE_DIR" && "$CDK" deploy "$STACK" --app "${OUT}/cdk.out" --toolkit-stack-name CDKToolkit-cell \
-  --require-approval never --progress events --outputs-file "${OUT}/outputs.json")
+# The deploy's own output holds the cell's stack outputs (the issuer with its user pool id,
+# every URL, role ARNs): it goes to a file in the scratch folder, and the log gets the
+# timing, and on a failure the failed resources by logical id and status only.
+if ! (cd "$SAMPLE_DIR" && "$CDK" deploy "$STACK" --app "${OUT}/cdk.out" --toolkit-stack-name CDKToolkit-cell \
+  --require-approval never --progress events --outputs-file "${OUT}/outputs.json" > "${OUT}/deploy.log" 2>&1); then
+  echo "cdk deploy of ${STACK} failed after $((SECONDS - start)) s; failed resources:"
+  grep -E '_FAILED' "${OUT}/deploy.log" | awk -F'|' 'NF >= 6 {print "  " $4 "|" $5 "|" $6}' | sed -E 's/ \(.*$//' | sort -u | head -20 || true
+  exit 1
+fi
 echo "cell_deploy_seconds=$((SECONDS - start)) peak_memory_mib=$(peak_memory_mib)"
 
 entitlements="$(node -e 'const o = require(process.argv[1])[process.argv[2]] ?? {}; if (!o.EntitlementsApiUrl) process.exit(1); console.log(o.EntitlementsApiUrl)' "${OUT}/outputs.json" "$STACK")"

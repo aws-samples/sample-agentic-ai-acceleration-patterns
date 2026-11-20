@@ -33,8 +33,10 @@ if ! STACK="$(get_param "$(cell_param stack)" 2> /dev/null)"; then
   STACK="StressCell-${CELL_ID}"
   echo "No $(cell_param stack); using the create script's name"
 fi
-if ! [[ "$STACK" =~ ^StressCell-[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
-  echo "$(cell_param stack) does not name a stress cell stack: refusing"
+# Every cell build in the account can write the cell namespace, so the parameter must name
+# this cell's own stack, never another one.
+if [ "$STACK" != "StressCell-${CELL_ID}" ]; then
+  echo "$(cell_param stack) does not name this cell's stack StressCell-${CELL_ID}: refusing"
   exit 1
 fi
 echo "Deleting cell ${CELL_ID}: stack ${STACK} in ${CELL_ACCOUNT_ID}"

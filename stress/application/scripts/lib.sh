@@ -69,22 +69,29 @@ peak_memory_mib() {
   echo -
 }
 
+# True when the URL is an execute-api URL in this Region: the only host a tenant script
+# signs to, whatever the cell parameter holds.
+#   execute_api_url_ok <url>
+execute_api_url_ok() {
+  [[ "$1" =~ ^https://[a-z0-9]{10}\.execute-api\.${AWS_REGION}\.amazonaws\.com/[A-Za-z0-9._/-]*$ ]]
+}
+
 # One SigV4-signed call to an execute-api URL with the role's credentials:
 #   sigv4 <method> <url> <response file> [<JSON body>]
-# Prints the HTTP status. The credentials go to curl in a 0600 config file, never in argv.
+# Prints the HTTP status (000 when it refused to sign or curl failed). The credentials reach
+# curl as a config on its stdin (`-K -`), never in argv and never on disk.
 sigv4() {
-  local method="$1" url="$2" out="$3" body="${4:-}" cfg status
-  cfg="$(mktemp)"
-  chmod 600 "$cfg"
-  {
-    printf 'user = "%s:%s"\n' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
-    printf 'header = "x-amz-security-token: %s"\n' "$AWS_SESSION_TOKEN"
-  } > "$cfg"
-  local args=(-sS -o "$out" -w '%{http_code}' -X "$method" --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" -K "$cfg" --max-time 30)
+  local method="$1" url="$2" out="$3" body="${4:-}" status
+  if ! execute_api_url_ok "$url"; then
+    echo "refusing to sign to a URL that is not an execute-api URL in ${AWS_REGION}" >&2
+    echo 000
+    return 0
+  fi
+  local args=(-sS -o "$out" -w '%{http_code}' -X "$method" --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api" -K - --max-time 30)
   if [ -n "$body" ]; then
     args+=(-H 'Content-Type: application/json' --data "$body")
   fi
-  status="$(curl "${args[@]}" "$url" || echo 000)"
-  rm -f "$cfg"
+  status="$(printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" \
+    | curl "${args[@]}" "$url" || echo 000)"
   echo "$status"
 }

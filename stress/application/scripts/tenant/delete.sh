@@ -29,6 +29,10 @@ fi
 echo "Removing tenant ${TENANT_ID} of ${APPLICATION_ID} from cell ${CELL_ID}"
 
 if api="$(get_param "$(cell_param entitlements-api-url)" 2> /dev/null)"; then
+  if ! execute_api_url_ok "${api%/}/"; then
+    echo "$(cell_param entitlements-api-url) is not an execute-api URL in ${AWS_REGION}: refusing to sign"
+    exit 1
+  fi
   response="$(mktemp)"
   trap 'rm -f "$response"' EXIT
   status="$(sigv4 DELETE "${api%/}/tenants/${TENANT_ID}" "$response")"

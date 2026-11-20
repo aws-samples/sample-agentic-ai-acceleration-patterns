@@ -42,6 +42,10 @@ echo "Tenant ${TENANT_ID} of ${APPLICATION_ID} into cell ${CELL_ID} (${OPERATION
 api="$(get_param "$(cell_param entitlements-api-url)")"
 echo "Read $(cell_param entitlements-api-url)"
 api="${api%/}"  # the API base: .../<stage>/entitlements
+if ! execute_api_url_ok "${api}/"; then
+  echo "$(cell_param entitlements-api-url) is not an execute-api URL in ${AWS_REGION}: refusing to sign"
+  exit 1
+fi
 
 # Names to JSON with jq; PARAM_ values are operator text, so they are never logged or eval'd.
 body="$(jq -cn --arg agents "${PARAM_AGENTS-}" --arg tools "${PARAM_TOOLS-}" \
