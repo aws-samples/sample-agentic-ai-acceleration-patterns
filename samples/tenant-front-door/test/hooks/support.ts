@@ -69,6 +69,18 @@ const SLEEP_STUB = `#!/usr/bin/env bash
 echo "$1" >> "$STUB_DIR/sleeps"
 `;
 
+/**
+ * Sourced through BASH_ENV when a test turns the fake clock on: a \`sleep\`
+ * function, which wins over the stub on PATH, records the call and moves
+ * the script's own \`SECONDS\` forward by FAKE_CLOCK_FACTOR times the
+ * argument. An external stub cannot change the script's clock.
+ */
+const FAKE_CLOCK = `sleep() {
+  echo "$1" >> "$STUB_DIR/sleeps"
+  SECONDS=$((SECONDS + $1 * FAKE_CLOCK_FACTOR))
+}
+`;
+
 /** One response of the curl stub: an HTTP status and body, or `fail` for no answer. */
 export type CurlResponse = { readonly status: number; readonly body?: unknown } | 'fail';
 
@@ -100,6 +112,7 @@ export class ScriptHarness {
   private readonly bin: string;
   private curlCount = 0;
   private ssmCount = 0;
+  private clockFactor: number | undefined;
 
   constructor() {
     this.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfd-script-'));
@@ -108,6 +121,13 @@ export class ScriptHarness {
     fs.writeFileSync(path.join(this.bin, 'curl'), CURL_STUB, { mode: 0o755 });
     fs.writeFileSync(path.join(this.bin, 'aws'), AWS_STUB, { mode: 0o755 });
     fs.writeFileSync(path.join(this.bin, 'sleep'), SLEEP_STUB, { mode: 0o755 });
+    fs.writeFileSync(path.join(this.dir, 'fake-clock.bash'), FAKE_CLOCK);
+  }
+
+  /** Makes each `sleep N` in the script advance its `SECONDS` by `factor * N`, as if every wait ran long. */
+  fakeClock(factor: number): this {
+    this.clockFactor = factor;
+    return this;
   }
 
   /** Queues curl answers, in call order. */
@@ -144,8 +164,11 @@ export class ScriptHarness {
 
   run(script: string, env: Record<string, string | undefined>, args: readonly string[] = []): RunResult {
     const clean = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined)) as Record<string, string>;
+    const clock = this.clockFactor === undefined
+      ? {}
+      : { BASH_ENV: path.join(this.dir, 'fake-clock.bash'), FAKE_CLOCK_FACTOR: String(this.clockFactor) };
     const r = spawnSync('bash', [script, ...args], {
-      env: { PATH: `${this.bin}:${process.env.PATH}`, STUB_DIR: this.dir, TMPDIR: this.dir, ...clean },
+      env: { PATH: `${this.bin}:${process.env.PATH}`, STUB_DIR: this.dir, TMPDIR: this.dir, ...clock, ...clean },
       encoding: 'utf8',
       timeout: 30_000,
     });

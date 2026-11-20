@@ -416,6 +416,17 @@ describe('host mode: polling the tenant\'s /config.json (§4.2)', () => {
     expect(r.output).toMatch(/warning: .* did not show the change within 45 s; the write succeeded/);
   });
 
+  it('stops at the 45 s deadline when the polls run slow, before the poll count bound', () => {
+    h.curl({ status: 200, body: { tenantId: TENANT, dt: DT } });
+    for (let i = 0; i < 20; i++) h.curl({ status: 200, body: { rev: DT - 1 } });
+    // Each 3 s sleep moves the hook's clock 15 s: the deadline falls after three polls, not fifteen.
+    const r = h.fakeClock(5).run(HOOK, hookEnv('POST', 'DEPLOYMENT_UPDATE'));
+    expect(r.status).toBe(0);
+    expect(h.curlCalls()).toHaveLength(1 + 3);
+    expect(h.sleeps()).toEqual([3, 3, 3]);
+    expect(r.output).toMatch(/warning: .* did not show the change within 45 s; the write succeeded/);
+  });
+
   it('waits the full bound when the answer has no dt', () => {
     h.curl({ status: 200, body: { tenantId: TENANT } });
     const r = h.run(HOOK, hookEnv('POST', 'DEPLOYMENT_CREATE'));
