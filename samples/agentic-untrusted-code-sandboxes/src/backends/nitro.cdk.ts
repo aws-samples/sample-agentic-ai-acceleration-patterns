@@ -177,6 +177,10 @@ export class NitroBackendResources extends Construct implements BackendConstruct
     // Neither the L1 nor the L2 types carry the isolation mode at the pin (ADR-0023).
     this.taskDefinition.addPropertyOverride('TrustedExecutionConfiguration', { IsolationMode: 'ISOLATED_SANDBOX' });
     Validations.of(this.taskDefinition).acknowledge({
+      id: 'AwsSolutions::AwsSolutions-ECS2',
+      reason: 'RUNNER_BACKEND is a fixed, non-secret selector (the value nitro) that the runner needs at start (ADR-0037). The per-start nonce hash is not here: the tool sets it in the RunTask container override (ADR-0018).',
+    });
+    Validations.of(this.taskDefinition).acknowledge({
       id: 'CloudFormation-Validate::F3002',
       reason: 'The CloudFormation schema that aws-cdk-lib 2.274.0 validates against predates TrustedExecutionConfiguration. The spikes deployed this property in raw CloudFormation (S-6, S-14, S-19, S-20); the synth test asserts it (ADR-0023, ADR-0046).',
     });
