@@ -61,6 +61,9 @@ export interface ResolvedProps {
 export const CORE_BUDGET_CAP_SECONDS = 120;
 export const GATEWAY_BUDGET_CAP_SECONDS = 90;
 
+/** A DNS Firewall domain: a name, or `*.` and a name (spec §3.9). */
+const DOMAIN_PATTERN = /^(\*\.)?[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
+
 function fail(message: string): never {
   throw new Error(`UntrustedCodeSandboxes: ${message}`);
 }
@@ -103,6 +106,11 @@ export function resolveProps(props: UntrustedCodeSandboxesProps): ResolvedProps 
   const dnsFirewall = props.dnsFirewall
     ? { allowDomains: typeof props.dnsFirewall === 'object' ? [...(props.dnsFirewall.allowDomains ?? [])] : [] }
     : false as const;
+  if (dnsFirewall) {
+    for (const d of dnsFirewall.allowDomains) {
+      if (!DOMAIN_PATTERN.test(d) || d.length > 255) fail(`dnsFirewall.allowDomains has an invalid name "${d}"; use example.com or *.example.com`);
+    }
+  }
 
   return {
     standalone: props.standalone ?? false,
