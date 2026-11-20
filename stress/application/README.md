@@ -256,3 +256,11 @@ publishes and reads assets, and it holds only cell assets.
   boundaries changed before its first deploy (ADR-0011).
 - `CellAccountBase` sets the account-wide API Gateway CloudWatch Logs role.
   A second stack that sets it too wins on its next deploy.
+- The runtime-isolation cell was deployed once, before the workload
+  boundary gained its last denies (log deliveries, export tasks, table
+  exports, X-Ray resource policies). It was not deployed again under the
+  final boundary. No cell role calls those actions, but the next cell
+  deploy is the check.
+- The security scan left out `spikes/`. With those files in scope the IAM
+  agent runs out of output tokens. The spike files are the record of their
+  runs and are not deployed.
