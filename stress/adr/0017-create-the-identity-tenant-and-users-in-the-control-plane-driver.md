@@ -65,9 +65,9 @@ for the control plane, and then polls the edge.
 
 Pros: the calls come from the run's AWS session in the platform account,
 which the platform API admits, and not from a build role, so the cell
-account's
-tenant role gains no reach into the platform account and a compromised tenant
-build cannot create identities; the driver already knows each tenant's id,
+account's tenant role gains no reach into the platform account and a
+compromised tenant build cannot create identities; the driver already knows
+each tenant's id,
 the tier's user count and when the deployment is `ACTIVE`; the calls fall
 inside PS-1's timing without a new component; the `tenant-identity` slice
 already has the call code, with its retry on throttling, to copy; no change
@@ -95,9 +95,9 @@ role in each cell account, and `PlatformInvokePolicy` attached in each cell
 account, which gives every tenant build there a way to create and delete
 tenants in the stress identity. The role pair is built to hold the cell's
 entitlement methods only (control-plane ADR-0022, ADR-0025). In the variant
-where the script calls `CreateTenant` itself, a script that
-fails halfway leaves an identity tenant that a retry must find (`CreateTenant`
-answers 409 for an existing id); `create.sh` reads state first and avoids it.
+where the script calls `CreateTenant` itself, a script that fails halfway
+leaves an identity tenant that a retry must find (`CreateTenant` answers 409
+for an existing id); `create.sh` reads state first and avoids it.
 
 ### Option 3: A tenant-identity hook
 `tenant-identity` registers a global hook with the control plane that creates
@@ -147,8 +147,8 @@ README, Cognito quotas).
 The first platform run at `small` onboards 20 tenants, and builds that start
 together finish close together, so the driver can have up to 20
 `CreateTenant` calls (40 `CreateGroup` calls) to make within seconds.
-Against 15 requests
-a second that can throttle. The driver retries a throttled call with backoff,
+Against 15 requests a second that can throttle. The driver retries a
+throttled call with backoff,
 as the `tenant-identity` slice's calls do, and a throttle shows in PS-1's
 time, which is a result, not an error. Spec §4.4 lists the draw in the
 `control-plane` column.
@@ -170,8 +170,9 @@ is `ACTIVE`; `identity[]` in `control-plane.json`, read by the
 runtime-isolation slice for control-plane tenants; `execute-api:Invoke` on
 the platform API for the driver's session; retry on throttling; the
 Cognito draw in the slice's `budget`; and the cleanup of the identity
-tenants of the deployments the `control-plane` `teardown` deletes (the
-`large` fleet's stay with the fixture), because the control plane's
+tenants of the run's deployments, those that PS-5 deleted included (the
+`large` fleet's stay with the fixture), in the `control-plane` `teardown`,
+because the control plane's
 `DeleteDeployment` no longer removes them and the `tenant-identity`
 `teardown` knows only the tenants it seeded. Revisit if the tenant-identity
 sample gains a control-plane hook, or if the platform API admits
