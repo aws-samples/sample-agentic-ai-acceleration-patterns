@@ -235,11 +235,12 @@ describe('the driver', () => {
 
   it('tears down in the §6.2 order', () => {
     const body = fs.readFileSync(path.join(SAMPLE_ROOT, 'scripts', 'integ', 'teardown.sh'), 'utf8');
-    const order = [...body.matchAll(/^ {2}try "([^"]+)"/gm)].map((m) => m[1]);
+    const order = [...body.matchAll(/^ {2}try(?:_cp)? "([^"]+)"/gm)].map((m) => m[1]);
     const at = (label: string) => order.findIndex((o) => o.startsWith(label));
     expect(at('step 2 fixture key')).toBeLessThan(at('(1)'));
     for (const [a, b] of [['(1)', '(2)'], ['(2)', '(3)'], ['(3)', '(4)'], ['(4)', '(5)'], ['(5)', '(6)'], ['(6)', 'control plane records'],
-      ['control plane records', 'control plane and the edge'], ['control plane and the edge', 'control plane setup']]) {
+      ['control plane records', 'control plane and the edge'], ['control plane and the edge', 'leftovers in the control plane'],
+      ['leftovers in the control plane', 'control plane setup']]) {
       expect(at(a)).toBeGreaterThanOrEqual(0);
       expect(at(a)).toBeLessThan(at(b));
     }
@@ -264,30 +265,58 @@ describe('the driver', () => {
   });
 });
 
-describe('the driver\'s teardown of a run that made nothing', () => {
+describe('the driver\'s teardown', () => {
   const RUN = 't0nothing';
   const runDir = path.join(SAMPLE_ROOT, '.integ', RUN);
-  /** Answers the reads the teardown and the leftover check make, as for an account where the run left nothing. */
-  const AWS_EMPTY = `#!/usr/bin/env bash
+  /**
+   * An aws stub for the driver. `describe` sets what DescribeStacks answers
+   * for the run's stacks: `missing`, CloudFormation's "does not exist", or
+   * `error`, any other error. `assume` sets whether the driver can assume a
+   * role. Every other read answers as for an account where the run left
+   * nothing, with each service's own not-found error. Once
+   * `$STUB_DIR/creds-gone` exists, every call fails as with no credentials.
+   */
+  const awsStub = (opts: { describe: 'missing' | 'error'; assume: boolean; blind?: boolean }) => `#!/usr/bin/env bash
 args="$*"
 echo "$args" >> "$STUB_DIR/aws.log"
+if [[ -f "$STUB_DIR/creds-gone" ]]; then echo 'Unable to locate credentials. You can configure credentials by running "aws configure".' >&2; exit 253; fi
+fail() { echo "An error occurred ($1) when calling the $2 operation: $3" >&2; exit 254; }
 case "$1 $2" in
-  "sts get-caller-identity") [[ "$args" == *Account* ]] && echo 111111111111 || echo arn:aws:sts::111111111111:assumed-role/Admin/s ;;
-  "iam get-role") [[ "$args" == *"--role-name Admin"* ]] && echo arn:aws:iam::111111111111:role/Admin || exit 254 ;;
+  "sts get-caller-identity") [[ "$args" == *Account* ]] && echo 111111111111 || echo arn:aws:sts::111111111111:assumed-role/Admin/s; exit 0 ;;
+  "sts assume-role") ${opts.assume ? 'echo \'{"AccessKeyId":"AKIAEXAMPLESTUB00000","SecretAccessKey":"stub-secret","SessionToken":"stub-token"}\'; exit 0' : 'fail AccessDenied AssumeRole "not authorized to perform sts:AssumeRole"'} ;;
+esac
+${opts.blind ? 'fail AccessDenied Any "not authorized"' : ''}
+case "$1 $2" in
+  "iam get-role") [[ "$args" == *"--role-name Admin"* ]] && echo arn:aws:iam::111111111111:role/Admin || fail NoSuchEntity GetRole "The role cannot be found." ;;
+  "iam get-policy") fail NoSuchEntity GetPolicy "Policy was not found." ;;
   "route53 get-hosted-zone") echo integ-placeholder.example.com. ;;
   "route53 list-resource-record-sets") [[ "$args" == *length* ]] && echo 0 || echo null ;;
-  "ssm get-parameter") case "$args" in *identity/apiUrl*) echo https://id.example.com/prod/ ;; *identity/*) echo stub ;; *) exit 254 ;; esac ;;
+  "ssm get-parameter") case "$args" in *identity/apiUrl*) echo https://id.example.com/prod/ ;; *identity/*) echo stub ;; *) fail ParameterNotFound GetParameter "" ;; esac ;;
+  "ssm delete-parameter") fail ParameterNotFound DeleteParameter "" ;;
   "ssm get-parameters-by-path") echo 0 ;;
   "cloudformation list-stacks"|"acm list-certificates"|"logs describe-log-groups") echo "" ;;
   "apigateway get-account") echo arn:aws:iam::111111111111:role/apigw-logs ;;
-  "cloudformation describe-stacks") [[ "$args" == *TenantIdentity-shared-pool-multi-tenant* ]] && echo ok || exit 254 ;;
+  "cloudformation describe-stacks")
+    [[ "$args" == *TenantIdentity-shared-pool-multi-tenant* ]] && { echo ok; exit 0; }
+    ${opts.describe === 'missing' ? 'fail ValidationError DescribeStacks "Stack with id stub does not exist"' : 'fail Throttling DescribeStacks "Rate exceeded"'} ;;
   *) exit 254 ;;
 esac
 `;
+  // npx fails every call and logs it; with `deploy` in its arguments it can also take the credentials away.
+  const npxStub = (dropCredentials: boolean) => `#!/usr/bin/env bash
+echo "npx $*" >> "$STUB_DIR/npx.log"
+${dropCredentials ? '[[ "$*" == *" deploy "* ]] && touch "$STUB_DIR/creds-gone"' : ''}
+exit 1
+`;
   let dir: ScriptHarness;
+  const stub = (aws: string, dropCredentials = false) => {
+    fs.writeFileSync(path.join(dir.dir, 'bin', 'aws'), aws, { mode: 0o755 });
+    fs.writeFileSync(path.join(dir.dir, 'bin', 'npx'), npxStub(dropCredentials), { mode: 0o755 });
+    fs.writeFileSync(path.join(dir.dir, 'bin', 'smithy'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  };
+  const npxCalls = () => (fs.existsSync(path.join(dir.dir, 'npx.log')) ? fs.readFileSync(path.join(dir.dir, 'npx.log'), 'utf8') : '');
   beforeEach(() => {
     dir = new ScriptHarness();
-    fs.writeFileSync(path.join(dir.dir, 'bin', 'aws'), AWS_EMPTY, { mode: 0o755 });
     fs.mkdirSync(path.join(runDir, 'logs'), { recursive: true });
     fs.writeFileSync(path.join(runDir, 'state.env'), 'EXTERNAL_ID=tfd-integ-x\n');
     fs.writeFileSync(path.join(runDir, 'context.json'), '{}');
@@ -305,22 +334,54 @@ esac
     TFD_DEDICATED_DOMAIN: 'dd.integ-placeholder.example.com',
     HOME: process.env.HOME,
   };
+  const teardown = () => dir.run(path.join(SAMPLE_ROOT, 'scripts', 'integ.sh'), inputs, ['teardown', RUN, 'single']);
 
-  it('runs every part, skips what is gone, finds no leftover and calls no curl', () => {
-    const r = dir.run(path.join(SAMPLE_ROOT, 'scripts', 'integ.sh'), inputs, ['teardown', RUN, 'single']);
-    expect(r.output).toContain('teardown: (6) front door, cells, test role, agent ingress: done');
-    expect(r.output).toContain('NOT CHECKED: the control plane setup stack');
+  it('of a run that made nothing: every part skipped on "does not exist", no leftover, no CDK or curl call', () => {
+    stub(awsStub({ describe: 'missing', assume: true }));
+    const r = teardown();
+    expect(r.output).toContain('teardown: (6) front door, cells, test role, agent ingress: skipped');
+    expect(r.output).toContain('teardown: control plane and the edge account\'s role pair: skipped');
+    expect(r.output).toContain('teardown: control plane setup and support stacks: skipped');
+    expect(r.output).not.toContain('FAILED');
     expect(r.output).not.toContain('LEFTOVER');
+    expect(r.output).not.toContain('NOT READ');
     expect(r.output).not.toContain('unbound variable');
+    expect(r.output).toContain('PASS teardown parts');
     expect(r.output).toMatch(/result: \d+ passed, 0 failed/);
     expect(r.status).toBe(0);
     expect(dir.curlCalls()).toEqual([]);
+    expect(npxCalls()).toBe('');
+  });
+
+  it('when AWS answers with errors: every part that cannot tell is FAILED, the setup stacks are kept, the leftover check fails', () => {
+    stub(awsStub({ describe: 'error', assume: false, blind: true }));
+    const r = teardown();
+    expect(r.output).toContain('teardown: (6) front door, cells, test role, agent ingress: FAILED');
+    expect(r.output).toContain('teardown: control plane and the edge account\'s role pair: FAILED');
+    expect(r.output).toContain('teardown: leftovers in the control plane\'s account: FAILED');
+    expect(r.output).toContain('teardown: leftovers in the edge account: FAILED');
+    expect(r.output).toContain('teardown: control plane setup and support stacks: FAILED');
+    expect(r.output).toContain(`kept TfdInteg-${RUN}-cp-setup and TfdInteg-${RUN}-support`);
+    expect(r.output).toContain(`scripts/integ.sh teardown ${RUN} single`);
+    expect(r.output).toContain('NOT READ the stacks in eu-central-1');
+    expect(r.output).toContain('FAIL teardown parts');
+    expect(r.output).not.toMatch(/: done$/m);
+    expect(r.output).not.toContain('PASS teardown parts');
+    expect(r.status).toBe(2);
+    expect(npxCalls()).toBe('');
+  });
+
+  it('with no credentials: stops at once and names the command that resumes the teardown', () => {
+    stub(awsStub({ describe: 'missing', assume: true }));
+    fs.writeFileSync(path.join(dir.dir, 'creds-gone'), '');
+    const r = teardown();
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain(`no working AWS credentials (sts get-caller-identity failed); refresh them, then resume with: scripts/integ.sh teardown ${RUN} single`);
+    expect(r.output).not.toContain('teardown: (1)');
   });
 
   it('a run whose first deploy fails: preflight writes the context, the EXIT trap tears down, the run fails', () => {
-    // npx fails every CDK call; smithy is a no-op.
-    fs.writeFileSync(path.join(dir.dir, 'bin', 'npx'), '#!/usr/bin/env bash\necho "npx $*" >> "$STUB_DIR/npx.log"\nexit 1\n', { mode: 0o755 });
-    fs.writeFileSync(path.join(dir.dir, 'bin', 'smithy'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    stub(awsStub({ describe: 'error', assume: true }));
     fs.rmSync(runDir, { recursive: true, force: true });
     const r = dir.run(path.join(SAMPLE_ROOT, 'scripts', 'integ.sh'), { ...inputs, TFD_INTEG_RUN_ID: RUN }, ['single']);
     expect(r.status).toBe(1);
@@ -341,9 +402,36 @@ esac
     // ipRequestsPer5Min is a host-mode input: the front door refuses it in single mode (§3.6).
     expect(context.ipRequestsPer5Min).toBeUndefined();
     expect(context.tenantRequestsPer5Min).toBeUndefined();
-    const npx = fs.readFileSync(path.join(dir.dir, 'npx.log'), 'utf8');
+    const npx = npxCalls();
     expect(npx).toContain(`deploy --exclusively TfdInteg-${RUN}-support`);
     expect(npx).toContain('test/integ.single.ts');
     expect(fs.readFileSync(path.join(runDir, 'times.tsv'), 'utf8')).toMatch(/deploy\tsupport\t\d+\tfailed/);
+    // Preflight read the control plane's account through its CDK lookup role, for an existing control plane.
+    const aws = fs.readFileSync(path.join(dir.dir, 'aws.log'), 'utf8');
+    expect(aws).toContain('cdk-hnb659fds-lookup-role-222222222222-eu-central-1');
+    expect(aws).toContain('/control-plane/tenant-api-url');
+  });
+
+  it('a run whose credentials vanish mid-deploy: the teardown runs no part and names the command that resumes it', () => {
+    stub(awsStub({ describe: 'missing', assume: true }), true);
+    fs.rmSync(runDir, { recursive: true, force: true });
+    const r = dir.run(path.join(SAMPLE_ROOT, 'scripts', 'integ.sh'), { ...inputs, TFD_INTEG_RUN_ID: RUN }, ['single']);
+    expect(r.status).toBe(1);
+    expect(r.output).toContain('a phase 1 stack failed');
+    expect(r.output).toContain('FAIL teardown not started: the driver\'s credentials are gone');
+    expect(r.output).toContain(`resume with: scripts/integ.sh teardown ${RUN} single`);
+    expect(r.output).not.toContain('teardown: (1)');
+    expect(r.output).not.toContain('PASS teardown parts');
+  });
+
+  it('refuses to start when the control plane\'s account already holds a control plane', () => {
+    const aws = awsStub({ describe: 'missing', assume: true })
+      .replace('*identity/*) echo stub ;;', '*identity/*) echo stub ;; *control-plane/tenant-api-url*) echo https://cp.example.com/ ;;');
+    stub(aws);
+    fs.rmSync(runDir, { recursive: true, force: true });
+    const r = dir.run(path.join(SAMPLE_ROOT, 'scripts', 'integ.sh'), { ...inputs, TFD_INTEG_RUN_ID: RUN }, ['single']);
+    expect(r.status).toBe(1);
+    expect(r.output).toContain('the control plane\'s account already holds a control plane in eu-central-1');
+    expect(npxCalls()).not.toContain('deploy');
   });
 });

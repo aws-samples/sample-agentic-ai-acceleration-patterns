@@ -18,6 +18,7 @@ wait_all() {
 # Phase 1: the support, setup and stand-in stacks, which need nothing deployed.
 deploy_phase_1() {
   section "deploy 1: support (edge), control plane setup (control plane's), agent ingress (edge)"
+  state_set DEPLOY_PHASE 1
   deploy_one "$S_SUPPORT" support &
   local p1=$!
   deploy_one "$S_CP_SETUP" cp-setup &
@@ -50,7 +51,7 @@ read_phase_1() {
   CP_PROBE_POLICY="$(cp_stack_out "$S_CP_SETUP" PairProbePolicyArn)"
   SOURCE_VERSION="$(in_cp aws s3api list-object-versions --region "$REGION" --bucket "$SOURCE_BUCKET" --prefix "$SOURCE_KEY" \
     --query 'Versions[?IsLatest] | [0].VersionId' --output text)"
-  [[ -n "$SOURCE_VERSION" && "$SOURCE_VERSION" != None ]] || die "no version of the source zip ${SOURCE_KEY}"
+  [[ -n "$SOURCE_VERSION" && "$SOURCE_VERSION" != None ]] || { die "no version of the source zip ${SOURCE_KEY}"; return 1; }
 }
 
 # The control plane, through the control-plane sample's own app, in its account (spec §6.3).
@@ -69,6 +70,7 @@ deploy_control_plane() { # LABEL [HOOK_POLICY_ARN]
 # Phase 2: the control plane and the edge account's role pair (with the run's external id).
 deploy_phase_2() {
   section "deploy 2: control plane (control plane's account), account role pair (edge account)"
+  state_set DEPLOY_PHASE 2
   deploy_control_plane control-plane &
   local p1=$!
   timed deploy cell-account cp_cdk deploy-cell-account "$EDGE_ACCOUNT" deploy "$S_CELL_ACCOUNT" --require-approval never \
@@ -81,7 +83,7 @@ deploy_phase_2() {
 }
 read_phase_2() {
   CP_API="$(cp_stack_out "$S_CP" ApiUrl)"
-  [[ "$CP_API" == https://* ]] || die "no control plane API URL"
+  [[ "$CP_API" == https://* ]] || { CP_API=""; die "no control plane API URL"; return 1; }
   [[ "$CP_API" == */ ]] || CP_API="$CP_API/"
   ctx_set controlPlaneApiUrl "\"$CP_API\""
 }
@@ -89,6 +91,7 @@ read_phase_2() {
 # Phase 3: the front door, in its deploy order (ADR-0010).
 deploy_phase_3() {
   section "deploy 3: front door edge, main, edge logging (edge account)"
+  state_set DEPLOY_PHASE 3
   deploy_one FrontDoor/Edge edge || die "the edge stack failed"
   deploy_one FrontDoor/Main main || die "the main stack failed"
   deploy_one FrontDoor/EdgeLogging edge-logging || die "the edge logging stack failed"
@@ -98,9 +101,12 @@ deploy_phase_3() {
 }
 read_phase_3() {
   local edge_param
-  edge_param="$(aws ssm get-parameter --region "$REGION" --name /application-plane/shared/front-door/edge --query Parameter.Value --output text)"
-  REGISTRAR="$(jq -r .registrarUrl <<<"$edge_param")"; [[ "$REGISTRAR" == */ ]] || REGISTRAR="$REGISTRAR/"
-  DIST_ARN="$(jq -r .distributionArn <<<"$edge_param")"; DIST_ID="${DIST_ARN##*/}"
+  REGISTRAR=""; DIST_ARN=""; DIST_ID=""
+  if edge_param="$(aws ssm get-parameter --region "$REGION" --name /application-plane/shared/front-door/edge --query Parameter.Value --output text)" \
+      && [[ "$(jq -r '.registrarUrl // empty' <<<"$edge_param" 2>/dev/null)" == https://* ]]; then
+    REGISTRAR="$(jq -r .registrarUrl <<<"$edge_param")"; [[ "$REGISTRAR" == */ ]] || REGISTRAR="$REGISTRAR/"
+    DIST_ARN="$(jq -r '.distributionArn // empty' <<<"$edge_param")"; DIST_ID="${DIST_ARN##*/}"
+  fi
   KVS="$(stack_out "$S_MAIN" IntegRouteTableArn)"
   ROUTER_ARN="$(stack_out "$S_MAIN" IntegRouterFunctionArn)"; ROUTER_NAME="${ROUTER_ARN##*/}"
   ROUTING="$(stack_out "$S_MAIN" IntegRoutingEndpoint)"
@@ -116,12 +122,14 @@ read_phase_3() {
   SWEEPER_LOG_ARN="$(stack_out "$S_MAIN" IntegSweeperLogGroupArn)"
   EDGE_LOG="$(stack_out "$S_EDGE_LOGGING" IntegEdgeLogGroupName us-east-1)"
   EDGE_LOG_ARN="$(stack_out "$S_EDGE_LOGGING" IntegEdgeLogGroupArn us-east-1)"
-  [[ "$KVS" == arn:*:key-value-store/* ]] || die "no route table ARN in the main stack's outputs"
+  [[ "$KVS" == arn:*:key-value-store/* ]] || { KVS=""; die "no route table ARN in the main stack's outputs"; return 1; }
+  [[ -n "$REGISTRAR" ]] || { die "no registrar URL in the edge parameter"; return 1; }
 }
 
 # Phase 4: RouteHookAccess (control plane's account, ADR-0027) and the two cells, then the test role.
 deploy_phase_4() {
   section "deploy 4: RouteHookAccess, cell A (control plane's account), cell B (edge account), test role"
+  state_set DEPLOY_PHASE 4
   deploy_one FrontDoor/RouteHookAccess route-hook-access &
   local p1=$!
   deploy_one "$S_CELL_A" cell-a &
@@ -155,8 +163,12 @@ test_role_inputs() {
 # Phase 5: the hook policy on the control plane, then the two global hooks (spec §6.1).
 deploy_phase_5() {
   section "deploy 5: control plane update with the RouteHookAccess policy, register-hooks.sh"
+  state_set DEPLOY_PHASE 5
+  # Recorded before each change, so a run that stops in the middle of one still undoes it (step 24).
+  state_set HOOK_POLICY_ATTACHED yes
   deploy_control_plane control-plane-hooks "$HOOK_POLICY" || die "the control plane update failed"
   api_token
+  state_set HOOKS_REGISTERED yes
   CONTROL_PLANE_URL="$CP_API" CONTROL_PLANE_TOKEN="$CP_TOKEN" HOOK_SOURCE_TYPE=S3 \
     HOOK_SOURCE_LOCATION="${SOURCE_BUCKET}/${SOURCE_KEY}" HOOK_SOURCE_VERSION="$SOURCE_VERSION" \
     timed step register-hooks bash scripts/register-hooks.sh || die "register-hooks.sh failed"

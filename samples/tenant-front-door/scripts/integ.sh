@@ -23,6 +23,7 @@
 #   TFD_INTEG_RUN_ID        optional, [a-z0-9]{1,10}; default a new one per run
 #   TFD_IDENTITY_REGION     optional, the tenant-identity shared pool's Region; default AWS_REGION
 #   TFD_ISSUER_DOMAIN       optional, a Cognito domain for the front door's issuer input
+#   TFD_CDK_QUALIFIER       optional, the control plane account's CDK bootstrap qualifier; default hnb659fds
 #   TFD_INTEG_KEEP=1        optional, skip the teardown (debugging; run `teardown` after)
 #
 # Everything the run makes carries its run id. Tokens, passwords and keys
@@ -109,20 +110,30 @@ BODY="$TMP/body"; HEAD="$TMP/head"; REQ="$TMP/req"
 : >"$BODY"; : >"$HEAD"; : >"$REQ"; chmod 600 "$BODY" "$HEAD" "$REQ"
 [[ "$CP_ACCOUNT" =~ ^[0-9]{12}$ ]] || die "TFD_INTEG_ACCOUNT_B must be a 12-digit account id"
 
-EDGE_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+# resume_hint: how to finish a run that already made something.
+resume_hint() { [[ "$COMMAND" == teardown || "$COMMAND" == leftovers ]] && echo "; refresh them, then resume with: scripts/integ.sh ${COMMAND} ${RUN_ID} ${MODE}"; return 0; }
+EDGE_ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
+  || die "no working AWS credentials (sts get-caller-identity failed)$(resume_hint)"
 [[ "$EDGE_ACCOUNT" != "$CP_ACCOUNT" ]] || die "TFD_INTEG_ACCOUNT_B must be another account than the one the credentials point at"
 CP_ACCESS_ROLE="arn:aws:iam::${CP_ACCOUNT}:role/${R_CP_ACCESS}"
-caller="$(aws sts get-caller-identity --query Arn --output text)"
-if [[ "$caller" =~ ^arn:aws:sts::[0-9]{12}:assumed-role/([^/]+)/ ]]; then
-  DRIVER_PRINCIPAL="$(aws iam get-role --role-name "${BASH_REMATCH[1]}" --query Role.Arn --output text)"
-else
-  DRIVER_PRINCIPAL="$caller"
+# read_shared NAME: a published parameter of tenant-identity's shared pool; empty when it cannot be read.
+read_shared() { aws ssm get-parameter --region "$IDENTITY_REGION" --name "$1" --query Parameter.Value --output text 2>/dev/null || true; }
+IDENTITY_API="$(read_shared /application-plane/shared/identity/apiUrl)"
+[[ -z "$IDENTITY_API" || "$IDENTITY_API" == */ ]] || IDENTITY_API="$IDENTITY_API/"
+if [[ "$COMMAND" == single || "$COMMAND" == host ]]; then
+  [[ -n "$IDENTITY_API" ]] || die "no tenant-identity shared pool in ${IDENTITY_REGION} (/application-plane/shared/identity/apiUrl)"
+  caller="$(aws sts get-caller-identity --query Arn --output text)"
+  if [[ "$caller" =~ ^arn:aws:sts::[0-9]{12}:assumed-role/([^/]+)/ ]]; then
+    DRIVER_PRINCIPAL="$(aws iam get-role --role-name "${BASH_REMATCH[1]}" --query Role.Arn --output text)" || die "cannot read the driver's role"
+  else
+    DRIVER_PRINCIPAL="$caller"
+  fi
+  ZONE_NAME="$(aws route53 get-hosted-zone --id "$ZONE_ID" --query HostedZone.Name --output text)" || die "cannot read the hosted zone ${ZONE_ID}"
+  ZONE_NAME="${ZONE_NAME%.}"
+  IDENTITY_POOL="$(read_shared /application-plane/shared/identity/userPoolId)"
+  IDENTITY_CLIENT="$(read_shared /application-plane/shared/identity/appClientId)"
+  [[ -n "$IDENTITY_POOL" && -n "$IDENTITY_CLIENT" ]] || die "the tenant-identity shared pool's userPoolId or appClientId parameter cannot be read"
 fi
-ZONE_NAME="$(aws route53 get-hosted-zone --id "$ZONE_ID" --query HostedZone.Name --output text)"; ZONE_NAME="${ZONE_NAME%.}"
-IDENTITY_API="$(aws ssm get-parameter --region "$IDENTITY_REGION" --name /application-plane/shared/identity/apiUrl --query Parameter.Value --output text)"
-[[ "$IDENTITY_API" == */ ]] || IDENTITY_API="$IDENTITY_API/"
-IDENTITY_POOL="$(aws ssm get-parameter --region "$IDENTITY_REGION" --name /application-plane/shared/identity/userPoolId --query Parameter.Value --output text)"
-IDENTITY_CLIENT="$(aws ssm get-parameter --region "$IDENTITY_REGION" --name /application-plane/shared/identity/appClientId --query Parameter.Value --output text)"
 # host mode lowers the per-host rate so step 17 reaches it in seconds; the per-IP rate stays below it until then.
 # single mode sets neither: ipRequestsPer5Min is a host-mode input, and the cells keep the default origin rate.
 TENANT_RATE=2000; IP_RATE=500
@@ -140,9 +151,26 @@ preflight() {
     aws cloudformation describe-stacks --region "$IDENTITY_REGION" --stack-name TenantIdentity-shared-pool-multi-tenant >/dev/null \
       || die "step 5 needs tenant-identity's TenantIdentity-shared-pool-multi-tenant deployment (never destroyed by this test)"
   fi
-  local s
-  for s in $(aws cloudformation list-stacks --region "$REGION" --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text); do
-    [[ "$s" == "$PREFIX"-* || "$s" == "$FLEET"-* ]] && die "stack $s of run ${RUN_ID} exists: tear that run down first, or pick another TFD_INTEG_RUN_ID"
+  local s r stacks err lookup
+  for r in $(printf '%s\n' "$REGION" us-east-1 | sort -u); do
+    stacks="$(aws cloudformation list-stacks --region "$r" --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text)" \
+      || die "cannot list the edge account's stacks in ${r}"
+    for s in $stacks; do
+      [[ "$s" == "$PREFIX"-* || "$s" == "$FLEET"-* ]] && die "stack $s of run ${RUN_ID} exists in the edge account (${r}): tear that run down first, or pick another TFD_INTEG_RUN_ID"
+    done
+  done
+  # The control plane's account, read only, through its CDK bootstrap lookup role (it trusts the edge account): no
+  # control plane may be there (its parameter name is fixed), and no stack of this run id.
+  lookup="arn:aws:iam::${CP_ACCOUNT}:role/cdk-${TFD_CDK_QUALIFIER:-hnb659fds}-lookup-role-${CP_ACCOUNT}-${REGION}"
+  if err="$(as_role "$lookup" aws ssm get-parameter --region "$REGION" --name /control-plane/tenant-api-url 2>&1 >/dev/null)"; then
+    die "the control plane's account already holds a control plane in ${REGION} (/control-plane/tenant-api-url): the test deploys its own (spec §10); remove it or pick another Region"
+  fi
+  [[ "$err" == *ParameterNotFound* ]] \
+    || die "cannot read the control plane's account through its CDK lookup role ${lookup##*/} (set TFD_CDK_QUALIFIER for a custom bootstrap qualifier): $(clip <<<"$err")"
+  stacks="$(as_role "$lookup" aws cloudformation list-stacks --region "$REGION" --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text)" \
+    || die "cannot list the control plane's account's stacks through ${lookup##*/}"
+  for s in $stacks; do
+    [[ "$s" == "$PREFIX"-* || "$s" == "$FLEET"-* ]] && die "stack $s of run ${RUN_ID} exists in the control plane's account: tear that run down first, or pick another TFD_INTEG_RUN_ID"
   done
   [[ -f build/spa/index.html ]] || npx projen spa:build >"$RUN_DIR/logs/spa-build.log" 2>&1 || die "the SPA build failed"
   [[ -d "$CONTROL_PLANE_DIR/src/smithy" ]] || ( cd "$CONTROL_PLANE_DIR" && smithy build ) >"$RUN_DIR/logs/control-plane-smithy.log" 2>&1 || die "smithy build in the control plane failed"
@@ -189,12 +217,22 @@ RUN_T0_MS="$(now_ms)"
 case "$COMMAND" in
   teardown | leftovers)
     state_load
-    printf 'kind\tname\tseconds\tresult\n' >>"$RUN_DIR/times.tsv"
+    [[ -s "$RUN_DIR/times.tsv" ]] || printf 'kind\tname\tseconds\tresult\n' >"$RUN_DIR/times.tsv"
     trap 'rm -f "$TMP"/*; rmdir "$TMP"' EXIT
-    if [[ "$COMMAND" == teardown ]]; then teardown; else teardown_read; leftovers_cp || true; leftovers_edge || true; fi
+    if [[ "$COMMAND" == teardown ]]; then
+      teardown || true
+    else
+      IN_TEARDOWN=1
+      teardown_credentials || { report; exit 1; }
+      teardown_read
+      leftovers_cp || true; leftovers_edge || true; leftovers_identity || true
+      note "leftovers: ${LEFT} found, ${UNREAD} reads failed"
+    fi
     report
-    (( FAILS == 0 && LEFT == 0 ))
-    exit
+    # 2: a read failed, so the check cannot say the accounts are clean; 1: a part failed or something is left.
+    (( UNREAD == 0 )) || exit 2
+    (( FAILS == 0 && LEFT == 0 )) || exit 1
+    exit 0
     ;;
 esac
 
@@ -203,8 +241,12 @@ preflight
 trap on_exit EXIT
 steps=("${STEPS_SINGLE[@]}")
 [[ "$MODE" == host ]] && steps=("${STEPS_HOST[@]}")
+# Each step's start and end (ms), for checks that look back at one step's log lines (step 15).
+declare -A STEP_START_MS=() STEP_END_MS=()
 for n in "${steps[@]}"; do
   t=$(date +%s)
+  STEP_START_MS[$n]="$(now_ms)"
   "step_${n}"
+  STEP_END_MS[$n]="$(now_ms)"
   printf 'step\t%s\t%s\t-\n' "$n" "$(elapsed "$t")" >>"$RUN_DIR/times.tsv"
 done

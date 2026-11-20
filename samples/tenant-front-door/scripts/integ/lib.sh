@@ -24,7 +24,12 @@ check_eq() { # NAME WANT GOT: a literal comparison, for values holding regex cha
 skip() { SKIPS=$((SKIPS + 1)); echo "  SKIP $*"; }
 yes_no() { if "$@"; then echo yes; else echo no; fi; }
 elapsed() { echo $(( $(date +%s) - $1 )); }
-die() { echo "integ: $*" >&2; exit 1; }
+# die MESSAGE: ends the run. During the teardown (IN_TEARDOWN=1) it only
+# returns 1, so a reader the teardown shares with the deploy phases fails
+# its own part and the parts after it still run. Every caller that can be
+# reached from the teardown writes `|| { die ...; return 1; }`.
+IN_TEARDOWN=0
+die() { echo "integ: $*" >&2; [[ "$IN_TEARDOWN" == 1 ]] && return 1; exit 1; }
 # rand_chars SET N: N random characters of SET (tr's set syntax).
 rand_chars() {
   local out
@@ -46,7 +51,7 @@ timed() {
 # state.env holds the run's ids (tenants, cells, applications), never a secret;
 # teardown reads it after an interruption.
 state_set() { # NAME VALUE
-  [[ "$1" =~ ^[A-Z_][A-Z0-9_]*$ && "$2" =~ ^[A-Za-z0-9._:/@+=-]*$ ]] || die "state value for $1 has unexpected characters"
+  [[ "$1" =~ ^[A-Z_][A-Z0-9_]*$ && "$2" =~ ^[A-Za-z0-9._:/@+=-]*$ ]] || { die "state value for $1 has unexpected characters"; return 1; }
   printf -v "$1" '%s' "$2"
   grep -v "^$1=" "$RUN_DIR/state.env" >"$RUN_DIR/state.env.new" 2>/dev/null || true
   printf '%s=%s\n' "$1" "$2" >>"$RUN_DIR/state.env.new"
@@ -104,7 +109,7 @@ assume() {
 }
 own_creds() {
   local creds
-  creds="$(aws configure export-credentials --format process)"
+  creds="$(aws configure export-credentials --format process)" || return 1
   AK="$(jq -r .AccessKeyId <<<"$creds")"; SK="$(jq -r .SecretAccessKey <<<"$creds")"; ST="$(jq -r '.SessionToken // empty' <<<"$creds")"
 }
 # as_role ROLE_ARN CMD...: runs CMD in a subshell with the role's credentials.
@@ -179,9 +184,10 @@ set_operator_password() {
     --message-action SUPPRESS >/dev/null 2>&1 || true
   printf '%s' "$OPERATOR_PASSWORD" | jq -Rc --arg p "$VENDOR_POOL" '{UserPoolId: $p, Username: "integ-operator", Password: ., Permanent: true}' >"$TMP/password.json"
   chmod 600 "$TMP/password.json"
-  aws cognito-idp admin-set-user-password --region "$REGION" --cli-input-json "file://$TMP/password.json" >/dev/null
-  : >"$TMP/password.json"
   CP_TOKEN=""; CP_TOKEN_AT=0
+  aws cognito-idp admin-set-user-password --region "$REGION" --cli-input-json "file://$TMP/password.json" >/dev/null \
+    || { : >"$TMP/password.json"; OPERATOR_PASSWORD=""; return 1; }
+  : >"$TMP/password.json"
 }
 api_token() {
   (( $(date +%s) - CP_TOKEN_AT < 2400 )) && [[ -n "$CP_TOKEN" ]] && return 0
@@ -190,13 +196,13 @@ api_token() {
     '{UserPoolId: $p, ClientId: $c, AuthFlow: "ADMIN_USER_PASSWORD_AUTH", AuthParameters: {USERNAME: "integ-operator", PASSWORD: .}}' >"$TMP/auth.json"
   chmod 600 "$TMP/auth.json"
   CP_TOKEN="$(aws cognito-idp admin-initiate-auth --region "$REGION" --cli-input-json "file://$TMP/auth.json" \
-    --query AuthenticationResult.IdToken --output text)" || { : >"$TMP/auth.json"; die "the operator could not sign in to the vendor IdP"; }
+    --query AuthenticationResult.IdToken --output text)" || { : >"$TMP/auth.json"; CP_TOKEN=""; die "the operator could not sign in to the vendor IdP"; return 1; }
   : >"$TMP/auth.json"
   CP_TOKEN_AT=$(date +%s)
 }
-# api METHOD PATH [JSON] -> status; body in $BODY.
+# api METHOD PATH [JSON] -> status; body in $BODY. 000 when the operator cannot sign in.
 api() {
-  api_token
+  api_token || { : >"$BODY"; echo 000; return 1; }
   local args=(-s -o "$BODY" -w '%{http_code}' --max-time 30 -X "$1" --config -)
   if [[ -n "${3:-}" ]]; then printf '%s' "$3" >"$REQ"; args+=(-H 'Content-Type: application/json' --data-binary "@$REQ"); fi
   : >"$BODY"
@@ -215,11 +221,17 @@ api_poll() {
     sleep "$every"
   done
 }
-# api_gone PATH [timeout s]: polls until the Get answers 404.
+# api_gone PATH [timeout s]: polls until the Get answers 404. Gives up early
+# after three answers in a row that say the driver cannot see the record
+# (000, 401, 403), so a lost sign-in fails a part instead of waiting it out.
 api_gone() {
-  local start max="${2:-1500}"
+  local start max="${2:-1500}" st blind=0
   start=$(date +%s)
-  while [[ "$(api GET "$1")" != 404 ]]; do
+  while :; do
+    st="$(api GET "$1")"
+    [[ "$st" == 404 ]] && return 0
+    if [[ "$st" =~ ^(000|401|403)$ ]]; then blind=$((blind + 1)); else blind=0; fi
+    (( blind >= 3 )) && { note "GET $1: HTTP ${st} three times in a row"; return 1; }
     (( $(elapsed "$start") > max )) && return 1
     sleep 20
   done
@@ -250,7 +262,32 @@ ti_token() {
   [[ "$st" == 200 ]] || die "tenant-identity IssueToken: HTTP $st"
   printf -v "$4" '%s' "$(jq -r .accessToken "$BODY")"; : >"$BODY"
 }
-ti_delete() { own_creds; SIG_REGION="$IDENTITY_REGION" signed DELETE "${1}platform/tenants/$2" >/dev/null || true; }
+# ti_delete API TENANT_ID: 0 deleted (204), 3 already gone (404), 1 on any other answer.
+# DeleteTenant is idempotent, so a rerun of the teardown sends it again.
+ti_delete() {
+  local st
+  [[ -n "$1" ]] || { note "tenant-identity DeleteTenant ${2}: no API URL"; return 1; }
+  own_creds || { note "tenant-identity DeleteTenant ${2}: no credentials to sign with"; return 1; }
+  st="$(SIG_REGION="$IDENTITY_REGION" signed DELETE "${1}platform/tenants/$2")"
+  case "$st" in
+    200 | 202 | 204) return 0 ;;
+    404) return 3 ;;
+  esac
+  note "tenant-identity DeleteTenant ${2}: HTTP ${st}"
+  return 1
+}
+# ti_status API TENANT_ID: GetTenant, read only -> "gone" (404), the tenant's status (200), or "error:<HTTP status>".
+ti_status() {
+  local st
+  [[ -n "$1" ]] || { echo "error:no-api-url"; return; }
+  own_creds || { echo "error:no-credentials"; return; }
+  st="$(SIG_REGION="$IDENTITY_REGION" signed GET "${1}platform/tenants/$2")"
+  case "$st" in
+    404) echo gone ;;
+    200) jq -r '.tenant.status // "unknown"' "$BODY" 2>/dev/null || echo unknown ;;
+    *) echo "error:${st}" ;;
+  esac
+}
 # token_for T VAR: a token for one of the run's tenants (a, b, c), minted again after 30 minutes.
 token_for() {
   local id_var="TENANT_${1^^}" user_var="TI_USER_${1^^}" at_var="TOKEN_AT_${1^^}"
@@ -291,13 +328,14 @@ tf_body() { jq -r '.response.body.data // .response.body // empty' <<<"$TF_OUT";
 # edge_tool ARGS...: test/integ/edge-tool.ts under the test role.
 edge_tool() { as_test npx ts-node -P test/tsconfig.json --prefer-ts-exts test/integ/edge-tool.ts "$@"; }
 
-# log_count GROUP REGION PATTERN SINCE_MS [ROLE]: events matching PATTERN since SINCE_MS.
+# log_count GROUP REGION PATTERN SINCE_MS [ROLE] [UNTIL_MS]: events matching PATTERN between SINCE_MS and UNTIL_MS (default now).
 log_count() {
   local runner=as_test
   [[ "${5:-}" == cp ]] && runner=in_cp
-  local pattern=()
+  local pattern=() until=()
   [[ -z "$3" ]] || pattern=(--filter-pattern "$3")
-  $runner aws logs filter-log-events --region "$2" --log-group-name "$1" --start-time "$4" "${pattern[@]}" \
+  [[ -z "${6:-}" ]] || until=(--end-time "$6")
+  $runner aws logs filter-log-events --region "$2" --log-group-name "$1" --start-time "$4" "${until[@]}" "${pattern[@]}" \
     --query 'length(events)' --output text 2>/dev/null || echo error
 }
 now_ms() { echo $(( $(date +%s) * 1000 )); }

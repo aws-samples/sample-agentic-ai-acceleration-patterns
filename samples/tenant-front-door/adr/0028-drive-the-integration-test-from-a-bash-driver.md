@@ -63,12 +63,20 @@ can copy, and synthesise under cdk-nag in the build.
   driver saves the run's ids (never a secret) in `.integ/<run id>/`, so
   `scripts/integ.sh teardown <run id> <mode>` can finish a teardown after
   an interruption.
+- Each teardown part is done, skipped or failed. A part is skipped only
+  on a not-found answer or when the run's state shows the thing was never
+  made; any other error fails it, so a teardown without working
+  credentials never reports a clean account. The driver checks its
+  credentials before the first part and stops with the resume command
+  when they are gone.
 - The driver's helpers follow `scripts/CONVENTIONS.md`. Tokens reach
   `curl` on stdin or in 0600 files, and the password and request bodies
   that hold one reach the AWS CLI in 0600 input files.
 - Unit tests cover the driver's names, step lists and teardown order, a
-  teardown of a run that made nothing, a run whose first deploy fails,
-  and the demo application's scripts and the probe hook against stubs.
+  teardown of a run that made nothing, a teardown whose AWS calls fail,
+  a teardown and a run whose credentials are gone, a run whose first
+  deploy fails, a control plane already in its account, and the demo
+  application's scripts and the probe hook against stubs.
   The steps themselves are checked only by a live run.
 - Revisit if integ-runner gains ordered multi-stack teardown and checks
   that are not CloudFormation resources.
