@@ -2,9 +2,10 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Decisions
 
-A change to a decision is a new record with an `Amends` line, or, for a
-detail, a dated note at the end of the record; the decision text itself is
-not edited ([sample standard §2.2](../../../docs/sample-standard.md#22-architecture-decision-records-adr)).
+Once a record is accepted, its decision text is not edited. A change is a
+new record with an `Amends` line; the amended record gets an `Amended by`
+line and a dated trailing note saying what changed
+([sample standard §2.2](../../../docs/sample-standard.md#22-architecture-decision-records-adr)).
 
 | Number | Title | Status | Date |
 | --- | --- | --- | --- |

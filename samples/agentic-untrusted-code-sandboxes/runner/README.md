@@ -32,13 +32,14 @@ kernel-level checks sets `RUNNER_REQUIRE_LINUX_TESTS=1`, which turns that skip i
 `npx projen test:runner:linux` (`scripts/test-runner-docker.sh`) on an x86_64 Docker host: one fresh
 privileged container per test class, on the image `runner/Dockerfile`
 builds (Python 3.13) and on AL2023 minimal with the pinned `python3`
-package (Python 3.9). No pipeline in this repository sets
-`RUNNER_REQUIRE_LINUX_TESTS` or `CHECK_TERMS_REQUIRE_PRIVATE`: the
-repository has no CI workflow for this sample, so the Linux tests run only
-when someone runs `npx projen test:runner:linux` by hand, and the `microvm`
-job filter, which is built for aarch64, has run only on a real MicroVM. The job tests drop to `RUNNER_TEST_UID` (61001),
+package (Python 3.9). The job tests drop to `RUNNER_TEST_UID` (61001),
 because `RLIMIT_NPROC` counts every process of a uid on the Docker host;
 the runner entry tests run their jobs as the real uid 1001.
+
+No pipeline in this repository sets `RUNNER_REQUIRE_LINUX_TESTS`: the
+repository has no CI workflow for this sample, so the Linux tests run only
+when someone runs `npx projen test:runner:linux` by hand, and the `microvm`
+job filter, which is built for aarch64, has run only on a real MicroVM.
 
 | Behaviour | Where it is checked |
 |---|---|

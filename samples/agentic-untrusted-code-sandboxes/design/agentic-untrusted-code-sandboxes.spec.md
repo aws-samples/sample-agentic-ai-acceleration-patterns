@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Untrusted code sandboxes for agentic applications: specification
 
-Status: draft, not built. Spikes S-1 to S-20 ran from 2026-11-18 to 2026-11-20 (§7.1 to §7.7).
+Status: draft, not built. Spikes S-1 to S-21 ran from 2026-11-18 to 2026-11-20 (§7.1 to §7.8).
 
 ## 1. Problem statement
 
@@ -490,7 +490,8 @@ with `busy`. The runner:
    (§4.1 step 3), so the takeover stops the session and the next start
    gets a fresh one under the same id. 32 MiB is a design value; the one
    spike result on it is §7 S-21 (a 2 GiB SysV fill drained below it inside
-   1 s, and 420 000 empty files in `/work` stay above it). Files in `/work`
+   1 s; 420 000 empty files in `/work` kept it above, seen before the poll
+   existed). Files in `/work`
    stay (below).
 
    After a job ends, the kill, the sweep and the thread joins of the runner
@@ -766,7 +767,9 @@ already ended at its idle timeout counts up to the stop (by the drain, the
 reaper or the tool) and over-counts idle time: §7.8 S-21 saw
 `sandboxSeconds` of 560 to 900 s for sessions the platform ended after
 60 s. For `agentcore` cost, use AgentCore's usage logs (table below), not
-`sandboxSeconds`.
+`sandboxSeconds`; their record format and the join through
+`runtimeSessionId` are not yet verified (S-21 saw no usage record in 90
+minutes of calls and stops).
 Two Contributor Insights rules rank tenants by runs and by
 `sandboxSeconds`. With `perTenantMetrics`, the
 tool also emits EMF metrics `Runs`, `Errors`, `RunDuration`,
@@ -1092,9 +1095,10 @@ capacity provider has no minimum-instances setting, so the sample
 keeps no warm instance. The `synth` test checks that the drain role may
 deregister on the cluster and the reaper role may not, and that the
 offboard function runs as the reaper role. With sandboxes live, the whole
-stack delete takes 23 to 32 minutes (§7 S-21), most of it the late release
-of the network interfaces of the VPC-attached drain and reaper functions,
-so plan 30 to 40 minutes for a destroy. A
+stack delete takes 23 to 32 minutes (§7 S-21). In the `nitro` and
+`agentcore` runs most of it was the late release of the network interfaces
+of the VPC-attached drain and reaper functions; the `microvm` run's cause
+was not isolated. Plan 30 to 40 minutes for a destroy. A
 `StopTask` takes 45 to 78 s, so the runner
 exits at once on `SIGTERM`. AgentCore sessions in rows are stopped with
 `StopRuntimeSession`; sessions with no row end within about 20 s of the
@@ -1455,14 +1459,17 @@ removed; one INACTIVE task definition revision was left.
 ### 7.8 Spike results, S-21 (2026-11-20, a non-production test account, eu-west-1)
 
 Three single-backend deployments of the construct (`standalone` on,
-`dnsFirewall` off, `sandboxIdle` 2 min, `runTimeout` 20 s), driven through
-`runCodeFunction` with the steps of §8 that need no gateway and no other
-backend. Every stack was removed; nothing of the runs was left.
+`sandboxIdle` 2 min, 1 min on `agentcore`, `runTimeout` 20 s; `dnsFirewall`
+off on `nitro` and `agentcore`), driven through `runCodeFunction` with the
+steps of §8 that need no gateway and no other backend. The `agentcore` run
+had two stacks, `sessionFiles` off and on, and ran its SysV case again on a
+second deploy with the 1 s poll. Every stack was removed; no stack, runtime,
+task, function or log group of the runs was left.
 
 | Check | Result |
 |---|---|
-| `agentcore` job group after a sweep | 1000 SysV semaphore arrays (2 GiB) are swept and the group drains below 32 MiB inside the 1 s poll: no `dirty`, 5 of 5. 420 000 empty files in `/work` keep the group above 32 MiB (slab memory charged to it), so the runner marks itself `dirty` and the next start gets a fresh session, which is the §3.5 rule |
-| `agentcore` stop line | for sessions the platform already ended at its idle timeout, the drain's stop lines carry `sandboxSeconds` of 560 to 900 s: the session's end is not known, so the line counts to the drain (§3.8) |
+| `agentcore` job group after a sweep | 1000 SysV semaphore arrays (2 GiB) are swept and the group drains below 32 MiB inside the 1 s poll: no `dirty`, 5 of 5. 420 000 empty files in `/work` kept the group above 32 MiB (slab memory charged to it; seen before the poll existed, not run again with it), so the runner marked itself `dirty` and the next start gets a fresh session, which is the §3.5 rule |
+| `agentcore` stop line | for sessions the platform already ended at its idle timeout, the drain's stop lines carry `sandboxSeconds` of 560 to 900 s: the session's end is not known, so the line counts to the drain (§3.8). No AgentCore usage-log record arrived in 90 minutes of calls and stops, only the delivery's validation stream |
 | Stack delete with live sandboxes | `nitro` 27 min (the drain 80 s; the VPC-attached `RunCodeDrain` function 21 min, its network interfaces release late); `microvm` 23 min (cause not isolated); `agentcore`, two stacks, 31.7 min (the VPC-attached Reaper and Drain functions 19.5 min each). A delete of stacks that never ran a sandbox took 15 s |
 
 ## 8. Integration test outline
