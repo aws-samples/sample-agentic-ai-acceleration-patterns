@@ -24,7 +24,7 @@ type InlinePolicy = { PolicyDocument: { Statement: Statement[] } };
 const actions = (statement: Statement): string[] => (Array.isArray(statement.Action) ? statement.Action : [statement.Action]);
 
 describe('demo HTTP sink receiver (threat model T-17, M-17)', () => {
-  const template = synthDemo({ integLocalCell: 'true', integHttpReceiver: 'true' });
+  const template = synthDemo({ integLocalEmitter: 'true', integHttpReceiver: 'true' });
   const functions = template.findResources('AWS::Lambda::Function');
   const receiverId = Object.keys(functions).find((id) => id.startsWith('DemoHttpReceiver'))!;
 
@@ -222,7 +222,7 @@ describe('demo HTTP sink receiver (threat model T-17, M-17)', () => {
   });
 
   test('without integHttpReceiver there is no function URL at all', () => {
-    expect(synthDemo({ integLocalCell: 'true' }).findResources('AWS::Lambda::Url')).toEqual({});
+    expect(synthDemo({ integLocalEmitter: 'true' }).findResources('AWS::Lambda::Url')).toEqual({});
   });
 });
 

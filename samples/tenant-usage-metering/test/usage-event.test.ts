@@ -51,7 +51,7 @@ describe('ingest checks (spec §4.8, §5)', () => {
   });
 
   test('the refusal order follows spec §5', () => {
-    expect(checkEvent({ ...event, tenantId: 'tenant-b' }, ctx())).toBe('TENANT_NOT_IN_CELL');
+    expect(checkEvent({ ...event, tenantId: 'tenant-b' }, ctx())).toBe('TENANT_NOT_BOUND');
     expect(checkEvent({ ...event, meterId: 'unknown' }, ctx())).toBe('UNKNOWN_METER');
     expect(checkEvent(event, ctx({ meterAt: () => ({ status: 'RETIRED' }) }))).toBe('UNKNOWN_METER');
     expect(checkEvent(event, ctx({ meterAt: () => ({ status: 'ACTIVE', allowedApplications: ['other'] }) }))).toBe('METER_NOT_ALLOWED');

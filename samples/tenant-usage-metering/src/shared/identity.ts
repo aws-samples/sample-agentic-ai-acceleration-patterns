@@ -7,11 +7,11 @@
  * API Gateway verifies the SigV4 signature and hands the function the
  * caller's ARN as `requestContext.identity.userArn`. Only an assumed role is
  * admitted; it is reduced to its role and account, and the role name must be
- * `<fleet>-ue-<cellId>`. Nothing in the request body is ever consulted.
+ * `<fleet>-ue-<emitterId>`. Nothing in the request body is ever consulted.
  */
 
-/** A cell id is a ULID (control-plane §4.2). */
-const CELL_ID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+/** An emitter id is a ULID (`EmitterId`, model/__global.smithy). */
+const EMITTER_ID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 /** `<fleet>` follows the control plane's charset (spec §3.3). */
 const FLEET = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -24,19 +24,19 @@ export interface EmitterCaller {
   readonly accountId: string;
   readonly roleName: string;
   readonly roleArn: string;
-  /** The cell id the role name claims; the registry decides whether it is real. */
-  readonly cellId: string;
+  /** The emitter id the role name claims; the registry decides whether it is real. */
+  readonly emitterId: string;
 }
 
-/** The emitter role name for a cell (spec §3.4). At most 62 characters. */
-export function emitterRoleName(fleet: string, cellId: string): string {
+/** The role name of an emitter (spec §3.4). At most 62 characters. */
+export function emitterRoleName(fleet: string, emitterId: string): string {
   if (!FLEET.test(fleet)) {
     throw new Error(`fleet name ${JSON.stringify(fleet)} is outside [a-z0-9][a-z0-9-]{0,31}`);
   }
-  if (!CELL_ID.test(cellId)) {
-    throw new Error(`cell id ${JSON.stringify(cellId)} is not a ULID`);
+  if (!EMITTER_ID.test(emitterId)) {
+    throw new Error(`emitter id ${JSON.stringify(emitterId)} is not a ULID`);
   }
-  return `${fleet}-ue-${cellId}`;
+  return `${fleet}-ue-${emitterId}`;
 }
 
 /**
@@ -54,7 +54,7 @@ export function emitterRolePattern(fleet: string, partition: string): string {
 
 /**
  * Reduces a verified caller ARN to an emitter, or `undefined` when the caller
- * is not an assumed role named `<fleet>-ue-<cellId>`. An IAM user, a root
+ * is not an assumed role named `<fleet>-ue-<emitterId>`. An IAM user, a root
  * caller, a federated user or a role of another name is refused (spec §3.2).
  */
 export function emitterFromCallerArn(userArn: string | undefined | null, fleet: string): EmitterCaller | undefined {
@@ -70,8 +70,8 @@ export function emitterFromCallerArn(userArn: string | undefined | null, fleet: 
   if (!roleName.startsWith(prefix)) {
     return undefined;
   }
-  const cellId = roleName.slice(prefix.length);
-  if (!CELL_ID.test(cellId)) {
+  const emitterId = roleName.slice(prefix.length);
+  if (!EMITTER_ID.test(emitterId)) {
     return undefined;
   }
   return {
@@ -79,13 +79,13 @@ export function emitterFromCallerArn(userArn: string | undefined | null, fleet: 
     accountId,
     roleName,
     roleArn: `arn:${partition}:iam::${accountId}:role/${roleName}`,
-    cellId,
+    emitterId,
   };
 }
 
-/** The registry key of an emitter (spec §4.2). */
-export function emitterKey(accountId: string, roleName: string): { PK: string; SK: string } {
-  return { PK: `EMITTER#${accountId}#${roleName}`, SK: 'META' };
+/** The role-keyed registry item of an emitter, `ROLE#<account>#<role>` (spec §4.2). */
+export function emitterRoleKey(accountId: string, roleName: string): { PK: string; SK: string } {
+  return { PK: `ROLE#${accountId}#${roleName}`, SK: 'META' };
 }
 
 /** An assumed-role caller reduced to its role (any role name). */

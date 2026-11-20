@@ -11,30 +11,30 @@ import { createIngestHandler } from '../src/ingest/ingest.function';
 import type { EnrichedUsageEvent } from '../src/shared/usage-event';
 
 const NOW = Date.parse('2026-11-18T12:30:00Z');
-const CELL = '01JD00000000000000000000C1';
-const ROLE = `demo-ue-${CELL}`;
+const EMITTER_ID = '01JD00000000000000000000E1';
+const ROLE = `demo-ue-${EMITTER_ID}`;
 const CALLER = `arn:aws:sts::111122223333:assumed-role/${ROLE}/emitter-1`;
 
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
 const ddb = mockClient(db);
 
 const emitterItem = {
-  PK: `EMITTER#111122223333#${ROLE}`,
+  PK: `ROLE#111122223333#${ROLE}`,
   SK: 'META',
-  cellId: CELL,
+  emitterId: EMITTER_ID,
   applicationId: 'demo-app',
   accountId: '111122223333',
   roleName: ROLE,
   status: 'ACTIVE',
   activeFrom: '2026-11-18T00:00:00Z',
 };
-const bindingItem = { cellId: CELL, tenantId: 'tenant-a', applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-18T00:00:00Z' };
+const bindingItem = { emitterId: EMITTER_ID, tenantId: 'tenant-a', applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-18T00:00:00Z' };
 const meterItem = { meterId: 'agent.tokens', version: 1, unit: 'tokens', rule: 'SUM', effectiveFrom: '2026-11-01T00', status: 'ACTIVE' };
 
 function setup(counter: { admission?: number; refusals?: number } = {}) {
   ddb.reset();
   ddb.on(GetCommand).callsFake((input: { Key: { PK: string; SK: string } }) => {
-    if (input.Key.PK.startsWith('EMITTER#') && input.Key.PK.endsWith(ROLE)) return { Item: emitterItem };
+    if (input.Key.PK.startsWith('ROLE#') && input.Key.PK.endsWith(ROLE)) return { Item: emitterItem };
     if (input.Key.SK === 'TENANT#tenant-a') return { Item: bindingItem };
     return {};
   });
@@ -105,7 +105,7 @@ describe('ingest door (spec §3.2, §5)', () => {
         await handler(
           request(
             { events: [good('01JD0000000000000000000001')] },
-            'arn:aws:sts::444455556666:assumed-role/demo-ue-01JD00000000000000000000C2/s',
+            'arn:aws:sts::444455556666:assumed-role/demo-ue-01JD00000000000000000000E2/s',
           ),
         )
       ).statusCode,
@@ -130,22 +130,22 @@ describe('ingest door (spec §3.2, §5)', () => {
     expect(results).toEqual([
       { eventId: '01JD0000000000000000000001', result: 'REFUSED', reason: 'BAD_SHAPE' },
       { eventId: '01JD0000000000000000000002', result: 'ACCEPTED' },
-      { eventId: '01JD0000000000000000000003', result: 'REFUSED', reason: 'TENANT_NOT_IN_CELL' },
+      { eventId: '01JD0000000000000000000003', result: 'REFUSED', reason: 'TENANT_NOT_BOUND' },
     ]);
     expect(published).toEqual([
       expect.objectContaining({
         eventId: '01JD0000000000000000000002',
         applicationId: 'demo-app',
-        cellId: CELL,
+        emitterId: EMITTER_ID,
         emitterAccountId: '111122223333',
         emitterRole: ROLE,
         receivedAt: '2026-11-18T12:30:00.000Z',
       }),
     ]);
-    // Both refusals are stored: BAD_SHAPE under the cap of 1, TENANT_NOT_IN_CELL always.
+    // Both refusals are stored: BAD_SHAPE under the cap of 1, TENANT_NOT_BOUND always.
     expect(errorObjects).toHaveLength(1);
     expect(errorObjects[0].key).toMatch(/^error\/hour=2026-11-18T12\//);
-    expect(JSON.parse(errorObjects[0].body).events.map((e: { reason: string }) => e.reason)).toEqual(['BAD_SHAPE', 'TENANT_NOT_IN_CELL']);
+    expect(JSON.parse(errorObjects[0].body).events.map((e: { reason: string }) => e.reason)).toEqual(['BAD_SHAPE', 'TENANT_NOT_BOUND']);
   });
 
   test('events over the per-emitter minute limit are RETRY, refusals over the cap are not stored', async () => {
@@ -190,7 +190,7 @@ describe('admin function (spec §3.2)', () => {
       body: body === undefined ? null : JSON.stringify(body),
     }) as APIGatewayProxyEvent;
 
-  test('an operator cannot register a cell, and a registrar cannot read meters', async () => {
+  test('an operator cannot register an emitter, and a registrar cannot read meters', async () => {
     ddb.reset();
     const handler = createAdminHandler(
       createAdminService(
@@ -212,8 +212,8 @@ describe('admin function (spec §3.2)', () => {
     const put = await handler(
       adminRequest(
         'PUT',
-        `/cells/${CELL}/emitter`,
-        '/cells/{cellId}/emitter',
+        `/emitters/${EMITTER_ID}`,
+        '/emitters/{emitterId}',
         'arn:aws:sts::111122223333:assumed-role/operator/session-1',
         { applicationId: 'demo-app', accountId: '111122223333' },
       ),
@@ -226,19 +226,19 @@ describe('admin function (spec §3.2)', () => {
 
   test('a delete takes the control-plane ids from headers in any case', async () => {
     ddb.reset();
-    const binding = { PK: `CELL#${CELL}`, SK: 'TENANT#tenant-b', cellId: CELL, tenantId: 'tenant-b', applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-18T00:00:00Z', createdBy: 'x', createdAt: '2026-11-18T00:00:00Z' };
+    const binding = { PK: `EMITTER#${EMITTER_ID}`, SK: 'TENANT#tenant-b', emitterId: EMITTER_ID, tenantId: 'tenant-b', applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-18T00:00:00Z', createdBy: 'x', createdAt: '2026-11-18T00:00:00Z' };
     ddb.on(GetCommand).resolves({ Item: binding });
     const handler = createAdminHandler(
       createAdminService({ db, config: { tableName: 't', fleetName: 'demo', recountWindowHours: 96, closeGraceMinutes: 60, blockedAccountIds: [], ingestPath: 'BUS' }, startJob: async () => {} }, lists),
     );
-    const event = adminRequest('DELETE', `/cells/${CELL}/tenants/tenant-b`, '/cells/{cellId}/tenants/{tenantId}', 'arn:aws:sts::111122223333:assumed-role/registrar/session-1');
+    const event = adminRequest('DELETE', `/emitters/${EMITTER_ID}/tenants/tenant-b`, '/emitters/{emitterId}/tenants/{tenantId}', 'arn:aws:sts::111122223333:assumed-role/registrar/session-1');
     const withHeaders = { ...event, headers: { 'X-Control-Plane-Execution-Id': 'exec-9' }, multiValueHeaders: { 'X-Control-Plane-Execution-Id': ['exec-9'] } } as APIGatewayProxyEvent;
     const out = await handler(withHeaders);
     expect(out.statusCode).toBe(200);
     expect(JSON.parse(out.body).binding).toMatchObject({ status: 'CLOSING', closedByExecutionId: 'exec-9' });
   });
 
-  test('a cell in a blocked account is refused ACCOUNT_NOT_ALLOWED', async () => {
+  test('an emitter in a blocked account is refused ACCOUNT_NOT_ALLOWED', async () => {
     ddb.reset();
     const handler = createAdminHandler(
       createAdminService(
@@ -260,8 +260,8 @@ describe('admin function (spec §3.2)', () => {
     const put = await handler(
       adminRequest(
         'PUT',
-        `/cells/${CELL}/emitter`,
-        '/cells/{cellId}/emitter',
+        `/emitters/${EMITTER_ID}`,
+        '/emitters/{emitterId}',
         'arn:aws:sts::111122223333:assumed-role/registrar/session-1',
         { applicationId: 'demo-app', accountId: '111122223333' },
       ),

@@ -12,7 +12,7 @@
 import { splitConcatenatedJson } from '../shared/json-stream';
 import { type EnrichedUsageEvent, hourOf, shapeIsValid } from '../shared/usage-event';
 
-const ENRICHMENT = ['applicationId', 'cellId', 'emitterAccountId', 'emitterRole', 'receivedAt'] as const;
+const ENRICHMENT = ['applicationId', 'emitterId', 'emitterAccountId', 'emitterRole', 'receivedAt'] as const;
 
 export function asEnrichedEvent(value: unknown): EnrichedUsageEvent | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {

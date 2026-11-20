@@ -5,8 +5,8 @@
 # The control plane's global vendor hook for tenant usage metering (spec §3.4).
 # Register it on five events, in these phases:
 #
-#   CELL_CREATE        PRE   PutCellEmitter
-#   CELL_DELETE        POST  DeleteCellEmitter
+#   CELL_CREATE        PRE   PutEmitter
+#   CELL_DELETE        POST  DeleteEmitter
 #   DEPLOYMENT_CREATE  PRE   PutTenantBinding
 #   DEPLOYMENT_UPDATE  PRE   PutTenantBinding
 #   DEPLOYMENT_DELETE  POST  DeleteTenantBinding
@@ -90,14 +90,14 @@ call() {
 case "$EVENT:$PHASE" in
   CELL_CREATE:PRE)
     need CELL_ACCOUNT_ID '^[0-9]{12}$'
-    call PUT "/cells/${CELL_ID}/emitter" "$(jq -nc --arg app "$APPLICATION_ID" --arg account "$CELL_ACCOUNT_ID" \
+    call PUT "/emitters/${CELL_ID}" "$(jq -nc --arg app "$APPLICATION_ID" --arg account "$CELL_ACCOUNT_ID" \
       --arg exec "$execution_id" --arg op "$operator_id" \
       '{applicationId: $app, accountId: $account}
        + (if $exec != "" then {controlPlaneExecutionId: $exec} else {} end)
        + (if $op != "" then {controlPlaneOperatorId: $op} else {} end)')"
     ;;
   CELL_DELETE:POST)
-    call DELETE "/cells/${CELL_ID}/emitter"
+    call DELETE "/emitters/${CELL_ID}"
     ;;
   DEPLOYMENT_CREATE:PRE | DEPLOYMENT_UPDATE:PRE)
     need TENANT_ID '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
@@ -106,7 +106,7 @@ case "$EVENT:$PHASE" in
       echo "hook environment: PARAM_BILLING_ACCOUNT is outside [A-Za-z0-9._:-]{1,128}" >&2
       exit 1
     fi
-    call PUT "/cells/${CELL_ID}/tenants/${TENANT_ID}" "$(jq -nc --arg app "$APPLICATION_ID" --arg billing "$billing" \
+    call PUT "/emitters/${CELL_ID}/tenants/${TENANT_ID}" "$(jq -nc --arg app "$APPLICATION_ID" --arg billing "$billing" \
       --arg exec "$execution_id" --arg op "$operator_id" \
       '{applicationId: $app}
        + (if $billing != "" then {billingAccount: $billing} else {} end)
@@ -115,7 +115,7 @@ case "$EVENT:$PHASE" in
     ;;
   DEPLOYMENT_DELETE:POST)
     need TENANT_ID '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
-    call DELETE "/cells/${CELL_ID}/tenants/${TENANT_ID}"
+    call DELETE "/emitters/${CELL_ID}/tenants/${TENANT_ID}"
     ;;
   *)
     echo "metering: nothing to do on $EVENT $PHASE"

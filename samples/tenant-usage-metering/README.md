@@ -7,31 +7,32 @@ SPDX-License-Identifier: MIT-0
 A multi-tenant agentic application bills, tiers and limits its tenants on
 what they use: agent sessions, model tokens, tool calls, requests. This
 sample is one metering service the vendor owns. Every emitter sends one
-versioned usage event. The ingest door admits an event only from an
-emitter the control plane registered, and only for a tenant the control
-plane placed in that emitter's cell. Every admitted event lands in a
-replayable raw store. Each hour is counted from that store under a
-run-time meter catalog, so a recount gives the same records, and a late
-event gives an `ADJUSTMENT`, never a changed record. Records go to
-configured sinks (an HTTP billing API or an export bucket) and to a usage
-bus that billing and limit systems subscribe to.
+versioned usage event. The ingest door admits an event only from a
+registered emitter, and only for a tenant bound to that emitter. Every
+admitted event lands in a replayable raw store. Each hour is counted from
+that store under a run-time meter catalog, so a recount gives the same
+records, and a late event gives an `ADJUSTMENT`, never a changed record.
+Records go to configured sinks (an HTTP billing API or an export bucket)
+and to a usage bus that billing and limit systems subscribe to.
 
-The control plane's vendor hooks ([`control-plane`](../control-plane/),
-ADR-044) register cells and tenants, so onboarding and offboarding drive
-metering with no manual step.
+The service works with any application layout: one application in one
+account, several applications across many accounts, or cells. With the
+[`control-plane`](../control-plane/) sample, its vendor hooks (ADR-044)
+register each cell's emitter and its tenant bindings, so onboarding and
+offboarding drive metering with no manual step.
 
 What it is NOT: telemetry (billing events never share the metrics or logs
 path), proof that an emitter reports honest quantities, tenant isolation
-inside a pooled cell, or a billing system. See spec §1.2.
+inside a pooled application, or a billing system. See spec §1.2.
 
 ## Architecture
 
 ![Components](diagrams/tenant-usage-metering.components.drawio.svg)
 
-An emitter signs its events as its cell's role; the ingest door checks
-them against the registry the control plane writes; the raw store keeps
-them; the recounter counts each hour into usage records; the outbox
-publishes each record to the usage bus and queues it for each sink.
+A workload signs its events as its emitter role; the ingest door checks
+them against the registry a registrar writes; the raw store keeps them;
+the recounter counts each hour into usage records; the outbox publishes
+each record to the usage bus and queues it for each sink.
 
 ![Architecture](diagrams/tenant-usage-metering.drawio.svg)
 
@@ -53,28 +54,62 @@ HTTPS (secret or SigV4) or the export bucket.
   bus with, dead-letter queue included. Each bus is shared through AWS RAM
   with the vendor accounts that read it.
 
+## Who may report usage
+
+The ingest door trusts two kinds of record. A registrar writes both: any
+system that knows where tenants are served, signing as a role in
+`registrarPrincipalArns`.
+
+- An **emitter** is one IAM role in one AWS account that signs usage
+  events for one application. The API keys it by `emitterId`, a ULID the
+  registrar picks. The role is named `<fleet>-ue-<emitterId>` and holds a
+  policy from `ingestStatement`.
+- A **tenant binding** lets one emitter report usage for one tenant. A
+  tenant may be bound to many emitters.
+
+An event counts only when it is signed by a registered emitter and its
+tenant is bound to that emitter. The body cannot name another emitter or
+tenant: identity comes from the signature.
+
+Emitters fit any layout; you do not need a cell-based design:
+
+| Your layout | Emitters | Tenant bindings |
+|---|---|---|
+| One pooled application in one account | one | every tenant, to that emitter |
+| One application across several accounts | one per account | each tenant, to the emitters of the accounts that serve it |
+| Several applications | one per application and account | each tenant, to the emitters of each application it uses |
+| One account per tenant (silo) | one per tenant account | that tenant, to its emitter |
+| The [`control-plane`](../control-plane/) sample | one per cell | each deployment, to its cell's emitter |
+
+Without the control plane, the registrar is usually the deploy pipeline
+(it registers an emitter when it creates the role) and the onboarding
+service (it binds a tenant when the tenant is placed). Rules that apply in
+every layout:
+
+- An emitter never moves to another account or application; register a
+  new one instead.
+- No emitter may sit in the metering account, or in an account that reads
+  a bus (`ACCOUNT_NOT_ALLOWED`).
+- `fleetName` is the prefix of the emitter role names and the sink
+  secrets; with the control plane, its fleet name. Without one, pick any
+  name.
+
 ## How it works
 
-1. **Register.** A cell's emitter is the IAM role that the cell's
-   workload signs its usage events with; it is the only identity the
-   ingest door accepts for that cell. The cell create step creates the
-   role in the cell's account with a policy from `ingestStatement`. The
-   system that places tenants in cells, signing as a role in
-   `registrarPrincipalArns`, calls `PutCellEmitter` when a cell is
-   created, to register that role, and `PutTenantBinding` when a tenant
-   is placed in a cell, so the role may report usage for that tenant.
-   Deletes close the registration at once; events timed before the close
-   are still admitted for a grace period (spec §3.4, §4.2). (With the
-   [`control-plane`](../control-plane/) sample, a global vendor hook
-   makes these calls: `PutCellEmitter` on `CELL_CREATE`,
-   `PutTenantBinding` on `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE`,
-   both in `PRE`, and the deletes in `POST`.)
+1. **Register.** The registrar calls `PutEmitter` when an emitter's
+   role is created, and `PutTenantBinding` when a tenant is placed on it.
+   Deletes close a registration at once; events timed before the close
+   are still admitted for `closeGraceMinutes` (spec §3.4, §4.2). With the
+   [`control-plane`](../control-plane/) sample, a global vendor hook makes
+   these calls: `PutEmitter` on `CELL_CREATE`, `PutTenantBinding` on
+   `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE`, both in `PRE`, and the
+   deletes in `POST`.
 2. **Define meters.** An operator creates meters (`COUNT`, `SUM`, `MAX`,
    `UNIQUE_COUNT`) and sinks. A change writes a new version that counts
    from the next whole hour (ADR-0004).
-3. **Emit.** The workload in a cell runs under the cell's emitter role,
-   `<fleet>-ue-<cellId>`, where `<fleet>` is the `fleetName` the stack was
-   deployed with. It sends usage with the `UsageEmitter` client in
+3. **Emit.** The workload runs under its emitter role,
+   `<fleet>-ue-<emitterId>`, where `<fleet>` is the `fleetName` the stack
+   was deployed with. It sends usage with the `UsageEmitter` client in
    [`scripts/emit-usage.ts`](scripts/emit-usage.ts), a code snippet to
    copy into the workload, not a CDK construct: `record()` buffers an
    event, and `flush()` signs and posts the buffer in batches of up to
@@ -103,12 +138,12 @@ npx cdk deploy TenantUsageMetering -c fleetName=demo
 | Context | Default | Meaning |
 |---|---|---|
 | `stackName` | `TenantUsageMetering` | the demo stack's name, so two stacks can sit in one account |
-| `fleetName` | `demo` | the control plane's fleet name; emitter roles are `<fleet>-ue-<cellId>` |
+| `fleetName` | `demo` | the prefix of the emitter role names and the sink secrets; with the control plane, its fleet name. Emitter roles are `<fleet>-ue-<emitterId>` |
 | `ingestPath` | `BUS` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose) |
 | `lateGraceMinutes` | `15` | how long after an hour ends it is first counted |
 | `rawRetentionDays` | `400` | raw object lifetime |
 | `publishServiceParameter` | `true` | write the published parameter; one stack per account and Region may |
-| `integLocalCell` | `false` | test only: an emitter role and cell in this account |
+| `integLocalEmitter` | `false` | test only: an emitter and its role in this account |
 | `integHttpReceiver` | `false` | test only: an `AWS_IAM` function URL that stands in for a billing API |
 
 The demo stack creates stand-in registrar, operator and reader roles and
@@ -145,20 +180,21 @@ The construct shares each bus whose subscriber list is not empty through
 AWS RAM with the managed permission
 `AWSRAMEventBridgeEventBusV2SubscribeOnly`. An account outside the
 organization accepts the resource share invitation before it can attach a
-subscriber. A deploy fails when a listed account holds a cell that can
-still send; a deleted cell stops counting at its close time
+subscriber. A deploy fails when a listed account holds an emitter that
+can still send; a deleted emitter stops counting at its close time
 (architecture.md §4.1).
 
-Then give `<fleet>-global-hook` a policy from `metering.registrarStatement`
-and each cell's emitter role a policy from `metering.ingestStatement`, and
-register [`scripts/control-plane/metering-hook.sh`](scripts/control-plane/metering-hook.sh)
-as a global hook on the five events of spec §3.4. Cells send usage with
+Then give each registrar role a policy from `metering.registrarStatement`
+and each emitter role a policy from `metering.ingestStatement`. With the
+control plane, the registrar is `<fleet>-global-hook`: register
+[`scripts/control-plane/metering-hook.sh`](scripts/control-plane/metering-hook.sh)
+as a global hook on the five events of spec §3.4. Emitters send usage with
 [`scripts/emit-usage.ts`](scripts/emit-usage.ts).
 
 ## Deployment integration test
 
 `AWS_REGION=eu-central-1 npx projen integ` deploys the demo stack with a
-local test cell, drives registration, ingest, counting, sinks, the usage
+local test emitter, drives registration, ingest, counting, sinks, the usage
 bus, a late event, re-admission and offboarding, and destroys the stack:
 about 40 to 100 minutes, depending on how far the run starts from the next
 hour, and under one US dollar. See [`integration-test.md`](integration-test.md).
@@ -166,15 +202,15 @@ hour, and under one US dollar. See [`integration-test.md`](integration-test.md).
 ## End-to-end demo
 
 `scripts/demo.sh` walks the flow against a stack deployed with
-`-c integLocalCell=true`, checks each response, and cleans up what it
+`-c integLocalEmitter=true`, checks each response, and cleans up what it
 created on exit.
 
 | Step | Call | Expected |
 |---|---|---|
-| 1 | `PUT /cells/{cellId}/emitter` (registrar) | 200, `ACTIVE` |
-| 2 | `PUT /cells/{cellId}/tenants/demo-tenant` (registrar) | 200, `ACTIVE` |
+| 1 | `PUT /emitters/{emitterId}` (registrar) | 200, `ACTIVE` |
+| 2 | `PUT /emitters/{emitterId}/tenants/demo-tenant` (registrar) | 200, `ACTIVE` |
 | 3 | `POST /meters` (operator) | 201 |
-| 4 | `POST /usage-events` (emitter) | 200, `ACCEPTED`, then `TENANT_NOT_IN_CELL` |
+| 4 | `POST /usage-events` (emitter) | 200, `ACCEPTED`, then `TENANT_NOT_BOUND` |
 | 5 | `GET /hours/{hour}` (operator) | 200, `OPEN` |
 | 6 | cleanup: `DELETE` binding and emitter, `DELETE /meters/{id}` | 200 |
 
@@ -187,7 +223,7 @@ Smithy, `aws.protocols#restJson1`, model in [`model/`](model/).
 | Usage events | `PutUsageEvents` |
 | Meter | `CreateMeter`, `GetMeter`, `UpdateMeter`, `DeleteMeter`, `ListMeters` |
 | Sink | `CreateSink`, `GetSink`, `UpdateSink`, `DeleteSink`, `ListSinks` |
-| Cell emitter | `PutCellEmitter`, `GetCellEmitter`, `DeleteCellEmitter`, `ListCellEmitters` |
+| Emitter | `PutEmitter`, `GetEmitter`, `DeleteEmitter`, `ListEmitters` |
 | Tenant binding | `PutTenantBinding`, `GetTenantBinding`, `DeleteTenantBinding`, `ListTenantBindings` |
 | Usage | `GetUsage`, `ListUsage` |
 | Hour | `GetHour`, `ListHours` |
@@ -229,7 +265,7 @@ the raw and error stores carries its `tenantId`, and `GetUsage` and
 `ListUsage` return records per tenant, application, meter and hour. Logs
 are JSON with an allow-list of fields
 ([`src/shared/logger.ts`](src/shared/logger.ts)); `tenantId` is on it, but
-log lines name the cell, application, meter, sink, hour or job, since a
+log lines name the emitter, application, meter, sink, hour or job, since a
 batch, an hour and a delivery each span tenants. Metrics have no tenant
 dimension: CloudWatch bills every name and dimension combination as its
 own custom metric, so a tenant dimension adds billed metrics per tenant
@@ -252,7 +288,7 @@ tenant cost ≈ Σ hours [ share of accepted events × per-event cost
 ```
 
 Refused events and calls from unregistered roles carry no verified
-tenant. Refusals can be charged to the emitter's cell, which the `error/`
+tenant. Refusals can be charged to the emitter, which the `error/`
 objects and the access log name; the rest of them, and the cost of repair
 jobs (re-admission, redrives, recounts), is vendor overhead.
 
@@ -298,18 +334,18 @@ a month, and with PITR each month adds about $6 to the monthly bill.
 ## Security notes
 
 - Identity comes from the SigV4 signature, never the body (P-2). An
-  emitter speaks for the tenants its cell holds, and only within the
+  emitter speaks for the tenants bound to it, and only within the
   registration's intervals.
-- The control plane is the source of truth for placement; only its hook
-  role may register (P-3).
+- The registrar is the source of truth for placement; only a role in
+  `registrarPrincipalArns` may register (P-3).
 - Explicit-deny resource policies on the API, the buckets, the buses, the
   table and the dead-letter queue keep every store to its writers, whatever
   an identity policy in the account allows (M-24).
-- No account both holds cells and reads a bus: `PutCellEmitter` and a
+- No account both holds emitters and reads a bus: `PutEmitter` and a
   deploy-time guard keep the two lists apart (M-6).
 - Logs carry no event payload, sink body or credential (M-27).
 - The sample proves who sent an event, not that its quantity is true: a
-  tenant-owned cell can under-report (T-3).
+  tenant-owned emitter can under-report (T-3).
 
 Threats, mitigations and residuals: [`threat-model.md`](threat-model.md).
 
@@ -325,11 +361,11 @@ Threats, mitigations and residuals: [`threat-model.md`](threat-model.md).
 - [ ] `alarmTopicArn` wired to the on-call rotation (M-12, M-21).
 - [ ] A reconciliation of the registry against the control plane's
       deployments, for delete hooks that were skipped (T-9).
-- [ ] Where cells share an account, a trust policy on each emitter role
-      that names only that cell's compute, never the account root;
-      `iam:PassRole` scoped per cell; `iam:CreateRole` and
-      `iam:DeleteRole` on `<fleet>-ue-*` only for the cell provisioning
-      role; or one account per cell (T-28).
+- [ ] Where emitters share an account, a trust policy on each emitter
+      role that names only that emitter's compute, never the account
+      root; `iam:PassRole` scoped per emitter; `iam:CreateRole` and
+      `iam:DeleteRole` on `<fleet>-ue-*` only for the role that creates
+      emitter roles; or one account per emitter (T-28).
 - [ ] `RemovalPolicy.RETAIN` on the table and the buckets (M-24 residual:
       a stack delete removes them).
 - [ ] A distributed map in the recounter for hours larger than one task's
