@@ -356,7 +356,9 @@ async function accessLogGroup(): Promise<string> {
 async function serverErrors(group: string, start: string, end: string): Promise<number> {
   const q = await aws([
     'logs', 'start-query', '--log-group-name', group,
-    '--start-time', String(Math.floor(Date.parse(start) / 1000) - 5), '--end-time', String(Math.ceil(Date.parse(end) / 1000) + 5),
+    // The record's own window: API Gateway logs a request when it arrives, after the
+    // driver's clock started and before it stopped, so no padding reaches the next record.
+    '--start-time', String(Math.floor(Date.parse(start) / 1000)), '--end-time', String(Math.ceil(Date.parse(end) / 1000)),
     '--query-string', 'filter status >= 500 | stats count(*) as n',
   ], { region: region() });
   for (let i = 0; i < 60; i += 1) {

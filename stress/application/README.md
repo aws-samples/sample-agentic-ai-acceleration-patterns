@@ -261,6 +261,19 @@ publishes and reads assets, and it holds only cell assets.
 
 ## Known limitations
 
+- The stress cell is the runtime-isolation demo stack: its agents and tool
+  targets are the demo's, not the tier's `agentsPerCell` and tool counts.
+  The tier-sized cell is W-3's stress ingress, which W-9 composes.
+- The tenant scripts subscribe a tenant on its cell only. The tenant-identity
+  tenant and the front-door route of spec §3.3 step 3 join when those slices
+  compose (W-9, W-7).
+- `cell-tenant-build-policy` reaches the tenant subscription methods of every
+  API in the cell account, so a compromised tenant build can change any
+  tenant's subscription on any cell there (ADR-0012).
+- A cell is stamped with its source when it is created: a fixed cell or
+  tenant script reaches an existing cell only after it is deleted and created
+  again (ADR-0014).
+
 - The request path under the workload boundary (authoriser, TVM, model
   call, tools) has not run in a cell account; the first platform run at
   `small` is the check (spec Q-5).
