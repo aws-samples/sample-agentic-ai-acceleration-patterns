@@ -163,7 +163,7 @@ export class UntrustedCodeSandboxes extends Construct {
         'The tool reads inputs with the tool tenant role and writes one structured line per call with tenantId, runId and input size (spec 3.8, ADR-0013); that line is the access record. A vendor who needs object-level records adds S3 data events.',
       );
     }
-    this.nagContext = { inputBucket: nagFindingResource(this, this.inputBucket.bucketArn), logGroups: [], logGroupPrefixes: [] };
+    this.nagContext = { inputBucket: nagFindingResource(this, this.inputBucket.bucketArn), logGroups: [], logGroupPrefixes: [], invokable: [] };
     const containers = this.config.backends.some((b) => b === 'nitro' || b === 'agentcore');
     if (containers) {
       this.runnerRepository = new ecr.Repository(this, 'RunnerRepository', {
@@ -326,6 +326,7 @@ export class UntrustedCodeSandboxes extends Construct {
     });
     this.logDrain.protect(frameworkLogs);
     this.logDrain.writer(provider);
+    this.nagContext = { ...this.nagContext, invokable: [nagFindingResource(this, drain.fn.functionArn)] };
     this.drainResource = new CustomResource(this, 'DrainResource', {
       serviceToken: provider.serviceToken,
       serviceTimeout: Duration.minutes(15),

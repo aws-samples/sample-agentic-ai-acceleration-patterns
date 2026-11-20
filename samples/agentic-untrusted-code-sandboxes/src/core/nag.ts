@@ -82,6 +82,8 @@ export interface KnownContext {
    */
   readonly logGroups: readonly string[];
   readonly logGroupPrefixes: readonly string[];
+  /** ARNs of the functions the construct's own provider may invoke (`nagFindingResource`), so another function stays a finding. */
+  readonly invokable: readonly string[];
 }
 
 const re = (pattern: RegExp) => (resource: string): boolean => pattern.test(resource);
@@ -122,9 +124,9 @@ export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
     },
     {
       // The framework function invokes the drain function, and the Lambda grant names the function with any qualifier.
-      matches: re(/^<[^>.:]+\.Arn>:\*$/),
+      matches: (r) => ctx.invokable.some((arn) => r === `${arn}:*`),
       actions: /^lambda:InvokeFunction$/,
-      reason: 'The drain custom resource\'s framework function invokes the drain function of this stack; the grant names the function ARN with any version or alias, and no other function (ADR-0029).',
+      reason: 'The drain custom resource\'s framework function invokes the drain function of this stack; the grant names the ARN of that function with any version or alias, and no other function (ADR-0029).',
     },
     {
       matches: re(/:network-interface\/\*$/),

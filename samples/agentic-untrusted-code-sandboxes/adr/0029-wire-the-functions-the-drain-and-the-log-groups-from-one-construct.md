@@ -106,8 +106,10 @@ own groups.
   still overlap it; both may then write an `orphan` stop line for the same
   sandbox, a double count bounded to one run.
 - Every custom resource of the construct, the two image copies included, sets
-  `ServiceTimeout` a little above its function's timeout, so a function that
-  cannot start never holds a delete for the default hour. The bucket's
+  `ServiceTimeout` a little above its function's timeout (the drain's is 15
+  minutes with the same `ServiceTimeout`, and its handler stops 30 s before
+  its own timeout so the framework can answer), so a function that cannot
+  start never holds a delete for the default hour. The bucket's
   auto-delete resource is CDK's own.
 - `reaper` and `offboard` share one role; the drain has its own.
 - The core copies the runner image (ADR-0024) for every container backend:
@@ -121,8 +123,10 @@ own groups.
 
 ## Consequences
 
-The drain handler returns or throws on `Delete`, and the framework answers CloudFormation, so every path ends in a response. A
-gateway function built with its own log group has that group in the app's
+The drain handler returns or throws on `Delete`, and the framework answers
+CloudFormation, so every path ends in a response. The failure message names
+the framework's own log group, not the drain's: the drain logs to `DrainLogs`.
+A gateway function built with its own log group has that group in the app's
 hands; the core cannot put it behind its log drain. The core functions
 run on immutable role references, so a grant made through
 `runCodeFunction.role` or `offboardFunction.role` does nothing; statements go

@@ -891,6 +891,10 @@ describe('known wildcards (ADR-0030)', () => {
     [`${arn}:container-instance/*`, ['ecs:DescribeContainerInstances'], false],
     [`${arn}:container-instance/<SandboxesBackendnitroCluster8B54CDC0>/*`, ['ecs:Poll'], false],
     ['<AWS::Region.AgentRuntimeArn>/runtime-endpoint/*', ['bedrock-agentcore:InvokeAgentRuntime'], false],
+    ['<Drain.Arn>:*', ['lambda:InvokeFunction'], true],
+    ['<Other.Arn>:*', ['lambda:InvokeFunction'], false],
+    ['<Drain.Arn>:*', ['lambda:InvokeFunction', 'lambda:DeleteFunction'], false],
+    ['<Drain.Arn>:*', ['lambda:DeleteFunction'], false],
     ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:a*', ['logs:DeleteLogGroup'], false],
     ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws*', ['logs:DeleteLogGroup'], false],
     ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/lambda*', ['logs:DeleteLogGroup'], false],
@@ -901,7 +905,7 @@ describe('known wildcards (ADR-0030)', () => {
     ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/x-:*', ['logs:PutLogEvents'], false],
     ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/x-other*', ['logs:DeleteLogGroup'], false],
   ])('%s with %p is %s', (resource, actions, accepted) => {
-    expect(knownWildcard(resource, actions, { inputBucket: '<Bucket.Arn>', logGroups: ['/aws/x'], logGroupPrefixes: ['/aws/x-'] }) !== undefined).toBe(accepted);
+    expect(knownWildcard(resource, actions, { inputBucket: '<Bucket.Arn>', logGroups: ['/aws/x'], logGroupPrefixes: ['/aws/x-'], invokable: ['<Drain.Arn>'] }) !== undefined).toBe(accepted);
   });
 
   test('a wider action on a known resource stays a finding, and a known one is acknowledged', () => {
@@ -910,7 +914,7 @@ describe('known wildcards (ADR-0030)', () => {
     role.addToPolicy(new iam.PolicyStatement({ actions: ['ecr:GetAuthorizationToken'], resources: ['*'] }));
     const wide = new iam.Role(stack, 'Wide', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
     wide.addToPolicy(new iam.PolicyStatement({ actions: ['ecr:GetAuthorizationToken', 's3:GetObject'], resources: ['*'] }));
-    acknowledgeKnownFindings(stack, { inputBucket: '<Bucket.Arn>', logGroups: [], logGroupPrefixes: [] });
+    acknowledgeKnownFindings(stack, { inputBucket: '<Bucket.Arn>', logGroups: [], logGroupPrefixes: [], invokable: [] });
     const found = new AwsSolutionsChecks(stack).validateScope(stack).violations.flatMap((v) => v.violatingResources.map((r) => r.constructPath));
     expect(found.some((p) => p.startsWith('S/R/'))).toBe(false);
     expect(found.some((p) => p.startsWith('S/Wide/'))).toBe(true);
@@ -955,8 +959,8 @@ describe('least privilege and teardown details', () => {
   test('the log drain waits for every owned log group, and every function and the DNS association wait for the log drain', () => {
     const all = resources();
     const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogDrain/Resource'))![0];
-    const groups = Object.entries(all).filter(([, r]) => r.Type === 'AWS::Logs::LogGroup' && /\/(RunCode|Reaper|Offboard|Drain)Logs\/|QueryLogs|CopyLogs/.test(pathOf(r)));
-    expect(groups).toHaveLength(5);
+    const groups = Object.entries(all).filter(([, r]) => r.Type === 'AWS::Logs::LogGroup' && /\/(RunCode|Reaper|Offboard|Drain)Logs\/|DrainProviderLogs|QueryLogs|CopyLogs/.test(pathOf(r)));
+    expect(groups).toHaveLength(6);
     for (const [id] of groups) expect(dependsOn(all[drainId])).toContain(id);
     for (const name of ['RunCode', 'Reaper', 'Offboard', 'Drain']) expect(dependsOn(all[fnId(base.t, name)])).toContain(drainId);
     const association = Object.values(all).find((r) => r.Type === 'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation');
@@ -1075,6 +1079,10 @@ describe('least privilege and teardown details', () => {
     expect(actionsOf(stmts).sort()).toEqual(['lambda:GetFunction', 'lambda:InvokeFunction', 'logs:CreateLogStream', 'logs:PutLogEvents']);
     const invoke = stmts.find((st) => Array.isArray(st.Action) && st.Action.includes('lambda:InvokeFunction') || st.Action === 'lambda:InvokeFunction') as Json;
     expect(JSON.stringify(invoke.Resource)).toContain(fnId(base.t, 'Drain'));
+    expect(JSON.stringify(invoke.Resource)).not.toContain('"*"');
+    const logWrite = stmts.find((st) => Array.isArray(st.Action) && st.Action.includes('logs:PutLogEvents')) as Json;
+    expect(JSON.stringify(logWrite.Resource)).toContain('DrainProviderLogs');
+    expect(JSON.stringify(logWrite.Resource)).not.toContain('"*"');
     // the framework waits for the log drain like every other writer
     const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogDrain/Resource'))![0];
     expect(dependsOn(framework)).toContain(drainId);
