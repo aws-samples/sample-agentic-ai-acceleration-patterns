@@ -31,7 +31,9 @@ appDomain, addressing}`. Pros: one app and one set of inputs; synth
 checks the URL's form, Region and stage, so the policy names exactly this
 registrar; no role in one account reads the other. Cons: two deploy
 steps, and a redeploy that replaces the registrar's API (a new API id)
-needs the stack deployed again with the new URL, or the hook gets 403.
+needs the stack deployed again with the new URL. Until then the old
+API's host does not resolve, so the hook gets no answer, retries for
+about two minutes and fails that application's operations.
 ### Option 2: The hook reads the edge parameter across accounts
 `RouteHookAccess` writes only a pointer, and the hook assumes a role in
 the edge account to read `/application-plane/shared/front-door/edge`.
@@ -55,9 +57,11 @@ Option 1. The front door's inputs already hold every value but the URL,
 and an input checked at synth keeps the policy scoped to one API id and
 stage. The parameter is one JSON document with a `version`, so the hook
 gets `appDomain` and `addressing` from the same read and refuses a
-document it does not know. A stale URL fails loudly: the hook's call gets
-403 and the operation fails, as an out-of-order teardown does (spec
-§6.2 limits).
+document it does not know. A stale URL fails loudly: the old API's host
+does not resolve, so the hook gets no answer, retries for about two
+minutes (spec §5.2) and then fails the operation. Only the application
+whose parameter is stale is affected, because the hook reads only that
+application's parameter (T-58).
 
 ## Consequences
 - Setup in the control plane's account is a second run of the front door
@@ -70,6 +74,6 @@ document it does not know. A stale URL fails loudly: the hook's call gets
 - The build's synth uses a placeholder `registrarUrl`, so cdk-nag checks
   the stack on every build.
 - The hook parameter's value changes from a URL to a JSON document (spec
-  §6.4); ADR-0014's note names only `registrarUrl`.
+  §6.4); ADR-0014's 2026-11-20 note records that change.
 - Revisit if CDK gains cross-account references, or if the registrar
   gets a stable domain for another reason.
