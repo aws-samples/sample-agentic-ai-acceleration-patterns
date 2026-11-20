@@ -429,7 +429,7 @@ keys it owns (`dynamodb:LeadingKeys`). See the
 
 | Route | Auth | Operation |
 |---|---|---|
-| `POST /{backend}/invocations`, `POST /invocations` | identity token, `X-Tenant-Id` when the token carries `tenants` | InvokeAgent; body `{prompt}`, with `session` `{conversationId, prompt}`; `200` `text/event-stream`, last event `event: usage` |
+| `POST /{backend}/invocations`, `POST /invocations` | identity token, `X-Tenant-Id` when the token carries `tenants` | InvokeAgent; body `{prompt}`, with `session` `{conversationId, prompt}`; `200` `text/event-stream`, last event `event: usage`; optional `x-correlation-id` (1 to 64 of `[A-Za-z0-9-]`, else ignored) logged as `correlationId` (ADR-0053) |
 | `GET /.well-known/openid-configuration`, `GET /.well-known/jwks.json` | none | issuer discovery (ADR-0037) |
 | `PUT`, `GET`, `DELETE /entitlements/tenants/{tenantId}` | IAM (SigV4) | tenant subscription |
 | `PUT`, `GET`, `DELETE /entitlements/plans/{planName}`, `GET /entitlements/plans` | IAM (SigV4) | plans |

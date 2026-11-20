@@ -717,7 +717,7 @@ replaced the Runtime: the old Runtime's group is deleted while it drains.
 
 | Route | Auth | What |
 |---|---|---|
-| `POST <baseUrl>/<backend>/invocations` | `Authorization: Bearer <identity token>`; `X-Tenant-Id` when the token carries `tenants` | Invoke an agent; `text/event-stream`, last event `event: usage` |
+| `POST <baseUrl>/<backend>/invocations` | `Authorization: Bearer <identity token>`; `X-Tenant-Id` when the token carries `tenants` | Invoke an agent; `text/event-stream`, last event `event: usage`. An optional `x-correlation-id` of 1 to 64 characters of `[A-Za-z0-9-]` is logged as `correlationId`; any other value is ignored, not refused (ADR-0053) |
 | `POST <baseUrl>/invocations` | same | The `defaultBackend` (`api-gateway`; on `agentcore-gateway` the name is always in the path) |
 | `POST <baseUrl>/<backend>/delegations` | `Authorization: Bearer <transaction token of the calling agent>` | (ADR-0048, `api-gateway` with `agentDelegation`) Hand the transaction to `<backend>`: a replacement token for it, its Runtime invoked, the stream relayed. 403 `delegation_not_declared`, `delegation_depth`, `delegation_loop`, `agent_not_subscribed`; an identity token is refused |
 | `GET <baseUrl>/.well-known/openid-configuration` | none | `{ issuer, jwks_uri, ... }`; `issuer` = `<baseUrl>` |

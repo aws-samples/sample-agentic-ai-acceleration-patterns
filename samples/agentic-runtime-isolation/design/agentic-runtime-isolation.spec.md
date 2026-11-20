@@ -286,10 +286,10 @@ transaction token's id), `grantSize` (entries in `scope`) and `mint`
 `tenantId`, `user` (the identity provider's `sub`), `agent`, `txn`,
 `gateway`, `target`, `tool` and `decision` (ADR-0040), and each tool writes
 `tool served` with `tenantId`, `txn`, duration and bytes. `txn` joins one
-agent request to every tool call it made. Every ingress line also carries
-`correlationId` when the client sent an `x-correlation-id` of 1 to 64
-characters of `[A-Za-z0-9-]` (ADR-0053); it joins the client's own record
-to the ingress lines and decides nothing.
+agent request to every tool call it made. Every line the ingress functions
+write for a request also carries `correlationId` when the client sent an
+`x-correlation-id` of 1 to 64 characters of `[A-Za-z0-9-]` (ADR-0053); it
+joins the client's own record to the ingress lines and decides nothing.
 
 **P-10. Every request's cost is attributable to its tenant.** The ingress
 meters, per tenant, what each billed service charges for: ingress requests,

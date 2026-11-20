@@ -164,7 +164,7 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
         // The event named no backend: the target is not named after its
         // backend, or the Gateway handed a path this module does not read.
         warnedPathLacksBackend = true;
-        log.warn('interceptor path lacks backend', { ingress: 'agentcore-gateway', pathPresent: path !== undefined });
+        log.warn('interceptor path lacks backend', { ingress: 'agentcore-gateway', pathPresent: path !== undefined, correlationId });
       }
       log.warn('request refused', {
         ingress: 'agentcore-gateway',

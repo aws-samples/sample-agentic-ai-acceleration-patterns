@@ -695,13 +695,16 @@ run_all_on() { # SUFFIX
   end_step
 
   begin "6c ${INGRESS}" "client correlation id (ADR-0053): a well-formed id is logged as correlationId on the ${REQUEST_LINE:-request} line; a malformed one is dropped and the request still served"
-  since="$(( $(date +%s) * 1000 - 5000 ))"
+  since="$(( $(date +%s) * 1000 - 1000 ))"
   local cid_bad="integ_${RUN}_badcorr" cid_good="integ-${RUN}-corr"
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" report)" "" "" "$cid_bad")"; check "malformed id: HTTP 200 (got ${status})" eq "$status" 200
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" report)" "" "" "$cid_good")"; check "well-formed id: HTTP 200 (got ${status})" eq "$status" 200
   check "the ${REQUEST_LINE} line carries correlationId ${cid_good} and tenant A" \
     wait_log "$REQUEST_LOGS" "$since" "\"${cid_good}\"" ".message == \"${REQUEST_LINE}\" and .correlationId == \"${cid_good}\" and .tenantId == \"${TENANT_A}\""
-  check "the malformed id is in no ingress line" eq "$(log_lines "$REQUEST_LOGS" "$since" "\"${cid_bad}\"" | wc -l | tr -d ' ')" 0
+  # The malformed request's own line: the one tenant-A line of this step without the field.
+  check "the malformed request's ${REQUEST_LINE} line has no correlationId" \
+    wait_log "$REQUEST_LOGS" "$since" "\"${REQUEST_LINE}\"" ".message == \"${REQUEST_LINE}\" and .tenantId == \"${TENANT_A}\" and (has(\"correlationId\") | not)"
+  check "the malformed id is in no line of the ${REQUEST_LINE} log group" eq "$(log_lines "$REQUEST_LOGS" "$since" "\"${cid_bad}\"" | wc -l | tr -d ' ')" 0
   if [[ "$INGRESS" == api-gateway ]]; then
     # A token step 6 never sent, so the authoriser runs rather than answering from its cache.
     local sig="${A1_ACCESS##*.}" flip

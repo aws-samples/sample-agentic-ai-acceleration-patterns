@@ -9,15 +9,14 @@
  * response streaming (spike V-5: the integration timeout is two minutes, set
  * by the construct). One Lambda serves every backend behind the ingress
  * (ADR-0024); no Runtime ARN is in its environment. Logs carry the verified
- * tenantId, the backend and the session prefix as fields, and no header
- * value but the shape-checked correlation id (P-9, ADR-0053); one EMF record per request carries requests, 4xx/5xx, TTFB
- * and streamed bytes (P-9) and the cost meters (P-10, ADR-0017): ingress
- * milliseconds, backend invoke seconds (from the invoke call to the end of
- * the stream), and the model tokens read from the agent's final
- * `event: usage` SSE event. Every line also carries the client's
- * `x-correlation-id` as `correlationId` when it has the accepted shape.
- * The stream is forwarded unchanged; the scanner
- * only looks at it.
+ * tenantId, the backend and the session prefix as fields; the one header
+ * value they carry is the client's `x-correlation-id`, as `correlationId`,
+ * when it has the accepted shape (P-9, ADR-0053). One EMF record per request
+ * carries requests, 4xx/5xx, TTFB and streamed bytes (P-9) and the cost
+ * meters (P-10, ADR-0017): ingress milliseconds, backend invoke seconds (from
+ * the invoke call to the end of the stream), and the model tokens read from
+ * the agent's final `event: usage` SSE event. The stream is forwarded
+ * unchanged; the scanner only looks at it.
  */
 
 import type { Writable } from 'node:stream';
