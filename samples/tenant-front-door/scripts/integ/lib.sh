@@ -163,9 +163,11 @@ edge() {
   local method="$1" host="$2" path="$3" tv="${4:-}" config=""
   shift 3; shift || true
   # A run tenant's token past its refresh age is issued again (token_for);
-  # the new one is in its token file, so later calls reuse it.
+  # the new one is in its token file, so later calls reuse it. When
+  # IssueToken fails, edge answers issue-token-failed and returns 0, so the
+  # caller's check fails and a `st="$(edge ...)"` under errexit goes on.
   if [[ "$tv" =~ ^([ABC])_TOKEN$ ]]; then
-    token_for "${BASH_REMATCH[1],,}" "$tv" || { : >"$BODY"; : >"$HEAD"; echo issue-token-failed; return 1; }
+    { token_for "${BASH_REMATCH[1],,}" "$tv" && [[ -n "${!tv}" ]]; } || { : >"$BODY"; : >"$HEAD"; echo issue-token-failed; return 0; }
   fi
   [[ -n "$tv" ]] && config="header = \"Authorization: Bearer ${!tv}\""
   : >"$BODY"; : >"$HEAD"
@@ -323,10 +325,13 @@ ti_status() {
 # issued again once it is three minutes old, so it outlives the request
 # that sends it (the pool's tokens last five). The token and its issue time
 # live in a 0600 file per tenant, $TMP/token-<t>, so a refresh made inside
-# $(edge ...) holds for every call after it. When IssueToken fails it
-# returns 1: in the step's own shell that is a FAIL line, inside a
-# subshell a note on stderr, and edge then answers issue-token-failed, so
-# the caller's check fails.
+# $(edge ...) holds for every call after it. When IssueToken fails, a
+# token failure fails one check and the run goes on. In the step's own
+# shell token_for counts a FAIL, sets VAR empty (so checks that use it fail
+# and `set -u` holds) and returns 0. Inside a subshell it notes the cause on
+# stderr and returns 1; edge then answers issue-token-failed and returns 0,
+# so the caller's check fails. The next call that needs the token tries
+# IssueToken again.
 token_for() {
   local t="$1" f="$TMP/token-$1" id_var="TENANT_${1^^}" user_var="TI_USER_${1^^}" at=0 tok="" fresh=""
   [[ -s "$f" ]] && { read -r at && read -r tok; } <"$f"
@@ -335,9 +340,10 @@ token_for() {
     if ! ti_token "$IDENTITY_API" "${!id_var}" "${!user_var}" fresh; then
       if (( BASH_SUBSHELL == 0 )); then
         FAILS=$((FAILS + 1)); echo "  FAIL tenant ${t}'s token: tenant-identity IssueToken failed (${TI_TOKEN_ERR})"
-      else
-        note "tenant ${t}'s token: tenant-identity IssueToken failed (${TI_TOKEN_ERR}); this call's check fails" >&2
+        printf -v "$2" '%s' ""
+        return 0
       fi
+      note "tenant ${t}'s token: tenant-identity IssueToken failed (${TI_TOKEN_ERR}); this call's check fails" >&2
       return 1
     fi
     tok="$fresh"

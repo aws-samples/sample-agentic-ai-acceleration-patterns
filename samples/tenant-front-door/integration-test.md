@@ -35,8 +35,11 @@ Two non-production accounts:
   run), whose published parameters the test reads and which it never
   changes or removes. It must hold no other front door in your Region
   (the edge parameter's name is fixed, spec §6.4), and API Gateway must
-  have its CloudWatch Logs role set there. The driver checks all of these
-  before it creates anything.
+  have its CloudWatch Logs role set there, naming a role that exists. For
+  an account without one, `test/integ/api-gateway-account.app.ts` sets it
+  (deploy command in its header); it keeps the role when its stack is
+  removed, because other API Gateway stages in the Region log through it.
+  The driver checks all of these before it creates anything.
 - The **control plane's account**, CDK-bootstrapped in your Region to
   trust the edge account, so the driver deploys into it with the edge
   account's credentials. It must hold no other control plane in that

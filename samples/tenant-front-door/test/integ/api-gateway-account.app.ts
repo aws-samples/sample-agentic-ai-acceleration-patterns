@@ -16,7 +16,9 @@
  * setting other API Gateway stages in the Region use too, and CloudFormation
  * leaves the account setting naming it, so deleting it would break access
  * logging in that Region, the case the preflight refuses. Delete the role
- * by hand only after pointing the setting at another role.
+ * by hand only after pointing the setting at another role. The role has a
+ * generated name: a deploy after the stack was removed makes a new role and
+ * points the setting at it, and the old one is left for that manual delete.
  */
 
 import { App, RemovalPolicy, Stack, Validations } from 'aws-cdk-lib';

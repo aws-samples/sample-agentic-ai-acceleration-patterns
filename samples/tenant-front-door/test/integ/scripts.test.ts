@@ -455,8 +455,8 @@ describe('the driver\'s helpers (scripts/integ/lib.sh)', () => {
   let tmp: string;
   beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tfd-lib-')); });
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
-  /** Runs SCRIPT after sourcing lib.sh, with TMP, BODY and HEAD in a fresh directory; stdout and stderr apart. */
-  const lib = (script: string) => spawnSync('bash', ['-c', `TMP="$1"; BODY="$TMP/body"; HEAD="$TMP/head"; : >"$BODY"; source "$2"\n${script}`, '_', tmp, LIB],
+  /** Runs SCRIPT after sourcing lib.sh under the driver's own `set -euo pipefail`, with TMP, BODY and HEAD in a fresh directory; stdout and stderr apart. */
+  const lib = (script: string) => spawnSync('bash', ['-c', `set -euo pipefail; TMP="$1"; BODY="$TMP/body"; HEAD="$TMP/head"; : >"$BODY"; source "$2"\n${script}`, '_', tmp, LIB],
     { env: { PATH: process.env.PATH, HOME: process.env.HOME }, encoding: 'utf8' });
 
   // A stub IssueToken that numbers its tokens and fails once $TMP/fail exists; a stub curl that answers 200.
@@ -480,11 +480,17 @@ echo "issued:$(wc -l <"$TMP/issued" | tr -d ' ')"`);
     const r = lib(`${STUBS}
 printf '%s\\n%s\\n' 0 tok-old >"$TMP/token-a"; touch "$TMP/fail"
 st="$(edge GET h.example.com /api/whoami A_TOKEN)"; echo "edge:$st"
-token_for a A_TOKEN; echo "rc:$? fails:$FAILS"`);
+token_for a A_TOKEN; echo "rc:$? fails:$FAILS token:[$A_TOKEN]"
+check "whoami" 200 "$(edge GET h.example.com /api/whoami A_TOKEN)"; echo "still-running fails:$FAILS"
+rm -f "$TMP/fail"; st="$(edge GET h.example.com /api/whoami A_TOKEN)"; echo "edge-again:$st"`);
+    expect(r.status).toBe(0);
     expect(r.stdout).toContain('edge:issue-token-failed');
     expect(r.stderr).toContain('tenant a\'s token: tenant-identity IssueToken failed (HTTP 500); this call\'s check fails');
     expect(r.stdout).toContain('FAIL tenant a\'s token: tenant-identity IssueToken failed (HTTP 500)');
-    expect(r.stdout).toContain('rc:1 fails:1');
+    expect(r.stdout).toContain('rc:0 fails:1 token:[]');
+    expect(r.stdout).toContain('FAIL whoami: want 200, got issue-token-failed');
+    expect(r.stdout).toContain('still-running fails:2');
+    expect(r.stdout).toContain('edge-again:200');
     expect(r.stdout).not.toContain('tok-old');
   });
 
