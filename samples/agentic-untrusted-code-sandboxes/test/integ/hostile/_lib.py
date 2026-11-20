@@ -46,6 +46,10 @@ def llink():
 PROBE_TIMEOUT = 2
 
 
+class ProbeDeadline(socket.timeout):
+    """A request still open after its time: the path gave no answer."""
+
+
 def _request(method, url, headers, body, timeout):
     req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     try:
@@ -61,8 +65,9 @@ def http(method, url, headers=None, body=None, timeout=PROBE_TIMEOUT):
     The whole request gets at most PROBE_TIMEOUT seconds, however many addresses the name has
     (urllib's timeout is per address). A request still open then is a timeout, which a blocked
     path must give: the probes stay well inside the run timeout on a sandbox with no route.
+    shortcut: a request slower than the timeout is read as blocked; pass a larger timeout for an
+    allowed path, and raise PROBE_TIMEOUT if a leak could take longer to show.
     """
-    timeout = min(timeout, PROBE_TIMEOUT)
     box = []
 
     def go():
@@ -75,7 +80,7 @@ def http(method, url, headers=None, body=None, timeout=PROBE_TIMEOUT):
     t.start()
     t.join(timeout)
     if not box:
-        raise socket.timeout("probe deadline")
+        raise ProbeDeadline("probe deadline")
     if isinstance(box[0], BaseException):
         raise box[0]
     return box[0]
@@ -130,11 +135,11 @@ def sigv4(method, host, path, region, service, creds, body=b"", query="", extra=
     return out
 
 
-def s3_request(method, key, creds, body=b""):
+def s3_request(method, key, creds, body=b"", timeout=PROBE_TIMEOUT):
     host = CONFIG["bucket"] + ".s3." + CONFIG["region"] + ".amazonaws.com"
     path = "/" + "/".join(urllib.parse.quote(p, safe="") for p in key.split("/"))
     h = sigv4(method, host, path, CONFIG["region"], "s3", creds, body)
-    return http(method, "https://" + host + path, h, body or None)
+    return http(method, "https://" + host + path, h, body or None, timeout=timeout)
 
 
 def tcp_connect(host, port, timeout=PROBE_TIMEOUT):

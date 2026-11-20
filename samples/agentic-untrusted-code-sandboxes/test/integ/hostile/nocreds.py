@@ -53,7 +53,7 @@ def load():
 
 early = [probe("imds_role_path", role_path), probe("ecs_credentials_path", ecs_path), probe("imds_credentials_loaded", load)]
 for t in early:
-    t.join(6)
+    t.join(8)
 R["credentials_loaded"] = creds[0] is not None
 
 

@@ -125,7 +125,7 @@ export async function noEgress(c: Ctx, u: Unit): Promise<void> {
     const answered = typeof r.outcome === 'number' && n !== 'put_presigned';
     const failed = !answered && (r.error !== undefined || (typeof r.outcome === 'number' && r.outcome >= 400) || (typeof r.outcome === 'string' && r.outcome !== 'connected' && !/^2/.test(r.outcome)));
     c.rec.check(`${n} fails (got ${r.error ?? String(r.outcome)})`, failed && r.outcome !== 'connected');
-    c.rec.check(`${n} fails within 5 s (took ${String(r.ms)} ms)`, typeof r.ms === 'number' && r.ms <= 6000);
+    c.rec.check(`${n} fails within 3 s (took ${String(r.ms)} ms)`, typeof r.ms === 'number' && r.ms <= 3000);
   }
   c.rec.check('the IP-literal TCP connect did not complete', ((out.tcp_public_ip ?? {}) as { outcome?: string }).outcome !== 'connected');
   // The hostile "one bad script": reads B's invoice and row, posts what it has out, then runs past the time cap.

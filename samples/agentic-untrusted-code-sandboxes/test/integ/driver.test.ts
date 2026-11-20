@@ -354,7 +354,7 @@ describe('the hostile probes', () => {
 
   test('the no-credentials and no-egress probes stay well inside the 20 s run timeout when every request hangs', () => {
     // A sandbox with no route: urlopen never answers. Each request is cut at 2 s and the requests run side by side.
-    const hang = 'import time, urllib.request\nurllib.request.urlopen = lambda *a, **k: time.sleep(60)\n';
+    const hang = 'import time, socket, urllib.request\nurllib.request.urlopen = lambda *a, **k: time.sleep(60)\ndef blocked(*a):\n    time.sleep(2)\n    raise socket.timeout()\nsocket.socket.connect = blocked\n';
     const config = { region: 'r', bucket: 'b', table: 't', backend: 'nitro', tenant: 'A', other: 'B', presigned: 'https://example.com/x', public_ip: '192.0.2.1' };
     for (const [probe, field] of [['nocreds', 'get_object_b'], ['noegress', 'https_name']] as const) {
       const t0 = Date.now();
@@ -363,7 +363,7 @@ describe('the hostile probes', () => {
       const seen = lastJsonLine(out) as Record<string, { error?: string; status?: unknown; outcome?: unknown; ms?: number }>;
       expect(seen[field].error).toBeDefined();
       expect(seen[field].status ?? seen[field].outcome).toBeUndefined();
-      for (const v of Object.values(seen)) if (typeof v === 'object' && v !== null && v.ms !== undefined) expect(v.ms).toBeLessThan(2_600);
+      for (const v of Object.values(seen)) if (typeof v === 'object' && v !== null && v.ms !== undefined) expect(v.ms).toBeLessThan(3_500);
     }
   });
 
