@@ -19,6 +19,7 @@ export const HANDLERS = {
   reaper: 'reaper/reaper.function.ts',
   drain: 'drain/drain.function.ts',
   offboard: 'offboard/offboard.function.ts',
+  gatewayRunCode: 'gateway/run-code-tool.function.ts',
 } as const;
 
 /** Name of the handler tree under lib/. */

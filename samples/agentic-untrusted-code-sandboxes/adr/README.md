@@ -53,4 +53,7 @@
 | [0052](0052-treat-the-session-as-always-ready-and-read-every-answer-as-a-result-a-refusal-or-a-dead-handle.md) | Treat the session as always ready, and read every answer as a result, a refusal or a dead handle | Proposed | 2026-11-20 |
 | [0053](0053-run-the-runtime-from-the-construct-repository-and-never-from-a-code-zip.md) | Run the runtime from the construct's repository and never from a code zip | Proposed | 2026-11-20 |
 | [0054](0054-deliver-the-usage-logs-with-resources-the-construct-owns.md) | Deliver the usage logs with resources the construct owns | Proposed | 2026-11-20 |
+| [0055](0055-take-the-tenant-from-the-signed-context-only-on-the-gateway-entry.md) | Take the tenant from the signed context only on the gateway entry | Proposed | 2026-11-20 |
+| [0056](0056-refuse-a-tool-budget-above-90-s-behind-the-gateway.md) | Refuse a tool budget above 90 s behind the gateway | Proposed | 2026-11-20 |
+| [0057](0057-prove-the-packed-core-builds-without-the-producer.md) | Prove the packed core builds without the producer | Proposed | 2026-11-20 |
 | [0058](0058-delete-the-integration-stack-through-the-api-from-the-driver-and-give-the-test-two-hooks.md) | Delete the integration stack through the API from the driver, and give the test two hooks | Proposed | 2026-11-20 |
