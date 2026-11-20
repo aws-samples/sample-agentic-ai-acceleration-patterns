@@ -194,6 +194,23 @@ describe('start', () => {
     expect(input.overrides?.taskRoleArn).toBeUndefined();
   });
 
+  test('the integration test hook adds the runner\'s fail-at-boot variable, and only when asked', async () => {
+    const nonce = newNonce();
+    ecsMock.on(RunTaskCommand).resolves({ tasks: [{ taskArn: TASK }] });
+    const { backend } = make(nonce);
+    const envOf = () => ecsMock.commandCalls(RunTaskCommand).at(-1)?.args[0].input.overrides?.containerOverrides?.[0].environment;
+    await backend.start('tenant-a', nonce, creds('tenant-a'), { failAtBoot: true });
+    expect(envOf()).toEqual([
+      { name: 'RUNNER_NONCE_HASH', value: nonceHash(nonce) },
+      { name: 'RUNNER_FAIL_AT_BOOT', value: '1' },
+    ]);
+    await backend.start('tenant-a', nonce, creds('tenant-a'), { failAtBoot: false });
+    expect(envOf()).toEqual([{ name: 'RUNNER_NONCE_HASH', value: nonceHash(nonce) }]);
+    await backend.start('tenant-a', nonce, creds('tenant-a'), {});
+    await backend.start('tenant-a', nonce, creds('tenant-a'));
+    expect(envOf()).toEqual([{ name: 'RUNNER_NONCE_HASH', value: nonceHash(nonce) }]);
+  });
+
   test('RunTask is signed with the tenant credentials, not the ambient ones', async () => {
     const nonce = newNonce();
     ecsMock.on(RunTaskCommand).resolves({ tasks: [{ taskArn: TASK }] });

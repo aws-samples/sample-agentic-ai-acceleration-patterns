@@ -42,10 +42,11 @@ import {
   type SandboxBackend,
   type SandboxHandle,
   type SandboxSummary,
+  type StartOptions,
   type StopFacts,
   type TenantCredentials,
 } from '../backend';
-import { BACKEND_ENV } from '../env';
+import { BACKEND_ENV, TEST_HOOK_ENV } from '../env';
 import {
   base64url,
   helloProof,
@@ -346,7 +347,7 @@ export class NitroBackend implements SandboxBackend {
     };
   }
 
-  public async start(tenantId: string, nonce: string, creds: TenantCredentials): Promise<SandboxHandle> {
+  public async start(tenantId: string, nonce: string, creds: TenantCredentials, options?: StartOptions): Promise<SandboxHandle> {
     if (creds.tenantId !== tenantId) throw new Error('nitro: the credentials belong to another tenant');
     const cfg = this.config();
     const ecs = this.tenantEcs(creds);
@@ -364,7 +365,14 @@ export class NitroBackend implements SandboxBackend {
           awsvpcConfiguration: { subnets: cfg.subnetIds, securityGroups: [cfg.securityGroupId], assignPublicIp: 'DISABLED' },
         },
         overrides: {
-          containerOverrides: [{ name: cfg.containerName, environment: [{ name: NONCE_HASH_ENV, value: nonceHash(nonce) }] }],
+          containerOverrides: [{
+            name: cfg.containerName,
+            environment: [
+              { name: NONCE_HASH_ENV, value: nonceHash(nonce) },
+              // Test hook of the integration test (ADR-0058): the runner exits at boot, which is a failed start.
+              ...(options?.failAtBoot === true ? [{ name: TEST_HOOK_ENV.RUNNER_FAIL_AT_BOOT, value: '1' }] : []),
+            ],
+          }],
         },
       }));
     } finally {
