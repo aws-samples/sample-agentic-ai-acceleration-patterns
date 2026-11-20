@@ -15,11 +15,10 @@ creates. The execution role needs IAM headroom: it creates, changes and
 passes the cell's roles on `role/cell/*`, assumes nothing, and creates two
 service-linked roles. A workload role (a Lambda function, the AgentCore
 Runtime, a Gateway, a TVM) needs none of that, and no resource-policy write
-either: in the synthesised runtime-isolation cell, CloudFormation creates
+either. In the synthesised runtime-isolation cell, CloudFormation creates
 every Lambda permission and resource policy, and no workload role calls
 `lambda:AddPermission`, `kms:PutKeyPolicy`, `kms:CreateGrant` or a
-`PutResourcePolicy`. In the synthesised
-runtime-isolation cell, 27 of 27 roles call no IAM action, pass no role, and
+`PutResourcePolicy`. All 27 of its roles also call no IAM action, pass no role, and
 use `sts:AssumeRole` only on `/cell/` roles (the TVM and the Entitlements
 API assume the cell's tenant roles). Under the one boundary, each of them
 still holds IAM write, `iam:PassRole` and `sts:AssumeRole` headroom on
@@ -91,17 +90,18 @@ that needs IAM or a resource-policy write at run time needs a new decision.
 The workload boundary has no `secretsmanager:GetSecretValue` and reads only
 the cell asset bucket, so runtime-isolation's optional tool targets with
 OAuth or API-key outbound auth, and an S3-hosted tool spec, fail until it
-gains a scoped grant. Still open: the execution role keeps resource-policy
-writes, since CloudFormation creates the cell's Lambda permissions and
-AgentCore resource policy, so a compromised cell build can share a cell
-resource with another account; the cell permissions boundary denies only
+gains a scoped grant. Open points: the execution role keeps resource-policy
+writes and `apigateway:*`, since CloudFormation creates the cell's Lambda
+permissions, AgentCore resource policy and API methods, so a compromised
+cell build can share a cell resource with another account or publish an
+API method with no authorization; the cell permissions boundary denies only
 the public function URL case, and the pre-run check does not read resource
 policies. A compromised cell role still reaches every cell's data in the
 account, which is ADR-0006's accepted scope. The probes in
 `stress/application/probes.sh` run as two roles: an owner-made `/cell/`
 role under the cell permissions boundary (the execution role's cap) and a
-cell-made role under the workload boundary. Still open: the request path
-under the workload boundary (spec Q-5), which the first platform run at
-`small` checks; the deploy of a runtime-isolation cell is recorded in
+cell-made role under the workload boundary. The request path
+under the workload boundary (spec Q-5) is not yet proven; the first platform run at
+`small` checks it. The deploy of a runtime-isolation cell is recorded in
 `stress/application/README.md`. Revisit if the CDK gains per-role
 boundaries, or if a cell needs a role with IAM permissions.

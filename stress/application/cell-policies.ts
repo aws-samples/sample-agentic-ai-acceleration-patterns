@@ -125,6 +125,13 @@ export const RESOURCE_POLICY_WRITE_ACTIONS = [
   'logs:PutAccountPolicy',
   'logs:PutDeliveryDestination',
   'logs:PutDeliveryDestinationPolicy',
+  // A standing log feed out of the account, like a subscription filter.
+  'logs:PutDeliverySource',
+  'logs:CreateDelivery',
+  'logs:UpdateDeliveryConfiguration',
+  // A one-time copy out of the account.
+  'logs:CreateExportTask',
+  'dynamodb:ExportTableToPointInTime',
   'dynamodb:PutResourcePolicy',
   'dynamodb:DeleteResourcePolicy',
   'ssm:ModifyDocumentPermission',

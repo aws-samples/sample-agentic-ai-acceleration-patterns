@@ -23,6 +23,7 @@ if aws lambda get-function --function-name cell-policy-probe-fn >/dev/null 2>&1;
   echo "removed the control function cell-policy-probe-fn"
 fi
 
+failed=0
 for stack in CellWorkloadProbe CellBoundaryProbe; do
   tag="$(aws cloudformation describe-stacks --stack-name "$stack" --query "Stacks[0].Tags[?Key=='stress:part'].Value | [0]" --output text 2>/dev/null || true)"
   if [[ -z "$tag" || "$tag" == None ]]; then
@@ -31,9 +32,13 @@ for stack in CellWorkloadProbe CellBoundaryProbe; do
   fi
   [[ "$tag" == cell-policy-probe ]] || { echo "${stack} is not a probe stack (stress:part=${tag}); left alone" >&2; exit 1; }
   start=$SECONDS
-  aws cloudformation delete-stack --stack-name "$stack"
-  aws cloudformation wait stack-delete-complete --stack-name "$stack"
-  echo "stack=${stack} destroy_seconds=$((SECONDS - start))"
+  # A failed delete still runs the leftover listing below, so nothing a probe left goes unseen.
+  if aws cloudformation delete-stack --stack-name "$stack" && aws cloudformation wait stack-delete-complete --stack-name "$stack"; then
+    echo "stack=${stack} destroy_seconds=$((SECONDS - start))"
+  else
+    echo "stack=${stack} delete failed; listing leftovers anyway" >&2
+    failed=1
+  fi
 done
 
 # What a let-through probe could have created.
@@ -51,4 +56,5 @@ if (( ${#left[@]} > 0 )); then
   printf '  %s\n' "${left[@]}" >&2
   exit 1
 fi
+(( failed == 0 )) || exit 1
 echo "no probe leftovers"

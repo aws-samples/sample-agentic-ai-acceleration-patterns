@@ -225,7 +225,8 @@ license headers: 0. IAM least privilege: 0 critical, 6 high, 3 medium,
   policy), so a compromised cell build can share a cell resource with
   another account. Of those writes, the cell permissions boundary denies
   only public function URLs. The pre-run account check does not look at
-  resource policies.
+  resource policies. The execution role also keeps `apigateway:*`, so a
+  compromised cell build can publish an API method with no authorization.
 - Under the workload boundary a compromised cell role can still read and
   write every cell's data in the account (DynamoDB, SSM outside the owner's
   paths, KMS use), invoke any cell function, and create or delete cell
