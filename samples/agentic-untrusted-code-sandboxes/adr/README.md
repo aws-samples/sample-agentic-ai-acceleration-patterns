@@ -24,3 +24,4 @@
 | [0018](0018-deliver-the-nonce-on-the-data-channel-and-bind-every-job-to-it.md) | Deliver the nonce on the data channel and bind every job to it | Proposed | 2026-11-19 |
 | [0019](0019-cap-job-memory-per-backend.md) | Cap job memory per backend | Proposed | 2026-11-19 |
 | [0020](0020-filter-job-system-calls-on-microvm.md) | Filter job system calls on microvm, and back the caps with a free-memory floor | Proposed | 2026-11-19 |
+| [0021](0021-close-socket-and-sysv-routes-and-reap-every-job.md) | Close the socket and SysV routes, watch the nitro group, and reap every job | Proposed | 2026-11-20 |

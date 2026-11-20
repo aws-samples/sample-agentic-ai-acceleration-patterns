@@ -451,9 +451,9 @@ with `busy`. The runner:
    `CAP_SYS_RESOURCE`, and S-14 found the runner starting at 1000 on
    `microvm` and `agentcore` and at -998 on `nitro`. The design relies on
    neither score on `microvm` and `agentcore`. On `nitro` the runner's
-   survival of a kernel kill was measured only at the platform's -998;
-   the watchdog, which fires at L below the task limit, is the cover if
-   that changes. On `microvm` the job's environment also sets
+   survival of a kernel kill was measured only at the platform's -998,
+   and only with SysV IPC filtered (S-18); the watchdog, which fires at
+   L below the task limit, is the cover if that changes. On `microvm` the job's environment also sets
    `MALLOC_ARENA_MAX` = 2, so each thread does not reserve a 64 MiB
    allocator arena out of A.
 3. At `runTimeout` wall time, or when the job ends, kills the process group
@@ -464,8 +464,16 @@ with `busy`. The runner:
    `IPC_RMID` on each id in `/proc/sysvipc/{msg,sem,shm}`: these outlive
    the job, and the root runner on `microvm`, which has no
    `CAP_SYS_ADMIN`, may not remove them (S-17, 32208 objects in 0.19 s); a
-   uid 1001 child works on every backend whatever the runner holds. Files in `/work` stay
-   (below).
+   uid 1001 child works on every backend whatever the runner holds. The
+   sweep runs after every job, a killed one included, and on `nitro`,
+   where the filter blocks SysV IPC, finds nothing. The runner is PID 1,
+   so orphaned job processes become its children: it then calls
+   `waitpid(-1, WNOHANG)` until no uid 1001 process is left. Zombies
+   still count against `RLIMIT_NPROC`, and without this the next job's
+   first `fork` failed with `EAGAIN` on `microvm` and `agentcore`
+   (S-18). On `agentcore` the runner then reads the job group's
+   `memory.current` and returns `tool_failed` rather than start the next
+   job if it is not near zero. Files in `/work` stay (below).
 4. Returns `exitCode`, `stdout`, `stderr` (together at most
    `maxOutputBytes`, stdout cut first, `truncated` flag), `durationMs`,
    `timedOut`, `memoryExceeded`, `bootId` and the nonce proof.
@@ -477,16 +485,19 @@ one tenant's, and L = M less 256 MiB.
 
 | Backend | M | Total cap | A, N | `memoryExceeded` when |
 |---|---|---|---|---|
-| `microvm` | `MemTotal` (about four times `microvm.memoryMiB`: 3998 MiB at the default, S-15) | the rlimits, for memory counted in address space. No cgroup is mounted and the runner cannot mount one (S-14), so N × A stays at or below 60 % of M (ADR-0020; S-15 found 70 % keeps the kernel's out-of-memory killer out of reach with no other memory held). An allocation past A fails inside the job with `MemoryError` or `ENOMEM` at once (0.09 to 0.13 s for a 512 MiB cap in S-15). Memory the rlimits do not count (an unmapped `memfd`, socket buffers, SysV semaphores and queues, `vmsplice` pages, a tmpfs in a user namespace) is closed by the job's seccomp filter (below, S-17); without it one such route ended the whole MicroVM in under 2 s (S-16). The routes left open were measured in one process: Unix socket default buffers 55 MiB at 256 descriptors (per process), pipes 63 MiB (per user) and loopback TCP 366 MiB (system-wide). With `RLIMIT_NOFILE` 64 the Unix buffers scale to about 14 MiB per process, so the job's total is about N × A + 130 + 63 + 366 MiB, about 2860 MiB at the default, against `MemAvailable` of about 3690 MiB: about 830 MiB of margin, of which the floor takes 512, leaving about 320 MiB for the small routes left out of the sum (inotify about 15 MiB, epoll, POSIX queues) and the processes' own kernel memory (an estimate; S-18 measures it across N processes). A free-memory floor is the backstop | A = 256 MiB, N = ⌊0.6 × M / A⌋ (9 at the default) | the free-memory floor killed the job; a single process past A sees the error itself |
-| `nitro` | the smaller of `MemTotal` and the task group's `memory.max` (the task size) | the platform's task group limit; the cgroup mount is read-only (S-14). The kernel kills only uid 1001 processes there, and the runner survived every run (S-14). The watchdog kills the job's processes above L first. It does not see data in an unmapped `memfd` or in `/dev/shm` (576 MiB at a 1 GiB task), so such a job can hold up to about 900 MiB with no kill and is killed by the kernel only at the task limit, with the runner alive (S-16). L therefore bounds process memory only; M bounds the rest | A = L, N = 64 | the watchdog killed the job, or `oom_kill` in the runner's own scope's `memory.events` grew during the job |
-| `agentcore` | `MemAvailable` (about 7625 of 8016 MiB at idle): a cap at `MemTotal` less 256 MiB lies above it, and the global killer would act first (S-14) | one cgroup v2 job group for the session's life, reused by every job, with `memory.max` = L and `memory.oom.group` = 1, so the kernel kills the whole job and nothing else, and memory one job leaves behind counts against the next. The group is required, not hardening: without it an unmapped `memfd` or a large tmpfs fill ended the session even with the root's `memory.oom.group` at 0, because the job's resident memory was smaller than the runner's (S-16) | A = L, N = 64 | `oom_kill` in the job group's `memory.events` grew |
+| `microvm` | `MemTotal` (about four times `microvm.memoryMiB`: 3998 MiB at the default, S-15) | the rlimits, for memory counted in address space. No cgroup is mounted and the runner cannot mount one (S-14), so N × A stays at or below 60 % of M (ADR-0020; S-15 found 70 % keeps the kernel's out-of-memory killer out of reach with no other memory held). An allocation past A fails inside the job with `MemoryError` or `ENOMEM` at once (0.09 to 0.13 s for a 512 MiB cap in S-15). Memory the rlimits do not count (an unmapped `memfd`, socket buffers, SysV semaphores and queues, `vmsplice` pages, a tmpfs in a user namespace) is closed by the job's seccomp filter (below, S-17); without it one such route ended the whole MicroVM in under 2 s (S-16). With every route left open filled at once across N processes (anonymous memory to A, pipes, Unix socket pairs, loopback TCP), S-18 measured 2627 to 2653 MiB held and `MemAvailable` at 1033 to 1055 MiB, 521 to 543 MiB above the floor. With every descriptor on Unix datagram pairs and 80 more descriptors in flight through `SCM_RIGHTS` (a per-user limit), the estimate is 2836 MiB held, 342 MiB above the floor. A free-memory floor is the backstop | A = 256 MiB, N = ⌊0.6 × M / A⌋ (9 at the default) | the free-memory floor killed the job; a single process past A sees the error itself |
+| `nitro` | the smaller of `MemTotal` and the task group's `memory.max` (the task size) | the platform's task group limit; the cgroup mount is read-only (S-14). The kernel kills only uid 1001 processes there, and the runner survived every anonymous, `memfd`, tmpfs and Unix socket fill (S-14, S-16, S-18). SysV IPC is the exception: a semaphore or shared-memory fill pinned the whole task limit in under 1 s, the objects outlived the job, and the runner died in 4 of 5 runs while it swept them, so the job filter blocks SysV IPC on `nitro` (below, S-18). The watchdog reads the task group's `memory.current` and kills the job's processes above L, so it also sees `memfd`, tmpfs, socket and SysV memory | A = L, N = 64 | the watchdog killed the job, or `oom_kill` in the runner's own scope's `memory.events` grew during the job |
+| `agentcore` | `MemAvailable` (about 7625 of 8016 MiB at idle): a cap at `MemTotal` less 256 MiB lies above it, and the global killer would act first (S-14) | one cgroup v2 job group for the session's life, reused by every job, with `memory.max` = L and `memory.oom.group` = 1, so the kernel kills the whole job and nothing else, and memory one job leaves behind counts against the next, SysV objects included, until step 3 sweeps them. It also bounds SysV and Unix socket memory, so `agentcore` needs no job filter (S-18). The group is required, not hardening: without it an unmapped `memfd` or a large tmpfs fill ended the session even with the root's `memory.oom.group` at 0, because the job's resident memory was smaller than the runner's (S-16) | A = L, N = 64 | `oom_kill` in the job group's `memory.events` grew |
 
 `RLIMIT_NPROC` counts every process and thread of uid 1001 in the
 sandbox; jobs run one at a time and step 3 sweeps uid 1001, so the count
-is per job, threads included. The watchdog runs on `nitro` only: it sums
-the resident memory of every uid 1001 process every 200 ms and kills
-them all above L. It does not see data in an unmapped `memfd` or in a
-tmpfs file, which is resident in no process.
+is per job, threads included. The watchdog runs on `nitro` only: every
+200 ms it reads the task group's `memory.current` (the path from
+`/proc/self/cgroup`) and kills every uid 1001 process above L. S-18
+dropped the earlier sum of resident memory: it counts shared pages once
+per process, so it saw 827 MiB for a 64-process Python job whose group
+held about 140 MiB, and it missed `memfd`, tmpfs, socket and SysV memory
+entirely. The `memory.current` watchdog itself is checked in S-19.
 
 Mounts (S-16). On every backend `/dev/shm` is the only tmpfs uid 1001
 can write: 64 MiB on `microvm` and `agentcore`, 576 MiB on `nitro`
@@ -512,33 +523,57 @@ architecture is not `AUDIT_ARCH_AARCH64`, returns `EPERM` for
 `setns`, `mount`, `umount2`, `pivot_root`, `move_mount`, `open_tree`,
 `fsopen`, `fsconfig`, `fsmount` and `fspick`, for `setsockopt` at
 `SOL_SOCKET` with `SO_SNDBUF`, `SO_RCVBUF`, `SO_SNDBUFFORCE` or
-`SO_RCVBUFFORCE`, and for `clone` with any `CLONE_NEW*` flag in its
-first argument; it returns `ENOSYS` for `clone3`, so the C library
-falls back to `clone`, and closes user namespaces in one place. It
-allows the rest. The `clone` and `clone3` entries were not in S-17's
-run and are checked in S-18. The numbers are the aarch64
-generic table. Children and `exec`ed programs inherit it, and the job
+`SO_RCVBUFFORCE`, for `socket` with `AF_UNIX` as its first argument
+(`socketpair` stays allowed), for `listen` with a backlog above 8, and
+for `clone` with any `CLONE_NEW*` flag in its first argument (the mask
+leaves out `CLONE_NEWTIME`, which shares bits with the exit signal); it
+returns `ENOSYS` for `clone3`, so the C library falls back to `clone`,
+and closes user namespaces in one place. It allows the rest. The two
+socket rules close routes S-18 found that need only descriptors: a
+Unix accept queue (connect, send, close, repeat) filled at 10 to
+11 GiB/s, and a named Unix datagram receiver at 14 to 18 GiB/s, faster
+than any poll. They also stop a loopback TCP accept queue that held
+1315 MiB at `listen(4096)`; at a backlog of 8 that route held about
+380 MiB, inside the budget. The numbers are the aarch64 generic table. Children and `exec`ed programs inherit it, and the job
 cannot remove or loosen it. It costs about 0.16 ms per job start and
-22 ns per system call, and broke none of 20 ordinary job checks (S-17,
-run before `RLIMIT_NOFILE` 64 and the `clone` entries were added; S-18
-runs them again).
+22 ns per system call. Under the full setup (A, N 9, `RLIMIT_NOFILE`
+64, `MALLOC_ARENA_MAX`, every entry above) 25 ordinary job checks,
+`threading`, `ThreadPoolExecutor`, `subprocess`, `posix_spawn`,
+`asyncio`, `socketpair` and `http.server` included, behave the same as
+unfiltered, and a process can open 56 files (S-18). The first job in a
+fresh MicroVM took 3.1 to 3.4 s against 0.2 s warm, from a cold page
+cache, not the filter.
 The child checks that `prctl(PR_GET_SECCOMP)` returns 2 after the
 install and before `exec`, and raises if not. `subprocess` carries that
 error back through its close-on-exec error pipe, which tenant code never
 reaches, so `Popen` fails before any tenant code runs. The runner logs it
 and returns `tool_failed`, because retrying cannot fix it; an exit code
-is always tenant data.
+is always tenant data. The check proves only that a filter is
+installed (S-18: an allow-all filter passes it), so the child also
+calls one blocked call (`memfd_create` on `microvm`, `semget` on
+`nitro`) and raises unless it gets `EPERM`.
 The list blocks only the routes S-17 found, so the runner also keeps a
-free-memory floor on `microvm`: every 200 ms it reads `MemAvailable`
-and kills the job and sweeps uid 1001 below 512 MiB. S-16's guest
-survived 100 MiB free (the 3584 MiB run); where below that the guest is
-lost is not known. Counting to 100 MiB, the floor has about 410 MiB of
-headroom, over up to 200 ms of poll and about 100 ms to kill and free,
-so it catches a fill slower than about 1.3 GiB/s. S-16's `memfd` fill ran at about
-4.5 GiB/s and S-17's semaphore fill at about 2 GiB/s, so the floor would
-not catch a route that fast; it is a backstop for slow routes only, and
-S-18 checks it. `/proc/sys` is read-only in the guest, so the runner
+free-memory floor on `microvm`: every 50 ms it reads `MemAvailable`
+and, below 512 MiB, kills the job's process group, sweeps uid 1001 and
+sets `memoryExceeded`. S-18 found the guest lost at about 2 to 7 MiB
+available, and only for memory no process maps (`memfd`, socket
+buffers); for anonymous memory the kernel kills job processes and the
+runner lives at 0. So the floor has about 510 MiB of headroom, and a
+kill takes 0.1 to 1.1 ms: at 200 ms it is certain only below about
+2.4 GiB/s, at 50 ms below about 9.5 GiB/s. In S-18 the floor fired in
+54 of 54 fills past the 70 % mark, the runner lived each time, and it
+stayed silent in every fill below that mark. The poll gap reached 627 ms
+when all CPUs were busy, so a route faster than the floor must be in the
+list; the floor is a backstop for slower routes. `/proc/sys` is read-only in the guest, so the runner
 cannot lower the kernel's own limits instead (S-17).
+
+Job filter on `nitro` (ADR-0021). The runner installs the same kind of
+filter in every `nitro` job, with `AUDIT_ARCH_X86_64` and the x86_64
+numbers, returning `EPERM` for `semget`, `msgget`, `shmget` and
+`shmat`. It has the same child check. In S-18 the three creates failed
+at once, nothing was charged, and the sweep and the next job were fine.
+The x32 ABI, whose numbers carry bit 30, was not checked; the filter
+kills a call with that bit set.
 
 On `agentcore` the
 runner prepares the cgroup tree once, at the session's first job and
@@ -893,8 +928,11 @@ threads, and `multiprocessing` locks, queues and pools fail with
 `/dev/shm`; `subprocess` and `os.fork` work. The `microvm` job filter
 (§3.5) also makes `memfd_create`, SysV shared memory, semaphores and
 queues, `vmsplice`, `io_uring`, `userfaultfd`, mounts, `unshare`, new
-namespaces through `clone`, and socket buffer sizing fail with `EPERM`,
-and each process has at most 64 open files.
+namespaces through `clone`, Unix sockets other than `socketpair`,
+`listen` with a backlog above 8 (so `socket.listen()` with no argument,
+which asks for 128), and socket buffer sizing fail with `EPERM`, and
+each process has at most 64 open files, about 56 for the job's own use.
+On `nitro` SysV IPC (`semget`, `msgget`, `shmget`) fails with `EPERM`.
 
 Errors (tool error `code`, no stack, no tenant data):
 
@@ -1100,7 +1138,8 @@ deploy and destroy time, and cleans up on exit.
 | S-15 | On `microvm`, which has no cgroup: do `RLIMIT_AS` and `RLIMIT_NPROC`, set before the drop to uid 1001, cap a job's memory, can code raise them, and do common runtimes start under them? | §3.5 memory cap on `microvm` |
 | S-16 | Which mounts are tmpfs on each backend; tmpfs and unmapped `memfd` fills against the §3.5 caps; the `agentcore` setup under a global out-of-memory; four threads under the `microvm` rlimits; the drain's forced deregister and the capacity provider delete; the applied MicroVM memory quota | §3.5 memory cap, §5.3 drain, §6.1 |
 | S-17 | On `microvm`: does a seccomp filter installed by the runner as uid 1001 block `memfd_create` and stay on, what other routes hold memory the rlimits do not count, and what does a filter cost and break? | §3.5 job filter, ADR-0020 |
-| S-18 | Planned: the `microvm` free-memory floor (threshold, poll rate against fill rates of 2 to 4.5 GiB/s); Unix socket buffers across N processes with `RLIMIT_NOFILE` 64; the `clone` and `clone3` entries of the filter; the 20 S-17 ordinary checks again with `RLIMIT_NOFILE` 64 and `clone3` returning `ENOSYS`, `threading` included; Unix sockets held in flight through `SCM_RIGHTS`; the free memory at which the guest is lost; whether SysV objects on `nitro` and `agentcore` are charged to the task or job group, and the SysV sweep on every backend | §3.5 job filter and floor, step 3 |
+| S-18 | On `microvm`: ordinary job code under the full ADR-0020 setup, the `clone` entries, the child check, Unix sockets across N processes and in flight, every open route at once, and the free-memory floor against slow and fast fills. On `nitro` and `agentcore`: SysV and Unix socket memory against the task and job groups, and the SysV sweep | §3.5 job filters, floor, watchdog and step 3, ADR-0021 |
+| S-19 | Planned: the `nitro` watchdog on `memory.current`; the 50 ms `microvm` floor against an unmapped fill at 4.4 GiB/s; the `nitro` filter's x32 entry; the loopback TCP accept queue at a backlog of 8 together with the other open routes | §3.5 watchdog, floor, `nitro` filter |
 
 ### 7.1 Spike results, S-1 to S-12 (2026-11-18, a non-production test account, eu-central-1)
 
@@ -1219,10 +1258,55 @@ drop):
 Not tested: the free-memory floor itself; `clone3` and a direct
 `clone(CLONE_NEWUSER)` under the filter (the mount family is blocked);
 an AArch32 entry; ptys, aio, `MAP_HUGETLB` and other routes not tried;
-third-party packages under the filter; the filter on `nitro` and
-`agentcore`, where the task and job groups bound memory but socket and
-SysV memory was not measured; a `nitro` watchdog that also reads the
-task group's `memory.current`.
+third-party packages under the filter (S-18 covers the filter on
+`nitro` and `agentcore`, §7.5).
+
+### 7.5 Spike results, S-18 (2026-11-19, a non-production test account, eu-west-1)
+
+The guests and limits matched S-16 and S-17. Every stack was removed;
+one AgentCore runtime log group and CDK asset objects were left. The
+decisions are recorded in ADR-0021.
+
+`microvm`, with the full ADR-0020 runner setup (A 256 MiB, N 9,
+`RLIMIT_NOFILE` 64, the filter with the `clone` entries, the child
+check, the floor):
+
+| Check | Result |
+|---|---|
+| 25 ordinary job checks | same as unfiltered; `multiprocessing` fails with `EACCES` in both (the `/dev/shm` lock); 56 files can be opened |
+| `clone` with a `CLONE_NEW*` flag; `clone3`; `unshare` | `EPERM`; `ENOSYS`; `EPERM`. `fork`, threads, `subprocess` and `posix_spawn` work |
+| Filter install skipped or failing | `Popen` raises in under 2 ms, no job code runs, no uid 1001 process left; an allow-all filter passes the check |
+| Unix pairs across 9 processes, default buffers | stream 121 MiB, datagram and seqpacket 198 MiB held |
+| Descriptors in flight through `SCM_RIGHTS` | `ETOOMANYREFS` at about 80 per user; 36 to 46 MiB more |
+| Unix accept queue; named Unix datagram receiver | 10 to 11 GiB/s; 14 to 18 GiB/s; both closed by the two socket rules |
+| Loopback TCP accept queue | 1315 MiB at `listen(4096)`; about 380 MiB at `listen(8)` |
+| Every open route at once | 2627 to 2653 MiB held, `MemAvailable` low 1033 to 1055 MiB, floor silent |
+| Fills to 70 % of `MemTotal` at 0.5, 1 and 2 GiB/s | `MemAvailable` low 858 to 873 MiB, floor silent |
+| Fills past it | floor fired 54 of 54, runner alive; lowest `MemAvailable` at the kill 407, 301, 210 and 0 MiB at 0.5, 1, 2 and 4 GiB/s |
+| Where the guest is lost | about 2 to 7 MiB available for unmapped memory; never for anonymous memory |
+| 4.4 GiB/s `memfd` fill, floor at 200 ms | guest lost in 1 of 2 runs |
+| Unpaced anonymous fill, about 8 GiB/s, floor at 50 ms | caught 8 of 8, lowest `MemAvailable` 129 MiB |
+| Zombies of killed job processes | count against `RLIMIT_NPROC`; the next `fork` failed with `EAGAIN` until the runner reaped |
+
+`nitro` and `agentcore`:
+
+| Check | `nitro` (1 GiB task, L 768 MiB) | `agentcore` (job group, L about 7.3 GiB) |
+|---|---|---|
+| SysV semaphores | charged to the task group as kernel memory, 1023 MiB in 0.4 to 0.8 s, killed at the task limit; the RSS watchdog saw 13 MiB | charged to the job group, killed at L in 1.9 s, runner alive |
+| SysV message queues | 514 MiB at 8 KiB messages (`msgmni` 32000); 949 MiB and a global kill at 1-byte messages | 523 MiB, `msgget` `ENOSPC`, no kill |
+| SysV objects after the job | stay, and stay charged; root `IPC_RMID` `EPERM` | stay, and stay charged; root `IPC_RMID` works (`CAP_SYS_ADMIN`) |
+| Sweep as uid 1001 | 0.08 to 2.6 s, frees the group; after a kill at the limit the runner died in 4 of 5 semaphore runs and 1 of 3 queue runs | 0.07 to 0.46 s for up to 7.4 GiB, frees the group |
+| Filter on `semget`, `msgget`, `shmget` | `EPERM` at once, nothing charged, runner fine (x86_64) | not needed |
+| Unix pairs across 64 processes | charged to the task group, killed at the limit, runner alive; the RSS sum read 827 MiB for about 140 MiB held | 3502 MiB charged to the job group; killed at a 1 GiB limit, runner alive |
+| Zombies after a kill | count against `RLIMIT_NPROC` | the next job's first `fork` failed with `EAGAIN` |
+| Drain before the stack delete | 24 s to `terminated`, delete 38 s | |
+
+Not tested: the `nitro` watchdog on `memory.current`; a 50 ms floor
+against an unmapped fill faster than 4.4 GiB/s; runtimes that call
+`clone3` without falling back (Go, Rust, musl); the `nitro` filter on
+the x32 ABI; why one `nitro` queue run exited 137 after it printed its
+result; the loopback TCP accept queue at a backlog of 8 together with
+the other open routes.
 
 ## 8. Integration test outline
 
@@ -1254,10 +1338,10 @@ touched.
 | race | two concurrent first calls for a new tenant `C` start one sandbox |
 | prefix | the tool refuses `input` = `../B/invoice.csv` and any name outside A's prefix |
 | iam-wall | `iam:SimulatePrincipalPolicy` on the tool tenant role with `aws:PrincipalTag/TenantId` = `A` denies `inputs/B/*`, the `TENANT#B` row, and `StopTask` on B's task |
-| limits | a 6 MiB input returns `input_too_large`; a 1 MiB print returns `truncated` = true; `multiprocessing.Lock()` raises `PermissionError` on `microvm` and works on `nitro` and `agentcore`, where a file the job leaves in `/dev/shm` is gone at its next call; on `microvm` `os.memfd_create`, `semget` and `setsockopt(SO_SNDBUF)` raise `PermissionError` and the job's `/proc/self/status` shows `Seccomp: 2` |
+| limits | a 6 MiB input returns `input_too_large`; a 1 MiB print returns `truncated` = true; `multiprocessing.Lock()` raises `PermissionError` on `microvm` and works on `nitro` and `agentcore`, where a file the job leaves in `/dev/shm` is gone at its next call; on `microvm` `os.memfd_create`, `semget`, `setsockopt(SO_SNDBUF)`, `socket(AF_UNIX)` and `listen(128)` raise `PermissionError`, `socketpair` and `listen(5)` work, and the job's `/proc/self/status` shows `Seccomp: 2`; on `nitro` `semget` raises `PermissionError` |
 | no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no answer within the script's own 3 s timeout), and the `GetObject` fails. `agentcore`: credentials load, and every call outside C-2 is denied |
 | no-egress | A's script tries HTTPS to `example.com`, a TCP connect to a public IP address on port 443 with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy. Every request fails within 5 s, and for the IP-literal probe the TCP connect itself must not complete (a TLS error after a completed connect is a failure of the step) |
-| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and the job plus N − 1 children that each allocate up to their `RLIMIT_AS` (on `nitro` and `agentcore` a total far above the sandbox memory), whose N-th fork fails with `EAGAIN`: each returns `timedOut`, `memoryExceeded` (the memory fill on `nitro` and `agentcore`) or a non-zero exit (on `microvm` with `MemoryError` in `stderr`); one process filled past its own `RLIMIT_AS` returns `memoryExceeded` false and `MemoryError` in `stderr` on every backend; on `microvm` a job of four threads that each allocate 32 MiB completes; on `nitro` and `agentcore` a `memfd` fill aimed at 1.5 × L (100 MiB per `memfd`; about 1.2 GiB on `nitro`, 11 GiB on `agentcore`) returns `memoryExceeded` true with the same `bootId`, and the next call works; on `nitro` and `agentcore` a SysV semaphore array a job creates is gone at the next call; the runner is still the one that answers (same `bootId`), nothing of the job survives into A's next call, and A's next call works |
+| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and the job plus N − 1 children that each allocate up to their `RLIMIT_AS` (on `nitro` and `agentcore` a total far above the sandbox memory), whose N-th fork fails with `EAGAIN`: each returns `timedOut`, `memoryExceeded` (the memory fill on `nitro` and `agentcore`) or a non-zero exit (on `microvm` with `MemoryError` in `stderr`); one process filled past its own `RLIMIT_AS` returns `memoryExceeded` false and `MemoryError` in `stderr` on every backend; on `microvm` a job of four threads that each allocate 32 MiB completes; on `nitro` and `agentcore` a `memfd` fill aimed at 1.5 × L (100 MiB per `memfd`; about 1.2 GiB on `nitro`, 11 GiB on `agentcore`) returns `memoryExceeded` true with the same `bootId`, and the next call works; on `agentcore` a SysV semaphore array a job creates is gone at the next call; after a job that forked N − 1 children was killed, the next job can fork N − 1 children again (no zombies left); the runner is still the one that answers (same `bootId`), nothing of the job survives into A's next call, and A's next call works |
 | dead-handle | stop A's sandbox out of band; A's next call returns `sandbox` = `started` |
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
 | idle | after `sandboxIdle` (2 min) idle the driver invokes the reaper; A's `nitro` task is stopped, and the stop line carries `sandboxSeconds` |

@@ -5,6 +5,7 @@
 - Status: Proposed
 - Date: 2026-11-19
 - Amends: ADR-0011, ADR-0019
+- Amended by: ADR-0021
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -80,3 +81,5 @@ checks under the new limits are measured in S-18. Whether `nitro` and
 `memfd` and tmpfs there, not that route; the SysV sweep covers the
 objects that outlive a job. With no warm instance, every `nitro` start
 after two idle minutes is a cold start of about 30 s.
+
+Note 2026-11-20: amended by ADR-0021. S-18 found two more `microvm` routes, a Unix accept queue and a named Unix datagram receiver, so the filter also blocks `socket(AF_UNIX)` and `listen` with a backlog above 8. The guest is lost at about 2 to 7 MiB available, so the floor polls every 50 ms. The `clone` entries and the child check worked as written.
