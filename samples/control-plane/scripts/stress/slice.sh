@@ -224,7 +224,7 @@ case "$verb" in
       fi
       groups="$(aws logs describe-log-groups --query "logGroups[?contains(logGroupName, '${STRESS_PREFIX}-c')].logGroupName" --output text | tr '\t' '\n' | grep -v -e '^$' -e '^None$' || true)"
       if [ -n "$groups" ]; then
-        echo "teardown: log groups named after the stacks (listed, not counted; see README, Known limitations):"
+        echo "teardown: log groups named after the stacks (listed, not counted; see README.md, Known issues):"
         printf '  %s\n' $groups
       fi
     fi

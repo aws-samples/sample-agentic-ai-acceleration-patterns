@@ -53,7 +53,7 @@ Pros: no 500 at all; a cancelled transaction did not apply. Cons: a change to a 
 the control-plane sample, outside the stress test; it needs its own review.
 
 ## Decision
-Option 1, and Option 3 goes to the control-plane owner as a finding. The same rule covers
+Option 1, and Option 3 goes to the control-plane owner as a finding (control-plane README, Known issues). The same rule covers
 the workflow's terminal writes: a deployment that ends `CREATE_FAILED` or `DELETE_FAILED`
 with a `TransactionCanceledException` reason is removed and created again, or deleted
 again, at most twice, and each retry is counted under `requests` as
@@ -63,7 +63,7 @@ the scenario at once.
 Every wave of creates and deletes keeps at most the build limit in flight, as any client
 must while the control plane does not queue builds. That makes build-limit scaling measure
 the onboarding rate at each limit, which is what spec §5.2 asks. The refused `StartBuild`
-goes to the control-plane owner as a finding: either the workflow waits and retries until a
+goes to the control-plane owner as a finding (the same Known issues): either the workflow waits and retries until a
 build slot is free, or ADR-0046 and the README say that a client must stay under the limit.
 
 ## Consequences

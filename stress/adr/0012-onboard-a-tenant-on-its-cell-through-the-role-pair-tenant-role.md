@@ -55,6 +55,10 @@ subscription version, which the control-plane slice reads back as an isolation a
 The owner redeploys `CellPolicies` and the role pair once (`deploy-owner.sh`,
 `deploy-role-pair.sh`). A compromised tenant build can change or delete any tenant's
 subscription on any cell in the account; it cannot change a plan, an agent or a tool. The
+tenant role also trusts the control plane's API role, for the `PutAccount` handshake
+(control-plane ADR-0028), so the API role can use this grant too: whoever can run code as
+the API role in the platform account can change any tenant's subscription on every cell of
+every cell account the pair is installed in, as ADR-0047 says of the cell role's policy. The
 tenant parameters `AGENTS` and `TOOLS` (default `default` and none) name what a tenant is
 subscribed to. Revisit when the stress cell gets per-tenant tool sets, or when a cell
 account holds cells of more than one application.

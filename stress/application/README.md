@@ -20,7 +20,7 @@ tenant on its cell. The control-plane slice
 
 | File | What it is |
 |---|---|
-| [`cell-policies.ts`](./cell-policies.ts) | the four cell policies as typed policy documents, and their names |
+| [`cell-policies.ts`](./cell-policies.ts) | the five cell policies as typed policy documents, and their names |
 | [`cell-account.cdk.ts`](./cell-account.cdk.ts) | the owner stacks: `CellPolicies` and `CellAccountBase` |
 | [`cell-path.ts`](./cell-path.ts) | `CellRolePath`, the aspect that puts every role on `/cell/`, and `cellSynthContext`, the context a cell app synthesises with |
 | [`cell-probe.cdk.ts`](./cell-probe.cdk.ts) | the two probe stacks `probes.sh` runs against, with their decoys |
@@ -313,7 +313,15 @@ publishes and reads assets, and it holds only cell assets.
   compose (W-9, W-7).
 - `cell-tenant-build-policy` reaches the tenant subscription methods of every
   API in the cell account, so a compromised tenant build can change any
-  tenant's subscription on any cell there (ADR-0012).
+  tenant's subscription on any cell there. The control plane's API role can
+  assume the tenant role too (control-plane ADR-0028), so it holds the same
+  reach (ADR-0012).
+- Two control-plane defects shape the slice (ADR-0013): a build over a
+  project's concurrent build limit is refused, not queued, so every wave is
+  paced at the limit; and a transaction conflict between concurrent
+  operations on one cell surfaces as a 500 or a `*_FAILED` record, which the
+  driver retries and counts. Both are in the control-plane README, Known
+  issues, until the control plane fixes them.
 - A cell is stamped with its source when it is created: a fixed cell or
   tenant script reaches an existing cell only after it is deleted and created
   again (ADR-0014).

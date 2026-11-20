@@ -1303,3 +1303,28 @@ application's cells (threat T5, the highest-consequence open item).
   (`cp-integ-<run id>`); [integration-test.md](./integration-test.md),
   After an interruption, lists them. Delete them after a run; they hold test
   output only.
+- **The stress slice's setup stack leaves one default Lambda log group.**
+  `<STRESS_PREFIX>-cp-setup` gives its operator-minting function and its
+  bucket deployment log groups the stack owns, but the CDK's auto-delete
+  provider for the source bucket creates `/aws/lambda/<STRESS_PREFIX>-cp-setup-CustomS3AutoDeleteObjects...`
+  on first invoke, and a late write can recreate an owned group after the
+  destroy. `slice.sh teardown --fixtures` lists every log group named after
+  the two stacks and does not count them; delete them after the run, they
+  hold test output only. The API access log group above can reappear the
+  same way.
+- **Builds over the concurrent build limit are refused, not queued.**
+  CodeBuild refuses a `StartBuild` above a project's `concurrentBuildLimit`
+  (`AccountLimitExceededException`), and the workflow retries it a few times
+  about 30 seconds apart and then fails the operation (`CREATE_FAILED`,
+  `DELETE_FAILED`). ADR-0046 and the stack's comment say that excess builds
+  queue. Until the workflow waits for a free slot, keep a client's in-flight
+  creates, updates and deletes at or below the limit; the platform stress
+  slice paces its waves this way (stress ADR-0013).
+- **A transaction conflict between concurrent operations on one cell
+  surfaces as a failure.** A placement whose `TransactWriteItems` is
+  cancelled with `TransactionConflict` and no failed condition answers 500
+  "Deployment placement failed ambiguously", and a workflow's terminal
+  write cancelled the same way leaves the record `CREATE_FAILED` or
+  `DELETE_FAILED` although its build succeeded. A `CreateDeployment` retry
+  with the same `clientToken`, a new create after a delete, or another
+  delete clears it (stress ADR-0013).
