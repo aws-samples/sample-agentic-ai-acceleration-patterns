@@ -37,3 +37,9 @@ global_settings:
     - rule_id: CKV_DOCKER_2
       path: runner/*
       reason: The platforms probe health themselves (AgentCore and the MicroVM GET /ping, ECS task state, spec 3.4); the image needs no HEALTHCHECK, which Lambda MicroVMs and AgentCore ignore.
+    - rule_id: B310
+      path: test/integ/hostile/*
+      reason: The probe scripts run inside a sandbox as hostile tenant code and must open URLs to prove the sandbox refuses them (spec 8 no-egress, no-credentials); the schemes are fixed http and https literals.
+    - rule_id: B108
+      path: test/integ/hostile/*
+      reason: The limits probe writes a file to /dev/shm on purpose, to show that a tmpfs file does not outlive the job (spec 8 limits); it runs only inside a sandbox.

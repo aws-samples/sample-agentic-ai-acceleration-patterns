@@ -62,3 +62,7 @@
 | [0056](0056-refuse-a-tool-budget-above-90-s-behind-the-gateway.md) | Refuse a tool budget above 90 s behind the gateway | Proposed | 2026-11-20 |
 | [0057](0057-prove-the-packed-core-builds-without-the-producer.md) | Prove the packed core builds without the producer | Proposed | 2026-11-20 |
 | [0058](0058-delete-the-integration-stack-through-the-api-from-the-driver-and-give-the-test-two-hooks.md) | Delete the integration stack through the API from the driver, and give the test two hooks | Proposed | 2026-11-20 |
+| [0059](0059-switch-on-the-test-overrides-through-an-escape-hatch-in-the-integration-app.md) | Switch on the test overrides through an escape hatch in the integration app | Proposed | 2026-11-20 |
+| [0060](0060-sign-test-tokens-with-a-mint-that-exists-only-in-the-integration-app.md) | Sign test tokens with a mint that exists only in the integration app | Proposed | 2026-11-20 |
+| [0061](0061-write-down-the-run-order-and-the-step-by-instance-by-backend-matrix.md) | Write down the run order and the step by instance by backend matrix | Proposed | 2026-11-20 |
+| [0062](0062-check-leftovers-read-only-against-what-the-run-owned.md) | Check leftovers read-only against what the run owned | Proposed | 2026-11-20 |

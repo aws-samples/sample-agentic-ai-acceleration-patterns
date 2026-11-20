@@ -1,0 +1,310 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+
+/**
+ * Behaviour steps 2, the ones that run the hostile probes of
+ * test/integ/hostile/: limits, no-credentials, no-egress, runaway,
+ * session-files, dns, dns-platform (spec §8).
+ */
+
+import { randomBytes } from 'node:crypto';
+import { AssumeRoleCommand } from '@aws-sdk/client-sts';
+import { sleep } from '../aws';
+import { insights } from '../cloud';
+import { type Backend, TENANT } from '../common';
+import { type Ctx, type CallResult } from '../ctx';
+import { presignUrl } from '../sigv4';
+import { type Unit } from '../steps';
+import { attempt, field } from './basic';
+
+const { a: A, b: B } = TENANT;
+
+const backendOf = (u: Unit): Backend => {
+  if (!u.backend) throw new Error(`step ${u.step} needs a backend`);
+  return u.backend;
+};
+
+/** A blocked call: the probe's attempt failed with `PermissionError` (EPERM). */
+const blocked = (out: Record<string, unknown>, name: string): boolean => {
+  const a = attempt(out, name);
+  return a.ok === false && (a.err === 'PermissionError' || a.errno === 1);
+};
+
+export async function limits(c: Ctx, u: Unit): Promise<void> {
+  const backend = backendOf(u);
+  const big = await c.call('run-code', A, { code: 'print(1)', input: 'big6.bin', backend }, { once: true });
+  c.rec.check(`a 6 MiB input returns input_too_large (got ${big.outcome.kind === 'error' ? big.outcome.code : big.outcome.kind})`, big.outcome.kind === 'error' && big.outcome.code === 'input_too_large');
+  const print = await c.probe('run-code', A, backend, 'limits', { mode: 'print' });
+  c.rec.check(`a 1 MiB print returns truncated (got ${String(print.call.result?.truncated)})`, print.call.result?.truncated === true);
+
+  const lock = await c.probe('run-code', A, backend, 'limits', { mode: 'shm_write' });
+  const mp = attempt(lock.out, 'mp_lock');
+  if (backend === 'microvm') {
+    c.rec.check(`multiprocessing.Lock() raises PermissionError on microvm (got ${mp.ok ? 'ok' : mp.err})`, mp.ok === false && mp.err === 'PermissionError');
+  } else {
+    c.rec.check(`multiprocessing.Lock() works on ${backend} (got ${mp.ok ? 'ok' : mp.err})`, mp.ok === true);
+    c.rec.check('the probe left a file in /dev/shm', attempt(lock.out, 'shm_file').ok === true);
+    const check = await c.probe('run-code', A, backend, 'limits', { mode: 'shm_check' });
+    c.rec.check('a file the job leaves in /dev/shm is gone at its next call', field(check.out, 'shm_file_present') === false);
+  }
+  if (backend === 'microvm') {
+    const f = await c.probe('run-code', A, backend, 'limits', { mode: 'microvm' });
+    for (const name of ['memfd_create', 'semget', 'setsockopt_sndbuf', 'af_unix_socket', 'listen_128']) {
+      c.rec.check(`${name} is refused on microvm`, blocked(f.out, name));
+    }
+    c.rec.check('socketpair works', attempt(f.out, 'socketpair').ok === true);
+    c.rec.check('listen(5) works', attempt(f.out, 'listen_5').ok === true);
+    c.rec.check(`the job's /proc/self/status shows Seccomp: 2 (got ${String(field(f.out, 'seccomp'))})`, field(f.out, 'seccomp') === 2);
+  } else if (backend === 'nitro') {
+    const f = await c.probe('run-code', A, backend, 'limits', { mode: 'nitro' });
+    c.rec.check('semget is refused on nitro', blocked(f.out, 'semget'));
+  }
+}
+
+/** A probe's status or error, for the notes. */
+const seen = (o: unknown): string => {
+  const r = (o ?? {}) as { status?: number; error?: string };
+  return r.status !== undefined ? String(r.status) : (r.error ?? 'none');
+};
+const failedProbe = (o: unknown): boolean => {
+  const r = (o ?? {}) as { status?: number; error?: string; outcome?: string };
+  return r.error !== undefined || (r.status !== undefined && r.status >= 400);
+};
+
+export async function noCredentials(c: Ctx, u: Unit): Promise<void> {
+  const backend = backendOf(u);
+  const { call, out } = await c.probe('run-code', A, backend, 'nocreds', {});
+  c.rec.check(`the probe ran (exit ${call.result?.exitCode})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
+  c.rec.check('boto3 and environment credentials are absent', field(out, 'boto3_importable') === false && field(out, 'env_credentials') === false && field(out, 'credentials_file') === false);
+  if (backend === 'agentcore') {
+    c.rec.check('credentials load through the metadata service (C-2)', field(out, 'credentials_loaded') === true);
+  } else {
+    c.rec.check('no credentials are returned', field(out, 'credentials_loaded') === false);
+    const role = (out.imds_role_path ?? {}) as { status?: number; error?: string };
+    const withToken = (out.imds_role_path_with_token ?? {}) as { status?: number | null };
+    if (backend === 'microvm') {
+      c.rec.check(`the MicroVM metadata path iam/security-credentials/ gives 404, with or without the token flow (got ${seen(role)}, ${String(withToken.status)})`,
+        (role.status === 404 || withToken.status === 404) && role.status !== 200 && withToken.status !== 200);
+    } else {
+      c.rec.check(`IMDS on nitro gives no answer within the script's timeout (got ${seen(role)})`, role.error !== undefined);
+      c.rec.check(`the ECS credentials path gives 404 (got ${seen(out.ecs_credentials_path)})`, ((out.ecs_credentials_path ?? {}) as { status?: number }).status === 404);
+    }
+  }
+  c.rec.check(`GetObject on B's invoice fails (got ${seen(out.get_object_b)})`, failedProbe(out.get_object_b));
+  c.rec.check(`GetItem on B's registry row fails (got ${seen(out.get_row_b)})`, failedProbe(out.get_row_b));
+}
+
+export async function noEgress(c: Ctx, u: Unit): Promise<void> {
+  const backend = backendOf(u);
+  const bucket = c.out.OutsideBucket;
+  const key = `integ/${c.runId}/${backend}`;
+  // Presigned with a role that may put under integ/ in the outside bucket and nothing else, not with the driver's own session.
+  const assumed = await c.aws.sts.send(new AssumeRoleCommand({ RoleArn: c.out.PresignRoleArn, RoleSessionName: 'rc-integ-presign', DurationSeconds: 900 }));
+  const cr = assumed.Credentials;
+  const creds = { accessKeyId: cr?.AccessKeyId ?? '', secretAccessKey: cr?.SecretAccessKey ?? '', sessionToken: cr?.SessionToken };
+  const presigned = presignUrl({
+    method: 'PUT', url: `https://${bucket}.s3.${c.aws.region}.amazonaws.com/${key}`, region: c.aws.region, service: 's3', credentials: creds, expiresSeconds: 600,
+  });
+  const direct = await fetch(presigned, { method: 'PUT', body: 'x' });
+  c.rec.check(`the presigned URL works from outside the sandbox (control; got ${direct.status})`, direct.status === 200);
+  const rowB = await c.aws.row(c.output('run-code', 'Table'), B, backend);
+  // B's sandbox address: a task's private IP (TCP) or a MicroVM's endpoint (HTTPS). AgentCore has none to aim at.
+  const peer: Record<string, unknown> = {};
+  if (backend === 'nitro' && typeof rowB?.address === 'string') Object.assign(peer, { peer_ip: rowB.address, peer_port: 8443 });
+  if (backend === 'microvm' && typeof rowB?.address === 'string') {
+    const url = rowB.address.startsWith('http') ? rowB.address : `https://${rowB.address}/`;
+    // The TCP connect is probed too: a TLS error after a completed connect is a failure of the step (spec §8).
+    Object.assign(peer, { peer_url: url, peer_ip: new URL(url).hostname, peer_port: 443 });
+  }
+  const { call, out } = await c.probe('run-code', A, backend, 'noegress', { presigned, public_ip: '1.1.1.1', ...peer });
+  c.rec.check(`the probe ran (exit ${call.result?.exitCode})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
+  const names = ['https_name', 'tcp_public_ip', 'put_presigned', ...(peer.peer_ip ? ['tcp_peer'] : []), ...(peer.peer_url ? ['https_peer'] : [])];
+  for (const n of names) {
+    const r = (out[n] ?? {}) as { outcome?: string | number; error?: string; ms?: number };
+    // An HTTP answer, whatever its status, means the connection completed; only the presigned PUT may be refused by status (the endpoint policy).
+    const answered = typeof r.outcome === 'number' && n !== 'put_presigned';
+    const failed = !answered && (r.error !== undefined || (typeof r.outcome === 'number' && r.outcome >= 400) || (typeof r.outcome === 'string' && r.outcome !== 'connected' && !/^2/.test(r.outcome)));
+    c.rec.check(`${n} fails (got ${r.error ?? String(r.outcome)})`, failed && r.outcome !== 'connected');
+    c.rec.check(`${n} fails within 5 s (took ${String(r.ms)} ms)`, typeof r.ms === 'number' && r.ms <= 6000);
+  }
+  c.rec.check('the IP-literal TCP connect did not complete', ((out.tcp_public_ip ?? {}) as { outcome?: string }).outcome !== 'connected');
+  // The hostile "one bad script": reads B's invoice and row, posts what it has out, then runs past the time cap.
+  const bad = await c.probe('run-code', A, backend, 'hostile_one_bad', { presigned });
+  const reads = ['read_invoice_b', 'read_row_b', 'post_internet', 'post_presigned'];
+  c.rec.check('the hostile job ran and reported', Object.keys(bad.out).length > 0);
+  for (const n of reads) {
+    const o = (bad.out[n] ?? {}) as { error?: string };
+    c.rec.check(`the hostile job's ${n} fails (got ${seen(bad.out[n])})`, n === 'post_internet' ? o.error !== undefined : failedProbe(bad.out[n]));
+  }
+  c.rec.check('the hostile job leaked nothing', field(bad.out, 'leaked') === false);
+  c.rec.check(`the time cap kills the hostile job (timedOut ${String(bad.call.result?.timedOut)})`, bad.call.result?.timedOut === true);
+}
+
+interface Called { step: string; r: CallResult }
+
+export async function runaway(c: Ctx, u: Unit): Promise<void> {
+  const backend = backendOf(u);
+  const table = c.output('run-code', 'Table');
+  const row0 = await c.aws.row(table, A, backend);
+  const bootId0 = row0?.bootId;
+  const run = async (mode: string, extra: Record<string, unknown> = {}): Promise<Called & { out: Record<string, unknown> }> => {
+    const p = await c.probe('run-code', A, backend, 'runaway', { mode, ...extra });
+    return { step: mode, r: p.call, out: p.out };
+  };
+  const live = (x: Called): boolean => x.r.result !== undefined;
+
+  const loop = await run('loop');
+  c.rec.check(`a loop returns timedOut (got ${String(loop.r.result?.timedOut)}, exit ${String(loop.r.result?.exitCode)})`, loop.r.result?.timedOut === true || (loop.r.result?.exitCode ?? 0) !== 0);
+
+  const spawn = await run('setsid_spawn');
+  c.rec.check('a setsid child is started', live(spawn) && spawn.r.result?.exitCode === 0);
+  const chk = await run('setsid_check');
+  c.rec.check(`the setsid child did not survive into the next call (alive ${String(field(chk.out, 'child_alive'))})`, field(chk.out, 'child_alive') === false);
+  c.rec.check(`no other process of the job's user survives (found ${JSON.stringify(field(chk.out, 'other_processes'))})`, JSON.stringify(field(chk.out, 'other_processes')) === '[]');
+
+  const kill = await run('kill_pid1');
+  c.rec.check('a kill of PID 1 and of the runner is refused', attempt(kill.out, 'kill_pid1').ok === false && attempt(kill.out, 'kill_runner').ok === false);
+
+  const disk = await run('disk_fill');
+  c.rec.check(`a file past the file-size limit is refused (got ${String(field(disk.out, 'fsize_errno'))})`, field(disk.out, 'fsize_errno') === 'EFBIG');
+  c.rec.check(`a disk fill ends by a full disk or the time cap, and the call returns (stopped by ${String(field(disk.out, 'stopped_by'))}, timedOut ${String(disk.r.result?.timedOut)})`,
+    live(disk) && (['ENOSPC', 'EDQUOT'].includes(String(field(disk.out, 'stopped_by'))) || disk.r.result?.timedOut === true || (disk.r.result?.exitCode ?? 0) !== 0));
+  const clean = await run('disk_clean');
+  c.rec.check(`the next call works and removes what the fill left (removed ${String(field(clean.out, 'removed'))}, left ${String(field(clean.out, 'left'))})`, live(clean) && clean.r.result?.exitCode === 0 && field(clean.out, 'left') === 0);
+
+  const mem = await run('mem_children');
+  const m = mem.r.result;
+  if (backend === 'microvm') {
+    c.rec.check(`on microvm the memory fill exits non-zero with MemoryError in stderr (exit ${String(m?.exitCode)})`, (m?.exitCode ?? 0) !== 0 && /MemoryError/.test(m?.stderr ?? ''));
+    const forked = /forked (\d+) of (\d+) errno (\w+)/.exec(m?.stderr ?? '');
+    c.rec.check(`the job plus N-1 children fill the process limit (forked ${forked?.[1]} of ${forked?.[2]})`, forked !== null && Number(forked[1]) === Number(forked[2]) - 1);
+    c.rec.check(`the N-th fork fails with EAGAIN (got ${String(forked?.[3])})`, forked?.[3] === 'EAGAIN');
+    c.rec.check('the 60 % budget keeps the free-memory floor silent: memoryExceeded and timedOut are false', m?.memoryExceeded === false && m?.timedOut === false);
+  } else {
+    c.rec.check(`on ${backend} the memory fill returns memoryExceeded (got ${String(m?.memoryExceeded)}, timedOut ${String(m?.timedOut)})`, m?.memoryExceeded === true || m?.timedOut === true);
+    c.rec.check('on nitro and agentcore the total memory cap fires: memoryExceeded', m?.memoryExceeded === true);
+  }
+
+  const over = await run('over_as');
+  c.rec.check(`one process past its own address-space limit gets MemoryError and memoryExceeded false (got ${String(over.r.result?.memoryExceeded)})`,
+    over.r.result?.memoryExceeded === false && /MemoryError/.test(over.r.result?.stderr ?? ''));
+
+  if (backend === 'nitro') {
+    const files = await run('files', { mib: 900 });
+    c.rec.check(`on nitro a job that writes 900 MiB of files is not killed (exit ${String(files.r.result?.exitCode)}, exceeded ${String(files.r.result?.memoryExceeded)})`,
+      files.r.result?.exitCode === 0 && files.r.result?.memoryExceeded === false && files.r.result?.timedOut === false);
+  }
+  if (backend === 'microvm') {
+    const threads = await run('threads');
+    c.rec.check(`on microvm four threads that each allocate 32 MiB complete (exit ${String(threads.r.result?.exitCode)})`, threads.r.result?.exitCode === 0 && field(threads.out, 'held_mib') === 128);
+  }
+  if (backend !== 'microvm') {
+    const fill = await run('memfd_fill');
+    c.rec.check(`a memfd fill at 1.5 times the cap returns memoryExceeded on ${backend} (target ${String(field(fill.out, 'target_mib'))} MiB)`, fill.r.result?.memoryExceeded === true);
+    const next = await run('setsid_check');
+    c.rec.check(`the next call works on the same sandbox after the memfd kill (sandbox ${String(next.r.result?.sandbox)})`, next.r.result?.exitCode === 0 && next.r.result?.sandbox === 'reused');
+  }
+  if (backend === 'agentcore') {
+    const create = await run('sysv_create');
+    c.rec.check('a SysV semaphore array is created on agentcore', typeof field(create.out, 'semid') === 'number' && (field<number>(create.out, 'semid') ?? -1) >= 0);
+    const gone = await run('sysv_check');
+    c.rec.check(`the semaphore array is gone at the next call (still there ${String(field(gone.out, 'still_there'))})`, field(gone.out, 'still_there') === false);
+  }
+
+  // No zombies: the count a job can fork is the same before and after a killed job that held every slot.
+  const base = await run('fork_count');
+  const limit = field<number>(base.out, 'nproc_limit');
+  c.rec.check(`the N-th fork fails with EAGAIN (got ${String(field(base.out, 'fork_failed_errno'))})`, field(base.out, 'fork_failed_errno') === 'EAGAIN');
+  c.rec.check(`a job forks N-1 children (forked ${String(field(base.out, 'forked'))} of ${String(limit)})`, limit !== undefined && field(base.out, 'forked') === limit - 1);
+  const hold = await run('fork_hold');
+  c.rec.check(`a job that holds every process slot is killed by the time cap (timedOut ${String(hold.r.result?.timedOut)})`, hold.r.result?.timedOut === true || (hold.r.result?.exitCode ?? 0) !== 0);
+  const after = await run('fork_count');
+  c.rec.check(`after that kill the next job forks N-1 children again (forked ${String(field(after.out, 'forked'))})`, field(after.out, 'forked') === field(base.out, 'forked'));
+
+  const end = await c.aws.row(table, A, backend);
+  c.rec.check('the runner that answers is the same: the registry bootId did not change', end?.bootId === bootId0);
+  const fin = await c.probe('run-code', A, backend, 'parse', {}, { input: 'invoice.csv' });
+  c.rec.check(`A's next call works, on the same sandbox (sandbox ${String(fin.call.result?.sandbox)})`, fin.call.result?.exitCode === 0 && fin.call.result?.sandbox === 'reused');
+}
+
+export async function sessionFiles(c: Ctx): Promise<void> {
+  const value = `note-${c.runId}`;
+  const bucketKey = { tenant: B };
+  const wb = await c.probe('run-code-files', B, 'agentcore', 'session_files', { ...bucketKey, mode: 'write', value: `${value}-b` });
+  c.rec.check('B writes its own session note', ((wb.out.put ?? {}) as { v?: number }).v === 200);
+  const wa = await c.probe('run-code-files', A, 'agentcore', 'session_files', { tenant: A, mode: 'write', value });
+  c.rec.check(`A writes its own session note (got ${String(((wa.out.put ?? {}) as { v?: number }).v)})`, ((wa.out.put ?? {}) as { v?: number }).v === 200);
+  const ra = await c.probe('run-code-files', A, 'agentcore', 'session_files', { tenant: A, mode: 'read', value });
+  const g = (ra.out.get ?? {}) as { v?: { status?: number; match?: boolean } };
+  c.rec.check('A reads its own session note back', g.v?.status === 200 && g.v?.match === true);
+  const da = await c.probe('run-code-files', A, 'agentcore', 'session_files', { tenant: A, other: B, mode: 'deny' });
+  const d = (da.out.get_other ?? {}) as { ok?: boolean; v?: number };
+  c.rec.check(`GetObject on B's session prefix is denied (got ${String(d.v)})`, d.ok === false || (d.v !== undefined && d.v >= 400));
+}
+
+const isPrivate = (ip: string | null | undefined): boolean => ip !== null && ip !== undefined && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
+
+/** Unique names of this run's lookups per backend, kept for dns-platform. */
+export async function dns(c: Ctx, u: Unit): Promise<void> {
+  const backend = backendOf(u);
+  const instance = u.instance ?? 'run-code';
+  const region = c.aws.region;
+  const token = `rc${randomBytes(6).toString('hex')}${backend[0]}`;
+  const exfil = randomBytes(20).toString('hex');
+  const names = [
+    { label: 'example', name: 'example.com', type: 1 },
+    { label: 'unique', name: `${token}.example.com`, type: 1 },
+    { label: 'exfil', name: `${exfil}.example.com`, type: 1 },
+    { label: 'txt', name: `txt-${token}.example.com`, type: 16 },
+    { label: 'logs', name: `logs.${region}.amazonaws.com`, type: 1 },
+  ];
+  for (const n of names.slice(0, 4)) c.lookedUpNames.add(n.name);
+  const started = Date.now();
+  const { call, out } = await c.probe(instance, A, backend, 'dns', { names });
+  c.rec.check(`the probe ran (exit ${call.result?.exitCode})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
+  const rc = (label: string): number | undefined => ((attempt(out, label).v ?? {}) as { rcode?: number }).rcode;
+  const addr = (label: string): string | null | undefined => ((attempt(out, label).v ?? {}) as { address?: string | null }).address;
+  if (instance === 'run-code') {
+    for (const l of ['example', 'unique', 'exfil', 'txt']) c.rec.check(`${l} lookup returns NXDOMAIN with the firewall on (got ${String(rc(l))})`, rc(l) === 3);
+    c.rec.check(`logs.${region}.amazonaws.com resolves to an endpoint address (got ${String(rc('logs'))})`, rc('logs') === 0 && isPrivate(addr('logs')));
+    const group = c.out.QueryLogGroup;
+    if (group) {
+      const wanted = [names[0].name, names[1].name, names[2].name, names[3].name];
+      const list = wanted.flatMap((n) => [`"${n}"`, `"${n}."`]).join(', ');
+      const query = `fields query_name, srcaddr, firewall_rule_action | filter firewall_rule_action = "BLOCK" and query_name in [${list}] | limit 1000`;
+      // The query log is about a minute behind: poll until all four names are there (not until some rows are), for up to 5 minutes.
+      let rows: Array<Record<string, string>> = [];
+      const seenNames = (): Set<string> => new Set(rows.map((r) => r.query_name.replace(/\.$/, '').toLowerCase()));
+      for (const end = Date.now() + 300_000; ;) {
+        rows = await insights(c, [group], query, started - 5000, 0, 1000);
+        if (wanted.every((n) => seenNames().has(n)) || Date.now() > end) break;
+        await sleep(15_000);
+      }
+      const blockedNames = seenNames();
+      for (const n of wanted) c.rec.check(`${n === 'example.com' ? 'example.com' : n.split('.')[0].replace(/[0-9a-f]{12,}/, '<token>')} appears in the query log as BLOCK`, blockedNames.has(n));
+      if (backend === 'nitro') {
+        const row = await c.aws.row(c.output('run-code', 'Table'), A, 'nitro');
+        c.rec.check('on nitro the BLOCK line\'s srcaddr is A\'s task address', rows.some((r) => r.srcaddr === row?.address));
+      }
+    } else {
+      c.rec.check('the stack publishes the query log group', false);
+    }
+  } else {
+    c.rec.check(`with the firewall off, example.com resolves to a public address (rcode ${String(rc('example'))})`, rc('example') === 0 && addr('example') !== null && addr('example') !== undefined && !isPrivate(addr('example')));
+  }
+}
+
+/** Query-log names that are the platform's own and stay blocked on purpose (spec §3.9). */
+const NTP_ZONE = /\.amazon\.pool\.ntp\.org\.?$/;
+
+export async function dnsPlatform(c: Ctx): Promise<void> {
+  const group = c.out.QueryLogGroup;
+  if (!group) {
+    c.rec.check('the stack publishes the query log group', false);
+    return;
+  }
+  await sleep(1000);
+  const rows = await insights(c, [group], 'filter firewall_rule_action = "BLOCK" | stats count() as n by query_name | limit 1000', Date.now() - 6 * 3_600_000);
+  const unexpected = rows.map((r) => r.query_name.replace(/\.$/, '').toLowerCase()).filter((n) => !c.lookedUpNames.has(n) && !NTP_ZONE.test(n));
+  c.rec.check(`every blocked name is one a test script looked up, or the NTP zone (unexpected: ${unexpected.slice(0, 5).join(', ') || 'none'})`, unexpected.length === 0);
+}
