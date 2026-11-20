@@ -18,7 +18,7 @@ import { matrix, SPEC_TABLE_ORDER, STEPS, unitKey, validateSteps, type StepSpec 
 import { collectHandles, sameKeys } from './steps/basic';
 import { neededQuotaGb, slotsFree } from './steps/build';
 import { DRIVER_STEPS, IMPLS } from './steps/index';
-import { CONNECTED, LAMBDA_RESPONSE_BYTES, LOOKUP_SLOW, controlAnswered, controlOutputOk, denied, egressFailed, noConnection } from './steps/probes';
+import { CONNECTED, LAMBDA_RESPONSE_BYTES, LOOKUP_SLOW, PROBE_BOUND_MS, controlAnswered, controlOutputOk, denied, egressFailed, noConnection } from './steps/probes';
 import { lastJsonLine, parseFunctionResponse, parseGatewayResponse } from './tool-result';
 
 describe('step order and matrix', () => {
@@ -379,18 +379,19 @@ describe('the hostile probes', () => {
     expect(run('print(CONFIG["on"], CONFIG["off"], CONFIG["none"])')).toBe('True False None');
   });
 
-  test('the no-credentials and no-egress probes stay well inside the 20 s run timeout when every request hangs', () => {
-    // A sandbox with no route: urlopen never answers. Each request is cut at 2 s and the requests run side by side.
+  test('the no-credentials and no-egress probes stay inside the 20 s run timeout when every request hangs', () => {
+    // A sandbox with no route: urlopen never answers, and every connect takes 2 s and fails. Each address of a name
+    // gets its 2 s (at most four), the requests run side by side, and the script prints by its shared deadline.
     const hang = 'import time, socket, urllib.request\nurllib.request.urlopen = lambda *a, **k: time.sleep(60)\ndef blocked(*a):\n    time.sleep(2)\n    raise socket.timeout()\nsocket.socket.connect = blocked\n';
     const config = { region: 'r', bucket: 'b', table: 't', backend: 'nitro', tenant: 'A', other: 'B', presigned: 'https://example.com/x', public_ip: '192.0.2.1' };
     for (const [probe, field] of [['nocreds', 'get_object_b'], ['noegress', 'https_name']] as const) {
       const t0 = Date.now();
-      const out = execFileSync('python3', ['-I', '-S', '-B', '-c', hang + probeCode(probe, config)], { encoding: 'utf8', timeout: 15_000 });
-      expect(Date.now() - t0).toBeLessThan(9_000);
+      const out = execFileSync('python3', ['-I', '-S', '-B', '-c', hang + probeCode(probe, config)], { encoding: 'utf8', timeout: 25_000 });
+      expect(Date.now() - t0).toBeLessThan(18_000);
       const seen = lastJsonLine(out) as Record<string, { error?: string; status?: unknown; outcome?: unknown; ms?: number }>;
       expect(seen[field].error).toBeDefined();
       expect(seen[field].status ?? seen[field].outcome).toBeUndefined();
-      for (const v of Object.values(seen)) if (typeof v === 'object' && v !== null && v.ms !== undefined) expect(v.ms).toBeLessThan(3_500);
+      for (const v of Object.values(seen)) if (typeof v === 'object' && v !== null && v.ms !== undefined) expect(v.ms).toBeLessThan(PROBE_BOUND_MS + 500);
     }
   });
 
@@ -462,9 +463,44 @@ describe('the hostile probes', () => {
       '    http("GET", "http://gone.example.com/", timeout=1)',
       'except BaseException as e:',
       '    print(type(e).__name__)',
+      'def servfail(*a, **k):',
+      '    raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")',
+      'socket.getaddrinfo = servfail',
+      'try:',
+      '    http("GET", "http://flaky.example.com/", timeout=1)',
+      'except BaseException as e:',
+      '    print(type(e).__name__)',
     ].join('\n');
     const lines = execFileSync('python3', ['-I', '-S', '-B', '-c', `${lib}\n${script}`], { encoding: 'utf8', timeout: 15_000 }).trim().split('\n');
-    expect(lines).toEqual([LOOKUP_SLOW, 'gaierror']);
+    expect(lines).toEqual([LOOKUP_SLOW, 'gaierror', LOOKUP_SLOW]);
+  });
+
+  test('a name whose first address is closed and a later one open counts as open, not blocked', () => {
+    const lib = `CONFIG = {}\n${readFileSync(path.join(HOSTILE_DIR, '_lib.py'), 'utf8')}`;
+    const script = [
+      'srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(5); port = srv.getsockname()[1]',
+      'def serve():',
+      '    while True:',
+      '        c, _ = srv.accept(); c.recv(4096); c.sendall(b"HTTP/1.0 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok"); c.close()',
+      'threading.Thread(target=serve, daemon=True).start()',
+      'gone = socket.socket(); gone.bind(("127.0.0.1", 0)); cport = gone.getsockname()[1]; gone.close()',
+      'real = socket.getaddrinfo',
+      'def two(host, p, *a, **k):',
+      '    if host == "two.example.com":',
+      '        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", cport)), (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]',
+      '    return real(host, p, *a, **k)',
+      'socket.getaddrinfo = two',
+      'print(http("GET", "http://two.example.com:%d/" % port, timeout=1)[0])',
+      'def none_open(host, p, *a, **k):',
+      '    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", cport))] * 2',
+      'socket.getaddrinfo = none_open',
+      'try:',
+      '    http("GET", "http://closed.example.com/", timeout=1)',
+      'except BaseException as e:',
+      '    print(type(e).__name__)',
+    ].join('\n');
+    const lines = execFileSync('python3', ['-I', '-S', '-B', '-c', `${lib}\n${script}`], { encoding: 'utf8', timeout: 15_000 }).trim().split('\n');
+    expect(lines).toEqual(['200', 'ConnectionRefusedError']);
   });
 
   test('the slot precheck needs every slot the stack creates', () => {

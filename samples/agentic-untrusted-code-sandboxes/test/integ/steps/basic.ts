@@ -185,7 +185,7 @@ export async function deadHandle(c: Ctx, u: Unit): Promise<void> {
     if (backend === 'microvm') {
       // The tool counts a MicroVM as dead only when terminatedAt is more than 2 s before its request left; a call
       // inside that window is no_answer, and the tool stops the sandbox and returns timedOut (ADR-0044). Wait until
-      // 4 s past terminatedAt on this clock, which leaves 2 s for a driver clock behind the platform's.
+      // 4 s past terminatedAt on this clock, which leaves 2 s for a driver clock ahead of the platform's.
       const endedAt = await microvmTerminatedAt(c, handle);
       await sleep(Math.max(0, (endedAt ?? Date.now()) + 4000 - Date.now()));
     }

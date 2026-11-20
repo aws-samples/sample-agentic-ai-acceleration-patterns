@@ -72,6 +72,9 @@ export function egressFailed(name: string, o: unknown, backend: Backend): boolea
 /** The positive control of no-egress: the same request code, under the same deadline, got a status from an allowed address. */
 export const controlAnswered = (o: unknown): boolean => statusOf(o) !== undefined;
 
+/** How long a blocked no-egress probe may take: 2 s per address tried, at most four, plus 1 s. */
+export const PROBE_BOUND_MS = 9000;
+
 /** The 6 MB Lambda response limit; the tool's answer must stay under it. */
 export const LAMBDA_RESPONSE_BYTES = 6_000_000;
 
@@ -179,7 +182,9 @@ export async function noEgress(c: Ctx, u: Unit): Promise<void> {
     const r = (out[n] ?? {}) as { outcome?: string | number; error?: string; ms?: number };
     const what = n === 'put_presigned' && backend === 'agentcore' ? 'reaches S3 and is refused with 403 by the endpoint policy' : 'fails before a connection is made';
     c.rec.check(`${n} ${what} (got ${r.error ?? String(r.outcome)})`, egressFailed(n, r, backend));
-    c.rec.check(`${n} fails within 3 s (took ${String(r.ms)} ms)`, typeof r.ms === 'number' && r.ms <= 3000);
+    const done = n === 'put_presigned' && backend === 'agentcore' ? 'answers' : 'fails';
+    // 2 s per address tried, at most four (test/integ/hostile/_lib.py MAX_ADDRESSES), plus a second for the lookup.
+    c.rec.check(`${n} ${done} within ${PROBE_BOUND_MS / 1000} s (took ${String(r.ms)} ms)`, typeof r.ms === 'number' && r.ms <= PROBE_BOUND_MS);
   }
   c.rec.check('the IP-literal TCP connect did not complete', ((out.tcp_public_ip ?? {}) as { outcome?: string }).outcome !== 'connected');
   // The hostile "one bad script": reads B's invoice and row, posts what it has out, then runs past the time cap.

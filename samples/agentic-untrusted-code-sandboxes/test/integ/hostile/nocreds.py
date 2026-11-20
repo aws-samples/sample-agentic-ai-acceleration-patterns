@@ -52,10 +52,9 @@ def load():
 
 
 early = [probe("imds_role_path", role_path), probe("ecs_credentials_path", ecs_path), probe("imds_credentials_loaded", load)]
-# role_path and the credential load make three requests each to an address literal (no lookup), each up to
-# 2 s to connect and 2 s to answer: 12 s. With the 6 s below the probe stays inside the 20 s runTimeout.
-for t in early:
-    t.join(12)
+# The metadata calls go to address literals (no lookup) and normally end in under 2 s; they get until 9 s so the
+# reads of B's data below keep 8 s of the shared deadline (a lookup of 5 s, a connect and an answer).
+join_all(early, until=START + 9)
 R["credentials_loaded"] = creds[0] is not None
 
 
@@ -75,6 +74,5 @@ def get_row_b():
 
 
 late = [probe("get_object_b", get_b), probe("get_row_b", get_row_b)]
-for t in late:
-    t.join(6)
+join_all(late)
 done()

@@ -57,7 +57,6 @@ if CONFIG.get("peer_ip"):
     ts.append(probe("tcp_peer", tcp_peer))
 if CONFIG.get("peer_url"):
     ts.append(probe("https_peer", https_peer))
-# A lookup may take LOOKUP_TIMEOUT (10 s) before the 2 s connect and the 2 s request; the threads run side by side.
-for t in ts:
-    t.join(15)
+# A lookup may take LOOKUP_TIMEOUT before the connects and the request; the threads run side by side on one deadline.
+join_all(ts)
 done()
