@@ -34,6 +34,8 @@ export class FakeBackendResources extends Construct implements BackendConstruct 
   public constructor(scope: Construct, id: string, public readonly name: BackendName, private readonly ctx: BackendContext) {
     super(scope, id);
     this.resource = new CfnResource(this, 'Marker', { type: 'AWS::CloudFormation::WaitConditionHandle' });
+    // The container backends ask the core for their image tag, each for its own architecture.
+    if (name !== 'microvm') ctx.runnerImageTag?.(name === 'nitro' ? 'amd64' : 'arm64');
     for (const service of Object.keys(NAME_RULES) as NamedService[]) {
       requestedNames.push({ path: this.node.path, service, name: ctx.nameFor(service, `fake-${name}`) });
     }

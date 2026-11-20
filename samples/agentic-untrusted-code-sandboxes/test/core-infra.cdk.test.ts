@@ -331,6 +331,28 @@ describe('teardown order and log ownership (spec 5.3)', () => {
     expect(drain[1].Properties.Backends).toEqual(['microvm', 'nitro', 'agentcore']);
   });
 
+  test('a container backend waits for the image copy of the architecture it asked for; microvm waits for none', () => {
+    const resources = base.t.toJSON().Resources as Record<string, Json>;
+    const copies = Object.entries(resources).filter(([, r]) => /RunnerImages\/Copy-/.test(pathOf(r)) && r.Type.startsWith('Custom::'));
+    expect(copies.map(([, r]) => /Copy-(\w+)\//.exec(pathOf(r))?.[1]).sort()).toEqual(['amd64', 'arm64']);
+    const copyId = (arch: string) => copies.find(([, r]) => pathOf(r).includes(`Copy-${arch}/`))![0];
+    const marker = (name: string) => Object.values(resources).find((r) => r.Type === 'AWS::CloudFormation::WaitConditionHandle' && pathOf(r).includes(`Backend-${name}/`)) as Json;
+    expect(dependsOn(marker('nitro'))).toContain(copyId('amd64'));
+    expect(dependsOn(marker('nitro'))).not.toContain(copyId('arm64'));
+    expect(dependsOn(marker('agentcore'))).toContain(copyId('arm64'));
+    expect(dependsOn(marker('agentcore'))).not.toContain(copyId('amd64'));
+    for (const [id] of copies) expect(dependsOn(marker('microvm'))).not.toContain(id);
+    // the tag names the architecture and the asset hash, in the construct-owned repository
+    const nitro = Object.values(resources).find((r) => r.Type.startsWith('Custom::') && pathOf(r).includes('Copy-amd64/')) as Json;
+    expect(JSON.stringify(nitro.Properties)).toMatch(/runner-amd64-[0-9a-f]{64}/);
+    expect(JSON.stringify(nitro.Properties)).toContain('RunnerRepository');
+  });
+
+  test('microvm alone builds no image copy', () => {
+    const s = synth({ backends: ['microvm'] });
+    expect(Object.values(s.t.toJSON().Resources as Record<string, Json>).filter((r) => /RunnerImages/.test(pathOf(r)))).toEqual([]);
+  });
+
   test('the cleanup resource gets every prefix and name, and its role deletes only those', () => {
     const cleanup = Object.values(base.t.toJSON().Resources as Record<string, Json>).find((r) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('LogCleanup')) as Json;
     expect(cleanup.Properties.Prefixes).toEqual(['/aws/bedrock-agentcore/runtimes/Fake_agentcore-']);

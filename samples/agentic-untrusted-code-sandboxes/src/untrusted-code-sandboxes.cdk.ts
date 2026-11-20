@@ -32,6 +32,7 @@ import { DnsFirewall } from './core/dns-firewall';
 import { SandboxEndpoints } from './core/endpoints';
 import { LogCleanup } from './core/log-cleanup';
 import { LogDrain } from './core/log-drain';
+import { RunnerImages, type RunnerArch } from './core/runner-image';
 import { acknowledge, acknowledgeGranularFinding, nagFindingResource } from './core/nag';
 import { InsightRules } from './core/observability';
 import { ENV, TENANT_KEY_PREFIX, TENANT_TAG, REGISTRY } from './env';
@@ -156,19 +157,31 @@ export class UntrustedCodeSandboxes extends Construct {
     this.registryTable = table;
 
     // --- Backends ---
-    const ctx: BackendContext = {
-      vpc: this.vpc,
-      sandboxSubnets,
-      toolSubnets: this.toolSubnets,
-      toolSecurityGroup,
-      inputBucket: this.inputBucket,
-      runnerRepository: this.runnerRepository,
-      runnerDir: runnerPath(),
-      nameFor,
-      settings: this.config.settings,
-    };
+    // The runner image copy is the core's (ADR-0032): a backend asks for the tag of an architecture, and its
+    // resources wait for the copies it asked for.
+    const images = this.runnerRepository
+      ? new RunnerImages(this, 'RunnerImages', { repository: this.runnerRepository, runnerDir: runnerPath() })
+      : undefined;
     const backends: Partial<Record<BackendName, BackendConstruct>> = {};
+    const copiesOf: Partial<Record<BackendName, Set<RunnerArch>>> = {};
     for (const name of this.config.backends) {
+      const asked = new Set<RunnerArch>();
+      copiesOf[name] = asked;
+      const ctx: BackendContext = {
+        vpc: this.vpc,
+        sandboxSubnets,
+        toolSubnets: this.toolSubnets,
+        toolSecurityGroup,
+        inputBucket: this.inputBucket,
+        runnerRepository: this.runnerRepository,
+        runnerImageTag: images && ((arch) => {
+          asked.add(arch);
+          return images.tag(arch);
+        }),
+        runnerDir: runnerPath(),
+        nameFor,
+        settings: this.config.settings,
+      };
       backends[name] = FACTORIES[name](this, `Backend-${name}`, ctx);
     }
     this.backends = backends;
@@ -289,6 +302,8 @@ export class UntrustedCodeSandboxes extends Construct {
     const cleanup = prefixes.length + names.length > 0 ? new LogCleanup(this, 'LogCleanup', { prefixes, names }) : undefined;
     for (const b of enabled) {
       for (const resource of b.drainOrder()) {
+        // The resource that runs the image waits for the copy of every architecture its backend asked for (ADR-0032).
+        for (const arch of copiesOf[b.name] ?? []) resource.node.addDependency((images as RunnerImages).copy(arch));
         this.drainResource.node.addDependency(resource);
         if (cleanup) resource.node.addDependency(cleanup.resource);
       }
