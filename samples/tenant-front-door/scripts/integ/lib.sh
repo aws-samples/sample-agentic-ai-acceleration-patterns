@@ -364,4 +364,4 @@ log_count() {
     --query 'length(events)' --output text 2>/dev/null)" || { echo error; return; }
   awk '{ for (i = 1; i <= NF; i++) n += $i } END { print n + 0 }' <<<"$counts"
 }
-now_ms() { echo $(( $(date +%s) * 1000 )); }
+now_ms() { date +%s%3N; }
