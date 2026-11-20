@@ -1134,20 +1134,21 @@ distribution tenants and `UpdateDistributionTenant`) and, in
 `acm:AddTagsToCertificate`, which CloudFront and ACM authorise for the
 tags of a create) require `aws:RequestTag/tenant-front-door:distribution`
 to be this distribution's id and allow no tag keys but the registrar's
-three. The tag grants also require the resource to carry no
-`tenant-front-door:distribution` tag yet (an IAM `Null` condition on
-`aws:ResourceTag`), so the role cannot put the tag on a resource another
-front door tagged. `UpdateDistributionTenant` requires
+three. The tag grants also require `aws:ResourceTag/tenant-front-door:distribution`
+to be this distribution's id. CloudFront and ACM authorise the tags of
+a create through the tag grants with the request's tags as the
+resource's, so a create passes; a resource with no distribution tag, or
+another front door's, is refused, so the role cannot put the tag on a
+resource it did not create. `UpdateDistributionTenant` requires
 `aws:ResourceTag/tenant-front-door:distribution` to be this
 distribution's id. The main stack creates the pooled distribution tenant
 with `tenant-front-door:distribution` set to `pooled/<distribution id>`.
-The key is present, so no front door's registrar in the account can tag
-it; the value is no distribution's id, so IAM refuses the
-`UpdateDistributionTenant` and `DeleteDistributionTenant` of every
-front door's registrar, sweeper and teardown on it. No code reads the
-value. Tagging an untagged certificate, or a distribution tenant no
-front door created, remains possible (threat model AR-33). The
-registrar uses these grants only on the edge operator role's domain calls and on deletes and replacements of an
+The value is no distribution's id, so IAM refuses every front door's
+registrar the tag grants on it, and the `UpdateDistributionTenant` and
+`DeleteDistributionTenant` of every front door's registrar, sweeper and
+teardown. No code reads the value. The residual is threat model AR-33.
+The registrar uses these grants only on the edge operator role's domain
+calls and on deletes and replacements of an
 entry that has a `d`, and never deletes a distribution tenant or a
 certificate. The sweeper runs as an execution role of its own. It
 holds the route table read it needs to list `tenant#` entries
@@ -2593,7 +2594,7 @@ destroy time, which the test reports with the rest.
     challenge had passed differs only by a certificate the sweeper
     deletes before the domain is free, so the test does not build one.
     `b`'s certificate request is the run's check that ACM authorises the
-    tags of a request under the tag grant's `Null` condition (§3.4).
+    tags of a request under the tag grant's `aws:ResourceTag` condition (§3.4).
     The repeat of sub-step 6 within ACM's hour sends the same token and
     tags again for a certificate that already carries the distribution
     tag, which `b`'s calls never reach, because a pending certificate

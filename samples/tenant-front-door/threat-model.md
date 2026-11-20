@@ -214,7 +214,7 @@ hardening checklist (standard §7).
 | M-13 | Hook failure semantics keep the table honest. A failing `POST` hook fails the create or update, so `ACTIVE` means routed. The delete hook runs `PRE`, before the delete script, so the route goes while the record still exists. A delete hook that fails three times is skipped and counted by the control plane. The hook waits 45 s for propagation after a write | Spec §3.4 (route hook step 4 and the paragraphs after it), §4.2; ADR-0017, ADR-0003; control-plane R-45, R-46. Planned check: steps 16, 21, 22 | T-10, T-31 |
 | M-14 | The registrar reads the control plane with a reader token only: its own app client, whose `role` is a namespaced entry of the control plane's `readerRoles`, the client id in `vendorIdp.clientIds`, and `requiredScope` set when the client can call another API. The secret lives in Secrets Manager in the edge account. The token is cached until it expires. A failed read refuses the write | Spec §3.6, §6.1, §3.4 step 2; ADR-0015; spike S-9; control-plane R-36, R-38. Deployer action: rotate the secret | T-27, T-31 |
 | M-15 | Store writes are optimistic. Every write uses the store's ETag (`IfMatch`); on a conflict the registrar re-reads the keys, repeats the checks of steps 3 and 4 and the size check, and retries. A write that rests on a DNS answer is retried only if the entry still holds the same `d` and `dk`. The `signin` custom resource does the same | Spec §3.4 step 5 (end), §3.5; ADR-0003 | T-24, T-43, T-64 |
-| M-16 | Roles are split and narrow. The registrar never deletes a distribution tenant or certificate, and holds no ACM or CloudFront domain action while `dedicatedDomains` is off. The sweeper cannot write routes: it holds read actions on the store, not `PutKey`. Only the sweeper role holds the sweeper table, and its ACM delete is conditioned on the registrar's distribution tag. The registrar's creates carry that tag with this distribution's id and no tag keys but its own three; its tag grants (`cloudfront:TagResource`, `acm:AddTagsToCertificate`) apply only to a resource that has no distribution tag yet, so it cannot re-label another front door's resource. Each front door creates its pooled distribution tenant with the distribution tag set to `pooled/<distribution id>`: the key is present, so no front door's registrar can tag it, and the value is no distribution's id, so IAM refuses the `UpdateDistributionTenant` and `DeleteDistributionTenant` of every front door's registrar, sweeper and teardown on it (residual AR-33, untagged certificates and distribution tenants no front door created). The sweeper and the teardown also skip it by its id before any read, a second guard. No code reads the tag's value. Where IAM cannot narrow an action, the code checks the tenant's distribution and tags first (409) | Spec §3.4 (IAM paragraphs), §3.1; ADR-0018, ADR-0020, ADR-0022 | T-25, T-55 |
+| M-16 | Roles are split and narrow. The registrar never deletes a distribution tenant or certificate, and holds no ACM or CloudFront domain action while `dedicatedDomains` is off. The sweeper cannot write routes: it holds read actions on the store, not `PutKey`. Only the sweeper role holds the sweeper table, and its ACM delete is conditioned on the registrar's distribution tag. The registrar's creates carry that tag with this distribution's id and no tag keys but its own three; its tag grants (`cloudfront:TagResource`, `acm:AddTagsToCertificate`) apply only where the resource's distribution tag is already this distribution's id, which a create's own tags satisfy, so it cannot tag a resource it did not create. Each front door creates its pooled distribution tenant with the distribution tag set to `pooled/<distribution id>`: the value is no distribution's id, so IAM refuses every front door's registrar the tag grants on it and refuses the `UpdateDistributionTenant` and `DeleteDistributionTenant` of every front door's registrar, sweeper and teardown on it (residual AR-33). The sweeper and the teardown also skip it by its id before any read, a second guard. No code reads the tag's value. Where IAM cannot narrow an action, the code checks the tenant's distribution and tags first (409) | Spec §3.4 (IAM paragraphs), §3.1; ADR-0018, ADR-0020, ADR-0022 | T-25, T-55 |
 | M-17 | The edge operator role is the vendor's own and the stack does not create it. It sits behind the vendor's sign-in and multi-factor rule, and no role a cell account, a tenant or the hook role can assume reaches it. The registrar's own checks apply to it too: form of the origin, the `GetCell` read, the domain rules and the challenge | Spec §3.4 (operator role paragraph), §3.6; ADR-0017. Deployer action: MFA, short sessions, review of who can assume it | T-21, T-23 |
 | M-18 | Audit: the registrar logs the caller role, key and outcome, never the body (step 6). The API access log names the calling account, the edge account or the control plane's, on the refused calls. CloudTrail records each operator call under the role's name. The hook role's calls say "some global hook" (AR-1) | Spec §3.4 step 6, §10 step 15; ADR-0017 | T-23, T-26 |
 | M-19 | The `state` is `base64url(payload).base64url(HMAC-SHA256)` with the `signin` key named by `kid`, an `exp` 10 minutes out, the tenant host `h` that minted it, and the SPA's nonce `n`. The sign-in host forwards only when the HMAC and `kid` verify, `h` is a pooled host, `host#<h>` exists and its tenant is `active`. The router mints a `state` only on a pooled host. An expired or nonce-less `state` gets 302 to `https://<h>/` with no code. Everything else is 400 | Spec §3.3 step 2, §3.5, §5.3; ADR-0016. Planned check: step 18 | T-34, T-35, T-39, T-37 |
@@ -631,31 +631,22 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
   `reportingEndpoint` only to an endpoint that may hold an authorization
   code and a `state`.
 
-- **AR-33: The registrar role can put this distribution's tag on an
-    untagged certificate or distribution tenant no front door created
-    (T-25).** The tag grants hold only on a resource
-    without the `tenant-front-door:distribution` tag, and only with this
-    distribution's id, so no resource a front door tagged can be
-    re-labelled. Every front door creates its distribution tenants with
-    that tag, its pooled one included (with the value
-    `pooled/<distribution id>`, which no grant matches, M-16), so no
-    registrar can tag another front door's distribution tenant, and the
-    `aws:ResourceTag` condition on `UpdateDistributionTenant` keeps it
-    from disabling one. A
-    certificate with no such tag can be tagged: any certificate in the
-    edge account's `us-east-1` that nothing uses. Tagged with a tenant id
-    that has no current `d`, the sweeper then deletes such a certificate.
-    A distribution tenant that no front door created is open the same
-    way. The code never calls either tag action on its own: CloudFront
-    and ACM authorise the tags of a create through them. *Why:* IAM
-    cannot tell a create's tags from a later tag call on a resource that
-    has none. *Bounded by:* the actor (compromised registrar code, AR-19);
-    the sweeper never deletes a certificate that is in use; CloudTrail
-    names every `TagResource` and `AddTagsToCertificate` call (M-18).
-    Deployer action: keep the edge account's `us-east-1` free of other
-    certificates and the edge account free of distribution tenants no
-    front door created, and review the registrar role's tag calls in
-    CloudTrail.
+- **AR-33: The tag grants rest on how CloudFront and ACM present a
+    create's tags (T-25).** The tag grants hold only where
+    `aws:ResourceTag/tenant-front-door:distribution` is this
+    distribution's id. A create passes because CloudFront and ACM present
+    the request's tags as the resource's: the smoke run showed it for
+    `RequestCertificate` and `CreateDistributionTenant`, and showed that
+    an IAM `Null` condition on the same key refuses ACM's create. A
+    resource with no distribution tag, another front door's, and the
+    pooled distribution tenant (`pooled/<distribution id>`, M-16) are
+    therefore refused by the policy; that refusal has not been tested
+    live. *Why:* the condition is the only way IAM offers to bound a tag
+    grant that a create also uses. *Bounded by:* the actor (compromised
+    registrar code, AR-19); the sweeper never deletes a certificate that
+    is in use; CloudTrail names every `TagResource` and
+    `AddTagsToCertificate` call (M-18). Deployer action: review the
+    registrar role's tag calls in CloudTrail.
 
 ## Open items
 
