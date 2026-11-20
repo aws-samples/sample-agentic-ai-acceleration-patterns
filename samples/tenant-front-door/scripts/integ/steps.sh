@@ -32,7 +32,7 @@ step_01() {
     "$(jq -nc --arg x "$EXTERNAL_ID" '{owner: "TENANT", maxCells: 1, externalId: $x}')"
   need api_poll "accounts/${CP_ACCOUNT}" .account.status ACTIVE 300 5
   need api_poll "accounts/${EDGE_ACCOUNT}" .account.status ACTIVE 300 5
-  check "GetAccount edge account: an external id is set" true "$(api_status "accounts/${EDGE_ACCOUNT}" .account.externalIdConfigured)"
+  check "GetAccount edge account: an external id is set" true "$(json_get .account.externalIdConfigured)"
   deploy_phase_3
   deploy_phase_4
   deploy_phase_5

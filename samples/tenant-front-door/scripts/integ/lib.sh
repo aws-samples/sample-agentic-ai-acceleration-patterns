@@ -146,6 +146,7 @@ signed() {
 # $(...), hence the file.
 as() {
   local st i
+  : >"$BODY"
   assume "$1" || { echo 000; return; }
   for i in 1 2 3 4; do
     st="$(signed "$2" "${REGISTRAR}$3" "${4:-}")"
@@ -228,11 +229,13 @@ api_token() {
   CP_TOKEN_AT=$(date +%s)
 }
 # api METHOD PATH [JSON] -> status; body in $BODY. 000 when the operator cannot sign in.
+# $BODY is emptied first: inside $(...) a failed sign-in ends the subshell
+# (die), and a failed check must not print the body of an earlier call.
 api() {
-  api_token || { : >"$BODY"; echo 000; return 1; }
+  : >"$BODY"
+  api_token || { echo 000; return 1; }
   local args=(-s -o "$BODY" -w '%{http_code}' --max-time 30 -X "$1" --config -)
   if [[ -n "${3:-}" ]]; then printf '%s' "$3" >"$REQ"; args+=(-H 'Content-Type: application/json' --data-binary "@$REQ"); fi
-  : >"$BODY"
   curl "${args[@]}" "${CP_API}${2#/}" <<<"header = \"Authorization: Bearer ${CP_TOKEN}\"" || echo 000
 }
 # api_poll PATH JQ WANT [timeout s] [interval s]: polls a Get until JQ matches WANT or a *_FAILED status; leaves the answer in $BODY.

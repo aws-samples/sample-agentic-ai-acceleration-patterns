@@ -508,4 +508,17 @@ st="$(as arn:aws:iam::111111111111:role/op PUT tenants/T1 '{}')"; echo "st:$st r
     expect(r.stderr).toContain('registrar 503 control plane unreadable on PUT tenants/T1, attempt 2 of 4');
     expect(r.stderr).not.toContain('attempt 3 of 4');
   });
+
+  it('api and as: a call that fails before its request leaves no earlier body for a failed check to print', () => {
+    const r = lib(`REQ="$TMP/req"; CP_API=https://cp.example.com/; REGISTRAR=https://registrar.example.com/
+api_token() { die "the operator could not sign in to the vendor IdP"; }
+assume() { return 1; }
+echo '{"stale":"earlier answer"}' >"$BODY"
+check "api: an external id is set" true "$(api_status accounts/111111111111 .account.externalIdConfigured)"
+echo '{"stale":"earlier answer"}' >"$BODY"
+check "as: 200" 200 "$(as arn:aws:iam::111111111111:role/op GET tenants/T1)"`);
+    expect(r.stdout).toContain('FAIL api: an external id is set: want true, got  (body: )');
+    expect(r.stdout).toContain('FAIL as: 200: want 200, got 000 (body: )');
+    expect(r.stdout).not.toContain('earlier answer');
+  });
 });
