@@ -13,7 +13,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-banned='\bsaas\b|application provider|end[- ]users?\b|\bcustomers?\b|\bpg\b|\bisengard\b|\b[0-9]{12}\b'
+banned='\bsaas\b|application provider|end[- ]users?\b|\bcustomers?\b|\b[0-9]{12}\b'
+# Account aliases are private, so they are not written here: a contributor
+# passes them as an extended regex in CHECK_TERMS_PRIVATE (for example from
+# their shell profile), and the check adds them.
+if [[ -n "${CHECK_TERMS_PRIVATE:-}" ]]; then
+  banned="${banned}|${CHECK_TERMS_PRIVATE}"
+fi
 allowed='customer ENI|customer-owned'
 
 files=$(git ls-files --cached --others --exclude-standard -- . \

@@ -84,7 +84,10 @@ function main(): void {
   const files = closure(entries);
   for (const f of files) copy(f, path.join(out, path.relative(src, f)));
   const runnerDir = path.join(root, 'runner');
-  const runnerFiles = walk(runnerDir, (p) => !p.endsWith('.pyc'));
+  // Runner tests and the vector generator stay in the repository; the vectors ship.
+  const runnerFiles = walk(runnerDir, (p) => !p.endsWith('.pyc')
+    && !p.startsWith(path.join(runnerDir, 'tests') + path.sep)
+    && p !== path.join(runnerDir, 'protocol', 'make_vectors.py'));
   for (const f of runnerFiles) copy(f, path.join(out, 'runner', path.relative(runnerDir, f)));
   console.log(`copy-handlers: ${entries.length} entries, ${files.length} modules, ${runnerFiles.length} runner files -> lib/handlers/`);
 }

@@ -46,3 +46,11 @@ test('a failed start and a dead handle', async () => {
   expect((await b.run(h, job)).kind).toBe('dead');
   await expect(b.start('tenant-a', newNonce(), creds('tenant-b'))).rejects.toThrow(/another tenant/);
 });
+
+test('a scripted no_answer outcome reaches the caller', async () => {
+  const b = new FakeBackend();
+  const h = await b.start('tenant-a', newNonce(), creds('tenant-a'));
+  b.script.nextRun = { kind: 'no_answer' };
+  const job = buildJob({ runId: 'r', tenantId: 'tenant-a', nonce: h.nonce, code: '', timeoutMs: 1000, maxOutputBytes: 1 });
+  expect(await b.run(h, job)).toEqual({ kind: 'no_answer' });
+});

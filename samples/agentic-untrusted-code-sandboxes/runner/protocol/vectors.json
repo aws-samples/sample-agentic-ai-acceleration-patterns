@@ -203,6 +203,25 @@
       "proof": "o_t5u9w3siXMHsthhJrnEQzuulWtYiwAA8TfCMHSUYE"
     }
   },
+  "refusalStatus": {
+    "wrong_sandbox": 403,
+    "busy": 409,
+    "dirty": 410,
+    "tool_failed": 500,
+    "malformedJob": 400,
+    "onInvocations": 200
+  },
+  "mustRefuseNonce": {
+    "note": "a decoder must refuse each of these as a nonce",
+    "padded": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "standardAlphabet": "+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/s",
+    "nonCanonical": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh9",
+    "short": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHg",
+    "long": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8A"
+  },
+  "mustRefuseChallenge": {
+    "short": "AAAAAAAAAAAAAAAAAAAAAA"
+  },
   "negative": {
     "note": "jobAuth of case 'basic' must change when any one input changes",
     "flipRunId": "RvG5bApkJ5nLq6r_4JUowR46mOs-trmlW6PiGwnCIyE",

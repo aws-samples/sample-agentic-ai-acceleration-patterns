@@ -42,7 +42,9 @@ Option 1. `test` spawns, after jest and eslint:
   standard bans in favour of "vendor" and "tenant" (the pattern is in the
   script, with two AWS network terms the spec quotes allowed), no account
   alias of the test account, and no 12-digit number, in any tracked or
-  new file except generated ones.
+  new file except generated ones. Account aliases are private, so the
+  script does not list them; a contributor passes them in
+  `CHECK_TERMS_PRIVATE`.
 
 `.projenrc.ts` and `package-lock.json` already carry every dependency the
 sample needs (ADR-0023); only the maintainers change them, and a missing

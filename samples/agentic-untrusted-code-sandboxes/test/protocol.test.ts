@@ -4,7 +4,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-  buildJob, decodeNonce, fromBase64url, helloProof, isRefusal, jobAuth, newNonce, nonceHash,
+  buildJob, decodeNonce, fromBase64url, helloProof, isRefusal, jobAuth, MALFORMED_JOB_STATUS, newNonce, nonceHash,
   proofMatches, REFUSAL_STATUS, resultProof, sessionIdFor, startToken, TENANT_ID_PATTERN,
 } from '../src/protocol';
 
@@ -32,6 +32,9 @@ const vectors = JSON.parse(
   cases: Case[];
   hello: { nonce: string; challenge: string; certFingerprint: string; expected: { proof: string } };
   negative: Record<string, string>;
+  refusalStatus: Record<string, number>;
+  mustRefuseNonce: Record<string, string>;
+  mustRefuseChallenge: { short: string };
 };
 
 const inputOf = (c: Case) => (c.inputHex === null ? undefined : Buffer.from(c.inputHex, 'hex'));
@@ -68,6 +71,22 @@ describe('wire protocol vectors (runner/protocol/vectors.json)', () => {
     for (const name of ['flipRunId', 'flipTenant', 'moveByteFromCodeToInput']) {
       expect(vectors.negative[name]).not.toBe(basic);
     }
+  });
+
+  test('every nonce and challenge the vectors mark as invalid is refused', () => {
+    for (const [name, value] of Object.entries(vectors.mustRefuseNonce)) {
+      if (name === 'note') continue;
+      expect(() => decodeNonce(value)).toThrow();
+    }
+    const h = vectors.hello;
+    expect(() => helloProof(h.nonce, vectors.mustRefuseChallenge.short, h.certFingerprint)).toThrow(/challenge/);
+  });
+
+  test('refusal statuses match the vectors', () => {
+    const { malformedJob, onInvocations, ...byCode } = vectors.refusalStatus;
+    expect(byCode).toEqual(REFUSAL_STATUS);
+    expect(malformedJob).toBe(MALFORMED_JOB_STATUS);
+    expect(onInvocations).toBe(200);
   });
 });
 
