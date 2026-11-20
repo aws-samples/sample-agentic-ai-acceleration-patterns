@@ -16,9 +16,10 @@
  */
 
 import { CfnFunction, type Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
+import { TEST_HOOK_ENV } from '../../src/env';
 
-export const INTEG_OVERRIDES_ENV = 'RC_INTEG_OVERRIDES';
-export const INTEG_FAIL_START_TENANT_ENV = 'RC_INTEG_FAIL_START_TENANT';
+export const INTEG_OVERRIDES_ENV = TEST_HOOK_ENV.RC_INTEG_OVERRIDES;
+export const INTEG_FAIL_START_TENANT_ENV = TEST_HOOK_ENV.RC_INTEG_FAIL_START_TENANT;
 /** The context key that marks an app as the integration app. */
 export const INTEG_CONTEXT_KEY = 'rcIntegTest';
 

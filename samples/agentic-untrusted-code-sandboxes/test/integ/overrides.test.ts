@@ -95,7 +95,8 @@ describe('RC_INTEG_OVERRIDES (T-88, M-60)', () => {
     for (const f of files) {
       const text = readFileSync(f, 'utf8');
       // run-time code reads the variable (`process.env`); nothing in src/ assigns it, by key or by property path
-      expect(text).not.toMatch(/RC_INTEG_OVERRIDES['"]?\s*[:=](?!=)/);
+      // (env.ts only names it: its `TEST_HOOK_ENV` key is the name itself)
+      if (!/[\\/]env\.ts$/.test(f)) expect(text).not.toMatch(/RC_INTEG_OVERRIDES['"]?\s*[:=](?!=)/);
       expect(text).not.toContain('Environment.Variables.');
     }
   });
