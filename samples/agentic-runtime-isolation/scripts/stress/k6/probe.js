@@ -110,9 +110,43 @@ export function buildOptions(scenarios, p, mode, extra = {}) {
   return buildOptionsShared(scenarios, p, mode, thresholds);
 }
 
-/** handleSummary: SCENARIO is the plan's id (`S1` ... `S7`). */
+/** handleSummary: SCENARIO is the plan's id (`S1` ... `S7`); RECORD_SCENARIO renames it in platform mode (`PS-2` ...). */
 export function summarize(data, scenario) {
-  return summarizeShared(data, { slice: SLICE, scenario });
+  return summarizeShared(data, { slice: SLICE, scenario: env('RECORD_SCENARIO', scenario) });
+}
+
+// -- refusals through the edge (platform mode) ----------------------------------
+
+const PLATFORM = env('STRESS_MODE', 'slice') === 'platform';
+let edgeRefusals = {};
+let edgeRefusalMinute = null;
+
+function flushEdgeRefusals() {
+  for (const key of Object.keys(edgeRefusals)) {
+    const [tenantId, status] = key.split('|');
+    console.log(JSON.stringify({ kind: 'edge_refusal', epochMinute: edgeRefusalMinute, tenantId, status: Number(status), count: edgeRefusals[key] }));
+  }
+  edgeRefusals = {};
+}
+
+/**
+ * Platform mode: a 4xx or 5xx through the edge is one `edge_refusal` line per VU, tenant, status
+ * and minute (stderr, kept in `<script>.k6-stdout.txt` like the library's own lines). No hop of
+ * the slice's own logs holds it, so `collect-platform.sh` takes the tenant and the reason
+ * (`http-<status>`) from these lines (P-7). Like the library's ledger, the last minute is
+ * flushed after every request in the last 1 % of the scenario.
+ */
+function noteEdgeRefusal(tenantId, status) {
+  const minute = Math.floor(Date.now() / 60000);
+  if (edgeRefusalMinute !== null && minute !== edgeRefusalMinute) {
+    flushEdgeRefusals();
+  }
+  edgeRefusalMinute = minute;
+  const key = `${tenantId}|${status}`;
+  edgeRefusals[key] = (edgeRefusals[key] || 0) + 1;
+  if (exec.scenario.progress >= 0.99) {
+    flushEdgeRefusals();
+  }
 }
 
 // -- tokens and conversations --------------------------------------------------
@@ -300,6 +334,9 @@ export function probe(entry, kind, opts = {}) {
   const phase = opts.phase || 'main';
   const r = invoke(entry, promptOf(kind, entry, opts), { probe: kind, phase });
   countStatus(r.status, entry.tenantId);
+  if (PLATFORM && r.status >= 400) {
+    noteEdgeRefusal(entry.tenantId, r.status);
+  }
   if (phase !== 'warm') {
     timed(r.ttfb, r.total, { probe: kind });
     ledger(entry.tenantId, r.status);

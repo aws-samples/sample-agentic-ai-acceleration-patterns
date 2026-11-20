@@ -9,8 +9,8 @@
 #   slice.sh budget                  draws on the account-wide quotas, no credentials
 #   slice.sh deploy                  <prefix>-ingress, the agents stacks, <prefix>-driver (deploy.sh)
 #   slice.sh seed                    the tier's tenants, users, subscriptions and demo rows (seed.sh)
-#   slice.sh run <scenario>          S1 to S7: k6 on the driver host, one record per scenario
-#   slice.sh collect                 the late fields of this run's records, from the hops' logs (collect.sh)
+#   slice.sh run <scenario>          S1 to S7 (slice mode) or PS-2, PS-3, PS-4, PS-6, PS-8 (platform mode): k6 on the driver host, one record per scenario
+#   slice.sh collect                 the late fields of this run's records, from the hops' logs (collect.sh; platform mode: collect-platform.sh)
 #   slice.sh teardown [--fixtures]   destroys the stacks, and the tenants at small and medium or on --fixtures
 #
 # In slice mode the slice deploys its own cell: one ingress with the tier's agents
@@ -19,8 +19,15 @@
 # `TenantIdentity-shared-pool` deployment the integration tests share: the slice
 # reads its published parameters, registers the vendor scopes it needs, creates and
 # deletes its own tenants, and never deploys, replaces, updates or destroys it.
-# The platform run (STRESS_MODE=platform) deploys cells through the control plane
-# (W-5); until it does, every verb but `budget` refuses that mode.
+#
+# In platform mode (STRESS_MODE=platform, run with the slices it needs) the slice deploys
+# and seeds nothing: the cells are the control plane's, the users are tenant-identity's and
+# the edge is the front door's. `deploy` and `seed` check that the manifests those slices
+# write to $STRESS_HOME/$STRESS_PREFIX are there (platform.sh); `run` picks the tenants the
+# control plane and tenant-identity both know, and sends the S1, S2, S3, S5 and S6 load
+# shapes to <edgeUrl>/agents as PS-2, PS-3, PS-4, PS-6 and PS-8 (spec §5.1); `collect` takes
+# each refusal's tenant and reason from the driver's own lines (collect-platform.sh);
+# `teardown` removes only this slice's run files. stress/README.md has the manifest contract.
 #
 # State lives in $STRESS_HOME/$STRESS_PREFIX/agentic-runtime-isolation/: the stack
 # outputs, the tenant manifest and the deploy and destroy times; never a token,
@@ -44,6 +51,10 @@ for name in STRESS_TIER STRESS_TIER_JSON STRESS_PREFIX STRESS_HOME STRESS_MODE S
     exit 2
   fi
 done
+if [[ "$STRESS_MODE" != slice && "$STRESS_MODE" != platform ]]; then
+  echo "slice.sh: STRESS_MODE must be slice or platform (got '${STRESS_MODE}')" >&2
+  exit 2
+fi
 if ! [[ "$STRESS_PREFIX" =~ ^[A-Za-z][A-Za-z0-9]{0,39}$ ]]; then
   echo "slice.sh: STRESS_PREFIX must be 1 to 40 letters and digits, starting with a letter (it names the stacks)" >&2
   exit 2
@@ -100,12 +111,10 @@ need_region() {
   export AWS_DEFAULT_REGION="$AWS_REGION"
 }
 
-need_slice_mode() {
-  if [[ "$STRESS_MODE" != slice ]]; then
-    echo "slice.sh: STRESS_MODE=${STRESS_MODE}: the platform run deploys cells through the control plane (W-5); this slice runs alone until then" >&2
-    exit 2
-  fi
-}
+platform_mode() { [[ "$STRESS_MODE" == platform ]]; }
+
+# shellcheck source=platform.sh
+source "${here}/platform.sh"
 
 # no_args VERB ARG... -> exits 2 when the verb got an argument it does not take.
 no_args() {
@@ -130,6 +139,36 @@ need_var() {
 output() { jq -r --arg k "$1" '.[$k] // empty' "${STRESS_STATE_DIR}/outputs.json"; }
 need() { local v; v="$(output "$1")"; [[ -n "$v" ]] || { echo "slice.sh: output $1 missing from the deploy's outputs; run deploy first" >&2; exit 1; }; printf '%s' "$v"; }
 
+# Platform mode: the k6 host, <prefix>-driver, is the one stack this slice may deploy (nothing
+# else in the runner does). It reuses a host that is already there, and the marker file records
+# that this slice deployed it, so `teardown` removes only a host it made.
+DRIVER_STACK="${STRESS_PREFIX}-driver"
+DRIVER_MARK="${STRESS_STATE_DIR}/platform-driver-owned"
+
+# True unless CloudFormation says the stack does not exist: an AWS error counts as "there", so
+# nothing is forgotten on a failed check.
+stack_exists() {
+  local err
+  if err="$(aws cloudformation describe-stacks --stack-name "$1" --query 'Stacks[0].StackStatus' --output text 2>&1 >/dev/null)"; then
+    return 0
+  fi
+  ! grep -q 'does not exist' <<<"$err"
+}
+
+# driver_script deploy|teardown -> runs the shared driver's script for this prefix and prints its `stack=` lines.
+driver_script() {
+  local log
+  log="$(mktemp)"
+  if ! STRESS_PREFIX="$STRESS_PREFIX" STRESS_TIER="$STRESS_TIER" "${REPO_ROOT}/stress/driver/${1}.sh" >"$log" 2>&1; then
+    tail -30 "$log" >&2
+    rm -f "$log"
+    echo "slice.sh: stress/driver/${1}.sh failed for ${DRIVER_STACK}" >&2
+    return 1
+  fi
+  grep '^stack=' "$log" || true
+  rm -f "$log"
+}
+
 case "$verb" in
   budget)
     no_args budget "$@"
@@ -138,8 +177,22 @@ case "$verb" in
     ;;
 
   deploy)
-    need_slice_mode
     no_args deploy "$@"
+    if platform_mode; then
+      need_platform_inputs deploy
+      need_region
+      mkdir -p -m 700 "$STRESS_STATE_DIR"
+      if stack_exists "$DRIVER_STACK"; then
+        echo "deploy: platform mode: ${DRIVER_STACK} is already there and stays its owner's; no cell stack here, the cells are the control plane's"
+      else
+        echo "deploy: platform mode: ${DRIVER_STACK}, the k6 host (stress/driver/deploy.sh); no cell stack here, the cells are the control plane's"
+        # Mark first: a deploy that fails halfway still leaves a stack this slice must remove.
+        : >"$DRIVER_MARK"
+        driver_script deploy
+      fi
+      echo "deploy: edge, identity and tenants are read from ${PLATFORM_MANIFEST_DIR}"
+      exit 0
+    fi
     need_region
     ensure_installed
     ensure_built
@@ -148,8 +201,12 @@ case "$verb" in
     ;;
 
   seed)
-    need_slice_mode
     no_args seed "$@"
+    if platform_mode; then
+      need_platform_inputs seed
+      echo "seed: platform mode: nothing to seed; each run picks its tenants from the control-plane and tenant-identity manifests"
+      exit 0
+    fi
     need_region
     ensure_installed
     mkdir -p -m 700 "$STRESS_STATE_DIR"
@@ -157,52 +214,89 @@ case "$verb" in
     ;;
 
   run)
-    need_slice_mode
     if (( $# != 1 )); then
-      echo "slice.sh run: one scenario id (S1 to S7), got $#: usage slice.sh run <S1..S7>" >&2
+      echo "slice.sh run: one scenario id (S1 to S7, or PS-2, PS-3, PS-4, PS-6, PS-8 in platform mode), got $#: usage slice.sh run <scenario>" >&2
       exit 2
     fi
     scenario="$1"
+    # The k6 file of each scenario. A platform scenario is a slice scenario's shape sent to the
+    # edge (spec §5.1): PS-2 is S1, PS-3 is S2, PS-4 is S3, PS-6 is S5 and PS-8 is S6, and the
+    # record carries the PS id (RECORD_SCENARIO). PS-3 reuses the conversations PS-2 opened.
+    if platform_mode; then
+      case "$scenario" in
+        PS-2) k6_file=s1-steady.js ;;
+        PS-3) k6_file=s2-herd.js ;;
+        PS-4) k6_file=s3-noisy.js ;;
+        PS-6) k6_file=s5-streams.js ;;
+        PS-8) k6_file=s6-peak.js ;;
+        S[1-7]) echo "slice.sh run: ${scenario} runs in slice mode only; in platform mode run PS-2, PS-3, PS-4, PS-6 or PS-8" >&2; exit 2 ;;
+        *) echo "slice.sh run: unknown scenario ${scenario} (PS-2, PS-3, PS-4, PS-6, PS-8)" >&2; exit 2 ;;
+      esac
+    else
+      case "$scenario" in
+        S1) k6_file=s1-steady.js ;;
+        S2) k6_file=s2-herd.js ;;
+        S3) k6_file=s3-noisy.js ;;
+        S4) k6_file=s4-tools.js ;;
+        S5) k6_file=s5-streams.js ;;
+        S6) k6_file=s6-peak.js ;;
+        S7) k6_file=s7-eviction.js ;;
+        PS-*) echo "slice.sh run: ${scenario} runs in platform mode only: it needs the edge, so run it with every slice it needs" >&2; exit 2 ;;
+        *) echo "slice.sh run: unknown scenario ${scenario} (S1 to S7)" >&2; exit 2 ;;
+      esac
+    fi
+    first=""
     case "$scenario" in
-      S1) k6_file=s1-steady.js ;;
-      S2) k6_file=s2-herd.js ;;
-      S3) k6_file=s3-noisy.js ;;
-      S4) k6_file=s4-tools.js ;;
-      S5) k6_file=s5-streams.js ;;
-      S6) k6_file=s6-peak.js ;;
-      S7) k6_file=s7-eviction.js ;;
-      *) echo "slice.sh run: unknown scenario ${scenario} (S1 to S7)" >&2; exit 2 ;;
+      S2) first=S1 ;;
+      PS-3) first=PS-2 ;;
     esac
     need_var run STRESS_RESULTS STRESS_COMMIT
     # S2 is a cold-ingress test on warm conversations: it reuses the ones S1 opened in this run
     # (the run id names them). Without them every tenant opens a new Runtime session at the
     # herd rate, which tests the Runtime's session-creation quota instead (plan F-2).
-    if [[ "$scenario" == S2 && ! -s "${STRESS_RESULTS}/agentic-runtime-isolation.S1.json" ]]; then
-      echo "slice.sh run S2: no agentic-runtime-isolation.S1.json in ${STRESS_RESULTS}; S2 reuses the conversations S1 opens in the same run, so run S1 first (--scenarios S1,S2)" >&2
+    if [[ -n "$first" && ! -s "${STRESS_RESULTS}/agentic-runtime-isolation.${first}.json" ]]; then
+      echo "slice.sh run ${scenario}: no agentic-runtime-isolation.${first}.json in ${STRESS_RESULTS}; ${scenario} reuses the conversations ${first} opens in the same run, so run ${first} first (--scenarios ${first},${scenario})" >&2
       exit 2
     fi
     need_region
     ensure_installed
-    manifest="${STRESS_STATE_DIR}/manifest.json"
-    [[ -s "$manifest" ]] || { echo "slice.sh run: no ${manifest}; seed did not run" >&2; exit 1; }
 
     # The sample's tier (agents, tenant limit, reserved concurrency) is what the scenarios read;
     # the runner's STRESS_TIER_JSON holds only the shared figures.
     tier_json="$(slice_cli tier)"
-    ident="/application-plane/shared/identity"
-    platform_api="$(aws ssm get-parameter --name "${ident}/apiUrl" --query Parameter.Value --output text)"
-    [[ "$platform_api" == */ ]] || platform_api="${platform_api}/"
-    app_client_id="$(aws ssm get-parameter --name "${ident}/appClientId" --query Parameter.Value --output text)"
+    if platform_mode; then
+      # No cell of this slice's own: the edge, the stress identity and the tenants come from
+      # the other slices' manifests (platform.sh).
+      need_platform_inputs run
+      manifest="${STRESS_STATE_DIR}/manifest.json"
+      build_platform_manifest "$tier_json" "$manifest"
+      env_args=(
+        "MANIFEST=/opt/stress/inputs/manifest.json"
+        "ENDPOINT=${EDGE_URL}/agents"
+        "PLATFORM_API=${IDENTITY_API}"
+        "APP_CLIENT_ID=${IDENTITY_CLIENT}"
+        "ISSUER=${IDENTITY_ISSUER}"
+        "REGION=${IDENTITY_REGION}"
+        "RECORD_SCENARIO=${scenario}"
+      )
+    else
+      manifest="${STRESS_STATE_DIR}/manifest.json"
+      [[ -s "$manifest" ]] || { echo "slice.sh run: no ${manifest}; seed did not run" >&2; exit 1; }
+      ident="/application-plane/shared/identity"
+      platform_api="$(aws ssm get-parameter --name "${ident}/apiUrl" --query Parameter.Value --output text)"
+      [[ "$platform_api" == */ ]] || platform_api="${platform_api}/"
+      app_client_id="$(aws ssm get-parameter --name "${ident}/appClientId" --query Parameter.Value --output text)"
 
-    env_args=(
-      "MANIFEST=/opt/stress/inputs/manifest.json"
-      "ENDPOINT=$(need EndpointUrl)"
-      "ENTITLEMENTS_API=$(need EntitlementsApiUrl)"
-      "PLATFORM_API=${platform_api}"
-      "APP_CLIENT_ID=${app_client_id}"
-      "ISSUER=$(need Issuer)"
-      "REGION=${AWS_REGION}"
-    )
+      env_args=(
+        "MANIFEST=/opt/stress/inputs/manifest.json"
+        "ENDPOINT=$(need EndpointUrl)"
+        "ENTITLEMENTS_API=$(need EntitlementsApiUrl)"
+        "PLATFORM_API=${platform_api}"
+        "APP_CLIENT_ID=${app_client_id}"
+        "ISSUER=$(need Issuer)"
+        "REGION=${AWS_REGION}"
+      )
+    fi
     vu_per_rps="$(jq -r '.k6.vuPerRps // empty' <<<"$tier_json")"
     tokens_in="$(jq -r '.k6.tokensIn // empty' <<<"$tier_json")"
     [[ -z "$vu_per_rps" ]] || env_args+=("VU_PER_RPS=${vu_per_rps}")
@@ -250,6 +344,12 @@ case "$verb" in
         || { echo "flush-stage-authorizers-cache failed" >&2; exit 1; }
       echo "  ${#fns[@]} functions on new instances; authoriser cache flushed"
       sleep 60
+    elif [[ "$scenario" == PS-3 ]]; then
+      # The functions are in the cell accounts, which this slice has no write access to: PS-3
+      # cannot retire their instances. It waits as long as S2's idle, so a short quiet spell
+      # lets the oldest go, and starts the herd from there (stress/README.md, known limitations).
+      echo "== PS-3 recipe: the cells' Lambda instances are not retired in platform mode; 60 s idle"
+      sleep 60
     fi
 
     # Two fixed-minute measures follow one scenario into the next: the per-tenant limit is a
@@ -262,7 +362,7 @@ case "$verb" in
     source "${here}/window.sh"
     prev_end=0
     shopt -s nullglob
-    for r in "${STRESS_RESULTS}"/agentic-runtime-isolation.S[1-7].json; do
+    for r in "${STRESS_RESULTS}"/agentic-runtime-isolation.S[1-7].json "${STRESS_RESULTS}"/agentic-runtime-isolation.PS-[2-8].json; do
       end_iso="$(jq -er '.window.end' "$r" 2>/dev/null)" \
         || { echo "slice.sh run: ${r} has no window.end; cannot space ${scenario} after it" >&2; exit 1; }
       e="$(iso_epoch "$end_iso")" || { echo "slice.sh run: ${r}: window.end is not a timestamp" >&2; exit 1; }
@@ -290,21 +390,36 @@ case "$verb" in
     ;;
 
   collect)
-    need_slice_mode
     no_args collect "$@"
     need_var collect STRESS_RESULTS STRESS_COMMIT
+    if platform_mode; then
+      exec "${here}/collect-platform.sh"
+    fi
     need_region
     "${here}/collect.sh"
     ;;
 
   teardown)
-    need_slice_mode
     fixtures=0
     case "$#:${1:-}" in
       0:) ;;
       1:--fixtures) fixtures=1 ;;
       *) echo "slice.sh teardown: unexpected argument '$1' (usage: slice.sh teardown [--fixtures])" >&2; exit 2 ;;
     esac
+    if platform_mode; then
+      # The slice made no tenant and no cell. It removes its run files, and the k6 host only
+      # when its own deploy made it (fixtures stay with their owners).
+      rm -f "${STRESS_STATE_DIR}/manifest.json" "${STRESS_STATE_DIR}/platform-tenants.json"
+      if [[ -e "$DRIVER_MARK" ]]; then
+        need_region
+        echo "teardown: platform mode: ${DRIVER_STACK} (stress/driver/teardown.sh)"
+        driver_script teardown
+        rm -f "$DRIVER_MARK"
+      else
+        echo "teardown: platform mode: this slice deployed and created nothing"
+      fi
+      exit 0
+    fi
     need_region
     ensure_built
     # The run's tenants go with it when the tier onboards every run (small, medium: stress
@@ -318,7 +433,7 @@ case "$verb" in
     ;;
 
   *)
-    echo "usage: slice.sh budget | deploy | seed | run <S1..S7> | collect | teardown [--fixtures]" >&2
+    echo "usage: slice.sh budget | deploy | seed | run <S1..S7 | PS-2 PS-3 PS-4 PS-6 PS-8> | collect | teardown [--fixtures]" >&2
     exit 2
     ;;
 esac

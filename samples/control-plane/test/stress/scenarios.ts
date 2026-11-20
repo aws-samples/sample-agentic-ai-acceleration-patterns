@@ -5,12 +5,15 @@
  * The control-plane slice's scenarios (platform stress test, docs/stress-test.spec.md §5.1
  * PS-1 and §5.2): onboarding (its share of PS-1, and the cell build time of spec Q-1),
  * placement races on a nearly full fleet, the read rate under writes, and onboarding rate at
- * build limits 5, 20 and 50. Every scenario makes isolation assertions (P-1) and leaves the
+ * build limits 5, 20 and 50. PS-5, the churn of tenants through the edge, is in `churn.ts`.
+ * Every scenario makes isolation assertions (P-1) and leaves the
  * fleet as it found it, apart from PS-1, which onboards the seeded tenants for the rest.
  */
 
 import type { CallResult } from './api';
 import { sleep } from './aws';
+import { ps5 } from './churn';
+import type { Edge } from './edge';
 import {
   assertPlaced,
   cellsOf,
@@ -37,6 +40,8 @@ export interface ScenarioEnv extends FleetEnv {
   readonly buildLimit: number;
   /** Redeploys the control plane with another concurrent build limit (slice.sh set-build-limit). */
   readonly setBuildLimit: (limit: number) => Promise<number>;
+  /** The front door's edge and route registrar, for PS-5 (platform mode only; `edge.ts`). */
+  readonly edge?: Edge;
 }
 
 /** A cell build plus its first tenant build: Q-1 expects about eight minutes; one hour is the build budget. */
@@ -324,6 +329,7 @@ export async function buildLimitScaling(s: ScenarioEnv): Promise<void> {
 
 export const SCENARIOS: Readonly<Record<string, (s: ScenarioEnv) => Promise<void>>> = {
   'PS-1': ps1,
+  'PS-5': (s) => ps5(s),
   'placement-race': placementRace,
   'read-rate': readRate,
   'build-limit-scaling': buildLimitScaling,
