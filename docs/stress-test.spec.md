@@ -99,7 +99,7 @@ budget shows by how much.
 **P-5. Pay for a large fleet once.** At `large`, onboarding thousands of
 tenants through CodeBuild takes hours. The fleet is seeded once through the
 control plane and kept as a fixture. Each run reuses it and onboards only a
-churn slice under load.
+churn slice.
 
 **P-6. Deploy and destroy time are results.** Every slice reports both,
 next to its functional results. A slice that cannot be destroyed cleanly
@@ -178,7 +178,7 @@ and the records in
    ingress publishes its own parameter in the cell account, as
    runtime-isolation does (front-door spec §6.3).
 3. The tenant script runs: `PutTenantSubscription` on the cell
-   ingress's Entitlements API, and nothing else. It does not run
+   ingress's Entitlements API, and makes no identity or route call. It does not run
    tenant-identity's own control-plane mount
    (`scripts/control-plane/tenant/create.sh`), because the platform API
    admits a caller in the identity's own account only and the tenant role
@@ -265,7 +265,8 @@ built, so a slice-mode run leaves it out and refuses one named in
 The runner orders slices by their needs, and each slice runs its `deploy`
 and then its `seed` before the next slice starts, so a slice's `deploy`
 can read what an earlier slice seeded. `teardown` runs in the reverse
-order. The needs the slices declare are:
+order. The needs the three existing slices declare, and the ones the
+front-door slice will declare (W-7), are:
 
 | Slice | Needs | `platformOnly` scenarios |
 |---|---|---|
@@ -478,7 +479,7 @@ A platform run uses four manifests:
 |---|---|---|---|
 | `tenant-identity.json` | `tenant-identity` `seed` | `agentic-runtime-isolation` | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each user as `{username, email}` |
 | `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation`; `control-plane`, for the identity calls of §3.3 step 4 (W-9) | the value of the SSM parameter `/<prefix>/identity`: `region`, `apiUrl` (the execute-api URL of the platform API), `userPoolId`, `appClientId`; the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>` |
-| `control-plane.json` | `control-plane` `seed` | `agentic-runtime-isolation` | tenant ids in `seeded[]` (the platform's steady set), `churn[]` and `extra[]`; the last two belong to the control-plane scenarios |
+| `control-plane.json` | `control-plane` `seed`; its driver adds `identity[]` in PS-1 | `agentic-runtime-isolation` | tenant ids in `seeded[]` (the platform's steady set), `churn[]` and `extra[]`; the last two belong to the control-plane scenarios; `identity[]`: for each tenant whose identity the driver created (§3.3 step 4), `tenantId`, `admin` and `users[]` as in `tenant-identity.json` |
 | `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` (W-7) | `agentic-runtime-isolation`; `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
 
 `agentic-runtime-isolation` also writes `manifest.json` (the tenants it
@@ -490,10 +491,14 @@ that set when each scenario starts, because the control plane onboards its
 tenants in PS-1, after every `seed`. It stops when fewer than two tenants
 are usable. The identity tenants the control-plane driver creates (§3.3
 step 4) are not in `tenant-identity.json`, which only that slice's `seed`
-writes. The driver records the admin and the users it creates, and the
-runtime-isolation slice reads that record for control-plane tenants (W-9,
-stress ADR-0017); a control-plane tenant with no entry is refused
-(`no-identity-tenant`).
+writes; the driver records them in `identity[]` of `control-plane.json`
+(stress ADR-0017), and the runtime-isolation slice reads that list for
+control-plane tenants in place of `tenant-identity.json` (W-9); a
+control-plane tenant with no entry is refused (`no-identity-tenant`). The
+`control-plane` `teardown` deletes the identity tenants its driver created,
+because the control plane's `DeleteDeployment` does not and the
+`tenant-identity` `teardown` removes only the tenants it seeded; the
+reverse order runs it before `tenant-identity`'s (P-6).
 
 ### 4.3 Result records
 

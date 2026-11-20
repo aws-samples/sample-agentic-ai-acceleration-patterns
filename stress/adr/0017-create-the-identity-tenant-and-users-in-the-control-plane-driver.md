@@ -28,8 +28,9 @@ control plane's tenants refuses every tenant (`no-identity-tenant`).
 
 `tenant-identity` ships a control-plane mount for this: the tenant script
 `scripts/control-plane/tenant/create.sh` calls `CreateTenant` under the
-control-plane tenant id (tenant-identity ADR-0028, ADR-0029). Spec §3.3 step 3
-used to give the stress application's tenant script that call. The mount
+control-plane tenant id (tenant-identity ADR-0028, ADR-0029). A reader of
+the spec might expect the stress application's tenant script to make that
+call; spec §3.3 step 3 says it does not. The mount
 assumes the tenant build runs in the identity's own account: the platform API
 admits the account root, and the tenant build role gets its permission from
 `PlatformInvokePolicy` (tenant-identity ADR-0030), so both sides allow the
@@ -58,11 +59,13 @@ Four facts fix the options:
 ### Option 1: The driver of the `control-plane` slice
 Right after a tenant's deployment is `ACTIVE`, the driver calls
 `CreateTenant` with the control-plane tenant id, then `CreateUser` for each
-further user the tier lists, with the IAM session it already uses for the
-control plane, and then polls the edge.
+further user the tier lists, with the AWS session the run already holds (the
+driver signs PS-5's registrar calls with it), not the operator token it uses
+for the control plane, and then polls the edge.
 
-Pros: the calls come from the runner's session in the platform account, which
-the platform API admits, and not from a build role, so the cell account's
+Pros: the calls come from the run's AWS session in the platform account,
+which the platform API admits, and not from a build role, so the cell
+account's
 tenant role gains no reach into the platform account and a compromised tenant
 build cannot create identities; the driver already knows each tenant's id,
 the tier's user count and when the deployment is `ACTIVE`; the calls fall
@@ -91,9 +94,10 @@ resource-policy change in `tenant-identity` that admits the role pair's tenant
 role in each cell account, and `PlatformInvokePolicy` attached in each cell
 account, which gives every tenant build there a way to create and delete
 tenants in the stress identity. The role pair is built to hold the cell's
-entitlement methods only (control-plane ADR-0022, ADR-0025). A script that
+entitlement methods only (control-plane ADR-0022, ADR-0025). In the variant
+where the script calls `CreateTenant` itself, a script that
 fails halfway leaves an identity tenant that a retry must find (`CreateTenant`
-answers 409 for an existing id).
+answers 409 for an existing id); `create.sh` reads state first and avoids it.
 
 ### Option 3: A tenant-identity hook
 `tenant-identity` registers a global hook with the control plane that creates
@@ -121,9 +125,10 @@ step 4 says. The tenant script keeps only the entitlement call. The calls are
 part of PS-1's time to the first served request. The driver never writes a
 temporary password or a token to disk (spec §4.2).
 
-The driver records the admin and users it creates. The runtime-isolation
-slice reads that record for control-plane tenants, in place of the lookup in
-`tenant-identity.json` that only the `tenant-identity` `seed` writes.
+The driver records the admin and users it creates in `identity[]` of
+`control-plane.json`. The runtime-isolation slice reads that list for
+control-plane tenants, in place of the lookup in `tenant-identity.json` that
+only the `tenant-identity` `seed` writes (spec §4.2).
 
 ## Consequences
 Easier: the tenant role stays an entitlement-only role, and the identity
@@ -136,10 +141,13 @@ Cognito quotas. At the shared-pool topology, `CreateTenant` creates two
 groups (`UserPoolResourceUpdate`, 15 requests a second, not adjustable), its
 admin (`UserCreation`, 50 a second, adjustable) and the admin's two group
 memberships (`UserUpdate`, 25 a second, not adjustable). Each further user
-adds a user and a group membership (tenant-identity README, Cognito quotas).
+adds a user and a group membership. Each call also looks the address up with
+`ListUsers` (`UserList`, 30 a second, not adjustable) (tenant-identity
+README, Cognito quotas).
 The first platform run at `small` onboards 20 tenants, and builds that start
-together finish close together, so up to 20 `CreateTenant` calls, 40
-`CreateGroup` calls, can reach the driver within seconds. Against 15 requests
+together finish close together, so the driver can have up to 20
+`CreateTenant` calls (40 `CreateGroup` calls) to make within seconds.
+Against 15 requests
 a second that can throttle. The driver retries a throttled call with backoff,
 as the `tenant-identity` slice's calls do, and a throttle shows in PS-1's
 time, which is a result, not an error. Spec §4.4 lists the draw in the
@@ -151,18 +159,19 @@ joint control-plane mount test covers it (tenant-identity
 `integration-test.md`).
 
 The `control-plane` slice now needs `identity.json`, and so reads a manifest
-that it did not before. The runtime-isolation slice reads the driver's
-record of identity tenants (spec §4.2). Until the driver and the record
-exist, the runtime-isolation slice refuses every control-plane tenant and a
-platform run fails with the list.
+that it did not before, and its driver holds two credentials: the operator
+token for the control plane and the AWS session for the platform API. The
+runtime-isolation slice reads `identity[]` of `control-plane.json` (spec
+§4.2). Until the driver writes it, the runtime-isolation slice refuses every
+control-plane tenant and a platform run fails with the list.
 
 W-9 implements: the driver's identity calls after each tenant's deployment
-is `ACTIVE`; the record of the admin and users it creates, in a manifest
-the runtime-isolation slice reads for control-plane tenants (a field per
-`seeded[]` tenant in `control-plane.json` is the smallest change); the
-identity API grant on the driver's session; retry on throttling; the
+is `ACTIVE`; `identity[]` in `control-plane.json`, read by the
+runtime-isolation slice for control-plane tenants; `execute-api:Invoke` on
+the platform API for the driver's session; retry on throttling; the
 Cognito draw in the slice's `budget`; and the cleanup of those identity
-tenants at teardown, because the control plane's `DeleteDeployment` no
-longer removes them and the `tenant-identity` `teardown` knows only the
-tenants it seeded. Revisit if the tenant-identity sample gains a
+tenants in the `control-plane` `teardown`, because the control plane's
+`DeleteDeployment` no longer removes them and the `tenant-identity`
+`teardown` knows only the tenants it seeded. Revisit if the tenant-identity
+sample gains a
 control-plane hook, or if the platform API admits cell-account roles.
