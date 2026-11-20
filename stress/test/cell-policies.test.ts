@@ -15,9 +15,10 @@ import {
   cellPolicyNames,
   IDENTITY_WRITE_ACTIONS,
   PARAMETER_WRITE_ACTIONS,
+  RESOURCE_POLICY_WRITE_ACTIONS,
   ROLE_WRITE_ACTIONS,
 } from '../application/cell-policies';
-import { CellBoundaryProbeStack, CellWorkloadProbeStack, PROBE_ROLES, PROBE_TAG } from '../application/cell-probe.cdk';
+import { CellBoundaryProbeStack, CellWorkloadProbeStack, PROBE_DECOY_POLICY, PROBE_ROLES, PROBE_TAG } from '../application/cell-probe.cdk';
 
 const NAMES = cellPolicyNames();
 const CELL_ROLES = 'arn:<AWS::Partition>:iam::<AWS::AccountId>:role/cell/*';
@@ -28,6 +29,13 @@ const OWNER_PARAMETERS = [
   'arn:<AWS::Partition>:ssm:*:<AWS::AccountId>:parameter/cdk-bootstrap/cell/*',
 ];
 const API_ACCOUNT = 'arn:<AWS::Partition>:apigateway:*::/account';
+const PUBLIC_URL_DENY = {
+  Sid: 'DenyPublicFunctionUrls',
+  Effect: 'Deny',
+  Action: ['lambda:CreateFunctionUrlConfig', 'lambda:UpdateFunctionUrlConfig', 'lambda:AddPermission'],
+  Resource: '*',
+  Condition: { StringEquals: { 'lambda:FunctionUrlAuthType': 'NONE' } },
+};
 
 /** Renders intrinsics the way the tests compare them: `Fn::Join` flattened, `Ref` of a pseudo parameter as `<AWS::...>`. */
 function render(node: unknown): unknown {
@@ -103,11 +111,18 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
   describe('the execution policy', () => {
     const p = managedPolicy(json, 'cell-execution-policy');
 
-    it('writes roles on role/cell/* only', () => {
+    it('writes roles on role/cell/* only, and sets no boundary but the workload boundary', () => {
       const st = p.sid('CellRoles');
       expect(st.Effect).toBe('Allow');
       expect(st.Resource).toBe(CELL_ROLES);
-      expect(list(st.Action)).toEqual([...ROLE_WRITE_ACTIONS]);
+      expect(list(st.Action)).toEqual(ROLE_WRITE_ACTIONS.filter((a) => a !== 'iam:CreateRole' && a !== 'iam:PutRolePermissionsBoundary'));
+      expect(p.sid('CellRolesWithTheWorkloadBoundary')).toEqual({
+        Sid: 'CellRolesWithTheWorkloadBoundary',
+        Effect: 'Allow',
+        Action: ['iam:CreateRole', 'iam:PutRolePermissionsBoundary'],
+        Resource: CELL_ROLES,
+        Condition: { StringEquals: { 'iam:PermissionsBoundary': WORKLOAD_BOUNDARY } },
+      });
     });
 
     it('passes /cell/ roles to Lambda and AgentCore only', () => {
@@ -147,10 +162,13 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
   describe('the permissions boundary', () => {
     const p = managedPolicy(json, 'cell-permissions-boundary');
 
-    it('allows role writes, PassRole and AssumeRole on role/cell/* only', () => {
+    it('allows role writes and PassRole on role/cell/* only, and assumes no role', () => {
       const st = p.sid('CellRoles');
       expect(st.Resource).toBe(CELL_ROLES);
-      expect(list(st.Action)).toEqual([...ROLE_WRITE_ACTIONS, 'sts:AssumeRole']);
+      expect(list(st.Action)).toEqual([...ROLE_WRITE_ACTIONS]);
+      for (const allow of p.statements.filter((x) => x.Effect === 'Allow')) {
+        expect(list(allow.Action)).not.toContain('sts:AssumeRole');
+      }
       expect(p.sid('CellPassRole').Condition).toEqual({ StringEquals: { 'iam:PassedToService': [...CELL_PASSED_TO_SERVICES] } });
     });
 
@@ -205,12 +223,17 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
       });
     });
 
-    it('allows the run-time calls and no IAM write on *', () => {
+    it('allows the deploy-time services only: no run-time call and no IAM write on *', () => {
       const services = list(p.sid('CellServices').Action);
-      for (const a of ['execute-api:*', 'bedrock:InvokeModel', 'bedrock:ConverseStream', 'sts:TagSession', 'xray:*', 'application-autoscaling:*']) {
-        expect(services).toContain(a);
+      expect(services).toContain('application-autoscaling:*');
+      for (const a of ['execute-api:*', 'bedrock:InvokeModel', 'bedrock:ConverseStream', 'sts:TagSession', 'sts:GetCallerIdentity', 'xray:*']) {
+        expect(services).not.toContain(a);
       }
       expect(services.filter((a: any) => String(a).startsWith('iam:'))).toEqual(['iam:Get*', 'iam:List*']);
+    });
+
+    it('denies public function URLs', () => {
+      expect(p.sid('DenyPublicFunctionUrls')).toEqual(PUBLIC_URL_DENY);
     });
   });
 
@@ -240,6 +263,17 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
       expect(p.sid('WorkloadAssets').Resource).toEqual([ASSETS, `${ASSETS}/*`]);
       expect(p.sid('DenyOwnerParameterWrites').Resource).toEqual(OWNER_PARAMETERS);
       expect(p.sid('DenyApiGatewayAccountSettings').Resource).toBe(API_ACCOUNT);
+    });
+
+    it('denies resource-policy and sharing writes, and public function URLs', () => {
+      const st = p.sid('DenyResourcePolicyWrites');
+      expect(st.Effect).toBe('Deny');
+      expect(st.Resource).toBe('*');
+      expect(list(st.Action)).toEqual([...RESOURCE_POLICY_WRITE_ACTIONS]);
+      for (const a of ['lambda:AddPermission', 'lambda:CreateFunctionUrlConfig', 'kms:PutKeyPolicy', 'kms:CreateGrant', 'logs:PutResourcePolicy', 'logs:PutSubscriptionFilter', 'dynamodb:PutResourcePolicy', 'bedrock-agentcore:PutResourcePolicy']) {
+        expect(list(st.Action)).toContain(a);
+      }
+      expect(p.sid('DenyPublicFunctionUrls')).toEqual(PUBLIC_URL_DENY);
     });
   });
 
@@ -349,18 +383,32 @@ describe('the probe stacks', () => {
     expect(JSON.stringify(json.Parameters?.BootstrapVersion)).toContain('/cdk-bootstrap/cell/version');
   });
 
-  it('CellBoundaryProbe: one /cell/ role under the cell permissions boundary, an owner stack', () => {
+  it('CellBoundaryProbe: one /cell/ role under the cell permissions boundary, a decoy role on / and a decoy policy, an owner stack', () => {
     const app = new App();
     Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
     const stack = new CellBoundaryProbeStack(app, 'CellBoundaryProbe', { names: NAMES });
     const json = render(Template.fromStack(stack).toJSON()) as any;
     const roles = Object.values(json.Resources).filter((r: any) => r.Type === 'AWS::IAM::Role') as any[];
-    expect(roles).toHaveLength(1);
-    expect(roles[0].Properties).toMatchObject({
-      RoleName: PROBE_ROLES.boundary,
+    expect(roles).toHaveLength(2);
+    const probe = roles.find((r) => r.Properties.RoleName === PROBE_ROLES.boundary);
+    expect(probe.Properties).toMatchObject({
       Path: '/cell/',
       PermissionsBoundary: 'arn:<AWS::Partition>:iam::<AWS::AccountId>:policy/cell-permissions-boundary',
     });
+    const decoy = roles.find((r) => r.Properties.RoleName === PROBE_ROLES.decoy);
+    expect(decoy.Properties.Path).toBeUndefined();
+    expect(decoy.Properties.PermissionsBoundary).toBeUndefined();
+    expect(decoy.Properties.Policies).toBeUndefined();
+    expect(decoy.Properties.ManagedPolicyArns).toBeUndefined();
+    expect(decoy.Properties.AssumeRolePolicyDocument.Statement[0].Condition).toEqual({
+      ArnLike: { 'aws:PrincipalArn': 'arn:<AWS::Partition>:iam::<AWS::AccountId>:role/cell/cell-policy-probe*' },
+    });
+    const policies = Object.values(json.Resources).filter((r: any) => r.Type === 'AWS::IAM::ManagedPolicy') as any[];
+    expect(policies.map((x) => x.Properties.ManagedPolicyName)).toEqual([PROBE_DECOY_POLICY]);
+    expect(policies[0].Properties.Roles).toBeUndefined();
+    const table = Object.values(json.Resources).filter((r: any) => r.Type === 'AWS::DynamoDB::GlobalTable') as any[];
+    expect(table.map((t) => t.Properties.TableName)).toEqual(['cell-policy-probe-decoy']);
+    expect(Object.values(json.Resources).filter((r: any) => r.Type === 'AWS::KMS::Key')).toHaveLength(1);
     expect(json.Parameters?.BootstrapVersion).toBeUndefined();
     expect(stack.tags.tagValues()).toEqual({ [PROBE_TAG.key]: PROBE_TAG.value });
   });

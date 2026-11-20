@@ -93,6 +93,47 @@ export const PARAMETER_WRITE_ACTIONS = [
 /** Changes to the API Gateway account setting, which the owner sets (path spike CP-8). */
 export const API_GATEWAY_ACCOUNT_WRITE_ACTIONS = ['apigateway:PATCH', 'apigateway:PUT', 'apigateway:DELETE'] as const;
 
+/**
+ * Public Lambda function URLs: a function URL or an invoke permission with `AuthType NONE`.
+ * Denied in both boundaries; a cell serves its traffic through its ingress (review of W-10).
+ */
+export const PUBLIC_FUNCTION_URL_ACTIONS = ['lambda:CreateFunctionUrlConfig', 'lambda:UpdateFunctionUrlConfig', 'lambda:AddPermission'] as const;
+
+/**
+ * Resource-policy and sharing writes no role a cell creates calls (ADR-0011): they share a
+ * resource outside the account without IAM. The execution role keeps them, since
+ * CloudFormation creates the cell's Lambda permissions and resource policies.
+ */
+export const RESOURCE_POLICY_WRITE_ACTIONS = [
+  'lambda:AddPermission',
+  'lambda:RemovePermission',
+  'lambda:AddLayerVersionPermission',
+  'lambda:RemoveLayerVersionPermission',
+  'lambda:CreateFunctionUrlConfig',
+  'lambda:UpdateFunctionUrlConfig',
+  'lambda:DeleteFunctionUrlConfig',
+  'lambda:PutFunctionRecursionConfig',
+  'kms:PutKeyPolicy',
+  'kms:CreateGrant',
+  'kms:RetireGrant',
+  'kms:RevokeGrant',
+  'logs:PutResourcePolicy',
+  'logs:DeleteResourcePolicy',
+  'logs:PutSubscriptionFilter',
+  'logs:PutDestination',
+  'logs:PutDestinationPolicy',
+  'logs:PutAccountPolicy',
+  'logs:PutDeliveryDestination',
+  'logs:PutDeliveryDestinationPolicy',
+  'dynamodb:PutResourcePolicy',
+  'dynamodb:DeleteResourcePolicy',
+  'ssm:ModifyDocumentPermission',
+  'ssm:PutResourcePolicy',
+  'ssm:DeleteResourcePolicy',
+  'bedrock-agentcore:PutResourcePolicy',
+  'bedrock-agentcore:DeleteResourcePolicy',
+] as const;
+
 /** What cell roles call at run time, besides the deploy-time services. */
 const RUNTIME_ACTIONS = [
   'execute-api:*',
@@ -186,6 +227,16 @@ function ownerParameterDeny(): iam.PolicyStatement {
   });
 }
 
+function publicFunctionUrlDeny(): iam.PolicyStatement {
+  return new iam.PolicyStatement({
+    sid: 'DenyPublicFunctionUrls',
+    effect: iam.Effect.DENY,
+    actions: [...PUBLIC_FUNCTION_URL_ACTIONS],
+    resources: ['*'],
+    conditions: { StringEquals: { 'lambda:FunctionUrlAuthType': 'NONE' } },
+  });
+}
+
 function apiGatewayAccountDeny(): iam.PolicyStatement {
   return new iam.PolicyStatement({
     sid: 'DenyApiGatewayAccountSettings',
@@ -195,15 +246,30 @@ function apiGatewayAccountDeny(): iam.PolicyStatement {
   });
 }
 
-/** The cell execution policy: what the cell bootstrap's execution role may create (bounded by the cell boundary). */
-export function cellExecutionPolicyDocument(): iam.PolicyDocument {
+/** Role writes that set a boundary: allowed only with the workload boundary. */
+const BOUNDARY_SETTING_ACTIONS = ['iam:CreateRole', 'iam:PutRolePermissionsBoundary'];
+
+/**
+ * The cell execution policy: what the cell bootstrap's execution role may create (bounded by
+ * the cell permissions boundary). A role it creates, or re-bounds on a redeploy, must carry
+ * the workload boundary; the boundary enforces the same, this repeats it for defence in depth.
+ */
+export function cellExecutionPolicyDocument(names: CellPolicyNames): iam.PolicyDocument {
   return new iam.PolicyDocument({
     statements: [
       new iam.PolicyStatement({ sid: 'CellResources', actions: [...DEPLOY_ACTIONS, ...IAM_READ_ACTIONS], resources: ['*'] }),
       assetStatement('CellAssets'),
-      // Role writes include iam:PutRolePermissionsBoundary, so a redeploy can move an existing
-      // cell role to a new workload boundary; the cell permissions boundary only lets it set that one.
-      new iam.PolicyStatement({ sid: 'CellRoles', actions: [...ROLE_WRITE_ACTIONS], resources: [cellRolesArn()] }),
+      new iam.PolicyStatement({
+        sid: 'CellRoles',
+        actions: ROLE_WRITE_ACTIONS.filter((a) => !BOUNDARY_SETTING_ACTIONS.includes(a)),
+        resources: [cellRolesArn()],
+      }),
+      new iam.PolicyStatement({
+        sid: 'CellRolesWithTheWorkloadBoundary',
+        actions: BOUNDARY_SETTING_ACTIONS,
+        resources: [cellRolesArn()],
+        conditions: { StringEquals: { 'iam:PermissionsBoundary': policyArn(names.workloadBoundary) } },
+      }),
       passRoleStatement(),
       serviceLinkedRoleStatement(),
     ],
@@ -211,16 +277,17 @@ export function cellExecutionPolicyDocument(): iam.PolicyDocument {
 }
 
 /**
- * The cell permissions boundary, on the execution role. It may create, change, pass and
- * assume `/cell/` roles only; a role it creates must carry the workload boundary
- * (ADR-0011), and a role it passes goes to a cell service only.
+ * The cell permissions boundary, on the execution role. It may create, change and pass
+ * `/cell/` roles only, and assumes none; a role it creates must carry the workload boundary
+ * (ADR-0011), and a role it passes goes to a cell service only. It holds the deploy-time
+ * services only: the run-time calls belong to the workload boundary.
  */
 export function cellPermissionsBoundaryDocument(names: CellPolicyNames): iam.PolicyDocument {
   return new iam.PolicyDocument({
     statements: [
-      new iam.PolicyStatement({ sid: 'CellServices', actions: [...DEPLOY_ACTIONS, ...RUNTIME_ACTIONS, ...IAM_READ_ACTIONS], resources: ['*'] }),
+      new iam.PolicyStatement({ sid: 'CellServices', actions: [...DEPLOY_ACTIONS, ...IAM_READ_ACTIONS], resources: ['*'] }),
       assetStatement('CellAssets'),
-      new iam.PolicyStatement({ sid: 'CellRoles', actions: [...ROLE_WRITE_ACTIONS, 'sts:AssumeRole'], resources: [cellRolesArn()] }),
+      new iam.PolicyStatement({ sid: 'CellRoles', actions: [...ROLE_WRITE_ACTIONS], resources: [cellRolesArn()] }),
       passRoleStatement(),
       serviceLinkedRoleStatement(),
       new iam.PolicyStatement({
@@ -251,6 +318,7 @@ export function cellPermissionsBoundaryDocument(names: CellPolicyNames): iam.Pol
         conditions: { StringNotEquals: { 'iam:AWSServiceName': [...CELL_SERVICE_LINKED_ROLE_SERVICES] } },
       }),
       new iam.PolicyStatement({ sid: 'DenyBoundaryRemovalAndIdentityWrites', effect: iam.Effect.DENY, actions: [...IDENTITY_WRITE_ACTIONS], resources: ['*'] }),
+      publicFunctionUrlDeny(),
       ownerParameterDeny(),
       apiGatewayAccountDeny(),
     ],
@@ -259,8 +327,8 @@ export function cellPermissionsBoundaryDocument(names: CellPolicyNames): iam.Pol
 
 /**
  * The cell workload boundary, on every role a cell creates (ADR-0011): the services cell
- * roles call, no IAM action at all, and `sts:AssumeRole` on `/cell/` roles only (the TVM
- * assumes the cell's tenant roles).
+ * roles call, no IAM action at all, `sts:AssumeRole` on `/cell/` roles only (the TVM
+ * assumes the cell's tenant roles), and no resource-policy or sharing write.
  */
 export function cellWorkloadBoundaryDocument(): iam.PolicyDocument {
   const services = [...DEPLOY_ACTIONS.filter((a) => a !== 'apigateway:*' && a !== 'application-autoscaling:*'), ...RUNTIME_ACTIONS];
@@ -271,6 +339,8 @@ export function cellWorkloadBoundaryDocument(): iam.PolicyDocument {
       new iam.PolicyStatement({ sid: 'WorkloadAssumeCellRoles', actions: ['sts:AssumeRole'], resources: [cellRolesArn()] }),
       new iam.PolicyStatement({ sid: 'DenyIam', effect: iam.Effect.DENY, actions: ['iam:*'], resources: ['*'] }),
       new iam.PolicyStatement({ sid: 'DenyAssumeOutsideCell', effect: iam.Effect.DENY, actions: ['sts:AssumeRole'], notResources: [cellRolesArn()] }),
+      new iam.PolicyStatement({ sid: 'DenyResourcePolicyWrites', effect: iam.Effect.DENY, actions: [...RESOURCE_POLICY_WRITE_ACTIONS], resources: ['*'] }),
+      publicFunctionUrlDeny(),
       ownerParameterDeny(),
       apiGatewayAccountDeny(),
     ],

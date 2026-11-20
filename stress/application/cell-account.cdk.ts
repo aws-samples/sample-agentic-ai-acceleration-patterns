@@ -76,7 +76,7 @@ export class CellPoliciesStack extends Stack {
     this.executionPolicy = new iam.ManagedPolicy(this, 'CellExecutionPolicy', {
       managedPolicyName: names.execution,
       description: 'What the cell bootstrap execution role may create (bounded by the cell permissions boundary)',
-      document: cellExecutionPolicyDocument(),
+      document: cellExecutionPolicyDocument(names),
     });
     this.buildPolicy = new iam.ManagedPolicy(this, 'CellBuildPolicy', {
       managedPolicyName: names.build,

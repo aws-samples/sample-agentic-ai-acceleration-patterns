@@ -3,8 +3,11 @@
 # SPDX-License-Identifier: MIT-0
 #
 # Removes the two probe stacks probe-deploy.sh created, and nothing else: CellWorkloadProbe
-# (through its own service role, the cell execution role) and CellBoundaryProbe. Then checks
-# that no probe role is left on /cell/.
+# (through its own service role, the cell execution role) and CellBoundaryProbe, each only
+# when it carries the stack tag stress:part=cell-policy-probe. It removes the probes' control
+# function if an interrupted run left it, then lists anything else a probe could have left
+# if a policy had let it through, and exits 1 when it finds any. It deletes none of those:
+# that is a policy regression to look at first.
 #
 #   AWS_REGION=eu-central-1 stress/application/probe-remove.sh
 
@@ -14,6 +17,11 @@ set -euo pipefail
 export AWS_DEFAULT_REGION="$AWS_REGION"
 account="$(aws sts get-caller-identity --query Account --output text)"
 echo "account=${account} region=${AWS_REGION}"
+
+if aws lambda get-function --function-name cell-policy-probe-fn >/dev/null 2>&1; then
+  aws lambda delete-function --function-name cell-policy-probe-fn
+  echo "removed the control function cell-policy-probe-fn"
+fi
 
 for stack in CellWorkloadProbe CellBoundaryProbe; do
   tag="$(aws cloudformation describe-stacks --stack-name "$stack" --query "Stacks[0].Tags[?Key=='stress:part'].Value | [0]" --output text 2>/dev/null || true)"
@@ -28,9 +36,19 @@ for stack in CellWorkloadProbe CellBoundaryProbe; do
   echo "stack=${stack} destroy_seconds=$((SECONDS - start))"
 done
 
-left="$(aws iam list-roles --path-prefix /cell/ --query "Roles[?starts_with(RoleName, 'cell-policy-probe')].RoleName" --output text)"
-if [[ -n "$left" ]]; then
-  echo "probe roles left on /cell/: ${left}" >&2
+# What a let-through probe could have created.
+left=()
+add() { [[ -z "$2" || "$2" == None ]] || left+=("$1: $2"); }
+add roles "$(aws iam list-roles --query "Roles[?starts_with(RoleName, 'cell-policy-probe') || starts_with(RoleName, 'cell-probe-')].Arn" --output text)"
+add users "$(aws iam list-users --query "Users[?starts_with(UserName, 'cell-policy-probe')].UserName" --output text)"
+add policies "$(aws iam list-policies --scope Local --query "Policies[?starts_with(PolicyName, 'cell-policy-probe')].Arn" --output text)"
+add functions "$(aws lambda list-functions --query "Functions[?starts_with(FunctionName, 'cell-policy-probe')].FunctionName" --output text)"
+add parameters "$(aws ssm get-parameters --names /application-plane/shared/identity/cell-policy-probe /cdk-bootstrap/cell/cell-policy-probe --query 'Parameters[].Name' --output text)"
+add "logs resource policies" "$(aws logs describe-resource-policies --query "resourcePolicies[?policyName=='cell-policy-probe'].policyName" --output text)"
+add "logs destinations" "$(aws logs describe-destinations --destination-name-prefix cell-policy-probe --query 'destinations[].destinationName' --output text)"
+if (( ${#left[@]} > 0 )); then
+  printf 'left by a probe a policy let through:\n' >&2
+  printf '  %s\n' "${left[@]}" >&2
   exit 1
 fi
-echo "no probe role left"
+echo "no probe leftovers"
