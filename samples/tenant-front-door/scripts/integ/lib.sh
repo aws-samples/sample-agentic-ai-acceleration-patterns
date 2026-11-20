@@ -244,13 +244,15 @@ api_status() { api GET "$1" >/dev/null; jq -r "$2" "$BODY" 2>/dev/null; }
 last_hooks() { api GET "$1" >/dev/null; jq -r "$2.lastGlobalHooks // [] | map(.hookId) | sort | join(\",\")" "$BODY" 2>/dev/null; }
 
 # -- tenant-identity (SigV4 with the driver's credentials) ----------------------------------
-# ti_tenant API TENANT_ID NAME -> sets TI_ADMIN (the admin user's name)
+# ti_tenant API TENANT_ID NAME [SCOPES_JSON] -> sets TI_ADMIN (the admin user's name).
+# SCOPES_JSON defaults to ["app/use"]; a scope must be in that deployment's
+# catalogue, and the multi-tenant deployment's catalogue is empty.
 ti_tenant() {
   local st
   own_creds
   st="$(SIG_REGION="$IDENTITY_REGION" signed POST "${1}platform/tenants" "$(jq -nc --arg id "$2" --arg n "$3" --arg e "success+$3@simulator.amazonses.com" \
-    '{tenantId: $id, name: $n, adminEmail: $e, scopes: ["app/use"]}')")"
-  [[ "$st" == 201 ]] || die "tenant-identity CreateTenant $3: HTTP $st"
+    --argjson s "${4:-[\"app/use\"]}" '{tenantId: $id, name: $n, adminEmail: $e, scopes: $s}')")"
+  [[ "$st" == 201 ]] || die "tenant-identity CreateTenant $3: HTTP $st $(jq -r '.message // empty' "$BODY" 2>/dev/null | head -c 160)"
   TI_ADMIN="$(jq -r .admin.user.username "$BODY")"
 }
 # ti_token API TENANT_ID USER VAR: a fresh access token (the pool's last one hour).
