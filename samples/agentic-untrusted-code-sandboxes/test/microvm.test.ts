@@ -536,19 +536,61 @@ describe('run', () => {
     expect(fetchMock.mock.calls[0][0]).toBe(`${ORIGIN}/run`);
   });
 
-  test('a proxy 502 from a MicroVM that ended before the call is a dead handle; one that ended after is no answer', async () => {
-    aws.on(GetMicrovmCommand).resolves(microvm('TERMINATED', { terminatedAt: new Date(Date.now() - 60_000), stateReason: 'terminated by caller' }));
-    fetchMock.mockResolvedValueOnce(reply(502, ''));
-    expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'dead', reason: 'terminated by caller' });
-    aws.on(GetMicrovmCommand).resolves(microvm('TERMINATED', { terminatedAt: new Date(Date.now() + 1000) }));
-    fetchMock.mockResolvedValueOnce(reply(502, ''));
-    expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
-    aws.on(GetMicrovmCommand).resolves(microvm('RUNNING'));
-    fetchMock.mockResolvedValueOnce(reply(502, ''));
-    expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
-    aws.on(GetMicrovmCommand).rejects(new Error('boom'));
-    fetchMock.mockResolvedValueOnce(reply(502, ''));
-    expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
+  describe('no answer from a MicroVM that may have ended', () => {
+    const ended = (extra: Record<string, unknown> = {}, state: 'TERMINATED' | 'TERMINATING' | 'RUNNING' = 'TERMINATED') => microvm(state, extra);
+    const longAgo = (): Date => new Date(Date.now() - 60_000);
+
+    test('a proxy 502 from a MicroVM that ended well before the call is a dead handle', async () => {
+      aws.on(GetMicrovmCommand).resolves(ended({ terminatedAt: longAgo(), stateReason: 'terminated by caller' }));
+      fetchMock.mockResolvedValueOnce(reply(502, ''));
+      expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'dead', reason: 'terminated by caller' });
+      aws.on(GetMicrovmCommand).resolves(ended({ terminatedAt: longAgo() }));
+      fetchMock.mockResolvedValueOnce(reply(502, ''));
+      expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'dead', reason: 'terminated_before_call' });
+    });
+
+    test('a connection lost after the request left is dead only for the same finding', async () => {
+      aws.on(GetMicrovmCommand).resolves(ended({ terminatedAt: longAgo() }));
+      fetchMock.mockRejectedValueOnce(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }));
+      expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'dead', reason: 'terminated_before_call' });
+    });
+
+    test('the abort path is dead for the same finding', async () => {
+      jest.useFakeTimers();
+      aws.on(GetMicrovmCommand).resolves(ended({ terminatedAt: longAgo() }));
+      fetchMock.mockImplementation((_url: string, init: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      }));
+      const pending = backend().run(handleOf(nonce), jobFor(nonce, { timeoutMs: 1000 }));
+      await jest.advanceTimersByTimeAsync(6000);
+      expect(await pending).toEqual({ kind: 'dead', reason: 'terminated_before_call' });
+    });
+
+    test.each([
+      ['it ended inside the 2 s margin', ended({ terminatedAt: new Date(Date.now() - 1000) })],
+      ['it ended after the request left', ended({ terminatedAt: new Date(Date.now() + 1000) })],
+      ['TERMINATED carries no end time', ended()],
+      ['TERMINATING (it may still serve)', ended({ terminatedAt: longAgo() }, 'TERMINATING')],
+      ['it is still running', ended({ terminatedAt: longAgo() }, 'RUNNING')],
+    ])('stays no answer when %s', async (_why, info) => {
+      aws.on(GetMicrovmCommand).resolves(info);
+      fetchMock.mockResolvedValueOnce(reply(502, ''));
+      expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
+      fetchMock.mockRejectedValueOnce(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }));
+      expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
+    });
+
+    test('an unreadable or slow lookup stays no answer', async () => {
+      aws.on(GetMicrovmCommand).rejects(new Error('boom'));
+      fetchMock.mockResolvedValueOnce(reply(502, ''));
+      expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
+      jest.useFakeTimers();
+      aws.on(GetMicrovmCommand).callsFake(() => new Promise(() => undefined));
+      fetchMock.mockResolvedValueOnce(reply(502, ''));
+      const pending = backend().run(handleOf(nonce), jobFor(nonce));
+      await jest.advanceTimersByTimeAsync(3000);
+      expect(await pending).toEqual({ kind: 'no_answer' });
+    });
   });
 
   test('a proxy 502 is no answer; other proxy errors are errors that never carry the token', async () => {

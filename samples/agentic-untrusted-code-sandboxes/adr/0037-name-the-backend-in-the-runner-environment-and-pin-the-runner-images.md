@@ -35,7 +35,8 @@ Pros: no new variable. Cons: a `nitro` task whose override lost
 
 Option 1.
 
-- `runner/microvm/Dockerfile` sets `ENV RUNNER_BACKEND=microvm`. The
+- `runner/microvm/Dockerfile` sets `ENV RUNNER_BACKEND=microvm`, and the
+  image's `environmentVariables` set it too (ADR-0042). The
   `nitro` task definition and the `agentcore` runtime set
   `RUNNER_BACKEND` in the container environment. The runner removes
   `RUNNER_NONCE_HASH` from its own environment at start, and hands code

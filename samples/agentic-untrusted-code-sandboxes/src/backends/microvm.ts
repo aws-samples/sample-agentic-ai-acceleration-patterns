@@ -75,6 +75,9 @@ const NOT_SENT: readonly string[] = ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH'
 /** A MicroVM that ended this long before the request left cannot have run the job; the margin covers clock skew with the platform. */
 const TERMINATED_BEFORE_CALL_MS = 2000;
 
+/** The state lookup behind a no-answer must not hold the call past the tool's own deadline. */
+const NO_ANSWER_LOOKUP_MS = 3000;
+
 /** States in which a MicroVM is gone or going. */
 const ENDED_STATES: readonly string[] = ['TERMINATING', 'TERMINATED'];
 
@@ -365,18 +368,25 @@ export class MicrovmBackend implements SandboxBackend {
 
   /**
    * No answer. The proxy answers 502 for a MicroVM that was terminated (smoke run), the same as for one that did not
-   * respond. When the platform says the MicroVM ended before the request left, the job cannot have run: a dead handle.
-   * Anything else, or an unreadable state, stays no answer, the safe one (ADR-0044).
+   * respond. When the platform says the MicroVM was TERMINATED more than 2 s before the request left, the job cannot
+   * have run: a dead handle. TERMINATING, a missing `terminatedAt`, a MicroVM that is still running and an unreadable
+   * or slow answer all stay no answer, the safe one (ADR-0044).
    */
   private async noAnswer(handle: SandboxHandle, sentAt: number): Promise<RunOutcome> {
+    let timer: NodeJS.Timeout | undefined;
     try {
-      const info = await this.get(handle.handle);
+      const lookup = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('GetMicrovm took too long')), NO_ANSWER_LOOKUP_MS);
+      });
+      const info = await Promise.race([this.get(handle.handle), lookup]);
       const endedAt = toMs(info.terminatedAt);
-      if (info.state && ENDED_STATES.includes(info.state) && endedAt !== undefined && endedAt + TERMINATED_BEFORE_CALL_MS < sentAt) {
+      if (info.state === 'TERMINATED' && endedAt !== undefined && endedAt + TERMINATED_BEFORE_CALL_MS < sentAt) {
         return { kind: 'dead', reason: info.stateReason ?? 'terminated_before_call' };
       }
     } catch {
-      // Unreadable: keep no_answer.
+      // Unreadable or slow: keep no_answer.
+    } finally {
+      clearTimeout(timer);
     }
     return { kind: 'no_answer' };
   }

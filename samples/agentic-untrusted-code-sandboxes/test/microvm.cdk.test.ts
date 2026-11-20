@@ -142,7 +142,7 @@ describe('microvm resources', () => {
       Action: 'sts:AssumeRole',
       Effect: 'Allow',
       Principal: { Service: 'lambda.amazonaws.com' },
-      Condition: { StringEquals: { 'aws:SourceAccount': expect.anything() } },
+      Condition: { StringEquals: { 'aws:SourceAccount': ACCOUNT } },
     })]);
     const policy = Object.entries(template.findResources('AWS::IAM::Policy')).find(([id]) => id.includes('ImageBuildRole'))![1];
     const st = policy.Properties.PolicyDocument.Statement as Record<string, any>[];
@@ -159,7 +159,7 @@ describe('microvm resources', () => {
       Action: 'sts:AssumeRole',
       Effect: 'Allow',
       Principal: { Service: 'lambda.amazonaws.com' },
-      Condition: { StringEquals: { 'aws:SourceAccount': expect.anything() } },
+      Condition: { StringEquals: { 'aws:SourceAccount': ACCOUNT } },
     })]);
     const policy = Object.entries(template.findResources('AWS::IAM::Policy')).find(([id]) => id.includes('ConnectorOperatorRole'))![1];
     const st = policy.Properties.PolicyDocument.Statement as Record<string, any>[];
