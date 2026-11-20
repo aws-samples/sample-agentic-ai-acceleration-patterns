@@ -132,12 +132,20 @@ the cell synth context then need the same suffix, and step 2 must run again.
 A deploy of `CellPolicies` from a version without `cell-tenant-build-policy`
 cannot delete that policy while the role pair holds it: CloudFormation leaves
 it behind, and the next step 1 fails on the name. Bring it back under the
-stack instead of deleting it:
+stack instead of deleting it. Run it from `stress/`, in the same shell as the
+steps above (the cell account owner's `AWS_PROFILE` and `AWS_REGION`), with
+the account id and the same `CELL_POLICY_SUFFIX` the owner stacks use (empty
+for none), so the policy name in the mapping and in the template agree:
 
 ```bash
-echo '{"CellTenantBuildPolicy37F02D91":{"PolicyArn":"arn:aws:iam::<account>:policy/cell-tenant-build-policy<suffix>"}}' > /tmp/import.json
+export CELL_POLICY_SUFFIX=<suffix>
+echo "{\"CellTenantBuildPolicy37F02D91\":{\"PolicyArn\":\"arn:aws:iam::<account>:policy/cell-tenant-build-policy${CELL_POLICY_SUFFIX}\"}}" > /tmp/import.json
 npx cdk --app "npx ts-node --transpile-only application/owner-app.ts" import CellPolicies --resource-mapping /tmp/import.json --output cdk.application.out/import --force
 ```
+
+The import applies no other change in the template, so run step 1 again
+afterwards (`application/deploy-owner.sh` with the same suffix) to bring the
+rest of `CellPolicies` up to date.
 
 ## Probe the policies
 

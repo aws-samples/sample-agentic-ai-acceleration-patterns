@@ -292,8 +292,17 @@ not pass), cells by their service role, the
 cell bootstrap's execution role), a
 stack whose service role is set and is not the cell execution role, a
 `cdk-hnb659fds-*` role, a role pair on `/cell/` or under either cell
-boundary, or a `/cell/` role trusted from outside (above). The stack list
-and `iam:GetRole` give all of it.
+boundary, a role pair half holding a policy its stack did not give it (a
+managed policy other than its owner policy, `cell-build-policy` or
+`cell-tenant-build-policy` with the owner's suffix, or an inline policy
+other than the stack's default one with the control plane's SSM namespace
+actions on `/application-plane/`), a role pair half whose trust is not the
+stack's (one statement allowing `sts:AssumeRole` to the platform account,
+conditioned on `aws:PrincipalArn` being the fleet's build role for that
+half or its API role, and nothing else), or a `/cell/` role trusted from
+outside (above). The stack list, `iam:ListRoles`, and for the role pair
+`iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and
+`iam:GetRolePolicy` give all of it.
 
 ## 4. Data model
 
@@ -490,7 +499,7 @@ Q-5.
 | W-2 driver and k6 library moved to `stress/` | W-1 schema | yes, once W-1's schema is fixed |
 | W-3 runtime-isolation slice on the contract | W-1, W-2 | yes, after W-1 and W-2 |
 | W-4 control-plane build-limit prop | decision 2 | yes, now |
-| W-5 control-plane slice and the stress application | W-1, W-4, W-10; W-11 for Q-1 and the account check | built on its branch (`samples/control-plane/scripts/stress/`, `stress/application/`; stress ADR-0012 to ADR-0015) on top of the merged W-10; Q-1 answered |
+| W-5 control-plane slice and the stress application | W-1, W-4, W-10; W-11 for Q-1 and the account check | done: the slice in `samples/control-plane/scripts/stress/`, the stress application and the role pair in `stress/application/` (stress ADR-0012 to ADR-0015); Q-1 answered |
 | W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, workload boundary, `/cell/` path aspect and the cell bootstrap, in `stress/application/` | decision 7; the deny probes ran in the path spike (`stress/spikes/cell-path/`); the second boundary is ADR-0011 | done: the prop in control-plane ADR-0047, the rest in `stress/application/` |
 | W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair | §3.7; W-10's policies and prop for the bootstrap and the role pair | done in both cell accounts: the owner stacks, `CDKToolkit-cell` and the role pair (`stress/application/deploy-role-pair.sh`, W-5); the account check passes on both |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |

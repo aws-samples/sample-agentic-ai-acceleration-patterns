@@ -11,8 +11,9 @@ SPDX-License-Identifier: MIT-0
 ## Context
 Spec §3.7 has the control-plane slice refuse a cell account that holds more than the cell
 bootstrap, the role pair, the owner's account-base stacks and cells, before every run. The
-check needs the stack list in each Region the run uses and `iam:ListRoles` and
-`iam:GetRole` in each cell account. The slice runs with the platform account's
+check needs the stack list in each Region the run uses and `iam:ListRoles` in each cell
+account, and for the two role pair roles `iam:GetRole` (path, boundary, trust),
+`iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and `iam:GetRolePolicy`. The slice runs with the platform account's
 credentials. The control plane's role pair is the only cross-account path into a cell
 account, and its roles hold the SSM namespace grants and the two owner policies only.
 The owner names the account-base stacks by stack ARN (W-11).
@@ -40,5 +41,8 @@ Option 1.
 ## Consequences
 The cell accounts file holds account ids and profile names, never credentials; it stays in
 `STRESS_HOME`. The check refuses a stack the owner did not list by ARN, so a recreated stack
-or the same name in another Region needs the list updated. It reads stacks and roles, not
-resource policies (stress/application README, Known limitations).
+or the same name in another Region needs the list updated. It refuses a role pair half that
+holds a policy its stack did not give it, or whose trust is not the stack's, so a policy
+attached or a trust widened out of band fails the next run; the check needs the platform
+account id and the owner policy suffix for that. It reads stacks, roles and the pair's
+policies, not resource policies (stress/application README, Known limitations).
