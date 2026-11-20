@@ -33,12 +33,15 @@ which already leaves only 25 to 90 ms of a fast fill.
 
 Option 1 (spec §3.5 memory cap table). On `nitro` A = L − 64 MiB. The
 watchdog stays at L as an early warning, on `memory.current` less the
-reclaimable file cache (`file` less `shmem`), so files written to
-`/work` do not trigger it; the task limit is the cap. Both the 64 MiB
-margin and the file-cache correction are checked in S-20. On `microvm` the floor stays at 50 ms, now measured.
+file cache (`file` less `shmem`), so files written to `/work` do not
+trigger it; the task limit is the cap. Both the 64 MiB margin and the
+file-cache correction are checked in S-20. On `microvm` the floor stays
+at 50 ms, now measured.
 
 ## Consequences
 
 A process on `nitro` has 704 MiB of address space at the default task
 size, and the tool description says so. A job of many processes is still
-bounded by the watchdog and the task limit. Revisit if the runner grows.
+bounded by the watchdog and the task limit. Revisit if S-20 or the
+integration test's `runaway` step shows a single process killed by the
+watchdog, or if the runner grows.
