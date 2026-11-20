@@ -129,10 +129,12 @@ export interface StopFacts {
 }
 
 /**
- * Test hook of the integration test (spec §8 `failed-start`, ADR-0058). `failAtBoot` makes the runner of this one
- * sandbox exit at boot: `nitro` sets `RUNNER_FAIL_AT_BOOT=1` in the container override, `microvm` adds
- * `"failAtBoot": true` to the `run` hook payload, `agentcore` ignores it. Only the tool sets it, and only when
- * its environment has `RC_INTEG_OVERRIDES=1` and the tenant is `RC_INTEG_FAIL_START_TENANT` (src/env.ts `TEST_HOOKS`).
+ * Test hook of the integration test (spec §8 `failed-start`, ADR-0058).
+ * `failAtBoot` makes the runner of this one sandbox exit at boot: `nitro`
+ * sets the runner's fail-at-boot variable in the container override,
+ * `microvm` adds `"failAtBoot": true` to the `run` hook payload, `agentcore`
+ * gets none. Only the tool sets it, and only for the one tenant the
+ * integration stack names (src/env.ts, the integration test hooks).
  */
 export interface StartOptions {
   readonly failAtBoot?: boolean;

@@ -65,26 +65,32 @@ export const BACKEND_ENV = {
 } as const;
 
 /**
- * The integration test's hooks (spec §8 `max-life`, `failed-start`; ADR-0058, threat T-88). They are read by run-time
- * code only (the tool and the reaper) and set by nothing in the construct: the integration app sets the first two on the
- * functions of its own stack through a raw property override. Without `OVERRIDES` = `1` the reaper ignores
+ * Variables of the integration test's hooks (spec §8 `max-life`,
+ * `failed-start`; ADR-0058, threat T-88). Run-time code reads them (the tool
+ * and the reaper); nothing in the construct sets them. The integration app
+ * sets the first two on the functions of its own stack through a raw
+ * property override. Without `RC_INTEG_OVERRIDES` = `1` the reaper ignores
  * `maxLifeSeconds` in its event and the tool never passes `failAtBoot`.
  */
-export const TEST_HOOKS = {
-  /** `1` on a function: it honours the hooks below. */
-  OVERRIDES: 'RC_INTEG_OVERRIDES',
+export const TEST_HOOK_ENV = {
+  /** `1` on a function: it honours the hooks. */
+  RC_INTEG_OVERRIDES: 'RC_INTEG_OVERRIDES',
   /** The one tenant whose sandboxes the tool starts with `failAtBoot`. */
-  FAIL_START_TENANT: 'RC_INTEG_FAIL_START_TENANT',
-  /** `nitro`: container override environment variable the runner reads (runner/PROTOCOL.md "Test hook"). */
+  RC_INTEG_FAIL_START_TENANT: 'RC_INTEG_FAIL_START_TENANT',
+  /** `nitro`: container override variable the runner reads (runner/PROTOCOL.md). */
   RUNNER_FAIL_AT_BOOT: 'RUNNER_FAIL_AT_BOOT',
-  /** `microvm`: boolean field of the `run` hook payload (runner/PROTOCOL.md "Test hook"). */
+} as const;
+
+/** Payload and event fields of the hooks (runner/PROTOCOL.md; the reaper's event). */
+export const TEST_HOOK_FIELDS = {
+  /** `microvm`: boolean field of the `run` hook payload. */
   RUN_HOOK_FAIL_AT_BOOT: 'failAtBoot',
   /** The reaper event field that replaces `sandboxMaxLife` for one run, in seconds. */
   REAPER_MAX_LIFE_SECONDS: 'maxLifeSeconds',
 } as const;
 
 /** Every variable name above, for tests and for a handler that validates its environment. */
-export const ALL_ENV_NAMES: readonly string[] = [...Object.values(ENV), ...Object.values(BACKEND_ENV)];
+export const ALL_ENV_NAMES: readonly string[] = [...Object.values(ENV), ...Object.values(BACKEND_ENV), ...Object.values(TEST_HOOK_ENV)];
 
 /** Registry key and attribute names (spec §4.1). */
 export const REGISTRY = {

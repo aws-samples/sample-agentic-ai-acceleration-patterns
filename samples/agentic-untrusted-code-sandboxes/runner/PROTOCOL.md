@@ -198,12 +198,26 @@ it hands to code.
 
 ### Test hook: a failed start
 
-The integration test makes one sandbox fail to start (spec §8 `failed-start`). `nitro`: the `RunTask` container
-override `environment` also holds `RUNNER_FAIL_AT_BOOT` = `1`; the runner exits at process start. `microvm`: the `run`
-hook payload also holds `"failAtBoot": true`; the runner answers HTTP 200 `{}`, claims nothing and answers `ready`
-and every job with HTTP 503. `agentcore` has no start call and ignores the hook. The tool passes the hook only when
-its own environment has `RC_INTEG_OVERRIDES` = `1` and the tenant is the one named in `RC_INTEG_FAIL_START_TENANT`;
-nothing else sets it (ADR-0058, threat T-88).
+The integration test makes one sandbox fail to start (spec §8
+`failed-start`; ADR-0037 is the runner's side of the hook).
+
+- `nitro`: the `RunTask` container override `environment` also holds
+  `RUNNER_FAIL_AT_BOOT` = `1` (that exact value). The runner logs
+  `fail_at_boot` and exits 1 before it opens a port. The runner reads the
+  variable on `agentcore` too, but the tool sends no hook to `agentcore`,
+  which has no start call.
+- `microvm`: the `run` hook payload also holds `"failAtBoot": true` (only
+  the JSON value `true` counts). The runner reads it inside the
+  `runHookPayload` wrapper and before it checks the payload shape, so the
+  hook answers HTTP 200 `{}` with or without `nonceHash` and `tenant`; a
+  body that is not JSON still answers HTTP 400. The runner claims nothing:
+  `ready` answers HTTP 503, a job is refused with `wrong_sandbox` (HTTP
+  403), a later `run` hook answers HTTP 200 `{}`, and the process exits 1
+  about half a second after the hook.
+
+The tool passes the hook only when its own environment has
+`RC_INTEG_OVERRIDES` = `1` and the tenant is the one named in
+`RC_INTEG_FAIL_START_TENANT`; nothing else sets it (ADR-0058, threat T-88).
 
 ## Vectors
 
