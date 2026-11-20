@@ -610,9 +610,9 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
   tenant-owned and a throwaway vendor IdP, are listed in
   [`integration-test.md`](./integration-test.md#test-only-shortcuts). A
   deployment does not copy them.
-- **Scans.** The ProtoShield scan in the threat model's security review
-  covers the sample; the integration test's own roles and stacks
-  (`test/integ/`) are outside it. Rescan after your own changes.
+- **Scans.** The threat model's security review records the ProtoShield
+  scan of the sample, the integration test's stacks included, and the outcome
+  of each finding. Rescan after your own changes.
 - **The integration driver needs bash 4.4, GNU coreutils, curl 7.75, jq 1.6
   and AWS CLI v2** or later, and a unit test of the driver needs `npm ci` in
   `../control-plane`.
