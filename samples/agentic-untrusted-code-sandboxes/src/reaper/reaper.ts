@@ -117,9 +117,14 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
         // Not listed means gone only when the list worked: a failed list says nothing about the sandbox.
         const notListed = listed.has(row.backend) && summary === undefined;
         const gone = notListed || handled === undefined || await stopQuietly(backend, handleOf(handled), log);
+        // A STOPPING row is done when the sandbox has left the list, `isAlive` agrees (`agentcore` lists nothing and is always
+        // alive, so its row waits for expiry and the next call's takeover stops the session again), and the sandbox the row
+        // replaced is gone as well, so that one is never taken for an orphan.
+        const finished = row.state === 'STOPPING' && notListed && handled !== undefined
+          && !(live.get(row.backend)?.has(row.replaces ?? '') ?? false) && !(await backend.isAlive(handleOf(handled)));
         // The row stays while a stop is failing: it is what makes the next pass stop the sandbox again. A STOPPING row
         // whose sandbox has left the list has done its work (an offboard keeps it for a task that is still stopping).
-        if ((expired || (row.state === 'STOPPING' && notListed)) && gone && await registry.delete(row)) stats.deletedRows += 1;
+        if ((expired || finished) && gone && await registry.delete(row)) stats.deletedRows += 1;
         continue;
       }
 

@@ -101,6 +101,8 @@ export async function settleReplaced(args: {
   readonly row: StoredRow;
   readonly listed?: SandboxSummary;
   readonly stopAlways?: boolean;
+  /** Claim the line whatever the row's age: the caller deletes the row, so nobody else could write it later (offboard). */
+  readonly claimNow?: boolean;
   readonly backend: SandboxBackend;
   readonly registry: Registry;
   readonly log: Logger;
@@ -111,7 +113,7 @@ export async function settleReplaced(args: {
   const { row, listed, backend, log, config } = args;
   if (row.replaces === undefined || row.replaces === '' || row.replaces === row.handle) return undefined;
   if (listed?.tenantId !== undefined && listed.tenantId !== row.tenantId) return undefined;
-  const owed = row.replacesLined !== true && args.now - row.createdAt > handleLessStaleMs(config);
+  const owed = row.replacesLined !== true && (args.claimNow === true || args.now - row.createdAt > handleLessStaleMs(config));
   const claimedVersion = owed ? await args.registry.update(row, { replacesLined: true }) : undefined;
   const claimed = claimedVersion !== undefined;
   if (listed !== undefined || args.stopAlways || claimed) {

@@ -103,9 +103,18 @@ stopped. The window is one start, and the integration test's teardown has
 no calls in flight. A drain that fails leaves the sandboxes it could not end for the
 operator to remove, and its error names how many.
 
-A `STOPPING` row whose sandbox has left the list is deleted by the reaper, with no
-line; a `FAILED` row stays for its backoff. That is how a row an offboard kept for
-a task that was still stopping goes away.
+A `STOPPING` row is deleted by the reaper, with no line, when its sandbox has left
+the list, `isAlive` agrees, and the sandbox it replaced has left the list too; a
+`FAILED` row stays for its backoff. That is how a row an offboard kept for a task
+that was still stopping goes away. `agentcore` lists nothing and is always
+alive, so its `STOPPING` row waits for expiry, and the next call's takeover stops
+the session again if a stop failed.
+
+Two windows of one network call each give a replaced sandbox two lines or none:
+a Lambda killed between the line and the `replacesLined` write (two), and one
+killed inside the line write before it reaches the log, with the next takeover
+dropping `replaces` first (none). Closing them needs a two-phase write; they are
+accepted.
 
 What a backend owes this logic: `stop` does not throw for a sandbox that is
 already gone; a `nitro` task in its stopping states counts as live in `list()`

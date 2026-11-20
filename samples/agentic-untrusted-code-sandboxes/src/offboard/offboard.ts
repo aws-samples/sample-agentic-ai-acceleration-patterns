@@ -7,8 +7,9 @@
  * and no instance action, so it cannot end another tenant's sandbox by ending
  * the instance it shares. It touches only the rows `TENANT#<tenantId>` names.
  *
- * Idempotent: a repeat call finds no rows, stops nothing and returns the same
- * shape. The caller removes the tenant's `run_code` grant first, so no call
+ * Idempotent: a repeat call stops nothing new and returns the same shape. A
+ * sandbox still listed after its stop keeps a `STOPPING` row until the reaper sees
+ * it leave the list. The caller removes the tenant's `run_code` grant first, so no call
  * can start a new sandbox in between.
  */
 
@@ -17,7 +18,7 @@ import { TENANT_ID_PATTERN } from '../protocol';
 import type { ToolConfig } from '../tool/config';
 import type { Logger } from '../tool/log';
 import type { Registry, RowKey } from '../tool/registry';
-import { handleOf, stopQuietly, writeStopLine } from '../tool/sandbox';
+import { handleOf, settleReplaced, stopQuietly, writeStopLine } from '../tool/sandbox';
 
 /** Re-reads one row after losing a race with a call, before giving up on it. */
 const MAX_ATTEMPTS = 4;
@@ -53,16 +54,16 @@ export async function offboardTenant(tenantId: unknown, deps: OffboardDeps): Pro
     if (backend === undefined) continue;
     let settled = false;
     for (let attempt = 0; attempt < MAX_ATTEMPTS && !settled; attempt++) {
-      const row = await registry.get(tenantId, name);
+      let row = await registry.get(tenantId, name);
       if (row === undefined) {
         settled = true;
         break;
       }
+      // A sandbox a takeover replaced is still named on the row: stop it too. Its line is the call's that took the row over;
+      // if that call died, this offboard writes it, because it deletes the row and nobody else could.
+      const claimed = await settleReplaced({ row, stopAlways: true, claimNow: true, backend, registry, log, config, now: deps.now(), by: 'offboard' });
+      if (claimed !== undefined) row = { ...row, version: claimed, replacesLined: true };
       let held: RowKey = row;
-      // A sandbox a takeover replaced and whose stop failed is still named on the row: stop it too, with no new line.
-      if (row.replaces !== undefined && row.replaces !== '' && row.replaces !== row.handle) {
-        await stopQuietly(backend, { backend: name, tenantId, handle: row.replaces, nonce: '' }, log);
-      }
       if (row.handle !== undefined) {
         const handle = { ...row, handle: row.handle };
         if (row.state === 'READY' || row.state === 'STARTING') {
@@ -95,6 +96,8 @@ export async function offboardTenant(tenantId: unknown, deps: OffboardDeps): Pro
           }
           stopped.set(`${name}|${row.handle}`, { backend: name, handle: row.handle });
           if (await backend.isAlive(handleOf(handle))) {
+            // A FAILED row becomes STOPPING, the state the reaper deletes once the sandbox has left the list.
+            if (row.state === 'FAILED') await registry.update(row, { state: 'STOPPING' });
             settled = true;
             break;
           }

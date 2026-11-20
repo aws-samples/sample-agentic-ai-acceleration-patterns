@@ -99,7 +99,7 @@ describe('two callers on one tenant', () => {
     expect((await rowA(h))?.lastUsedAt).toBeGreaterThanOrEqual(h.clock.t);
   });
 
-  test('a boot id from ready that does not look like one is ignored; the runner\'s own is recorded', async () => {
+  test('a boot id from ready that does not look like one never reaches the row', async () => {
     const h = harness();
     const b = h.backends.get('microvm')!;
     const real = b.ready.bind(b);
@@ -107,8 +107,39 @@ describe('two callers on one tenant', () => {
       const out = await real(handle, r);
       return out.state === 'ready' ? { ...out, patch: { ...out.patch, bootId: 'not a boot id!' } } : out;
     });
+    const written: unknown[] = [];
+    h.db.hook = (op, input) => {
+      if (op === 'update') written.push(...Object.values((input.ExpressionAttributeValues ?? {}) as Record<string, unknown>));
+    };
     ok(await runCode(req(), h.deps));
-    expect((await rowA(h))?.bootId).not.toBe('not a boot id!');
+    expect(written).not.toContain('not a boot id!');
+    expect(written.length).toBeGreaterThan(0);
+  });
+
+  test('a start that throws after a takeover that replaced a sandbox leaves the row FAILED, not a handle-less STARTING row', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    const b = h.backends.get('microvm')!;
+    b.kill('fake-1');
+    b.script.failStart = new Error('x');
+    expect(await runCode(req(), h.deps)).toEqual({ error: 'sandbox_failed', retryAfterSeconds: 30 });
+    expect(await rowA(h)).toMatchObject({ state: 'FAILED' });
+    expect(h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')?.replacesLined).toBe(true);
+  });
+
+  test('an offboard that deletes the row between the stop of the old sandbox and the mark ends the call without a new sandbox', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    const b = h.backends.get('microvm')!;
+    b.kill('fake-1');
+    h.db.hook = (op, input) => {
+      if (op === 'update' && String(input.UpdateExpression).includes('#a0') && b.calls.some((c) => c === 'stop fake-1')) {
+        h.db.hook = undefined;
+        h.db.items.clear();
+      }
+    };
+    expect(await runCode(req(), h.deps)).toEqual({ error: 'sandbox_starting', retryAfterSeconds: 1 });
+    expect(starts(h)).toBe(1);
   });
 
   test('a row with a state but no version (a partial write) does not wedge the tenant', async () => {

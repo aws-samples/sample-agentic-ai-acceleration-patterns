@@ -431,6 +431,76 @@ describe('a pass', () => {
     });
   });
 
+  test('an agentcore STOPPING row is kept while its session may be alive: the next call stops it again', async () => {
+    const h = harness({ backends: ['agentcore'], defaultBackend: 'agentcore' });
+    await seedSandbox(h, 'STOPPING', {}, 'agentcore');
+    jest.spyOn(h.backends.get('agentcore')!, 'list').mockImplementation(async function* () { /* none */ });
+    jest.spyOn(h.backends.get('agentcore')!, 'isAlive').mockResolvedValue(true);
+    await reapOnce(maintenanceDeps(h));
+    expect(await row(h, A, 'agentcore')).toMatchObject({ state: 'STOPPING' });
+  });
+
+  test('a STOPPING row is kept while the sandbox it replaced is still listed, so that sandbox is not taken for an orphan', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    const old = await seedSandbox(h, 'READY', {}, 'nitro');
+    const own = await seedSandbox(h, 'STOPPING', {}, 'nitro', 'tenant-c');
+    h.backends.get('nitro')!.kill(own.handle);
+    h.db.row('TENANT#tenant-c', 'SANDBOX#nitro')!.replaces = old.handle;
+    h.db.row('TENANT#tenant-c', 'SANDBOX#nitro')!.replacesLined = true;
+    jest.spyOn(h.backends.get('nitro')!, 'stop').mockImplementation(async () => { /* still stopping */ });
+    await reapOnce(maintenanceDeps(h));
+    expect(await row(h, 'tenant-c', 'nitro')).toMatchObject({ state: 'STOPPING' });
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
+  test('a stale unmarked row is claimed, lined and, being expired, deleted in the same pass', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
+    const prev = (await h.registry.get(A, 'microvm'))!;
+    await h.registry.takeOver({
+      tenantId: A, backend: 'microvm', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 1000, replaces: old.handle,
+    }, prev);
+    h.clock.t += HOUR;
+    const summary = await reapOnce(maintenanceDeps(h));
+    expect(summary.deletedRows).toBe(1);
+    expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: old.handle, reason: 'replaced' })]);
+    expect(await row(h)).toBeUndefined();
+  });
+
+  test('two writers racing for the line: the one that loses the claim writes none', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
+    const prev = (await h.registry.get(A, 'microvm'))!;
+    await h.registry.takeOver({
+      tenantId: A, backend: 'microvm', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 8 * HOUR, replaces: old.handle,
+    }, prev);
+    h.clock.t += handleLessStaleMs(h.deps.config) + 1;
+    h.db.hook = (op) => {
+      if (op === 'update') {
+        h.db.hook = undefined;
+        const item = h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!;
+        item.version = (item.version as number) + 1;
+        item.replacesLined = true;
+      }
+    };
+    await reapOnce(maintenanceDeps(h));
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
+  test('a claim stops the replaced sandbox even when the list failed', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
+    const prev = (await h.registry.get(A, 'microvm'))!;
+    await h.registry.takeOver({
+      tenantId: A, backend: 'microvm', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 8 * HOUR, replaces: old.handle,
+    }, prev);
+    h.clock.t += handleLessStaleMs(h.deps.config) + 1;
+    jest.spyOn(h.backends.get('microvm')!, 'list').mockImplementation(() => { throw new TypeError('x'); });
+    await expect(reapOnce(maintenanceDeps(h))).rejects.toThrow(/error/);
+    expect(stops(h)).toEqual([old.handle]);
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
+  });
+
   test('a STOPPING row whose sandbox has left the list is deleted without a line, a FAILED row is kept', async () => {
     const h = harness();
     const stopping = await seedSandbox(h, 'STOPPING', {}, 'microvm', A);

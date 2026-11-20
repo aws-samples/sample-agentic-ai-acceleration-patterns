@@ -224,6 +224,59 @@ describe('the drain', () => {
     expect(h.events('sandbox_stopped')).toEqual([]);
   });
 
+  test('a sandbox a takeover replaced that stays listed after its stop is not lined as an orphan', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    const old = await seedSandbox(h, 'READY', {}, 'nitro');
+    const prev = (await h.registry.get(A, 'nitro'))!;
+    await h.registry.takeOver({
+      tenantId: A, backend: 'nitro', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 3_600_000, replaces: old.handle,
+    }, prev);
+    h.db.row('TENANT#tenant-a', 'SANDBOX#nitro')!.replacesLined = true;
+    const pending = slowStop(h, 'nitro', 20_000);
+    await drain(deps(h));
+    expect(pending.size).toBe(1);
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
+  test('a row replaced while the drain moves it, whose sandbox stays listed, is not lined as an orphan either', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    await seedSandbox(h, 'READY', {}, 'nitro');
+    h.db.hook = (op) => {
+      if (op === 'update') {
+        h.db.hook = undefined;
+        h.db.seed(rowItem({ tenantId: B, backend: 'nitro', state: 'STARTING', createdAt: h.clock.t, version: 6 }, h.clock.t));
+        h.db.items.delete('TENANT#tenant-a|SANDBOX#nitro');
+      }
+    };
+    const pending = slowStop(h, 'nitro', 20_000);
+    await drain(deps(h));
+    expect(pending.size).toBe(1);
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
+  test('a row that keeps changing, whose stop fails, is lined once a stop works and not before', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY');
+    h.db.hook = (op) => {
+      if (op === 'update') h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.version = (h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.version as number) + 1;
+    };
+    const b = h.backends.get('microvm')!;
+    const real = b.stop.bind(b);
+    let fail = true;
+    const seen: number[] = [];
+    jest.spyOn(b, 'stop').mockImplementation(async (handle, creds) => {
+      seen.push(h.events('sandbox_stopped').length);
+      if (fail) {
+        fail = false;
+        throw new Error('throttled');
+      }
+      return real(handle, creds);
+    });
+    await drain(deps(h));
+    expect(seen[0]).toBe(0);
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
+  });
+
   test('cleanup gets a deadline no later than the Lambda\'s limit', async () => {
     const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
     const cleanup = jest.fn();

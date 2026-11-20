@@ -288,7 +288,11 @@ async function startNew(call: Call, prev: RegistryRow | undefined, why: string):
     // The replaced sandbox now has its line. Until this write a reaper or drain pass that finds the row old and unmarked
     // writes the line itself, because the call may have died before it did (ADR-0034).
     const marked = await call.registry.update(row, { replacesLined: true });
-    if (marked === undefined) return { kind: 'reread' };
+    if (marked === undefined) {
+      // An offboard that deleted the row meanwhile has ended this tenant: do not start a sandbox for it.
+      if (await call.registry.get(call.tenantId, call.backendName) === undefined) return { kind: 'error', error: fail('sandbox_starting', 1) };
+      return { kind: 'reread' };
+    }
     held = { ...row, version: marked };
   }
   let started;

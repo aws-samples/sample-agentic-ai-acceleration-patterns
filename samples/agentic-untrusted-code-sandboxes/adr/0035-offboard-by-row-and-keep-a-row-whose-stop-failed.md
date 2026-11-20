@@ -43,8 +43,12 @@ It never touches another tenant's key, which `TENANT#<id>` makes exact, so
 A sandbox that is still listed after a successful stop (a `nitro` task stays listed
 while it stops) keeps its `STOPPING` row, so the reaper does not take it for an
 orphan and line it again; the reaper deletes the row once the sandbox has left
-the list. The call still returns it in `stopped`. A sandbox a takeover replaced
-and that is still named on the row is stopped too, with no line of its own.
+the list; a `FAILED` row is moved to `STOPPING` for that. The call still returns it
+in `stopped`. A sandbox a takeover replaced and that is still named on the row is
+stopped too. Its line is the one the call that took the row over writes; when that
+call died first (`replacesLined` false), the offboard claims and writes it, because it
+deletes the row and nobody else could. A call that finds its row gone after its
+takeover returns `sandbox_starting` and starts nothing.
 
 A stop that fails keeps the row, finishes the other backends, and throws, so
 the control plane's tenant delete script stops. A second call repeats the

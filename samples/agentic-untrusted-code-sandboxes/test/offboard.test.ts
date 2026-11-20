@@ -193,9 +193,47 @@ describe('offboardTenant', () => {
     const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', 'tenant-z');
     await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', A);
     h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replaces = old.handle;
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replacesLined = true;
     await offboardTenant(A, maintenanceDeps(h));
     expect(h.backends.get('microvm')!.sandboxes.get(old.handle)!.live).toBe(false);
     expect(h.events('sandbox_stopped')).toHaveLength(1);
+  });
+
+  test('when the call that replaced a sandbox died before it wrote the line, the offboard writes it, once', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', A);
+    const prev = (await h.registry.get(A, 'microvm'))!;
+    await h.registry.takeOver({
+      tenantId: A, backend: 'microvm', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 3_600_000, replaces: old.handle,
+    }, prev);
+    h.clock.t += 1000;
+    await offboardTenant(A, maintenanceDeps(h));
+    expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: old.handle, by: 'offboard', reason: 'replaced' })]);
+    expect(h.db.items.size).toBe(0);
+    await offboardTenant(A, maintenanceDeps(h));
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
+  });
+
+  test('a FAILED row whose sandbox is still listed after its stop becomes STOPPING, so the reaper deletes it once the sandbox leaves the list', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    const handle = await seedSandbox(h, 'FAILED', { retryAt: h.clock.t + 20_000 }, 'nitro');
+    const b = h.backends.get('nitro')!;
+    const realStop = b.stop.bind(b);
+    jest.spyOn(b, 'stop').mockImplementation(async () => { /* still stopping */ });
+    await offboardTenant(A, maintenanceDeps(h));
+    expect(await h.registry.get(A, 'nitro')).toMatchObject({ state: 'STOPPING' });
+    await realStop(handle);
+    await reapOnce(maintenanceDeps(h));
+    expect(await h.registry.get(A, 'nitro')).toBeUndefined();
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
+  test('a STOPPING row whose sandbox is still listed after the repeat stop is kept', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    await seedSandbox(h, 'STOPPING', {}, 'nitro');
+    jest.spyOn(h.backends.get('nitro')!, 'stop').mockImplementation(async () => { /* still stopping */ });
+    expect((await offboardTenant(A, maintenanceDeps(h))).stopped).toHaveLength(1);
+    expect(await h.registry.get(A, 'nitro')).toMatchObject({ state: 'STOPPING' });
   });
 
   test.each([undefined, null, 5, '', 'a b', 'a#b', '-a', 'a'.repeat(65), { tenantId: A }])('refuses the tenant id %p', async (bad) => {

@@ -406,6 +406,7 @@ describe('a sandbox that is not the one the call read', () => {
     const result = await runCode(req(), h.deps, { remainingMs: () => 10_000 });
     expect(result).toEqual({ error: 'sandbox_failed', retryAfterSeconds: 30 });
     expect(starts(h)).toBe(1);
+    expect(h.backends.get('microvm')!.stops.map((s) => s.handle)).toEqual(['fake-1']);
     expect(await rowA(h)).toMatchObject({ state: 'FAILED', handle: 'fake-1' });
     expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: 'fake-1', reason: 'dead' })]);
     h.clock.t += 30_000;
