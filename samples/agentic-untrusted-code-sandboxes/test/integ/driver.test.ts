@@ -197,6 +197,12 @@ describe('reading a tool answer', () => {
     expect(parseGatewayResponse(200, 'not json')).toEqual({ kind: 'unreadable' });
   });
 
+  test('the tool\'s own error field carries the code, in text or as structured content', () => {
+    const structured = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { structuredContent: { error: 'sandbox_busy', retryAfterSeconds: 2 }, isError: true } });
+    expect(parseGatewayResponse(200, structured)).toEqual({ kind: 'error', code: 'sandbox_busy', retryAfterSeconds: 2 });
+    expect(parseFunctionResponse(undefined, JSON.stringify({ error: 'sandbox_failed', retryAfterSeconds: 9 }))).toEqual({ kind: 'error', code: 'sandbox_failed', retryAfterSeconds: 9 });
+  });
+
   test('gateway: an event-stream body is read too', () => {
     expect(parseGatewayResponse(200, `event: message\ndata: ${rpc(JSON.stringify(result))}\n\n`)).toMatchObject({ kind: 'result' });
   });

@@ -56,20 +56,8 @@ export const IDENTITY_PARAMETERS = {
   appClientId: '/application-plane/shared/identity/appClientId',
 } as const;
 
-/** What the spec §3.3 lists as the construct's read-only properties; read through this view so a missing one fails at synth with its name. */
-interface SandboxesView {
-  readonly registryTable: { readonly tableName: string; readonly tableArn: string };
-  readonly inputBucket: { readonly bucketName: string };
-  readonly toolRole: iam.IRole;
-  readonly toolTenantRole: iam.IRole;
-  readonly offboardFunction: lambda.IFunction;
-  readonly runCodeFunction?: lambda.IFunction;
-  readonly backends: Readonly<Partial<Record<Backend, { outputs(): Record<string, string> }>>>;
-  grantInvokeRunCode?(grantee: iam.IGrantable): iam.Grant;
-}
-
 function required<T>(value: T | undefined, what: string): T {
-  if (value === undefined) throw new Error(`the construct has no ${what} (spec §3.3 read-only properties)`);
+  if (value === undefined) throw new Error(`the construct has no ${what}`);
   return value;
 }
 
@@ -166,20 +154,19 @@ export function createIntegApp(options: IntegAppOptions): App {
   out('AgentRuntimeArn', agent.runtimeArn);
 
   for (const name of ['run-code', 'run-code-files'] as const) {
-    const view = instances[name] as unknown as SandboxesView;
+    const view = instances[name];
     const o = (key: string, value: string): CfnOutput => out(outputKey(name, key), value);
-    o('Table', required(view.registryTable, 'registryTable').tableName);
+    o('Table', view.registryTable.tableName);
     o('TableArn', view.registryTable.tableArn);
-    o('Bucket', required(view.inputBucket, 'inputBucket').bucketName);
-    o('ToolRole', required(view.toolRole, 'toolRole').roleArn);
-    o('ToolTenantRole', required(view.toolTenantRole, 'toolTenantRole').roleArn);
-    o('OffboardFunction', required(view.offboardFunction, 'offboardFunction').functionName);
+    o('Bucket', view.inputBucket.bucketName);
+    o('ToolRole', view.toolRole.roleArn);
+    o('ToolTenantRole', view.toolTenantRole.roleArn);
+    o('OffboardFunction', view.offboardFunction.functionName);
     const reaper = findFunction(instances[name], /reaper/i, 'reaper');
     o('ReaperFunction', reaper.functionName);
     o('ToolFunction', targets[name].function.functionName);
     for (const backend of INSTANCE_BACKENDS[name]) {
-      const b = required(view.backends[backend], `backend ${backend}`);
-      for (const [key, value] of Object.entries(b.outputs())) out(backendOutputKey(name, backend, key), value);
+      for (const [key, value] of Object.entries(required(view.backends[backend], `backend ${backend}`).outputs())) out(backendOutputKey(name, backend, key), value);
     }
     // TEST ONLY: the reaper's own schedule is off, so a reaper run never lands in the middle of a timing step.
     const schedules = instances[name].node.findAll()
@@ -188,7 +175,7 @@ export function createIntegApp(options: IntegAppOptions): App {
     if (schedules.length !== 1) throw new Error(`expected one schedule rule under ${instances[name].node.path} (found ${schedules.length})`);
   }
 
-  const runCode = instances['run-code'] as unknown as SandboxesView;
+  const runCode = instances['run-code'];
   out(outputKey('run-code', 'RunCodeFunction'), required(runCode.runCodeFunction, 'runCodeFunction (standalone)').functionName);
   // TEST ONLY: the two switches of threat T-88, on the run-code instance's reaper and tool functions only.
   enableIntegOverrides(findFunction(instances['run-code'], /reaper/i, 'reaper'));
@@ -202,7 +189,7 @@ export function createIntegApp(options: IntegAppOptions): App {
 
   // The standalone step: a role with the invoke grant through the construct's own method, and one with none.
   const vendor = new iam.Role(stack, 'VendorRole', { assumedBy: new iam.AccountRootPrincipal(), description: 'integration test: holds the run-code invoke grant (grantInvokeRunCode)' });
-  required(runCode.grantInvokeRunCode, 'grantInvokeRunCode').call(instances['run-code'], vendor);
+  runCode.grantInvokeRunCode(vendor);
   out('VendorRoleArn', vendor.roleArn);
   const nogrant = new iam.Role(stack, 'NoGrantRole', { assumedBy: new iam.AccountRootPrincipal(), description: 'integration test: no lambda:InvokeFunction' });
   out('NoGrantRoleArn', nogrant.roleArn);

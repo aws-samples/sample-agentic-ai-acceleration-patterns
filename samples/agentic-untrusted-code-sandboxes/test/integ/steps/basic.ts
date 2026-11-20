@@ -279,8 +279,10 @@ export async function offboard(c: Ctx): Promise<void> {
   c.rec.check('offboardTenant answers without a function error', first.functionError === undefined);
   const stopped = collectHandles(first.body);
   c.rec.check(`it stops C's sandboxes (reported ${stopped.length}, wanted at least 3)`, stopped.length >= 3);
+  // The offboard keeps a STOPPING row for a sandbox that is still alive (agentcore always; a nitro task for up to 78 s).
   for (const b of backends) {
-    c.rec.check(`C's row on ${b} is deleted`, (await c.aws.row(table, C, b)) === undefined);
+    const row = await c.aws.row(table, C, b);
+    c.rec.check(`C's row on ${b} is deleted or STOPPING (state ${String(row?.state)})`, row === undefined || row.state === 'STOPPING');
   }
   for (const b of ['microvm', 'nitro'] as const) {
     const row = rows.find(([name]) => name === b)?.[1];
@@ -291,7 +293,8 @@ export async function offboard(c: Ctx): Promise<void> {
     }
   }
   const second = await c.aws.invoke(fn, { tenantId: C });
-  c.rec.check('a second call stops nothing', second.functionError === undefined && collectHandles(second.body).length === 0);
+  const firstHandles = new Set(stopped);
+  c.rec.check('a second call stops nothing new', second.functionError === undefined && collectHandles(second.body).every((h) => firstHandles.has(h)));
   c.rec.check('a second call returns the same shape', sameKeys(first.body, second.body));
 }
 

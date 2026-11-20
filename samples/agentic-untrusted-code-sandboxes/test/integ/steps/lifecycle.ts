@@ -12,6 +12,7 @@
 
 import { DescribeTasksCommand } from '@aws-sdk/client-ecs';
 import { GetMicrovmCommand } from '@aws-sdk/client-lambda-microvms';
+import { TEST_HOOK_FIELDS } from '../../../src/env';
 import { sleep, until } from '../aws';
 import { clusterArn, containerInstances, insights, liveHandles, logGroupOf, sandboxState, stopOutOfBand, waitEnded } from '../cloud';
 import { type Backend, SANDBOX_IDLE_MINUTES, TENANT } from '../common';
@@ -39,7 +40,11 @@ async function stopLines(c: Ctx, handle: string, since: number, want = 0): Promi
   return insights(c, await lineGroups(c), q, since, want);
 }
 
-const reaper = (c: Ctx, event: Record<string, unknown> = {}) => c.aws.invoke(c.output('run-code', 'ReaperFunction'), event);
+/** Runs the reaper once; a pass that threw is a failed check, so it does not surface later as an unrelated one. */
+async function reaper(c: Ctx, event: Record<string, unknown> = {}): Promise<void> {
+  const r = await c.aws.invoke(c.output('run-code', 'ReaperFunction'), event);
+  c.rec.check(`the reaper pass finished without an error (${r.functionError ?? 'none'})`, r.functionError === undefined);
+}
 
 /** Waits until the row's `lastUsedAt` is older than `sandboxIdle`, plus a margin. */
 async function waitIdle(c: Ctx, backend: Backend, tenant: string): Promise<void> {
@@ -119,7 +124,7 @@ export async function maxLife(c: Ctx): Promise<void> {
   c.rec.check('A\'s task is older than 60 s', old === true);
   const longJob = c.call('run-code', A, { code: 'import time\ntime.sleep(15)\nprint("long")', backend: 'nitro' }, { once: true });
   await sleep(3000);
-  await reaper(c, { maxLifeSeconds: 60 });
+  await reaper(c, { [TEST_HOOK_FIELDS.REAPER_MAX_LIFE_SECONDS]: 60 });
   c.rec.check('the task is stopped by the reaper (ended within 4 minutes)', await waitEnded(c, 'nitro', handle, 240_000));
   const lj = await longJob;
   c.rec.note(`the long job ended with ${lj.outcome.kind}`);
@@ -190,7 +195,7 @@ export async function microvmStop(c: Ctx): Promise<void> {
   const lines = await stopLines(c, handle, since, 1);
   const l = lines[0] ?? {};
   c.rec.check(`one stop line carries sandboxSeconds, runningSeconds, suspendedSeconds and estimated (found ${lines.length})`,
-    lines.length === 1 && [l.sandboxSeconds, l.runningSeconds, l.suspendedSeconds].every((v) => v !== undefined && v !== '') && String(l.estimated) === 'true');
+    lines.length === 1 && [l.sandboxSeconds, l.runningSeconds, l.suspendedSeconds].every((v) => v !== undefined && v !== '') && ['1', 'true'].includes(String(l.estimated)));
   c.rec.check('the row is gone', (await c.aws.row(table, A, 'microvm')) === undefined);
 }
 

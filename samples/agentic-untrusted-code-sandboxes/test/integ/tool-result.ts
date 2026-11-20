@@ -8,7 +8,7 @@
  *
  * The result fields are spec §5.1. A tool error carries a `code` of the §5.1
  * table; the shape that carries it differs by entry, so the reader accepts a
- * JSON object with `code` (or `errorCode`, or `error.code`), a Lambda error
+ * JSON object with `error` (the tool's own field), `code`, `errorCode` or `error.code`, a Lambda error
  * payload whose message holds the code, or plain text that names one.
  */
 
@@ -63,7 +63,7 @@ function errorFrom(v: unknown, rawText: string): Outcome {
   let retry: number | undefined;
   if (isObject(v)) {
     const nested = isObject(v.error) ? v.error : undefined;
-    for (const c of [v.code, v.errorCode, nested?.code]) if (typeof c === 'string') code = code ?? c;
+    for (const c of [v.error, v.code, v.errorCode, nested?.code]) if (typeof c === 'string') code = code ?? c;
     for (const r of [v.retryAfterSeconds, nested?.retryAfterSeconds]) if (typeof r === 'number') retry = retry ?? r;
   }
   const known = ERROR_CODES.find((c) => c === code) ?? codeIn(rawText);

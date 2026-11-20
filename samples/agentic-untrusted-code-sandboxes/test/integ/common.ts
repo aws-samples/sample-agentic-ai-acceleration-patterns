@@ -39,7 +39,6 @@ export const ENV = {
   prefix: 'INTEG_PREFIX',
   concurrency: 'INTEG_DEPLOY_CONCURRENCY',
   region: 'AWS_REGION',
-  keep: 'INTEG_KEEP',
 } as const;
 
 export const DEFAULT_PREFIX = 'UntrustedCodeSandboxesInteg';
