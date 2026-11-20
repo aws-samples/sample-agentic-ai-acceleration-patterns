@@ -309,7 +309,8 @@ describe('the registrar answer to a write', () => {
 });
 
 describe('edge log rows', () => {
-  const row = (fields: Record<string, string>): { field: string; value: string }[] => Object.entries(fields).map(([field, value]) => ({ field, value }));
+  const row = (fields: Record<string, string>): { field: string; value: string }[] =>
+    Object.entries(fields).map(([field, value]) => ({ field, value }));
 
   it('keeps the rows with a numeric status and time, and returns the ids of the others', async () => {
     const results = [
