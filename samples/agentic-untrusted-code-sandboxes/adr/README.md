@@ -43,6 +43,11 @@
 | [0037](0037-name-the-backend-in-the-runner-environment-and-pin-the-runner-images.md) | Name the backend in the runner environment, and pin the runner images | Proposed | 2026-11-20 |
 | [0038](0038-prepare-the-job-child-as-uid-1001-and-set-the-address-space-cap-last.md) | Prepare the job child as uid 1001, and set the address space cap last | Proposed | 2026-11-20 |
 | [0039](0039-read-the-open-points-of-the-runner-protocol-one-way.md) | Read the open points of the runner protocol one way | Proposed | 2026-11-20 |
+| [0040](0040-filter-microvm-calls-by-code-and-scope-iam-to-the-image.md) | Filter MicroVM calls by code and scope IAM to the image | Proposed | 2026-11-20 |
+| [0041](0041-refuse-a-microvm-start-without-the-sample-connector-twice.md) | Refuse a MicroVM start without the sample's connector, in IAM and in code | Proposed | 2026-11-20 |
+| [0042](0042-build-the-microvm-image-from-a-staged-artifact-with-platform-hooks.md) | Build the MicroVM image from a staged artifact, with the platform hooks enabled | Proposed | 2026-11-20 |
+| [0043](0043-end-every-microvm-before-the-image-and-connector-go.md) | End every MicroVM before the image and the connector go | Proposed | 2026-11-20 |
+| [0044](0044-classify-microvm-data-channel-answers-and-start-failures.md) | Classify MicroVM data-channel answers and start failures | Proposed | 2026-11-20 |
 | [0050](0050-scope-the-tool-rights-to-the-runtime-and-derive-the-session-id-in-code.md) | Scope the tool's AgentCore rights to the runtime and derive the session id in code | Proposed | 2026-11-20 |
 | [0051](0051-keep-the-runtime-role-to-logs-and-the-image-and-let-the-core-open-the-network.md) | Keep the runtime role to logs and the image, and let the core open the network | Proposed | 2026-11-20 |
 | [0052](0052-treat-the-session-as-always-ready-and-read-every-answer-as-a-result-a-refusal-or-a-dead-handle.md) | Treat the session as always ready, and read every answer as a result, a refusal or a dead handle | Proposed | 2026-11-20 |
