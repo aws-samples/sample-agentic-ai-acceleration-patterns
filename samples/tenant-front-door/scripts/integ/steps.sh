@@ -158,7 +158,7 @@ step_05() {
   multi_tenant_token MT_TOKEN
   st="$(edge GET "$APP_DOMAIN" /api/whoami MT_TOKEN)"; check "a token with tenants and no tenant_id 401" 401 "$st"
   BIG="$(head -c 8186 /dev/zero | tr '\0' a)"
-  st="$(edge GET "$APP_DOMAIN" /api/whoami BIG)"; check "Authorization one byte over 8,192 401" "401|494" "$st"
+  st="$(edge GET "$APP_DOMAIN" /api/whoami BIG)"; check "Authorization one byte over 8,192 401" 401 "$st"
   test_fn GET /api/whoami "$APP_DOMAIN" '' "$(head -c 8185 /dev/zero | tr '\0' a | jq -Rc '{authorization: ("Bearer " + .)}' | headers_file exact)"
   check "TestFunction with an Authorization of exactly 8,192 bytes: no compute-limit error" yes "$(yes_no test -z "$TF_ERR")"
   note "TestFunction compute utilisation ${TF_COMPUTE:-?}"
@@ -236,10 +236,8 @@ step_10() {
 }
 
 # -- Steps 11 to 13: the pair roles and the operator --------------------------------------------
-STEP11_T0=0
 step_11() {
   section "11. the edge account's tenant role cannot write routes; the operator's domain limits"
-  STEP11_T0="$(now_ms)"
   api_expect "UpdateDeployment b with the step 11 probe 202" 202 PUT "$(deployment_path "$TENANT_B")" \
     "$(jq -nc --arg p "$TENANT_A" '{parameters: {TFD_PROBE: "step11", TFD_PROBE_PEER: $p}}')"
   api_poll "$(deployment_path "$TENANT_B")" .deployment.status ACTIVE 1200 30 || true
@@ -444,7 +442,6 @@ step_14() {
 }
 
 # -- Steps 15 and 16 ----------------------------------------------------------------------------
-STEP_T0=0
 step_15() {
   section "15. per-tenant counts and the registrar's logs"
   sleep 60
@@ -461,15 +458,24 @@ step_15() {
       'any(.[] | fromjson? ; .["x-host-header"] == $h and (.["cs-uri-stem"] | startswith("/assets/")) and ((.["viewer-request-log-data"] // "") | ascii_downcase) == $t)' <<<"$events")"
     check "login.<appDomain> leaves the field empty" 0 "$(jq --arg h "login.${APP_DOMAIN}" \
       '[.[] | fromjson? | select(.["x-host-header"] == $h) | select((.["viewer-request-log-data"] // "-") != "-")] | length' <<<"$events")"
-    return
   fi
-  local refused
-  refused="$(as_test aws logs filter-log-events --region "$REGION" --log-group-name "$ACCESS_LOG" --start-time "$STEP11_T0" \
+  # The refused calls of steps 11 to 13 (step 11 alone in host mode: steps 12 and 13 are single-mode steps).
+  local refused last=13
+  [[ "$MODE" == host ]] && last=11
+  refused="$(as_test aws logs filter-log-events --region "$REGION" --log-group-name "$ACCESS_LOG" \
+    --start-time "${STEP_START_MS[11]}" --end-time "${STEP_END_MS[$last]}" \
     --filter-pattern '{ $.status = "403" }' --query 'events[].message' --output json 2>/dev/null | jq -r '[.[] | fromjson | .callerAccount] | unique | join(",")' || true)"
-  check "access log names the edge account on refused calls" yes "$(yes_no grep -q "$EDGE_ACCOUNT" <<<"$refused")"
-  check "access log names the control plane's account on refused calls" yes "$(yes_no grep -q "$CP_ACCOUNT" <<<"$refused")"
-  check "registrar log names the global hook role on the writes of steps 2 and 13" "[1-9][0-9]*" \
-    "$(log_count "$REGISTRAR_LOG" "$REGION" "\"${FLEET}-global-hook\"" "$RUN_T0_MS")"
+  check "access log names the edge account on the refused calls of step 11" yes "$(yes_no grep -q "$EDGE_ACCOUNT" <<<"$refused")"
+  if [[ "$MODE" == single ]]; then
+    check "access log names the control plane's account on the refused calls of step 12" yes "$(yes_no grep -q "$CP_ACCOUNT" <<<"$refused")"
+  fi
+  # The global hook role's writes, counted in each step's own window.
+  check "registrar log names the global hook role on the writes of step 2" "[1-9][0-9]*" \
+    "$(log_count "$REGISTRAR_LOG" "$REGION" "\"${FLEET}-global-hook\"" "${STEP_START_MS[02]}" "" "${STEP_END_MS[02]}")"
+  if [[ "$MODE" == single ]]; then
+    check "registrar log names the global hook role on the write of step 13" "[1-9][0-9]*" \
+      "$(log_count "$REGISTRAR_LOG" "$REGION" "\"${FLEET}-global-hook\"" "${STEP_START_MS[13]}" "" "${STEP_END_MS[13]}")"
+  fi
 }
 
 step_16() {
@@ -501,19 +507,24 @@ step_17() {
   # The per-IP rule above the per-host one for this step, then back (ADR-0021).
   ctx_set ipRequestsPer5Min "$(( TENANT_RATE * 10 ))"
   start=$(date +%s); deploy_one FrontDoor/Edge rate-up || check "edge update for the rate step" ok failed
-  note "the web ACL update took $(elapsed "$start") s; waiting 60 s for the edge"
+  local updated; updated=$(date +%s)
+  note "the web ACL update took $(( updated - start )) s; waiting 60 s for the edge"
   sleep 60
   local attempt
   for attempt in 1 2 3 4; do
-    first=""; sent=0; start=$(date +%s)
+    first=""; rule=""; sent=0; start=$(date +%s)
     while (( $(elapsed "$start") < 300 )); do
       for _ in 1 2 3 4 5 6 7 8; do edge GET "$ha" /api/whoami A_TOKEN >"$TMP/rate.$_" & done; wait
       sent=$((sent + 8))
       if grep -qx 429 "$TMP"/rate.*; then first=429; st="$(edge GET "$ha" /api/whoami A_TOKEN)"; rule="$(header x-tfd-rate-rule)"; break; fi
     done
     note "attempt ${attempt}: ${sent} requests, first 429 after $(elapsed "$start") s, rule ${rule:-none}"
-    [[ "$first" == 429 && "$rule" == host ]] && break
-    [[ "$first" != 429 ]] && break
+    if [[ "$first" == 429 && "$rule" == host ]]; then
+      note "the check passed $(elapsed "$updated") s after the stack update finished"
+      break
+    fi
+    [[ "$first" == 429 ]] || break
+    (( attempt < 4 )) || break
     note "the old per-IP value still applies: waiting out the 5-minute window"; sleep 300
   done
   check "a over its rate: 429 from the per-host rule" "429:host" "${first:-none}:${rule:-none}"
@@ -567,15 +578,15 @@ step_19() {
   section "19. an application without a front door"
   local before after definition
   definition="$(application_definition test/integ/app/plain test/integ/app/plain noop.sh noop.sh noop.sh | jq -c '.maxTenants = 1')"
-  api_expect "PutApplication demo-plain 202" 202 PUT "applications/${PLAIN_APP}" "$definition"
+  api_expect "PutApplication ${PLAIN_APP} 202" 202 PUT "applications/${PLAIN_APP}" "$definition"
   need api_poll "applications/${PLAIN_APP}" .application.status ACTIVE 300 5
   state_set PLAIN_REGISTERED yes
   before="$(entry "tenant#${TENANT_A,,}")"
   need create_deployment a "" "$PLAIN_APP"
   state_set PLAIN_CELL "$DEPLOYED_CELL"
-  check "demo-plain's cell ran front-door-post" ".*front-door-post.*" "$(last_hooks "cells/${PLAIN_CELL}" .cell)"
-  check "a's demo-plain deployment ran front-door-post" ".*front-door-post.*" "$(last_hooks "$(deployment_path "$TENANT_A" "$PLAIN_APP")" .deployment)"
-  check "no cell# for demo-plain's cell" null "$(entry "cell#${PLAIN_CELL,,}")"
+  check "${PLAIN_APP}'s cell ran front-door-post" ".*front-door-post.*" "$(last_hooks "cells/${PLAIN_CELL}" .cell)"
+  check "a's ${PLAIN_APP} deployment ran front-door-post" ".*front-door-post.*" "$(last_hooks "$(deployment_path "$TENANT_A" "$PLAIN_APP")" .deployment)"
+  check "no cell# for ${PLAIN_APP}'s cell" null "$(entry "cell#${PLAIN_CELL,,}")"
   after="$(entry "tenant#${TENANT_A,,}")"
   check "a's entry unchanged" yes "$(yes_no test "$before" = "$after")"
 }
