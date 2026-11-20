@@ -140,7 +140,7 @@ async function standaloneBuildIn(rec: Recorder, work: string): Promise<void> {
   writeFileSync(path.join(consumer, 'graph-check.js'), GRAPH_CHECK);
   const install = await run('npm', ['install', '--no-audit', '--no-fund'], 'standalone-install.log', process.env, consumer);
   rec.check(`npm install succeeds with no peer error (exit ${install.code})`, install.code === 0 && !/ERESOLVE|peer dep/i.test(install.tail));
-  const ls = await run('npm', ['ls', 'agentic-runtime-isolation', '--all', '--parseable'], 'standalone-ls.log', process.env, consumer);
+  const ls = await run('npm', ['ls', 'agentic-runtime-isolation', '--all'], 'standalone-ls.log', process.env, consumer);
   rec.check('the consumer tree has no agentic-runtime-isolation anywhere (npm ls finds none)', ls.code !== 0 && !/agentic-runtime-isolation/.test(ls.tail.replace(/npm (error|ERR!)[^\n]*/g, '')));
   const tsc = await run('npx', ['tsc', '-p', '.'], 'standalone-tsc.log', process.env, consumer);
   rec.check(`tsc compiles the consumer (exit ${tsc.code})`, tsc.code === 0);
