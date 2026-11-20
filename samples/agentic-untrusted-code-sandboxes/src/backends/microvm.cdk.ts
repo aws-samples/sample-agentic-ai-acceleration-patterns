@@ -21,19 +21,19 @@ import { BACKEND_ENV } from '../env';
 import { RUNNER_PORTS } from '../protocol';
 
 /**
- * Version of the platform base image `al2023-1` the image builds on (spec §3.5): fixed so a redeploy
- * never changes the VM base without a code change. The version is the last one run end to end
- * (the first passing integration run confirms it, and a change goes with a passing run).
+ * Version of the platform base image `al2023-1` the image builds on (spec §3.5). `3` is the input the spike
+ * stack deployed (S-1, S-4); the platform resolved it to 3.1. It pins the major version, not the minor one:
+ * `3.1` as an input is untested, so the pin stays at what ran. A change goes with a passing integration run.
  */
-export const MICROVM_BASE_IMAGE_VERSION = '3.1';
+export const MICROVM_BASE_IMAGE_VERSION = '3';
 
 /** MicroVM sizes the spikes measured (S-15: 1024 gives 3998 MiB and 2 vCPUs, 2048 gives 8016 MiB and 4). */
 const MEASURED_MEMORY_MIB: readonly number[] = [1024, 2048];
 
 const HOOK_RUN_TIMEOUT_SECONDS = 10;
-const HOOK_RESUME_TIMEOUT_SECONDS = 5;
-const HOOK_SUSPEND_TIMEOUT_SECONDS = 5;
-const HOOK_READY_TIMEOUT_SECONDS = 60;
+const HOOK_RESUME_TIMEOUT_SECONDS = 10;
+const HOOK_SUSPEND_TIMEOUT_SECONDS = 10;
+const HOOK_READY_TIMEOUT_SECONDS = 120;
 
 /** Temporary artifact directories, removed once when the process exits. */
 const stagedDirs: string[] = [];
@@ -89,13 +89,8 @@ export class MicrovmBackendResources extends Construct implements BackendConstru
       sid: 'TagConnectorInterfaces',
       actions: ['ec2:CreateTags'],
       resources: [stack.formatArn({ service: 'ec2', resource: 'network-interface', resourceName: '*' })],
-      // Tags only at creation, and only interfaces the connector service manages.
-      conditions: {
-        StringEquals: {
-          'ec2:ManagedResourceOperator': 'network-connectors.lambda.amazonaws.com',
-          'ec2:CreateAction': 'CreateNetworkInterface',
-        },
-      },
+      // Only interfaces the connector service manages: the condition the spike's operator role ran with (S-1).
+      conditions: { StringEquals: { 'ec2:ManagedResourceOperator': 'network-connectors.lambda.amazonaws.com' } },
     }));
     Validations.of(this.operatorRole).acknowledge({
       id: 'AwsSolutions::AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ec2:<AWS::Region>:<AWS::AccountId>:network-interface/*]',

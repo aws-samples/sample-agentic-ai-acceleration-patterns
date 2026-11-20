@@ -98,9 +98,9 @@ describe('microvm resources', () => {
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
       Hooks: {
         Port: 9000,
-        MicrovmImageHooks: { Ready: 'ENABLED', ReadyTimeoutInSeconds: 60 },
+        MicrovmImageHooks: { Ready: 'ENABLED', ReadyTimeoutInSeconds: 120 },
         MicrovmHooks: {
-          Run: 'ENABLED', RunTimeoutInSeconds: 10, Resume: 'ENABLED', ResumeTimeoutInSeconds: 5, Suspend: 'ENABLED', SuspendTimeoutInSeconds: 5,
+          Run: 'ENABLED', RunTimeoutInSeconds: 10, Resume: 'ENABLED', ResumeTimeoutInSeconds: 10, Suspend: 'ENABLED', SuspendTimeoutInSeconds: 10,
         },
       },
     });
@@ -166,9 +166,7 @@ describe('microvm resources', () => {
     expect(resources).not.toMatch(/PrivateSubnet|PublicSubnet/); // only the Sandbox group's subnets
     expect(st[1]).toEqual(expect.objectContaining({
       Action: 'ec2:CreateTags',
-      Condition: {
-        StringEquals: { 'ec2:ManagedResourceOperator': 'network-connectors.lambda.amazonaws.com', 'ec2:CreateAction': 'CreateNetworkInterface' },
-      },
+      Condition: { StringEquals: { 'ec2:ManagedResourceOperator': 'network-connectors.lambda.amazonaws.com' } },
     }));
   });
 
