@@ -34,8 +34,9 @@ connector. The service no longer accepts it on this role.
 ## Options considered
 
 ### Option 1: Drop the condition on the connector operator role
-Pros: the connector deploys; the trust matches the example in the service
-documentation (the service principal and `sts:AssumeRole`, nothing else). The
+Pros: the connector deploys; the trust matches the role AWS SAM generates for a
+network connector, which trusts the `lambda.amazonaws.com` service principal and
+nothing else ([SAM generated resources](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-specification-generated-resources-networkconnector.html)). The
 role can still only create network interfaces in the sandbox subnets with the
 connector security group, and tag interfaces the connector service manages.
 Cons: the trust no longer limits the caller to this account. The service
@@ -52,9 +53,9 @@ documented (ADR-0042), and it is untested, so a guess could fail the same way.
 
 ## Decision
 
-Option 1, for the connector operator role only. The image build role keeps the
-condition of ADR-0042; this ADR changes it only if a deployment shows the
-service refuses it too. A unit test pins the trust of the operator role to the
+The decision is Option 1, for the connector operator role only. The image build role keeps the
+condition of ADR-0042: a `microvm`-only deployment with this change built the image with it
+in about 2 minutes. A unit test pins the trust of the operator role to the
 service principal and `sts:AssumeRole`.
 
 ## Consequences
@@ -62,5 +63,7 @@ service principal and `sts:AssumeRole`.
 The connector operator role is trusted by the Lambda service for any caller
 that can pass it; the permission policy (ENI creation in the named subnets and
 security group, tagging of managed interfaces) and the `iam:PassRole` boundary
-are the controls. Revisit when the service documents a source ARN or accepts
+are the controls. A principal in this account with broad `iam:PassRole` could
+attach the role to another connector; its rights stay limited to network
+interfaces. Revisit when the service documents a source ARN or accepts
 `aws:SourceAccount` again.

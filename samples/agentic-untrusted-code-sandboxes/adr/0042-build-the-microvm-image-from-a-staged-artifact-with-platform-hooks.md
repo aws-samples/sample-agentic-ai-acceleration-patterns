@@ -77,3 +77,5 @@ interfaces it tags; add those conditions (the AWS managed operator policy has
 them) if a deploy shows the service accepts them. An image
 update takes about 150 s (S-19). The artifact is staged in a temporary
 directory, so asset staging cannot be disabled (`--no-staging`); synth refuses.
+
+Note 2026-11-20: amended by ADR-0068. The connector operator role trusts `lambda.amazonaws.com` with no `aws:SourceAccount` condition, because the connector service refuses a role whose trust carries it. The image build role keeps the condition.
