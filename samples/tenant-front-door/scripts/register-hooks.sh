@@ -10,10 +10,10 @@
 #
 # Both hooks run hooks/route-hook.sh from this repository, pinned to one
 # full commit SHA (or, from an S3 zip, to one object version), and serve
-# every front door on the control plane. A hook
-# already registered with the same definition is left as it is, so a rerun
-# changes nothing and does not raise the hook's revision. A changed
-# definition reaches only operations the control plane accepts afterwards.
+# every front door on the control plane. A hook already registered with
+# the same definition is left as it is, so a rerun changes nothing and
+# does not raise the hook's revision. A changed definition reaches only
+# operations the control plane accepts afterwards.
 #
 # Inputs (environment):
 #   CONTROL_PLANE_URL      the control plane API's base URL, https

@@ -531,6 +531,17 @@ state_load; echo "cell:$CELL_A path-kept:$([[ "$PATH" != /nowhere ]] && echo yes
     expect(r.stdout).toContain('cell:c1 path-kept:yes');
   });
 
+  it('ti_tenant: the CreateTenant answer, which holds a temporary password, is not left for a failed check to print', () => {
+    const r = lib(`IDENTITY_REGION=eu-central-1; own_creds() { :; }
+signed() { echo '{"admin":{"user":{"username":"admin-a"},"temporaryPassword":"Temp-Secret-1"}}' >"$BODY"; echo 201; }
+ti_tenant https://id.example.com/ T1 tenant-a
+echo "admin:$TI_ADMIN"
+check "a later check" 200 500`);
+    expect(r.stdout).toContain('admin:admin-a');
+    expect(r.stdout).toContain('FAIL a later check: want 200, got 500 (body: )');
+    expect(r.stdout).not.toContain('Temp-Secret-1');
+  });
+
   it('http_status: a curl that fails prints 000 once, whatever its -w wrote', () => {
     const r = lib(`curl() { printf 000; return 7; }
 echo "[$(http_status -s -o /dev/null -w '%{http_code}' https://cell.example.com/)]"

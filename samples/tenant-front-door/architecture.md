@@ -57,10 +57,10 @@ route.
 ## 3. Components
 
 The [components diagram](diagrams/tenant-front-door.components.drawio.svg)
-shows the parts and the pattern each carries, and the
-[architecture diagram](diagrams/tenant-front-door.drawio.svg) shows the AWS
-resources, the request path and the route registration path. Both are
-embedded in the README's [Architecture](README.md#architecture) section.
+shows the parts and the pattern each carries, and the [architecture
+diagram](diagrams/tenant-front-door.drawio.svg) shows the AWS resources,
+the request path and the route registration path. Both are embedded in the
+README's [Architecture](README.md#architecture) section.
 
 Four stacks, deployed in this order (ADR-0010, ADR-0027):
 

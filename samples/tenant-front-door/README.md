@@ -440,14 +440,14 @@ tenant gives its dedicated domain.
 ## Costs
 
 Deploying creates billable resources in two accounts. The ones that grow
-with use are CloudFront requests and data transfer, AWS WAF web ACL rules and
-requests, CloudWatch Logs delivery and storage, API Gateway and Lambda
+with use are CloudFront requests and data transfer, AWS WAF web ACL rules
+and requests, CloudWatch Logs delivery and storage, API Gateway and Lambda
 requests for the registrar, and, with `dedicatedDomains`, the sweeper's
 Lambda, DynamoDB and SQS use, EventBridge Scheduler invocations and one ACM
-certificate per dedicated domain. The
-control plane's cell builds are the control plane's cost. The sample sets
-no prices: see the pricing pages of CloudFront (multi-tenant distributions),
-AWS WAF and CloudWatch for current figures.
+certificate per dedicated domain. The control plane's cell builds are the
+control plane's cost. The sample sets no prices: see the pricing pages of
+CloudFront (multi-tenant distributions), AWS WAF and CloudWatch for current
+figures.
 
 Per-tenant attribution: a dedicated domain's certificate and distribution
 tenant carry the cost allocation tag `TenantId`, which you activate. Pooled

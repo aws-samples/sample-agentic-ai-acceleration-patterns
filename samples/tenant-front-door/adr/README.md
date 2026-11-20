@@ -2,13 +2,12 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Architecture decision records
 
-One file per decision, in the template of
-[`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md).
-Every record is Accepted except ADR-0013, which ADR-0017 supersedes.
-ADR-0017 rests on the control plane's
+One file per decision, in the template of [`docs/sample-standard.md`
+§2.2](../../../docs/sample-standard.md). Every record is Accepted except
+ADR-0013, which ADR-0017 supersedes. ADR-0017 rests on the control plane's
 global hooks (control-plane ADR-0044 and ADR-0045), and its notes on
-ADR-0002, 0003, 0012, 0014 and 0015 are in effect. The spike results
-are in [spikes](../design/spikes.md).
+ADR-0002, 0003, 0012, 0014 and 0015 are in effect. The spike results are
+in [spikes](../design/spikes.md).
 
 | Number | Title | Status | Date |
 |---|---|---|---|

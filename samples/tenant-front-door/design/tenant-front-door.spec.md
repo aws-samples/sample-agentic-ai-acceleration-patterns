@@ -509,21 +509,22 @@ given below):
    Each read is one unit with a time budget of 10 s, which covers its
    Secrets Manager read, its token request and the GET. Each call has a
    limit of 3 s, or what is left of the budget when that is less. A read
-   whose call times out, fails on the network or gets a 5xx is tried once
-   more from the start of the unit after a pause of 100 to 400 ms (random),
-   and only when at least 1.4 s of the budget is left when the call fails
-   (the longest pause plus 1 s). A 401 or 403 from the
-   control plane drops the cached token and repeats the GET once with a new
-   one, with no pause. A 404 `ResourceNotFoundError` is a missing record and
-   is not repeated, nor is any other 4xx, a body that is not JSON, or a
-   record that fails the shape checks. A read that still gives no usable
-   answer is 503, and the write is never made on an unchecked read. The
-   deployment and tenant reads of a tenant put run at once, so the reads
-   of a call end within 10 s, which leaves 19 s of API Gateway's 29 s and
-   20 s of the function's 30 s for the store write (step 5). The registrar
-   logs each failed call with its name (`GetSecretValue`, `FetchReaderToken`,
-   `GetCell`, `GetDeployment` or `GetTenant`) and the error class or HTTP
-   status, never a token, a secret or a URL.
+   whose call times out, fails on the network or gets a 5xx is tried
+   once more from the start of the unit after a pause of 100 to 400 ms
+   (random), and only when at least 1.4 s of the budget is left when the
+   call fails (the longest pause plus 1 s). A 401 or 403 from the
+   control plane drops the cached token and repeats the GET once with a
+   new one, with no pause. A 404 `ResourceNotFoundError` is a missing
+   record and is not repeated, nor is any other 4xx, a body that is not
+   JSON, or a record that fails the shape checks. A read that still
+   gives no usable answer is 503, and the write is never made on an
+   unchecked read. The deployment and tenant reads of a tenant put run
+   at once, so the reads of a call end within 10 s, which leaves 19 s of
+   API Gateway's 29 s and 20 s of the function's 30 s for the store
+   write (step 5). The registrar logs each failed call with its name
+   (`GetSecretValue`, `FetchReaderToken`, `GetCell`, `GetDeployment` or
+   `GetTenant`) and the error class or HTTP status, never a token, a
+   secret or a URL.
 3. Refuse with 403 when the record is missing or belongs to another
    application. A put from the global hook role also needs the record in
    `CREATING` or `UPDATING`, the statuses in which the control plane runs
@@ -1790,36 +1791,33 @@ phases (§3.4 steps 3 to 5). The domain is never a sign-in target: its
 users sign in on `signInHost` (§3.5).
 
 Errors: 400 for a malformed id or domain, an `apiDomain` that is not a
-Lambda function URL host in the control plane's Region, a `customDomain` that is not one host name of at most 64
-characters without a wildcard, or that equals `appDomain` or ends in
-`.<appDomain>`, and any `customDomain` while `dedicatedDomains` is off;
-403
-from API Gateway for any principal the resource policy does not admit,
-and from the registrar when the placement record is missing or belongs
-to another application (the message names neither the real account nor
-the real cell), or a role other than the edge operator role sends
-`customDomain`; 409 for a global hook role write whose record is not in
-the status of its operation (§3.4), a global hook role `PutCellRoute`
-that would change a cell's origin, a missing cell route, an operator
-domain change with no tenant route or for another
-deployment (`dt`), a `customDomain` whose `host#` entry names another
-tenant, one another tenant holds pending (a registrar certificate for
-it tagged with that tenant), one CloudFront already serves (`CNAMEAlreadyExists`), or a
-distribution tenant or certificate tagged for another tenant (the
-message names no tenant); 422 when the dedicated domain's certificate
-failed validation, on any repeat within ACM's hour of its request, for
-which the sweeper keeps the failed certificate (a
-domain challenge never fails: it expires and is issued again); 507
-when a write would exceed the route table's 5 MB (ADR-0012); 429 with
-`reason: certificate-quota` when ACM refuses a certificate request for
-its quota (§4.1), which lasts until the deployer raises the quota or
-certificates are deleted, so the operator does not repeat the call until
-then; 503 when
-the control plane cannot be read, after the one retry of §3.4 step 2, or
-returns a `createdAt` that does not
-parse (the write is refused, never made unchecked), or when the store's
-ETag still conflicts after five
-attempts (§3.4 step 5).
+Lambda function URL host in the control plane's Region, a `customDomain`
+that is not one host name of at most 64 characters without a wildcard,
+or that equals `appDomain` or ends in `.<appDomain>`, and any
+`customDomain` while `dedicatedDomains` is off; 403 from API Gateway for
+any principal the resource policy does not admit, and from the registrar
+when the placement record is missing or belongs to another application
+(the message names neither the real account nor the real cell), or a
+role other than the edge operator role sends `customDomain`; 409 for a
+global hook role write whose record is not in the status of its
+operation (§3.4), a global hook role `PutCellRoute` that would change a
+cell's origin, a missing cell route, an operator domain change with no
+tenant route or for another deployment (`dt`), a `customDomain` whose
+`host#` entry names another tenant, one another tenant holds pending (a
+registrar certificate for it tagged with that tenant), one CloudFront
+already serves (`CNAMEAlreadyExists`), or a distribution tenant or
+certificate tagged for another tenant (the message names no tenant); 422
+when the dedicated domain's certificate failed validation, on any repeat
+within ACM's hour of its request, for which the sweeper keeps the failed
+certificate (a domain challenge never fails: it expires and is issued
+again); 507 when a write would exceed the route table's 5 MB (ADR-0012);
+429 with `reason: certificate-quota` when ACM refuses a certificate
+request for its quota (§4.1), which lasts until the deployer raises the
+quota or certificates are deleted, so the operator does not repeat the
+call until then; 503 when the control plane cannot be read, after the
+one retry of §3.4 step 2, or returns a `createdAt` that does not parse
+(the write is refused, never made unchecked), or when the store's ETag
+still conflicts after five attempts (§3.4 step 5).
 
 Every error body the registrar function writes is `{message, reason?}`.
 `reason` is set only where a status alone does not tell the caller what
@@ -2563,38 +2561,36 @@ The test's other shortcuts, none of them taken by the sample's own code:
 
 
 Expected time, from S-1: deploying the edge stacks and the distribution
-takes about 481 s and destroying them about 312 s, before the control plane
-and the cells the test also deploys, and each cell or deployment event
-runs one route hook build. The route changes of steps 2, 13, 16 and 20
-to 22, and the deletes of step 24, go through the route hook, which
-waits its 45 s bound (§4.2) before the operation ends. Step 20 adds one
-probe build per event, and step 22 waits through two skipped delete
-hooks, each three builds of at least one 60 s poll with 60 s and 120 s
-between them, so at least 6 minutes each.
-The step 2 fixture and the suspensions of steps 13 and 22 are writes
-the test makes without the hook, so after each the test waits 90 s for
-propagation (§4.2) before its next call. The rotation check after
-the list is a separate run with its own time. The dedicated-domain
-checks (steps 3, 11 and 18) use a fixture `host#` entry and
-`cloudfront:TestFunction`, so they deploy no distribution tenant and no
-certificate. Step 14 runs the domain challenge against the real
-`TFD_DEDICATED_DOMAIN`: it requests one certificate, creates no
-distribution tenant, and adds three waits of a little over 60 s for the
-TXT record's TTL, two daily sweeper runs started by hand, each
-followed by a wait for its page (at most 15 s for one entry), two stack
-updates of the main stack and a wait of up to 15 minutes for the
-sweeper to delete the certificate. Step 23 adds the stand-in's deploy
-and destroy (67 s and 33 s in S-5), two 90 s waits around the
-suspended-tenant check, and a streamed call of a few seconds. The
-control plane the test deploys has its own deploy and
-destroy time, which the test reports with the rest. In all, an estimate:
-about 30 minutes of deploys, about three
-hours of steps in `single` mode (each control-plane operation runs its
-scripts and hook builds one at a time, and steps 14 and 22 take about 40
-minutes each) and about 50 minutes of teardown, so about four and a half
-hours; a `host` run, which skips steps 5 to 10, 12 to 14, 16 and 19 to 22,
-about two and a half. The credentials the driver starts with must last
-the whole run.
+takes about 481 s and destroying them about 312 s, before the control
+plane and the cells the test also deploys, and each cell or deployment
+event runs one route hook build. The route changes of steps 2, 13, 16
+and 20 to 22, and the deletes of step 24, go through the route hook,
+which waits its 45 s bound (§4.2) before the operation ends. Step 20
+adds one probe build per event, and step 22 waits through two skipped
+delete hooks, each three builds of at least one 60 s poll with 60 s and
+120 s between them, so at least 6 minutes each. The step 2 fixture and
+the suspensions of steps 13 and 22 are writes the test makes without the
+hook, so after each the test waits 90 s for propagation (§4.2) before
+its next call. The rotation check after the list is a separate run with
+its own time. The dedicated-domain checks (steps 3, 11 and 18) use a
+fixture `host#` entry and `cloudfront:TestFunction`, so they deploy no
+distribution tenant and no certificate. Step 14 runs the domain
+challenge against the real `TFD_DEDICATED_DOMAIN`: it requests one
+certificate, creates no distribution tenant, and adds three waits of a
+little over 60 s for the TXT record's TTL, two daily sweeper runs
+started by hand, each followed by a wait for its page (at most 15 s for
+one entry), two stack updates of the main stack and a wait of up to 15
+minutes for the sweeper to delete the certificate. Step 23 adds the
+stand-in's deploy and destroy (67 s and 33 s in S-5), two 90 s waits
+around the suspended-tenant check, and a streamed call of a few seconds.
+The control plane the test deploys has its own deploy and destroy time,
+which the test reports with the rest. In all, an estimate: about 30
+minutes of deploys, about three hours of steps in `single` mode (each
+control-plane operation runs its scripts and hook builds one at a time,
+and steps 14 and 22 take about 40 minutes each) and about 50 minutes of
+teardown, so about four and a half hours; a `host` run, which skips
+steps 5 to 10, 12 to 14, 16 and 19 to 22, about two and a half. The
+credentials the driver starts with must last the whole run.
 
 1. Deploy the control plane in the control plane's account, which
    installs that account's role pair, and deploy the account role pair in
@@ -2872,13 +2868,13 @@ the whole run.
     because cell parameters are empty at a cell's birth
     (control-plane R-34).
 22. A skipped delete hook, and a suspension across a re-created
-    deployment. Create tenant `c` in cell A and suspend it;
-    after 90 s its token gets 503. The test points the front door hook
-    parameter's `registrarUrl` at a path the registrar does not serve,
-    which API Gateway refuses with 403, and deletes `c`'s deployment:
-    `front-door-pre` fails three times and is skipped, the control
-    plane counts the skip, the deployment is deleted, and `c`'s entry
-    stays `suspended`. The test restores the parameter and creates `c`'s
+    deployment. Create tenant `c` in cell A and suspend it; after 90 s
+    its token gets 503. The test points the front door hook parameter's
+    `registrarUrl` at a path the registrar does not serve, which API
+    Gateway refuses with 403, and deletes `c`'s deployment:
+    `front-door-pre` fails three times and is skipped, the control plane
+    counts the skip, the deployment is deleted, and `c`'s entry stays
+    `suspended`. The test restores the parameter and creates `c`'s
     deployment again: its `createdAt` differs from the entry's `dt`, so
     `front-door-post` replaces the entry and keeps `suspended`, and
     `c`'s token still gets 503. The edge operator role resumes `c`
@@ -2887,10 +2883,10 @@ the whole run.
     deletes `c`'s deployment (`front-door-pre` removes the entry, and
     after 90 s `c`'s token gets 403) and creates it again: the new entry
     is `active`, and `c`'s token is served by cell A (AR-31). The test
-    breaks the parameter again, deletes `c`'s
-    deployment, which skips the hook again, and restores the parameter;
-    the edge operator role's `DeleteTenantRoute` for `c` answers 200, and
-    after 90 s `c`'s token gets 403.
+    breaks the parameter again, deletes `c`'s deployment, which skips
+    the hook again, and restores the parameter; the edge operator role's
+    `DeleteTenantRoute` for `c` answers 200, and after 90 s `c`'s token
+    gets 403.
 23. `/agents/*` on the `tenant-only` distribution (ADR-0019), in
     `test/integ.single.ts` and, for the rewrite and the 404 cases,
     again in `test/integ.host.ts`. S-5 ran on a standard distribution,

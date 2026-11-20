@@ -4,8 +4,7 @@
 
 This file describes the sample's integration test, as the
 [sample standard §5.3](../../docs/sample-standard.md#53-integration-test-document-integration-testmd)
-lays it out. The steps are those of
-[spec §10](./design/tenant-front-door.spec.md#10-integration-test-outline).
+lays it out. The steps are those of [spec §10](./design/tenant-front-door.spec.md#10-integration-test-outline).
 
 ## What it is
 
@@ -139,13 +138,12 @@ unit tests.
 ## Runtime and cost
 
 About four and a half hours for a `single` run and two and a half for a
-`host` run (estimates): about 30 minutes of deploys,
-the control plane's script and hook builds one at a time, and about 50
-minutes of teardown. The driver prints each stack's deploy and destroy
-time at the end (`.integ/<run id>/times.tsv`). The cost is a few dollars:
-CloudFront, a few dozen short CodeBuild builds, one ACM certificate
-request, Lambda, DynamoDB and API Gateway requests, all removed at the
-end.
+`host` run (estimates): about 30 minutes of deploys, the control plane's
+script and hook builds one at a time, and about 50 minutes of teardown.
+The driver prints each stack's deploy and destroy time at the end
+(`.integ/<run id>/times.tsv`). The cost is a few dollars: CloudFront, a
+few dozen short CodeBuild builds, one ACM certificate request, Lambda,
+DynamoDB and API Gateway requests, all removed at the end.
 
 Last green run: none yet.
 
