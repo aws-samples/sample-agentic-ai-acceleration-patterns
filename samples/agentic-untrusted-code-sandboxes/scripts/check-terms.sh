@@ -19,6 +19,10 @@ banned='\bsaas\b|application provider|end[- ]users?\b|\bcustomers?\b|\b[0-9]{12}
 # their shell profile), and the check adds them.
 if [[ -n "${CHECK_TERMS_PRIVATE:-}" ]]; then
   banned="${banned}|${CHECK_TERMS_PRIVATE}"
+elif [[ "${CHECK_TERMS_REQUIRE_PRIVATE:-}" == "1" ]]; then
+  # A pipeline that must prove the tree holds no alias sets this, so a missing pattern fails the check.
+  echo "check-terms: CHECK_TERMS_REQUIRE_PRIVATE=1 but CHECK_TERMS_PRIVATE is not set, so account aliases were not checked" >&2
+  exit 2
 fi
 allowed='customer ENI|customer-owned'
 

@@ -12,16 +12,23 @@
  * escape hatch (a raw property override on the function), and nowhere in the
  * construct: no prop exposes it. This module is imported by the integration
  * app only, and refuses to run in any other app: the app it is called from
- * must carry the context key `rcIntegTest`, which only `createIntegApp` sets.
+ * must have been registered by `markIntegApp`, which only `createIntegApp`
+ * calls. The mark lives in this module, so no context value or command-line
+ * flag can set it.
  */
 
+import type { App } from 'aws-cdk-lib';
 import { CfnFunction, type Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { TEST_HOOK_ENV } from '../../src/env';
 
 export const INTEG_OVERRIDES_ENV = TEST_HOOK_ENV.RC_INTEG_OVERRIDES;
 export const INTEG_FAIL_START_TENANT_ENV = TEST_HOOK_ENV.RC_INTEG_FAIL_START_TENANT;
-/** The context key that marks an app as the integration app. */
-export const INTEG_CONTEXT_KEY = 'rcIntegTest';
+const integApps = new WeakSet<object>();
+
+/** Registers the app as the integration app. Only `createIntegApp` calls it. */
+export function markIntegApp(app: App): void {
+  integApps.add(app);
+}
 
 export interface IntegOverrideOptions {
   /** The tenant whose sandboxes the tool starts with the exit-at-boot flag (tool functions only). */
@@ -46,8 +53,8 @@ export function overrideEnvironment(options: IntegOverrideOptions = {}): Record<
  * a deployment fails at synth instead of weakening it.
  */
 export function enableIntegOverrides(fn: LambdaFunction, options: IntegOverrideOptions = {}): void {
-  if (fn.node.tryGetContext(INTEG_CONTEXT_KEY) !== true) {
-    throw new Error(`${INTEG_OVERRIDES_ENV} may be set only in the integration app (context ${INTEG_CONTEXT_KEY}=true)`);
+  if (!integApps.has(fn.node.root)) {
+    throw new Error(`${INTEG_OVERRIDES_ENV} may be set only in the integration app`);
   }
   const cfn = fn.node.defaultChild;
   if (!(cfn instanceof CfnFunction)) throw new Error(`${fn.node.path} has no CfnFunction to override`);

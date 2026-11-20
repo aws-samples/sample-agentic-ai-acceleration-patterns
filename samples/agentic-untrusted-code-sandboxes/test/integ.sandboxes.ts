@@ -46,7 +46,7 @@ import { type Construct } from 'constructs';
 import { type Backend, INSTANCE_BACKENDS, type Instance, RUN_TIMEOUT_SECONDS, SANDBOX_IDLE_MINUTES, stackPrefix, START_WAIT_SECONDS, TENANT, TOOL_TARGET, TOOLS_GATEWAY } from './integ/common';
 import { backendOutputKey, outputKey } from './integ/ctx';
 import { INTEG_MINT_ENV } from './integ/mint.function';
-import { INTEG_CONTEXT_KEY, enableIntegOverrides } from './integ/overrides';
+import { enableIntegOverrides, markIntegApp } from './integ/overrides';
 import { RunCodeToolTarget } from '../src/gateway';
 import { UntrustedCodeSandboxes } from '../src/untrusted-code-sandboxes.cdk';
 
@@ -86,7 +86,8 @@ export interface IntegAppOptions {
 }
 
 export function createIntegApp(options: IntegAppOptions): App {
-  const app = new App({ context: { [INTEG_CONTEXT_KEY]: true, ...options.context } });
+  const app = new App({ context: { ...options.context } });
+  markIntegApp(app);
   const prefix = options.prefix ?? stackPrefix();
   const account = process.env.CDK_DEFAULT_ACCOUNT;
   const region = process.env.CDK_DEFAULT_REGION;

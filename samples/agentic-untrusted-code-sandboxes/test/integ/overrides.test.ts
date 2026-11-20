@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { App, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import { INTEG_CONTEXT_KEY, INTEG_FAIL_START_TENANT_ENV, INTEG_OVERRIDES_ENV, enableIntegOverrides, overrideEnvironment } from './overrides';
+import { INTEG_FAIL_START_TENANT_ENV, INTEG_OVERRIDES_ENV, enableIntegOverrides, markIntegApp, overrideEnvironment } from './overrides';
 import { DemoStack } from '../../src/demo.cdk';
 import { resolveProps } from '../../src/props';
 
@@ -43,11 +43,13 @@ describe('RC_INTEG_OVERRIDES (T-88, M-60)', () => {
 
   test('it refuses to run in an app that is not the integration app', () => {
     expect(() => enableIntegOverrides(fn(new App()))).toThrow(/integration app/);
-    expect(() => enableIntegOverrides(fn(new App({ context: { [INTEG_CONTEXT_KEY]: false } })))).toThrow(/integration app/);
+    // A context value, as `cdk -c rcIntegTest=true` would pass, marks nothing.
+    expect(() => enableIntegOverrides(fn(new App({ context: { rcIntegTest: true } })))).toThrow(/integration app/);
   });
 
   test('in the integration app it sets the variable on that function only', () => {
-    const app = new App({ context: { [INTEG_CONTEXT_KEY]: true } });
+    const app = new App();
+    markIntegApp(app);
     const f = fn(app);
     const stack = Stack.of(f);
     const other = new lambda.Function(stack, 'Other', { runtime: lambda.Runtime.NODEJS_22_X, handler: 'index.handler', code: lambda.Code.fromInline('exports.handler = async () => 1') });
@@ -60,12 +62,14 @@ describe('RC_INTEG_OVERRIDES (T-88, M-60)', () => {
   });
 
   test('a normal deployment has no function with the variable, with the context key set or not', () => {
-    for (const context of [{}, { [INTEG_CONTEXT_KEY]: true }]) {
+    for (const context of [{}, { rcIntegTest: true }]) {
       const app = new App({ context });
       const stack = new DemoStack(app, 'Demo', { backends: ['microvm', 'nitro', 'agentcore'], standalone: true });
       const names = functionEnvironments(stack).flat();
       expect(names.filter((n) => n.startsWith('RC_INTEG'))).toEqual([]);
       expect(JSON.stringify(Template.fromStack(stack).toJSON())).not.toContain('RC_INTEG');
+      // M-60: no token mint, so nothing in a construct-only app may sign
+      expect(JSON.stringify(Template.fromStack(stack).toJSON())).not.toMatch(/kms:(Sign|\*)/);
     }
   });
 
