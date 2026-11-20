@@ -1,0 +1,6 @@
+{
+  "name": "tenant-front-door",
+  "needs": [],
+  "scenarios": ["PS-7", "route-write", "router-load", "edge-refusals"],
+  "quotas": ["lambda-concurrency"]
+}

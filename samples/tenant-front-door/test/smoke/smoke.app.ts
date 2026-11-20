@@ -29,6 +29,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { DemoCellApi } from '../../src/demo-cell/demo-cell-api.cdk';
@@ -38,12 +39,18 @@ const account = process.env.CDK_DEFAULT_ACCOUNT;
 const region = process.env.CDK_DEFAULT_REGION ?? 'eu-central-1';
 const env = { account, region };
 
+/**
+ * Stack name prefix and `fleet`. The smoke test uses the defaults; the stress
+ * slice passes `smokePrefix` and `smokeFleet` so that its stacks and its
+ * `<fleet>-global-hook` role name are its own.
+ */
+const PREFIX = (app.node.tryGetContext('smokePrefix') as string | undefined) ?? 'TfdSmoke';
 /** The smoke's `fleet` input: the registrar admits `<fleet>-global-hook` of the control plane's account. */
-export const SMOKE_FLEET = 'tfd-smoke';
+export const SMOKE_FLEET = (app.node.tryGetContext('smokeFleet') as string | undefined) ?? 'tfd-smoke';
 
 // --- Support: the two callers of the registrar ------------------------------
 
-const support = new Stack(app, 'TfdSmoke-support', { env, description: 'tenant-front-door smoke test: edge operator and stand-in global hook roles' });
+const support = new Stack(app, `${PREFIX}-support`, { env, description: 'tenant-front-door smoke test: edge operator and stand-in global hook roles' });
 const registrarRoutes = (...routes: string[]) => routes.map((route) => support.formatArn({ service: 'execute-api', resource: route }));
 // Both are assumed by the smoke driver's own identity in this account. The
 // registrar's resource policy is the gate; these policies name only the
@@ -70,7 +77,7 @@ new CfnOutput(support, 'GlobalHookRoleArn', { value: hook.roleArn });
 
 // --- Stand-in control plane ---------------------------------------------------
 
-const cp = new Stack(app, 'TfdSmoke-control-plane', { env, description: 'tenant-front-door smoke test: stand-in control plane for the registrar reads' });
+const cp = new Stack(app, `${PREFIX}-control-plane`, { env, description: 'tenant-front-door smoke test: stand-in control plane for the registrar reads' });
 const fixtures = new dynamodb.TableV2(cp, 'Fixtures', {
   partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
   billing: dynamodb.Billing.onDemand(),
@@ -78,6 +85,8 @@ const fixtures = new dynamodb.TableV2(cp, 'Fixtures', {
   removalPolicy: RemovalPolicy.DESTROY, // test fixture
 });
 const reads = new NodejsFunction(cp, 'Reads', {
+  // An explicit log group, so a stack delete removes it (Lambda would create one that no stack owns).
+  logGroup: new logs.LogGroup(cp, 'ReadsLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: RemovalPolicy.DESTROY }),
   entry: path.join(__dirname, 'control-plane.function.ts'),
   handler: 'handler',
   runtime: lambda.Runtime.NODEJS_24_X,
@@ -110,6 +119,8 @@ const readerSecret = new secretsmanager.Secret(cp, 'ReaderSecret', {
 
 const api = new apigateway.RestApi(cp, 'Api', {
   description: 'tenant-front-door smoke test: stand-in control plane reads (Cognito client-credentials token)',
+  // No account-wide CloudWatch Logs role: the stand-in logs nothing, and CDK retains that role after a stack delete.
+  cloudWatchRole: false,
   deployOptions: { stageName: 'prod' },
 });
 const authorizer = new apigateway.CognitoUserPoolsAuthorizer(cp, 'Authorizer', { cognitoUserPools: [pool] });
@@ -130,7 +141,7 @@ new CfnOutput(cp, 'FixtureTable', { value: fixtures.tableName });
 
 const distributionArn = app.node.tryGetContext('distributionArn') as string | undefined;
 if (distributionArn !== undefined) {
-  const cell = new Stack(app, 'TfdSmoke-cell', { env, description: 'tenant-front-door smoke test: one demo cell API' });
+  const cell = new Stack(app, `${PREFIX}-cell`, { env, description: 'tenant-front-door smoke test: one demo cell API' });
   const issuer = required('cellIssuer');
   const cellApi = new DemoCellApi(cell, 'CellApi', {
     issuer: { issuer, jwksUrl: `${issuer}/.well-known/jwks.json`, clientIds: [required('cellClientId')] },
@@ -151,7 +162,7 @@ interface DnsRecordInput {
 }
 const dnsRecords = app.node.tryGetContext('dnsRecords') as string | undefined;
 if (dnsRecords !== undefined) {
-  const dns = new Stack(app, 'TfdSmoke-dns', { env, description: 'tenant-front-door smoke test: dedicated-domain DNS records' });
+  const dns = new Stack(app, `${PREFIX}-dns`, { env, description: 'tenant-front-door smoke test: dedicated-domain DNS records' });
   const zoneId = required('zoneId');
   (JSON.parse(dnsRecords) as DnsRecordInput[]).forEach((r, i) => {
     new route53.CfnRecordSet(dns, `Record${i}`, {

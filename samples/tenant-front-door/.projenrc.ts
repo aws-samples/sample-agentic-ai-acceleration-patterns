@@ -52,6 +52,15 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     'aws-sdk-client-mock@4.1.0',
     // Local NodejsFunction bundling (no Docker) and the SPA build (build slice S4)
     'esbuild@0.28.2',
+    // The stress slice's driver (scripts/stress/, test/stress/): SigV4 calls to the
+    // platform API and the registrar, role sessions for the hook and operator roles,
+    // and the log and metric reads `collect` makes.
+    '@aws-crypto/sha256-js@5.2.0',
+    '@aws-sdk/client-cloudwatch@3.1125.0',
+    '@aws-sdk/client-cloudwatch-logs@3.1125.0',
+    '@aws-sdk/client-sts@3.1125.0',
+    '@aws-sdk/credential-providers@3.1125.0',
+    '@smithy/signature-v4@5.7.5',
   ],
 });
 
