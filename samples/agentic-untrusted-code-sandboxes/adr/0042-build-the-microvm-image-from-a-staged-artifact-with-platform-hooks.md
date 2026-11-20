@@ -33,16 +33,19 @@ Option 1.
 - The artifact holds `Dockerfile` at its root and the runner sources under
   `runner/`. It leaves out tests, bytecode, the vector generator, the
   container `Dockerfile` and the `microvm/` directory.
-- Base image `al2023-1`, version pinned to `3.1` so a redeploy never
-  changes the VM base without a code change; the first passing integration
-  run confirms the value, and a change goes with a passing run. `ARM_64` only. The build uses the
+- Base image `al2023-1`, version `3`: the input the spike stack deployed,
+  which the platform resolved to 3.1 (S-1, S-4). It pins the major version
+  and not the minor one; `3.1` as an input is untested, and a change goes
+  with a passing integration run. `ARM_64` only. The build uses the
   Lambda-managed `INTERNET_EGRESS` (spec §3.5); runtime egress is the VPC
   connector only (ADR-0041). `AdditionalOsCapabilities` is empty: a MicroVM
   grants no capability the runner needs, and none is added (ADR-0019).
   `MinimumMemoryInMiB` is `microvm.memoryMiB`; the guest has about four
   times that (S-15).
-- Hooks on port 9000: `ready` (60 s), `run` (10 s), `resume` (5 s) and
-  `suspend` (5 s) enabled; `terminate` stays disabled. The platform sends
+- Hooks on port 9000: `ready` (120 s), `run` (10 s), `resume` (10 s) and
+  `suspend` (10 s) enabled, the timeouts the spike stack ran with (S-1 to
+  S-4); `terminate` stays disabled, because the runner serves no such hook.
+  The platform sends
   `POST /aws/lambda-microvms/runtime/v1/ready`, `.../run`, `.../resume` and
   `.../suspend`, and the runner serves exactly those paths on port 9000. It
   answers `ready` with 200 once it can take a hook (503 while it cannot), the
@@ -53,16 +56,18 @@ Option 1.
   image's build log group. The connector operator role trusts the same
   principal and creates network interfaces in the sandbox subnets with the
   connector's security group, and tags only interfaces the connector
-  service manages, at creation only (`ec2:CreateAction`).
+  service manages (`ec2:ManagedResourceOperator`), the two statements the
+  spike's operator role ran with (S-1).
 
 ## Consequences
 
 The runner owner serves the `ready` hook and the platform hook paths in
 addition to the `/run`, `/suspend` and `/resume` names that
 `runner/PROTOCOL.md` lists; until it does, an image build fails at the
-`ready` hook. `3.1` as an input value, an empty capability list and the
+`ready` hook. An empty capability list and the
 build role's exact permissions are unverified until the first deploy. The
-operator role does not restrict the tag keys on the interfaces it creates; add
-that condition if a deploy shows the service accepts it. An image
+operator role does not restrict the tag keys or the create action of the
+interfaces it tags; add those conditions (the AWS managed operator policy has
+them) if a deploy shows the service accepts them. An image
 update takes about 150 s (S-19). The artifact is staged in a temporary
 directory, so asset staging cannot be disabled (`--no-staging`); synth refuses.
