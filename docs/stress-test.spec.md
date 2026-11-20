@@ -189,8 +189,7 @@ and the records in
    answer carries the route hint (§5.3). The run's first tenant is the
    warm-up tenant of §3.5: its deployment builds the cell, and
    `/agents/*` is refused at the edge (404, or CloudFront's own 403 for
-   a `POST`) until front-door phase two, so it is not
-   timed in PS-1.
+   a `POST`) until front-door phase two, so it is not timed in PS-1.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
