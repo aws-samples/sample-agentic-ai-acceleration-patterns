@@ -447,6 +447,35 @@ describe('the driver\'s helpers (scripts/integ/lib.sh)', () => {
   const lib = (script: string) => spawnSync('bash', ['-c', `TMP="$1"; BODY="$TMP/body"; HEAD="$TMP/head"; : >"$BODY"; source "$2"\n${script}`, '_', tmp, LIB],
     { env: { PATH: process.env.PATH, HOME: process.env.HOME }, encoding: 'utf8' });
 
+  // A stub IssueToken that numbers its tokens and fails once $TMP/fail exists; a stub curl that answers 200.
+  const STUBS = `TENANT_A=T1; TI_USER_A=u1; IDENTITY_API=https://id.example.com/
+ti_token() { echo x >>"$TMP/issued"; [[ -f "$TMP/fail" ]] && { TI_TOKEN_ERR="HTTP 500"; return 1; }; printf -v "$4" 'tok-%s' "$(wc -l <"$TMP/issued" | tr -d ' ')"; }
+curl() { echo 200; }`;
+
+  it('token_for: a token issued inside $(edge ...) is kept in a 0600 file and reused by the caller', () => {
+    const r = lib(`${STUBS}
+st="$(edge GET h.example.com /api/whoami A_TOKEN)"; echo "edge:$st"
+token_for a A_TOKEN; echo "parent:$A_TOKEN"
+st="$(edge GET h.example.com /api/whoami A_TOKEN)"
+echo "issued:$(wc -l <"$TMP/issued" | tr -d ' ')"`);
+    expect(r.stdout).toContain('edge:200');
+    expect(r.stdout).toContain('parent:tok-1');
+    expect(r.stdout).toContain('issued:1');
+    expect((fs.statSync(path.join(tmp, 'token-a')).mode % 0o1000).toString(8)).toBe('600');
+  });
+
+  it('token_for: an IssueToken failure is a failed check, with a note naming the cause', () => {
+    const r = lib(`${STUBS}
+printf '%s\\n%s\\n' 0 tok-old >"$TMP/token-a"; touch "$TMP/fail"
+st="$(edge GET h.example.com /api/whoami A_TOKEN)"; echo "edge:$st"
+token_for a A_TOKEN; echo "rc:$? fails:$FAILS"`);
+    expect(r.stdout).toContain('edge:issue-token-failed');
+    expect(r.stderr).toContain('tenant a\'s token: tenant-identity IssueToken failed (HTTP 500); this call\'s check fails');
+    expect(r.stdout).toContain('FAIL tenant a\'s token: tenant-identity IssueToken failed (HTTP 500)');
+    expect(r.stdout).toContain('rc:1 fails:1');
+    expect(r.stdout).not.toContain('tok-old');
+  });
+
   it('as: a registrar 503 "control plane cannot be read" is retried with a note per retry and counted', () => {
     const r = lib(`REGISTRAR=https://registrar.example.com/
 assume() { AK=a; SK=b; ST=c; }

@@ -162,10 +162,11 @@ registrar_retries() { [[ -f "$TMP/registrar-retries" ]] && wc -l <"$TMP/registra
 edge() {
   local method="$1" host="$2" path="$3" tv="${4:-}" config=""
   shift 3; shift || true
-  # A tenant token past its refresh age is issued again (the pool's tokens
-  # last five minutes). edge runs in $(...), so the caller keeps its copy;
-  # token_for at a step's start keeps that copy fresh too.
-  if [[ "$tv" =~ ^([ABC])_TOKEN$ ]]; then token_for "${BASH_REMATCH[1],,}" "$tv"; fi
+  # A run tenant's token past its refresh age is issued again (token_for);
+  # the new one is in its token file, so later calls reuse it.
+  if [[ "$tv" =~ ^([ABC])_TOKEN$ ]]; then
+    token_for "${BASH_REMATCH[1],,}" "$tv" || { : >"$BODY"; : >"$HEAD"; echo issue-token-failed; return 1; }
+  fi
   [[ -n "$tv" ]] && config="header = \"Authorization: Bearer ${!tv}\""
   : >"$BODY"; : >"$HEAD"
   curl -s -D "$HEAD" -o "$BODY" -w '%{http_code}' --max-time 30 -X "$method" "$@" --config - "https://${host}${path}" <<<"$config" || echo 000
@@ -278,15 +279,19 @@ ti_tenant() {
   [[ "$st" == 201 ]] || die "tenant-identity CreateTenant $3: HTTP $st $(jq -r '.message // empty' "$BODY" 2>/dev/null | head -c 160)"
   TI_ADMIN="$(jq -r .admin.user.username "$BODY")"
 }
-# ti_token API TENANT_ID USER VAR: a fresh access token. The shared pool's
-# app client issues access tokens valid for five minutes.
+# ti_token API TENANT_ID USER VAR: a fresh access token in VAR. The shared
+# pool's app client issues access tokens valid for five minutes. Returns 1
+# with the cause in TI_TOKEN_ERR when IssueToken fails.
 ti_token() {
-  local st pw
-  own_creds
+  local st pw tok
+  TI_TOKEN_ERR=""
+  own_creds || { TI_TOKEN_ERR="no credentials to sign with"; return 1; }
   pw="Tfd-Integ-$(od -An -N9 -tx1 /dev/urandom | tr -d ' \n')!"
   st="$(SIG_REGION="$IDENTITY_REGION" signed POST "${1}platform/tenants/$2/users/$3/token" "$(printf '%s' "$pw" | jq -Rs '{password: .}')")"
-  [[ "$st" == 200 ]] || die "tenant-identity IssueToken: HTTP $st"
-  printf -v "$4" '%s' "$(jq -r .accessToken "$BODY")"; : >"$BODY"
+  [[ "$st" == 200 ]] || { TI_TOKEN_ERR="HTTP $st"; return 1; }
+  tok="$(jq -r '.accessToken // empty' "$BODY")"; : >"$BODY"
+  [[ -n "$tok" ]] || { TI_TOKEN_ERR="HTTP 200 with no accessToken"; return 1; }
+  printf -v "$4" '%s' "$tok"
 }
 # ti_delete API TENANT_ID: 0 deleted (204), 3 already gone (404), 1 on any other answer.
 # DeleteTenant is idempotent, so a rerun of the teardown sends it again.
@@ -314,14 +319,32 @@ ti_status() {
     *) echo "error:${st}" ;;
   esac
 }
-# token_for T VAR: a token for one of the run's tenants (a, b, c), minted again after 30 minutes.
+# token_for T VAR: the token of one of the run's tenants (a, b, c) in VAR,
+# issued again once it is three minutes old, so it outlives the request
+# that sends it (the pool's tokens last five). The token and its issue time
+# live in a 0600 file per tenant, $TMP/token-<t>, so a refresh made inside
+# $(edge ...) holds for every call after it. When IssueToken fails it
+# returns 1: in the step's own shell that is a FAIL line, inside a
+# subshell a note on stderr, and edge then answers issue-token-failed, so
+# the caller's check fails.
 token_for() {
-  local id_var="TENANT_${1^^}" user_var="TI_USER_${1^^}" at_var="TOKEN_AT_${1^^}"
-  # Refreshed after three minutes, so a token outlives the request that sends it.
-  if (( $(date +%s) - ${!at_var:-0} > 180 )); then
-    ti_token "$IDENTITY_API" "${!id_var}" "${!user_var}" "$2"
-    printf -v "$at_var" '%s' "$(date +%s)"
+  local t="$1" f="$TMP/token-$1" id_var="TENANT_${1^^}" user_var="TI_USER_${1^^}" at=0 tok="" fresh=""
+  [[ -s "$f" ]] && { read -r at && read -r tok; } <"$f"
+  [[ "$at" =~ ^[0-9]+$ ]] || at=0
+  if [[ -z "$tok" ]] || (( $(date +%s) - at > 180 )); then
+    if ! ti_token "$IDENTITY_API" "${!id_var}" "${!user_var}" fresh; then
+      if (( BASH_SUBSHELL == 0 )); then
+        FAILS=$((FAILS + 1)); echo "  FAIL tenant ${t}'s token: tenant-identity IssueToken failed (${TI_TOKEN_ERR})"
+      else
+        note "tenant ${t}'s token: tenant-identity IssueToken failed (${TI_TOKEN_ERR}); this call's check fails" >&2
+      fi
+      return 1
+    fi
+    tok="$fresh"
+    local part="$f.$BASHPID"
+    ( umask 077; printf '%s\n%s\n' "$(date +%s)" "$tok" >"$part" ) && mv -f "$part" "$f"
   fi
+  printf -v "$2" '%s' "$tok"
 }
 
 # -- The router, through CloudFront's TestFunction (test role) -------------------------------

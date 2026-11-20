@@ -183,7 +183,7 @@ multi_tenant_token() {
     ti_tenant "$api" "$MT_TENANT" "tfd-integ-mt-${RUN_ID}" '[]'
     state_set MT_USER "$TI_ADMIN"
   fi
-  ti_token "$api" "$MT_TENANT" "$MT_USER" "$1"
+  ti_token "$api" "$MT_TENANT" "$MT_USER" "$1" || die "tenant-identity IssueToken: $TI_TOKEN_ERR"
 }
 # ulid: a random id of the ULID form (26 Crockford base32 characters).
 ulid() { rand_chars '0-9A-HJKMNP-TV-Z' 26; }
@@ -196,7 +196,7 @@ step_06() {
     ti_tenant "$IDENTITY_API" "$TENANT_U" "tfd-integ-u-${RUN_ID}"
     state_set TI_USER_U "$TI_ADMIN"
   fi
-  ti_token "$IDENTITY_API" "$TENANT_U" "$TI_USER_U" U_TOKEN
+  ti_token "$IDENTITY_API" "$TENANT_U" "$TI_USER_U" U_TOKEN || die "tenant-identity IssueToken: $TI_TOKEN_ERR"
   st="$(edge GET "$APP_DOMAIN" /api/whoami U_TOKEN)"; check "unregistered tenant 403" 403 "$st"; check_headers "403"
 }
 
@@ -715,7 +715,7 @@ step_23() {
   [[ "$MODE" == host ]] && return
   test_fn POST /agents/support-bot/invocations "$host"
   check "agent route, no token 401" 401 "$(tf_status)"
-  ti_token "$IDENTITY_API" "$TENANT_U" "$TI_USER_U" U_TOKEN
+  ti_token "$IDENTITY_API" "$TENANT_U" "$TI_USER_U" U_TOKEN || die "tenant-identity IssueToken: $TI_TOKEN_ERR"
   test_fn POST /agents/support-bot/invocations "$host" '' "$(auth_headers U_TOKEN)"
   check "agent route, unregistered tenant 403" 403 "$(tf_status)"
   test_fn POST /agents/support-bot/invocations "$host" '' "$(auth_headers A_TOKEN '{"sec-fetch-site":"same-site"}')"
