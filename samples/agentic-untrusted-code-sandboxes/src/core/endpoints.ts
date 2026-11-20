@@ -16,6 +16,10 @@ export interface SandboxEndpointsProps {
   readonly inputBucket: s3.IBucket;
   readonly runnerRepository?: ecr.IRepository;
   readonly sessionFiles: boolean;
+  /** Id of the S3 managed prefix list (`pl-...`), for the runtime's egress to the gateway endpoint. */
+  readonly s3PrefixListId?: string;
+  /** The VPC is the app's own, so a route other than the S3 one may exist. */
+  readonly vpcSupplied: boolean;
 }
 
 const HTTPS = ec2.Port.tcp(443);
@@ -156,6 +160,12 @@ export class SandboxEndpoints extends Construct {
       policy.forEach((s) => endpoint.addToPolicy(s));
     }
 
+    // The S3 prefix list when the app gives its id; otherwise any address on 443, which is safe only in the VPC
+    // the construct creates (ADR-0028). The id cannot be read from CloudFormation.
+    if (wanted.has('s3-gateway') && !props.s3PrefixListId && props.vpcSupplied) {
+      throw new Error('UntrustedCodeSandboxes: a supplied vpc with the S3 endpoint needs s3PrefixListId, the id of the com.amazonaws.<region>.s3 managed prefix list (ADR-0028)');
+    }
+    const s3Peer = props.s3PrefixListId ? ec2.Peer.prefixList(props.s3PrefixListId) : ec2.Peer.anyIpv4();
     const groupOf = (e: SandboxEndpoint): ec2.ISecurityGroup | undefined => (e === 'logs' ? this.logsSecurityGroup : e === 's3-gateway' ? undefined : this.ecrSecurityGroup);
     const endpointGroups = [this.ecrSecurityGroup, this.logsSecurityGroup].filter((g): g is ec2.ISecurityGroup => g !== undefined);
     for (const backend of props.backends) {
@@ -164,10 +174,7 @@ export class SandboxEndpoints extends Construct {
         for (const e of new Set(backend.endpoints())) {
           const target = groupOf(e);
           if (target) client.connections.allowTo(target, HTTPS, `${backend.name} to the ${e} endpoint`);
-          // shortcut: the S3 prefix list of the gateway endpoint is not known at synth, so the egress goes to any
-          // address on 443; the sandbox subnets route nothing else (ADR-0028). Narrow it when CloudFormation
-          // can read the prefix list id.
-          if (e === 's3-gateway') client.connections.allowTo(ec2.Peer.anyIpv4(), HTTPS, `${backend.name} to S3 through the gateway endpoint`);
+          if (e === 's3-gateway') client.connections.allowTo(s3Peer, HTTPS, `${backend.name} to S3 through the gateway endpoint`);
         }
         // The endpoints admit every client, so a group that reaches an endpoint through private DNS is admitted.
         for (const g of endpointGroups) g.addIngressRule(client, HTTPS, `${backend.name} clients`);

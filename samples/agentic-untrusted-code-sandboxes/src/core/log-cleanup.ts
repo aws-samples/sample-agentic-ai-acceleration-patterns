@@ -6,7 +6,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
-import { acknowledgeGranularFinding, nagFindingResource } from './nag';
+import { acknowledgeServiceTimeout } from './nag';
 
 /**
  * Deletes the log groups that AWS services create outside the stack: the
@@ -52,22 +52,11 @@ export class LogCleanup extends Construct {
       actions: ['logs:DeleteLogGroup'],
       resources: [
         ...props.prefixes.map((p) => arn(p, true)),
-        ...props.names.map((n) => arn(n, false)),
+        // Both forms of the group ARN: the log group authorizes DeleteLogGroup against either, and the exact one is unverified.
+        ...props.names.flatMap((n) => [arn(n, false), arn(`${n}:`, true)]),
       ],
     }));
 
-    acknowledgeGranularFinding(
-      role,
-      'AwsSolutions-IAM5[Resource::*]',
-      'logs:DescribeLogGroups takes no log group name to authorize against; it lists names only, and the delete grant below names the prefixes and groups (spec 3.6 Log cleanup role).',
-    );
-    for (const p of props.prefixes) {
-      acknowledgeGranularFinding(
-        role,
-        `AwsSolutions-IAM5[Resource::${nagFindingResource(this, arn(p, true))}]`,
-        'The wildcard is the id AgentCore appends to the runtime name, and the groups code with the runtime role may add under the prefix; the prefix names only this deployment\'s runtime (spec 5.3, ADR-0029).',
-      );
-    }
     const logGroup = new logs.LogGroup(this, 'Logs', {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.DESTROY,
@@ -91,7 +80,9 @@ export class LogCleanup extends Construct {
     this.resource = new CustomResource(this, 'Resource', {
       serviceToken: fn.functionArn,
       properties: { Prefixes: props.prefixes, Names: props.names },
+      serviceTimeout: Duration.minutes(6),
     });
+    acknowledgeServiceTimeout(this.resource);
   }
 }
 

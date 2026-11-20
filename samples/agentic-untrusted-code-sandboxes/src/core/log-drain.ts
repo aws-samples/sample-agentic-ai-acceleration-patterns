@@ -6,6 +6,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct, type IConstruct } from 'constructs';
+import { acknowledgeServiceTimeout } from './nag';
 
 /**
  * Holds back the deletion of log groups until their writers have stopped
@@ -61,7 +62,10 @@ export class LogDrain extends Construct {
     this.resource = new CustomResource(this, 'Resource', {
       serviceToken: fn.functionArn,
       properties: { DelaySeconds: delay.toSeconds() },
+      // Just above the function timeout: a function that cannot start never holds the delete for the default hour.
+      serviceTimeout: delay.plus(Duration.seconds(60)),
     });
+    acknowledgeServiceTimeout(this.resource);
   }
 
   /** The log group is deleted only after the drain has waited. */

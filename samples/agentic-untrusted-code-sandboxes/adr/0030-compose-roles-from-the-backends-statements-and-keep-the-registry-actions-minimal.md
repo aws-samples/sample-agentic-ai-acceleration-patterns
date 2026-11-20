@@ -60,7 +60,11 @@ Option 1.
 
 ## Consequences
 
-A handler that needs `Query` on the tenant role (for example to read a
+The policy cannot check the tenant id's characters: a session tag value may
+contain `/`, and `inputs/a/*` also covers a tenant named `a/b`. The tool
+handlers must refuse a tenant id that holds `/` or `*` (the signed tenant
+context and the vendor's identity provider already use a restricted
+alphabet). A handler that needs `Query` on the tenant role (for example to read a
 tenant's rows in one call) needs a change here and an ADR amendment. The
 synth tests assert each `fake:` marker statement lands on one role only,
 and that the reaper role holds none of the drain list.

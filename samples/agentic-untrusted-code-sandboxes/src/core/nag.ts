@@ -84,7 +84,12 @@ export const KNOWN_WILDCARDS: readonly KnownWildcard[] = [
     reason: 'These actions take no resource (spec 3.6, ADR-0011, ADR-0051): ECR token, EC2 and MicroVM listing, the ECS poll endpoint, log group listing. ecs:ListTasks carries an ecs:cluster condition. None reads tenant data.',
   },
   {
-    resource: /^<[^>]*>\/(inputs|outputs)\/<aws:PrincipalTag\/TenantId>\/\*$/,
+    resource: /^\*$/,
+    actions: /^ec2:(CreateNetworkInterface|DescribeNetworkInterfaces|DescribeSubnets|DeleteNetworkInterface|AssignPrivateIpAddresses|UnassignPrivateIpAddresses)$/,
+    reason: 'A function in a VPC manages its own network interfaces, which have no id before they exist; these six actions are the managed VPC access policy minus its log writes, so no role here can write another function\'s log group (spec 3.6, ADR-0029).',
+  },
+  {
+    resource: /\/(inputs|outputs)\/<aws:PrincipalTag\/TenantId>\/\*$/,
     actions: /^s3:(GetObject|PutObject)$/,
     reason: 'The wildcard is the object name under the caller\'s own prefix, resolved from the TenantId session tag; the role reaches no other prefix (spec 3.6, C-5, ADR-0030).',
   },
@@ -192,4 +197,18 @@ export function acknowledgeImageCopy(stack: Stack): void {
       'The copy library asks for ECR and S3 read actions on every resource, because the source image and its layers are in the CDK asset repository and bucket; the function runs at deploy time only and handles no tenant data (ADR-0024, ADR-0029).',
     );
   }
+}
+
+/**
+ * CloudFormation takes `ServiceTimeout` as a number of seconds; CDK writes
+ * it as a string and CloudFormation coerces it. Every custom resource of
+ * the construct sets one, a little above its function timeout, so a function
+ * that cannot start never holds a delete for the default hour (spec 5.3).
+ */
+export function acknowledgeServiceTimeout(resource: IConstruct): void {
+  acknowledge(
+    resource,
+    'CloudFormation-Validate::W9003',
+    'CloudFormation takes ServiceTimeout as a number of seconds; CDK writes a string and CloudFormation coerces it. The value is just above the function timeout, so a function that cannot start never holds the delete for the default hour (spec 5.3).',
+  );
 }

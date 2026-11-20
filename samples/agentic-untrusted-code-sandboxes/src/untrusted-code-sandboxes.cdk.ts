@@ -11,7 +11,7 @@
  * It writes no backend-specific action itself (ADR-0025).
  */
 
-import { type CfnResource, CustomResource, Duration, RemovalPolicy, Tags } from 'aws-cdk-lib';
+import { type CfnResource, CustomResource, Duration, Fn, RemovalPolicy, Stack, Tags } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
@@ -32,7 +32,7 @@ import { DnsFirewall } from './core/dns-firewall';
 import { SandboxEndpoints } from './core/endpoints';
 import { LogCleanup } from './core/log-cleanup';
 import { LogDrain } from './core/log-drain';
-import { acknowledge, acknowledgeGranularFinding, acknowledgeKnownFindings, nagFindingResource } from './core/nag';
+import { acknowledge, acknowledgeKnownFindings, acknowledgeServiceTimeout } from './core/nag';
 import { InsightRules } from './core/observability';
 import { RunnerImages, type RunnerArch } from './core/runner-image';
 import { ENV, TENANT_KEY_PREFIX, TENANT_TAG, REGISTRY } from './env';
@@ -52,8 +52,27 @@ export const SUBNET_GROUPS = { public: 'Public', tool: 'Tool', sandbox: 'Sandbox
 /** Tag the construct puts on the subnets it creates (spec §6.1). */
 export const TIER_TAG = 'run-code:tier';
 
-const VPC_ACCESS_POLICY = 'service-role/AWSLambdaVPCAccessExecutionRole';
 const TENANT_VARIABLE = `\${aws:PrincipalTag/${TENANT_TAG}}`;
+
+/**
+ * What a function in a VPC needs to manage its network interfaces. The managed policy of the same purpose also holds
+ * log writes on every group, which no role here may have (spec 3.6), so the six actions are written out (ADR-0029).
+ */
+function vpcAccessStatement(): iam.PolicyStatement {
+  return new iam.PolicyStatement({
+    sid: 'VpcNetworkInterfaces',
+    actions: [
+      'ec2:CreateNetworkInterface',
+      'ec2:DescribeNetworkInterfaces',
+      'ec2:DescribeSubnets',
+      'ec2:DeleteNetworkInterface',
+      'ec2:AssignPrivateIpAddresses',
+      'ec2:UnassignPrivateIpAddresses',
+    ],
+    // Lambda creates the interfaces with the function's role before any id exists; none of these takes a resource we can name.
+    resources: ['*'],
+  });
+}
 
 /** Registry actions: the tool tenant role writes its own rows; the reaper role reads, updates and deletes any row. */
 const TENANT_ROW_ACTIONS = ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'];
@@ -70,7 +89,7 @@ export class UntrustedCodeSandboxes extends Construct {
   /** Per backend values (image ARN, cluster ARN, runtime ARN), from each `BackendConstruct.outputs()`. */
   public readonly backendOutputs: Readonly<Record<string, string>>;
   public readonly registryTable: dynamodb.ITable;
-  /** The one role every tool function runs as (spec §3.6 "Tool role"). */
+  /** The role of `runCodeFunction`; a bound function holds the same statements on its own role (spec §3.6 "Tool role", ADR-0029). */
   public readonly toolRole: iam.IRole;
   /** The role the tool assumes with a `TenantId` session tag (spec §3.6 "Tool tenant role"). */
   public readonly toolTenantRole: iam.IRole;
@@ -156,11 +175,20 @@ export class UntrustedCodeSandboxes extends Construct {
     });
     this.registryTable = table;
 
+    // --- Log drain and Contributor Insights rules ---
+    this.logDrain = new LogDrain(this, 'LogDrain');
+    this.insights = new InsightRules(this, 'Insights', nameFor);
+
     // --- Backends ---
     // The runner image copy is the core's (ADR-0029): a backend asks for the tag of an architecture, and its
     // resources wait for the copies it asked for.
     const images = this.runnerRepository
-      ? new RunnerImages(this, 'RunnerImages', { repository: this.runnerRepository, runnerDir: runnerPath() })
+      ? new RunnerImages(this, 'RunnerImages', {
+        repository: this.runnerRepository,
+        inputBucket: this.inputBucket,
+        logDrain: this.logDrain,
+        runnerDir: runnerPath(),
+      })
       : undefined;
     const backends: Partial<Record<BackendName, BackendConstruct>> = {};
     const copiesOf: Partial<Record<BackendName, Set<RunnerArch>>> = {};
@@ -197,14 +225,12 @@ export class UntrustedCodeSandboxes extends Construct {
         inputBucket: this.inputBucket,
         runnerRepository: this.runnerRepository,
         sessionFiles: this.config.settings.agentcoreSessionFiles,
+        s3PrefixListId: this.config.s3PrefixListId,
+        vpcSupplied: props.vpc !== undefined,
       });
     } else if (needsEndpoints && !props.vpc) {
       throw new Error('UntrustedCodeSandboxes: createEndpoints false needs a supplied vpc that already has the spec 3.7 endpoints');
     }
-
-    // --- Log drain and Contributor Insights rules ---
-    this.logDrain = new LogDrain(this, 'LogDrain');
-    this.insights = new InsightRules(this, 'Insights', nameFor);
 
     // --- Roles (spec §3.6) ---
     const toolRole = this.lambdaRole('ToolRole', 'run_code tool functions (spec 3.6 Tool role)');
@@ -237,20 +263,9 @@ export class UntrustedCodeSandboxes extends Construct {
     });
     const reaperRole = this.lambdaRole('ReaperRole', 'reaper and offboard functions: stop actions only (spec 3.6 Reaper role)');
     [registryAll, ...enabled.flatMap((b) => b.reaperStatements())].forEach((s) => reaperRole.addToPrincipalPolicy(s));
-    acknowledgeGranularFinding(
-      reaperRole,
-      'AwsSolutions-IAM5[Resource::*]',
-      'The only resource-less actions are lambda:ListMicrovms (it takes no resource; the call filters by image); each other statement names its table, cluster or image (spec 3.6 Reaper role, ADR-0011).',
-    );
     const drainRole = this.lambdaRole('DrainRole', 'drain custom resource: the reaper role plus the instance actions (spec 3.6 Drain role)');
     [registryAll, ...enabled.flatMap((b) => b.reaperStatements()), ...enabled.flatMap((b) => b.drainStatements())]
       .forEach((s) => drainRole.addToPrincipalPolicy(s));
-
-    acknowledgeGranularFinding(
-      drainRole,
-      'AwsSolutions-IAM5[Resource::*]',
-      'The only resource-less actions are lambda:ListMicrovms and ec2:DescribeInstances, which take no resource; the forced deregister is limited to the cluster (spec 3.6 Drain role, ADR-0011).',
-    );
 
     // --- Environment shared by every function ---
     const e = this.config.settings;
@@ -273,7 +288,7 @@ export class UntrustedCodeSandboxes extends Construct {
     // --- Functions (spec §3.1, §3.7) ---
     const reaper = this.lambdaFunction('Reaper', HANDLERS.reaper, reaperRole, Duration.minutes(4), 'Stops idle and over-age sandboxes and sweeps orphans (spec 4.1)');
     this.insights.addStopLogGroup(reaper.logGroup.logGroupName);
-    new events.Rule(this, 'ReaperSchedule', {
+    const schedule = new events.Rule(this, 'ReaperSchedule', {
       description: 'Runs the sandbox reaper every 5 minutes (spec 4.1)',
       schedule: events.Schedule.rate(Duration.minutes(5)),
       targets: [new targets.LambdaFunction(reaper.fn, { retryAttempts: 0 })],
@@ -289,17 +304,21 @@ export class UntrustedCodeSandboxes extends Construct {
       serviceTimeout: Duration.minutes(15),
       properties: { Backends: this.config.backends },
     });
-    acknowledge(
-      this.drainResource,
-      'CloudFormation-Validate::W9003',
-      'CloudFormation takes ServiceTimeout as a number of seconds; CDK writes it as a string and CloudFormation coerces it. 900 s matches the drain function timeout, so a function that dies never holds the delete for the default hour (spec 5.3).',
-    );
+    acknowledgeServiceTimeout(this.drainResource);
 
     // Delete order: tool functions, then the drain, then the backends' resources, then the log cleanup.
     const logCleanups = enabled.map((b) => b.logCleanup());
     const prefixes = logCleanups.flatMap((c) => c.prefixes);
     const names = logCleanups.flatMap((c) => c.names);
+    // The bucket's auto-delete provider is a function CDK adds to the stack; Lambda makes its log group on first use,
+    // so the cleanup resource deletes it, after the provider has emptied the bucket (spec 6.2 C-6).
+    const autoDelete = props.inputBucket ? undefined : Stack.of(this).node.tryFindChild('Custom::S3AutoDeleteObjectsCustomResourceProvider');
+    if (autoDelete) {
+      const provider = autoDelete as unknown as { serviceToken: string };
+      names.push(`/aws/lambda/${Fn.select(6, Fn.split(':', provider.serviceToken))}`);
+    }
     const cleanup = prefixes.length + names.length > 0 ? new LogCleanup(this, 'LogCleanup', { prefixes, names }) : undefined;
+    if (cleanup && autoDelete) this.inputBucket.node.findChild('AutoDeleteObjectsCustomResource').node.addDependency(cleanup.resource);
     for (const b of enabled) {
       for (const resource of b.drainOrder()) {
         // The resource that runs the image waits for the copy of every architecture its backend asked for (ADR-0029).
@@ -308,8 +327,10 @@ export class UntrustedCodeSandboxes extends Construct {
         if (cleanup) resource.node.addDependency(cleanup.resource);
       }
     }
-    // The drain itself must be deleted before the registry and the roles it reads.
+    // The drain itself must be deleted before the registry and the roles it reads, and the reaper schedule before the drain
+    // so the two never sweep at once.
     this.drainResource.node.addDependency(table);
+    schedule.node.addDependency(this.drainResource);
     this.logDrain.writer(this.drainResource);
 
     if (this.config.standalone) {
@@ -353,44 +374,45 @@ export class UntrustedCodeSandboxes extends Construct {
     if (!(fn instanceof lambda.Function)) {
       throw new Error('UntrustedCodeSandboxes.bindRunCode takes a lambda.Function (ADR-0029)');
     }
-    if (!fn.role) throw new Error('UntrustedCodeSandboxes.bindRunCode needs a function with a role');
     const cfn = fn.node.defaultChild as lambda.CfnFunction;
     const subnetIds = this.vpc.selectSubnets(this.toolSubnets).subnetIds;
     cfn.vpcConfig = { subnetIds, securityGroupIds: [this.toolSecurityGroup.securityGroupId] };
     cfn.timeout = this.config.toolBudget.toSeconds();
     for (const [key, value] of Object.entries(this.environment)) fn.addEnvironment(key, value);
-    if (fn.role !== this.toolRole) {
-      fn.role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName(VPC_ACCESS_POLICY));
-      acknowledgeGranularFinding(
-        fn.role,
-        `AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/${VPC_ACCESS_POLICY}]`,
-        'bindRunCode puts the function in the tool subnets; AWSLambdaVPCAccessExecutionRole holds only the network interface actions that needs (ADR-0029).',
-      );
-      this.toolStatements.forEach((s) => (fn.role as iam.IRole).addToPrincipalPolicy(s));
+    const role = fn.role;
+    if (!(role instanceof iam.Role)) {
+      throw new Error('UntrustedCodeSandboxes.bindRunCode needs a function built with a role created in this app, not an imported one (ADR-0029)');
+    }
+    if (role !== this.toolRole) {
+      role.addToPrincipalPolicy(vpcAccessStatement());
+      this.toolStatements.forEach((s) => role.addToPrincipalPolicy(s));
       this.tenantRole.assumeRolePolicy?.addStatements(new iam.PolicyStatement({
-        principals: [new iam.ArnPrincipal(fn.role.roleArn)],
+        principals: [new iam.ArnPrincipal(role.roleArn)],
         actions: ['sts:AssumeRole', 'sts:TagSession'],
         conditions: { Null: { [`aws:RequestTag/${TENANT_TAG}`]: 'false' } },
       }));
     }
-    // The function's own log group when it has one (it was built with `logGroup`); otherwise a group the
-    // construct owns, named as Lambda names it. The owned group is deleted before the function (it names the
-    // function) and is not behind the log drain: a drain would close a dependency cycle (ADR-0029).
-    const own = (cfn.loggingConfig as { logGroup?: string } | undefined)?.logGroup;
+    // The function's own log group when it was built with `logGroup`. Otherwise a group the construct owns and
+    // sets on the function, behind the log drain like the core's own (ADR-0029).
+    const config = cfn.loggingConfig as { logGroup?: string } | undefined;
     let groupName: string;
-    if (own) {
-      groupName = own;
+    if (config?.logGroup) {
+      groupName = config.logGroup;
     } else {
-      groupName = new logs.LogGroup(this, `BoundLogs${this.bound.length}`, {
-        logGroupName: `/aws/lambda/${fn.functionName}`,
+      const group = new logs.LogGroup(this, `BoundLogs${this.bound.length}`, {
         retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: RemovalPolicy.DESTROY,
-      }).logGroupName;
+      });
+      cfn.loggingConfig = { ...(config ?? {}), logGroup: group.logGroupName };
+      group.grantWrite(role);
+      this.logDrain.protect(group);
+      this.logDrain.writer(cfn);
+      groupName = group.logGroupName;
     }
     // Only the function resource waits for the drain, not its role, which the tenant role's trust names.
     cfn.addResourceDependency(this.drainResource.node.defaultChild as CfnResource);
     this.insights.addToolLogGroup(groupName);
-    acknowledgeKnownFindings(fn.role);
+    acknowledgeKnownFindings(role);
     this.bound.push(fn);
   }
 
@@ -431,13 +453,8 @@ export class UntrustedCodeSandboxes extends Construct {
     const role = new iam.Role(this, id, {
       description,
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName(VPC_ACCESS_POLICY)],
     });
-    acknowledgeGranularFinding(
-      role,
-      `AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/${VPC_ACCESS_POLICY}]`,
-      'AWSLambdaVPCAccessExecutionRole holds only the network interface actions a function in a VPC needs, and they take no resource; a copy would add nothing (ADR-0029).',
-    );
+    role.addToPrincipalPolicy(vpcAccessStatement());
     return role;
   }
 
@@ -463,13 +480,6 @@ export class UntrustedCodeSandboxes extends Construct {
       },
     }));
     enabled.flatMap((b) => b.tenantStatements()).forEach((s) => this.tenantRole.addToPolicy(s));
-    for (const [what, resource] of [['inputs', inputs], ['outputs', outputs]] as const) {
-      acknowledgeGranularFinding(
-        this.tenantRole,
-        `AwsSolutions-IAM5[Resource::${nagFindingResource(this, resource)}]`,
-        `The wildcard is the object name under the caller's own ${what}/<TenantId>/ prefix, resolved from the session tag; the role reaches no other prefix (spec 3.6, C-5).`,
-      );
-    }
   }
 
   /** One function, with an owned log group, the shared environment and the tool subnets. */
@@ -487,6 +497,7 @@ export class UntrustedCodeSandboxes extends Construct {
     });
     this.logDrain.protect(logGroup);
     logGroup.grantWrite(role);
+    // An immutable reference, so the L2 adds no managed policy to the role: the role holds what is written here.
     const fn = new NodejsFunction(this, id, {
       entry: handlerEntry(entry),
       handler: 'handler',
@@ -494,7 +505,7 @@ export class UntrustedCodeSandboxes extends Construct {
       architecture: lambda.Architecture.ARM_64,
       memorySize,
       timeout,
-      role,
+      role: iam.Role.fromRoleArn(this, `${id}RoleRef`, role.roleArn, { mutable: false }),
       description,
       environment: { ...this.environment },
       vpc: this.vpc,
@@ -507,6 +518,8 @@ export class UntrustedCodeSandboxes extends Construct {
       applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
       bundling: { minify: true, sourceMap: false, externalModules: [] },
     });
+    // The function waits for the role and its policy.
+    fn.node.addDependency(role);
     this.logDrain.writer(fn);
     return { fn, logGroup };
   }

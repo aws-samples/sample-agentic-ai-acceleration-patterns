@@ -59,9 +59,18 @@ function logicalIdByPath(t: Template, type: string, suffix: string): string {
 
 function statementsOfRole(t: Template, roleId: string): Json[] {
   const policies = Object.values(t.findResources('AWS::IAM::Policy')) as Json[];
-  return policies
-    .filter((p) => (p.Properties.Roles as Json[]).some((r) => r.Ref === roleId))
-    .flatMap((p) => p.Properties.PolicyDocument.Statement as Json[]);
+  const inline = ((t.findResources('AWS::IAM::Role')[roleId] as Json).Properties.Policies ?? []) as Json[];
+  return [
+    ...policies
+      .filter((p) => (p.Properties.Roles as Json[]).some((r) => r.Ref === roleId))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement as Json[]),
+    ...inline.flatMap((p) => p.PolicyDocument.Statement as Json[]),
+  ];
+}
+
+/** The managed policies a role attaches, which `statementsOfRole` cannot see. */
+function managedPoliciesOf(t: Template, roleId: string): unknown[] {
+  return ((t.findResources('AWS::IAM::Role')[roleId] as Json).Properties.ManagedPolicyArns ?? []) as unknown[];
 }
 
 const actionsOf = (stmts: Json[]): string[] => stmts.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
@@ -271,7 +280,11 @@ describe('bindRunCode (spec 3.3)', () => {
     expect(actionsOf(statementsOfRole(s.t, gatewayRole))).toEqual(expect.arrayContaining(['sts:AssumeRole', 'sts:TagSession', 'fake:Toolnitro']));
     const trust = (s.t.findResources('AWS::IAM::Role')[roleId(s.t, 'ToolTenantRole')] as Json).Properties.AssumeRolePolicyDocument.Statement as Json[];
     expect(JSON.stringify(trust)).toContain(gatewayRole);
-    s.t.hasResourceProperties('AWS::Logs::LogGroup', { LogGroupName: Match.objectLike({ 'Fn::Join': Match.anyValue() }), RetentionInDays: 30 });
+    const bound = Object.values(s.t.findResources('AWS::Logs::LogGroup')).filter((g) => pathOf(g as Json).includes('/BoundLogs')) as Json[];
+    expect(bound).toHaveLength(1);
+    expect(bound[0].Properties.RetentionInDays).toBe(30);
+    expect(bound[0].Properties.LogGroupName).toBeUndefined();
+    expect(fn.Properties.LoggingConfig.LogGroup).toEqual({ Ref: logicalIdByPath(s.t, 'AWS::Logs::LogGroup', '/BoundLogs0/Resource') });
     const rule = Object.values(s.t.findResources('AWS::CloudWatch::InsightRule')).find((r) => JSON.stringify((r as Json).Properties.RuleName).length > 0 && JSON.stringify((r as Json).Properties.RuleBody).includes('runId')) as Json;
     expect(JSON.stringify(rule.Properties.RuleBody)).toContain('BoundLogs0');
     expect(() => synth({ standalone: false }, (_st, c) => c.bindRunCode({} as never))).toThrow(/lambda.Function/);
@@ -307,10 +320,21 @@ describe('bindRunCode (spec 3.3)', () => {
     });
     const trust = (s.t.findResources('AWS::IAM::Role')[roleId(s.t, 'ToolTenantRole')] as Json).Properties.AssumeRolePolicyDocument.Statement as Json[];
     expect(trust).toHaveLength(2);
-    expect(Object.values(s.t.findResources('AWS::Logs::LogGroup')).filter((g) => /^\/aws\/lambda\//.test(JSON.stringify((g as Json).Properties.LogGroupName ?? '')))).toHaveLength(0);
+    // the function on the tool role is the only one with no group of its own, so it is the only one that gets one
+    const owned = Object.values(s.t.findResources('AWS::Logs::LogGroup')).filter((g) => pathOf(g as Json).includes('/BoundLogs'));
+    expect(owned).toHaveLength(1);
+    const own = Object.values(s.t.findResources('AWS::Lambda::Function')).find((f) => pathOf(f as Json).includes('/OwnLogs/')) as Json;
+    expect(JSON.stringify(own.Properties.LoggingConfig.LogGroup)).toContain('OwnGroup');
     const runs = Object.values(s.t.findResources('AWS::CloudWatch::InsightRule')).map((r) => JSON.stringify((r as Json).Properties.RuleBody)).find((b) => b.includes('$.runId')) as string;
     expect(runs).toContain('OwnGroup');
     expect(runs).toContain('BoundLogs0');
+  });
+
+  test('a function with an imported role is refused', () => {
+    expect(() => synth({ standalone: false }, (stack, c) => {
+      const role = iam.Role.fromRoleArn(stack, 'Imported', stack.formatArn({ service: 'iam', region: '', resource: 'role', resourceName: 'x' }));
+      c.bindRunCode(new lambda.Function(stack, 'F', { ...inline, role }));
+    })).toThrow(/imported one/);
   });
 });
 
@@ -357,11 +381,13 @@ describe('teardown order and log ownership (spec 5.3)', () => {
   test('the cleanup resource gets every prefix and name, and its role deletes only those', () => {
     const cleanup = Object.values(base.t.toJSON().Resources as Record<string, Json>).find((r) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('LogCleanup')) as Json;
     expect(cleanup.Properties.Prefixes).toEqual(['/aws/bedrock-agentcore/runtimes/Fake_agentcore-']);
-    expect(cleanup.Properties.Names).toHaveLength(2);
+    expect(cleanup.Properties.Names).toHaveLength(3);
+    // the third is the log group of the bucket's auto-delete provider, named from its function
+    expect(JSON.stringify(cleanup.Properties.Names[2])).toContain('/aws/lambda/');
     const stmts = statementsOfRole(base.t, logicalIdByPath(base.t, 'AWS::IAM::Role', '/LogCleanup/Role/Resource'));
     const del = stmts.find((s) => s.Sid === 'DeleteOwnedLogGroups') as Json;
     expect(del.Action).toBe('logs:DeleteLogGroup');
-    expect(del.Resource).toHaveLength(3);
+    expect(del.Resource).toHaveLength(1 + 2 * 3);
     expect(stmts.find((s) => s.Sid === 'DescribeLogGroups')!.Action).toBe('logs:DescribeLogGroups');
   });
 
@@ -584,12 +610,13 @@ describe('DNS Firewall (spec 3.9, ADR-0016)', () => {
     }
   });
 
-  test('the association covers the construct VPC, fails closed and can be deleted', () => {
+  test('the association covers the construct VPC and can be deleted', () => {
     s.t.hasResourceProperties('AWS::Route53Resolver::FirewallRuleGroupAssociation', {
       MutationProtection: 'DISABLED',
       VpcId: Match.anyValue(),
     });
-    // FirewallFailOpen is left at its default, DISABLED: there is no resource property that turns it on.
+    // CloudFormation has no property for FirewallFailOpen; the service default is DISABLED (fail closed), and the
+    // integration run reads it back (ADR-0031). Nothing in the template turns it on.
     expect(JSON.stringify(s.t.toJSON())).not.toMatch(/FirewallFailOpen/);
   });
 
@@ -608,7 +635,7 @@ describe('DNS Firewall (spec 3.9, ADR-0016)', () => {
     expect(policy.Properties.PolicyName).toMatch(/^[\w-]{1,255}$/);
     expect(doc.Statement).toHaveLength(1);
     expect(doc.Statement[0].Principal).toEqual({ Service: 'delivery.logs.amazonaws.com' });
-    expect(doc.Statement[0].Resource).toMatch(/^<[A-Za-z0-9]*QueryLogs[A-Za-z0-9]*\.Arn>:\*$/);
+    expect(doc.Statement[0].Resource).toMatch(/^<[A-Za-z0-9]*QueryLogs[A-Za-z0-9]*\.Arn>$/);
     expect(doc.Statement[0].Action).toEqual(['logs:CreateLogStream', 'logs:PutLogEvents']);
     for (const type of ['AWS::Route53Resolver::ResolverQueryLoggingConfig', 'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation']) {
       const r = Object.values(resources).find((x) => x.Type === type) as Json;
@@ -724,9 +751,9 @@ describe('cdk-nag (AwsSolutions)', () => {
       }));
     });
     const report = new AwsSolutionsChecks(s.stack).validateScope(s.stack);
-    const findings = report.violations.map((v) => `${v.ruleName}: ${JSON.stringify(v.violatingResources)}`);
-    // The gateway function in this test is the test's own; its role and function are not the construct's.
-    expect(findings.filter((f) => !/Gateway/.test(f))).toEqual([]);
+    // The function the test itself builds (S/Gateway/...) is not the construct's; its role (S/GatewayRole/...) is.
+    const findings = report.violations.flatMap((v) => v.violatingResources.map((r) => `${v.ruleName}: ${r.constructPath}`));
+    expect(findings.filter((f) => !/: S\/Gateway\//.test(f))).toEqual([]);
   });
 });
 
@@ -768,5 +795,159 @@ describe('known wildcards (ADR-0030)', () => {
     const found = new AwsSolutionsChecks(stack).validateScope(stack).violations.flatMap((v) => v.violatingResources.map((r) => r.constructPath));
     expect(found.some((p) => p.startsWith('S/R/'))).toBe(false);
     expect(found.some((p) => p.startsWith('S/Wide/'))).toBe(true);
+  });
+});
+
+describe('review round 1 fixes', () => {
+  const dependsOn = (r: Json): string[] => (Array.isArray(r.DependsOn) ? r.DependsOn : r.DependsOn ? [r.DependsOn] : []);
+  const resources = () => base.t.toJSON().Resources as Record<string, Json>;
+
+  test('no role of the construct attaches a managed policy, and none can write a log group it does not own', () => {
+    for (const name of ['ToolRole', 'ReaperRole', 'DrainRole', 'ToolTenantRole']) {
+      const id = roleId(base.t, name);
+      expect(managedPoliciesOf(base.t, id)).toEqual([]);
+      for (const s of statementsOfRole(base.t, id)) {
+        for (const a of Array.isArray(s.Action) ? s.Action : [s.Action]) {
+          if (/^logs:/.test(a) && s.Effect === 'Allow') expect(JSON.stringify(s.Resource)).not.toBe('"*"');
+        }
+      }
+    }
+    // the functions' roles hold the six network interface actions, and the log writes name the function's own group
+    const toolActions = actionsOf(statementsOfRole(base.t, roleId(base.t, 'ToolRole')));
+    expect(toolActions).toEqual(expect.arrayContaining(['ec2:CreateNetworkInterface', 'ec2:DeleteNetworkInterface', 'logs:PutLogEvents']));
+    expect(toolActions).not.toContain('logs:CreateLogGroup');
+  });
+
+  test('a bound function gets the network interface statement, not the managed policy, and is checked as the tool role is', () => {
+    const s = synth({ standalone: false }, (stack, c) => {
+      c.bindRunCode(new lambda.Function(stack, 'B', {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline('x'),
+        role: new iam.Role(stack, 'BRole', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') }),
+      }));
+    });
+    const id = Object.entries(s.t.findResources('AWS::IAM::Role')).find(([, r]) => pathOf(r as Json).endsWith('/BRole/Resource'))![0];
+    expect(managedPoliciesOf(s.t, id)).toEqual([]);
+    expect(actionsOf(statementsOfRole(s.t, id))).toEqual(expect.arrayContaining(['ec2:CreateNetworkInterface', 'logs:PutLogEvents']));
+    expect(actionsOf(statementsOfRole(s.t, id))).not.toContain('logs:CreateLogGroup');
+  });
+
+  test('the log drain waits for every owned log group, and every function and the DNS association wait for the log drain', () => {
+    const all = resources();
+    const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogDrain/Resource'))![0];
+    const groups = Object.entries(all).filter(([, r]) => r.Type === 'AWS::Logs::LogGroup' && /\/(RunCode|Reaper|Offboard|Drain)Logs\/|QueryLogs|CopyLogs/.test(pathOf(r)));
+    expect(groups).toHaveLength(5);
+    for (const [id] of groups) expect(dependsOn(all[drainId])).toContain(id);
+    for (const name of ['RunCode', 'Reaper', 'Offboard', 'Drain']) expect(dependsOn(all[fnId(base.t, name)])).toContain(drainId);
+    const association = Object.values(all).find((r) => r.Type === 'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation');
+    expect(association).toBeUndefined();
+    const dns = synth({ dnsFirewall: true });
+    const dnsAll = dns.t.toJSON().Resources as Record<string, Json>;
+    const dnsDrain = Object.entries(dnsAll).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogDrain/Resource'))![0];
+    const assoc = Object.values(dnsAll).find((r) => r.Type === 'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation') as Json;
+    expect(dependsOn(assoc)).toContain(dnsDrain);
+    const dnsGroup = Object.entries(dnsAll).find(([, r]) => r.Type === 'AWS::Logs::LogGroup' && pathOf(r).includes('QueryLogs'))![0];
+    expect(dependsOn(dnsAll[dnsDrain])).toContain(dnsGroup);
+  });
+
+  test('a bound function with no group of its own is behind the log drain too', () => {
+    const s = synth({ standalone: false }, (stack, c) => {
+      c.bindRunCode(new lambda.Function(stack, 'B', {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline('x'),
+        role: new iam.Role(stack, 'BRole', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') }),
+      }));
+    });
+    const all = s.t.toJSON().Resources as Record<string, Json>;
+    const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogDrain/Resource'))![0];
+    const group = Object.entries(all).find(([, r]) => r.Type === 'AWS::Logs::LogGroup' && pathOf(r).includes('/BoundLogs0/'))![0];
+    const fn = Object.entries(all).find(([, r]) => r.Type === 'AWS::Lambda::Function' && pathOf(r).includes('/B/Resource'))![1];
+    expect(dependsOn(all[drainId])).toContain(group);
+    expect(dependsOn(fn)).toContain(drainId);
+  });
+
+  test('the image copy function is constrained: denies, a log group the construct owns, and the drain', () => {
+    const all = resources();
+    const copyFn = Object.entries(all).find(([, r]) => r.Type === 'AWS::Lambda::Function' && /Custom::CDKECRDeployment/.test(pathOf(r)))!;
+    expect(JSON.stringify(copyFn[1].Properties.LoggingConfig.LogGroup)).toContain('CopyLogs');
+    const roleLogical = copyFn[1].Properties.Role['Fn::GetAtt'][0] as string;
+    const stmts = statementsOfRole(base.t, roleLogical);
+    const deny = (sid: string) => stmts.find((s) => s.Sid === sid && s.Effect === 'Deny') as Json;
+    expect(deny('NoInputBucket').Action).toBe('s3:*');
+    expect(JSON.stringify(deny('NoInputBucket').Resource)).toContain('InputBucket');
+    expect(deny('EcrWriteOnlyToRunnerRepositories').Action).toEqual(['ecr:PutImage', 'ecr:InitiateLayerUpload', 'ecr:UploadLayerPart', 'ecr:CompleteLayerUpload']);
+    expect(JSON.stringify(deny('EcrWriteOnlyToRunnerRepositories').NotResource)).toContain('RunnerRepository');
+    expect(deny('NoLogGroupCreation').Action).toBe('logs:CreateLogGroup');
+    const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogDrain/Resource'))![0];
+    expect(dependsOn(copyFn[1])).toContain(drainId);
+  });
+
+  test('two instances share the copy function and its denies cover both repositories and both buckets', () => {
+    const stack = new Stack(new App({ context: PATHS }), 'S');
+    for (const id of ['One', 'Two']) new UntrustedCodeSandboxes(stack, id, { standalone: true, backends: ['nitro'] });
+    const t = Template.fromStack(stack);
+    const fns = Object.values(t.findResources('AWS::Lambda::Function')).filter((f) => /Custom::CDKECRDeployment/.test(pathOf(f as Json)));
+    expect(fns).toHaveLength(1);
+    const roleLogical = (fns[0] as Json).Properties.Role['Fn::GetAtt'][0] as string;
+    const stmts = statementsOfRole(t, roleLogical);
+    const repos = JSON.stringify(stmts.find((s) => s.Sid === 'EcrWriteOnlyToRunnerRepositories')!.NotResource);
+    expect(repos).toContain('OneRunnerRepository');
+    expect(repos).toContain('TwoRunnerRepository');
+    const buckets = JSON.stringify(stmts.find((s) => s.Sid === 'NoInputBucket')!.Resource);
+    expect(buckets).toContain('OneInputBucket');
+    expect(buckets).toContain('TwoInputBucket');
+  });
+
+  test('every function has a log group the stack owns, except the auto-delete provider, which the cleanup resource clears', () => {
+    const all = resources();
+    const plain = Object.entries(all).filter(([, r]) => r.Type === 'AWS::Lambda::Function' && !r.Properties.LoggingConfig?.LogGroup);
+    expect(plain.map(([, r]) => pathOf(r)).filter((p) => !/S3AutoDeleteObjects/.test(p))).toEqual([]);
+    const bucketCr = Object.values(all).find((r) => r.Type === 'Custom::S3AutoDeleteObjects') as Json;
+    const cleanupId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogCleanup/Resource'))![0];
+    expect(dependsOn(bucketCr)).toContain(cleanupId);
+  });
+
+  test('a core with a supplied bucket has no auto-delete provider to clean', () => {
+    const s = synth({ backends: ['microvm'], inputBucket: s3.Bucket.fromBucketName(new Stack(), 'Supplied', 'supplied-input-bucket') });
+    expect(Object.values(s.t.toJSON().Resources as Record<string, Json>).filter((r) => r.Type === 'Custom::S3AutoDeleteObjects')).toEqual([]);
+  });
+
+  test('the reaper schedule is deleted before the drain, and every custom resource has a service timeout', () => {
+    const all = resources();
+    const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/DrainResource/'))![0];
+    const rule = Object.values(all).find((r) => r.Type === 'AWS::Events::Rule') as Json;
+    expect(dependsOn(rule)).toContain(drainId);
+    const mine = Object.values(all).filter((r) => r.Type === 'AWS::CloudFormation::CustomResource');
+    expect(mine.length).toBeGreaterThanOrEqual(3);
+    for (const r of mine) expect(Number(r.Properties.ServiceTimeout)).toBeGreaterThan(0);
+  });
+
+  test('the sandbox egress to S3 is the prefix list when given, any address only in the created vpc, and refused in a supplied one', () => {
+    const withList = synth({ s3PrefixListId: 'pl-6ea54007' });
+    expect(JSON.stringify(withList.t.toJSON())).toContain('pl-6ea54007');
+    const rules = sgRules(withList.t);
+    const runtime = Object.keys(rules).find((id) => /BackendagentcoreClients/.test(id)) as string;
+    expect(rules[runtime].egress.map((e) => e.peer)).not.toContain('0.0.0.0/0');
+    const stack = new Stack(new App(), 'V');
+    const vpc = new ec2.Vpc(stack, 'Own', {
+      maxAzs: 2,
+      subnetConfiguration: [
+        { name: 'Public', subnetType: ec2.SubnetType.PUBLIC },
+        { name: 'Tool', subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        { name: 'Sandbox', subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+      ],
+    });
+    expect(() => new UntrustedCodeSandboxes(stack, 'A', { standalone: true, vpc, backends: ['agentcore'] })).toThrow(/s3PrefixListId/);
+    expect(() => new UntrustedCodeSandboxes(stack, 'B', { standalone: true, vpc, backends: ['agentcore'], s3PrefixListId: 'pl-6ea54007' })).not.toThrow();
+    expect(() => new UntrustedCodeSandboxes(stack, 'C', { standalone: true, vpc, backends: ['nitro'] })).not.toThrow();
+  });
+
+  test('size limits and the prefix list id are validated', () => {
+    expect(() => resolveProps({ maxOutputBytes: 4 * 1024 * 1024 + 1 })).toThrow(/maxOutputBytes must be at most/);
+    expect(() => resolveProps({ maxInputBytes: 50 * 1024 * 1024 + 1 })).toThrow(/maxInputBytes must be at most/);
+    expect(() => resolveProps({ maxInputBytes: 50 * 1024 * 1024, maxOutputBytes: 4 * 1024 * 1024 })).not.toThrow();
+    expect(() => resolveProps({ s3PrefixListId: 'nope' })).toThrow(/prefix list id/);
   });
 });

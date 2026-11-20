@@ -98,7 +98,7 @@ export class DnsFirewall extends Construct {
             sid: 'AllowQueryLogDelivery',
             principals: [new iam.ServicePrincipal('delivery.logs.amazonaws.com')],
             actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
-            resources: [`${this.queryLogGroup.logGroupArn}:*`],
+            resources: [this.queryLogGroup.logGroupArn],
             conditions: {
               StringEquals: { 'aws:SourceAccount': Aws.ACCOUNT_ID },
               ArnLike: { 'aws:SourceArn': `arn:${Aws.PARTITION}:logs:${Aws.REGION}:${Aws.ACCOUNT_ID}:*` },

@@ -29,11 +29,12 @@ Pros: the handler returns a value or throws. Cons: two framework Lambdas
 per provider, one more role, and the drain's 10-minute wait runs inside the
 framework's own timeout.
 
-### Option 3: Create the bound function's log group inside `bindRunCode` and put it behind the log drain
-Pros: uniform. Cons: the group is named after the function, so the group
-depends on the function, the function depends on the drain (it must be
-deleted first so no new sandbox starts), and the drain depends on the log
-drain, which depends on the group: a cycle.
+### Option 3: Name a bound function's log group `/aws/lambda/<function name>`
+Pros: no change to the function. Cons: the group depends on the function, the
+function depends on the drain (it must be deleted first so no new sandbox
+starts) and on the log drain, and the log drain depends on the group: a
+cycle. Left outside the log drain instead, the group is deleted before the
+function and a late invocation recreates it with no retention.
 
 ## Decision
 
@@ -53,13 +54,39 @@ Option 1.
   90 s on delete. Function logs use the JSON format and application level
   INFO, so a line written with `process.stdout.write` keeps its top-level
   fields for Logs Insights and Contributor Insights.
-- `bindRunCode(fn)` takes a `lambda.Function` and sets its VPC config,
-  timeout and environment on the underlying `CfnFunction`, adds the tool
-  statements to its role, adds the role to the tenant role's trust, and
-  adds only the function resource (not its role) to the drain's dependents.
-  If the function was built with its own log group the core reads it; if
-  not it creates `/aws/lambda/<function name>` (retention one month, deleted
-  on destroy), outside the log drain (Option 3's cycle).
+- `bindRunCode(fn)` takes a `lambda.Function` built with a role created in
+  the app (an imported role is refused, because its policy cannot be
+  changed) and sets its VPC config, timeout and environment on the
+  underlying `CfnFunction`. The tool statements and the network interface
+  statement go on the function's own role, so a bound function holds the
+  same rights as the tool role without running as it, and the role is added
+  to the tenant role's trust. The function resource, not its role, becomes
+  a dependent of the drain. If the function was built with its own log group
+  the core reads it; if not the core creates an unnamed group (retention one
+  month, deleted on destroy), sets it on the function, grants the role the
+  write, and puts it behind the log drain like its own (the function depends
+  on the group, so there is no cycle). The tenant role's trust policy has a
+  default limit of 2,048 characters, about seven bound roles; share one
+  role when more are needed.
+- No role of the construct attaches `AWSLambdaVPCAccessExecutionRole`. Its
+  document also allows log writes and `logs:CreateLogGroup` on every group,
+  which would let a function recreate a group the stack deleted. The roles
+  hold the six network interface actions as one inline statement, and the
+  functions get an immutable reference to the role so the L2 adds no managed
+  policy. A function writes only to its own group.
+- The image copy library puts one Lambda in the stack, shared by every copy,
+  with ECR write and S3 read on every resource and no log group of its own.
+  The core adds explicit denies to its role (ECR write outside the stack's
+  runner repositories, any S3 action on the stack's input buckets, log
+  group creation), gives it a log group the core owns behind the log drain,
+  and makes it wait for the log drain. The bucket's auto-delete provider,
+  which CDK adds with no log group, has its group deleted by the log cleanup
+  resource after the bucket has been emptied.
+- The reaper schedule is deleted before the drain starts, so the reaper
+  and the drain never sweep at once.
+- Every custom resource of the construct sets `ServiceTimeout` a little above
+  its function's timeout, so a function that cannot start never holds a delete
+  for the default hour.
 - `reaper` and `offboard` share one role; the drain has its own.
 - The core copies the runner image (ADR-0024) for every container backend:
   `BackendContext.runnerImageTag(arch)` builds the image asset and the copy
@@ -73,7 +100,8 @@ Option 1.
 ## Consequences
 
 A handler author writes `Delete` so that every path ends in a response. A
-gateway function built without its own log group loses a final log line if
-it runs in the seconds around its stack's delete; one built with a log group
-the app owns is the app's to protect. Revisit if a function can take its
-log group after construction.
+gateway function built with its own log group has that group in the app's
+hands; the core cannot put it behind its log drain. The function lists in
+the spec say a bound function runs as the shared tool role; it holds the
+same statements on its own role instead, because a function's role is fixed
+when it is built. Revisit if the spec wants one role.

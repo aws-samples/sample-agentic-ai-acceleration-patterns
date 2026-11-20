@@ -38,14 +38,19 @@ Option 1.
 - `perTenantMetrics` sets `PER_TENANT_METRICS` on every function; the
   handler writes EMF lines only when it is `true`. The construct adds no
   `cloudwatch:` permission: EMF needs only the log write.
-- The firewall association has `MutationProtection` `DISABLED` and the
-  construct never sets `FirewallFailOpen`, whose default is `DISABLED`
-  (fail closed). The Logs resource policy is the construct's own and names
+- The firewall association has `MutationProtection` `DISABLED`.
+  CloudFormation has no property for `FirewallFailOpen`, whose service
+  default is `DISABLED` (fail closed), so the integration run reads it back
+  with `GetFirewallConfig` and fails if it is `ENABLED`. The Logs resource policy is the construct's own and names
   the one query log group's ARN, and the query log config and its
   association depend on it (spec §3.9).
 - `createEndpoints: false` is refused for a VPC the construct creates,
   because a `nitro` or `agentcore` sandbox with no endpoints cannot pull
-  its image or log; it is for a supplied VPC that has them.
+  its image or log; it is for a supplied VPC that has them. The core then
+  adds no security group rule for those endpoints, so the app opens 443 from
+  each backend's client group to them (ADR-0028).
+- The log group of the Logs resource policy statement is the group's own ARN
+  (already ending in `:*`), the form the integration driver compares.
 
 ## Consequences
 
