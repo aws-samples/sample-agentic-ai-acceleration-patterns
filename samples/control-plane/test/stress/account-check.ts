@@ -3,7 +3,7 @@
 
 /**
  * The cell account check the control-plane slice runs before every run (platform stress
- * test, docs/stress-test.spec.md §3.7; stress ADR-0012). A cell account holds only the cell
+ * test, docs/stress-test.spec.md §3.7; stress ADR-0015). A cell account holds only the cell
  * bootstrap (`CDKToolkit-cell`), the role pair (`<fleet>-cell-account`), the owner's
  * account-base stacks (tagged `stress:part=account-base`, deployed without a service role,
  * and on the owner's list by stack ARN) and cells (deployed under the cell bootstrap's

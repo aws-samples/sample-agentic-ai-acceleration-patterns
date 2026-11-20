@@ -13,10 +13,10 @@ Spec §3.7 has the control-plane slice refuse a cell account that holds more tha
 bootstrap, the role pair, the owner's account-base stacks and cells, before every run. The
 check needs the stack list in each Region the run uses and `iam:ListRoles` in each cell
 account, and for the two role pair roles `iam:GetRole` (path, boundary, trust),
-`iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and `iam:GetRolePolicy`.
-The slice runs with the platform account's credentials. The control plane's role pair is the only cross-account path into a cell
-account, and its roles hold the SSM namespace grants and the two owner policies only.
-The owner names the account-base stacks by stack ARN (W-11).
+`iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and `iam:GetRolePolicy`. The slice
+runs with the platform account's credentials. The control plane's role pair is the only
+cross-account path into a cell account, and its roles hold the SSM namespace grants and
+the two owner policies only. The owner names the account-base stacks by stack ARN (W-11).
 
 ## Options considered
 ### Option 1: The owner's own read access, through AWS CLI profiles named in a file
@@ -36,7 +36,10 @@ Pros: no new role. Cons: the API role can assume the pair too (control-plane ADR
 the cell build would read every role and stack in the account.
 
 ## Decision
-Option 1.
+Option 1, the owner's own read access through CLI profiles named in a file. It adds no
+stack and no cross-account trust to a cell account, which Option 2 needs, and it leaves
+the role pair's reach as it is, where Option 3 would give the API role and every cell
+build read on every role and stack in the account.
 
 ## Consequences
 The cell accounts file holds account ids and profile names, never credentials; it stays in

@@ -106,7 +106,8 @@ const controlPlane = new TenantStack(app, names.controlPlane, {
   concurrentBuildLimit: buildLimit,
   description: 'Platform stress test: the control-plane slice control plane (test asset)',
 });
-controlPlane.node.tryRemoveChild('ApiUrlParameter');
+// The fixed-name /control-plane/tenant-api-url parameter would overwrite another control plane's.
+if (!controlPlane.node.tryRemoveChild('ApiUrlParameter')) throw new Error('TenantStack has no ApiUrlParameter to remove');
 // The source fetch runs under the build roles, before the buildspec assumes the role pair.
 sourceBucket.grantRead(controlPlane.provisioning.cellProject);
 sourceBucket.grantRead(controlPlane.provisioning.tenantProject);

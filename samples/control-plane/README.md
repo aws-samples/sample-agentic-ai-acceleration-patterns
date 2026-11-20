@@ -746,26 +746,28 @@ cd ../../stress
 ```
 
 `STRESS_REGIONS` (comma-separated, default `AWS_REGION`) names the Regions the
-account check lists stacks in: every Region the run uses (spec §3.7).
-A record's `quotas` holds the peak of operations the driver's paced waves
-kept in flight (onboarding and every removal), which bounds its draw on the
-platform account's concurrent Linux/Small builds. The unpaced bursts, the
-placement race's racers and the read-rate churn, are not counted, so those
-two records show the peak of their paced removals only. Lambda concurrency
-and STS are budgeted (`slice.sh budget`) but not measured.
-The platform account's CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL`
-builds must hold the build limit times two (the cell and tenant projects; the
-service default is 1). Scenarios: `PS-1` (the seeded tenants onboarded at the
-build limit; the first deployment creates the cell, whose build time answers
-spec Q-1), `placement-race` (twice as many `CreateDeployment` calls as free
-slots, at once, on a nearly full fleet), `read-rate` (`ListDeployments`,
-`GetDeployment` and `ListCells` at the tier's steady rate while deployments
-are placed and tenants updated) and `build-limit-scaling` (the seeded tenants
-onboarded again at build limits 5, 20 and 50). Each asserts that a deployment
-names its tenant and a cell of the application in a cell account, that no cell
-goes over `maxTenants`, that a refused tenant has no deployment, and that the
-tenant build's record in the cell account names the tenant and the cell. The
-driver is [`test/stress/`](./test/stress/), the scripts
+account check lists stacks in: every Region the run uses (spec §3.7). A
+record's `quotas` holds the peak of operations the driver's paced waves kept in
+flight (onboarding and every removal), which bounds its draw on the platform
+account's concurrent Linux/Small builds. The unpaced bursts, the placement
+race's racers and the read-rate churn, are not counted, so those two records
+show the peak of their paced removals only. Lambda concurrency and STS are
+budgeted (`slice.sh budget`) but not measured. The API Gateway control-plane
+draw of spec §4.4, each `set-build-limit` redeploy of the control plane, has no
+Service Quotas code, so the slice does not budget it. The platform account's
+CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds must hold the
+build limit times two (the cell and tenant projects; the service default is 1).
+Scenarios: `PS-1` (the seeded tenants onboarded at the build limit; the first
+deployment creates the cell, whose build time answers spec Q-1),
+`placement-race` (twice as many `CreateDeployment` calls as free slots, at
+once, on a nearly full fleet), `read-rate` (`ListDeployments`, `GetDeployment`
+and `ListCells` at the tier's steady rate while deployments are placed and
+tenants updated) and `build-limit-scaling` (the seeded tenants onboarded again
+at build limits 5, 20 and 50). Each asserts that a deployment names its tenant
+and a cell of the application in a cell account, that no cell goes over
+`maxTenants`, that a refused tenant has no deployment, and that the tenant
+build's record in the cell account names the tenant and the cell. The driver is
+[`test/stress/`](./test/stress/), the scripts
 [`scripts/stress/`](./scripts/stress/slice.sh); the manifest and the source zip
 stay outside the repository and hold no token or password. `--remove-fixtures`
 also deregisters the accounts and the application and destroys both stacks.
@@ -1311,7 +1313,7 @@ application's cells (threat T5, the highest-consequence open item).
   (`cp-integ-<run id>`); [integration-test.md](./integration-test.md),
   After an interruption, lists them. Delete them after a run; they hold test
   output only.
-- **The stress slice's setup stack leaves one default Lambda log group.**
+- **The stress slice leaves log groups and API Gateway CloudWatch roles.**
   `<STRESS_PREFIX>-cp-setup` gives its operator-minting function and its
   bucket deployment log groups the stack owns, but the CDK's auto-delete
   provider for the source bucket creates `/aws/lambda/<STRESS_PREFIX>-cp-setup-CustomS3AutoDeleteObjects...`
@@ -1322,8 +1324,9 @@ application's cells (threat T5, the highest-consequence open item).
   same way. Each `<STRESS_PREFIX>-control-plane` also leaves its REST API's
   CloudWatch role (`<STRESS_PREFIX>-control-plane-ApiCloudWatchRole...`),
   which the CDK retains on destroy because the account's API Gateway setting
-  may still point at it; `teardown --fixtures` lists them. Delete one only
-  when the account setting names another role.
+  may still point at it; `teardown --fixtures` lists them and does not count
+  them, whatever the case of `STRESS_PREFIX`. Delete one only when the account
+  setting names another role.
 - **Builds over the concurrent build limit are refused, not queued.**
   CodeBuild refuses a `StartBuild` above a project's `concurrentBuildLimit`
   (`AccountLimitExceededException`), and the workflow retries it a few times

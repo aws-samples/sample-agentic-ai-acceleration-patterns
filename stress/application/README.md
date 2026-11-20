@@ -129,6 +129,8 @@ example `-v2`) deploys a second set of names beside the first, for an
 account that already has policies by the default names; every script and
 the cell synth context then need the same suffix, and step 2 must run again.
 
+### Bring back a tenant build policy left behind
+
 A deploy of `CellPolicies` from a version without `cell-tenant-build-policy`
 cannot delete that policy while the role pair holds it: CloudFormation leaves
 it behind, and the next step 1 fails on the name. Bring it back under the
@@ -228,13 +230,12 @@ would load too.
 
 ### W-5: the role pair, the account check, Q-1 and the control-plane slice
 
-Run 2026-11-20, `eu-central-1`, on the code merged with W-10, W-3 and W-8:
-the platform account and cell accounts A and B as above, fleet `stressw5`,
-`CELL_POLICY_SUFFIX=-w10`.
+Region `eu-central-1`; the platform account and the cell accounts A and B
+of the W-10 run below; fleet `stressw5`, `CELL_POLICY_SUFFIX=-w10`.
 
 | Step | Account A | Account B |
 |---|---|---|
-| `deploy-owner.sh` (`CellPolicies` with `cell-tenant-build-policy`, `CellAccountBase`) | `CellPolicies` had been redeployed without the tenant build policy, which CloudFormation could not delete while the pair held it; brought back with `cdk import` (README, step 1), then `deploy-owner.sh`: no change left | 37 s |
+| `deploy-owner.sh` (`CellPolicies` with `cell-tenant-build-policy`, `CellAccountBase`) | `CellPolicies` had been redeployed without the tenant build policy, which CloudFormation could not delete while the pair held it; brought back with `cdk import` ([Bring back a tenant build policy left behind](#bring-back-a-tenant-build-policy-left-behind)), then `deploy-owner.sh`: no change left | 37 s |
 | `deploy-role-pair.sh` (`stressw5-cell-account`) | no change (5 s) | no change (4 s) |
 | `probe-deploy.sh`, `probes.sh`, `probe-remove.sh` | 53 s and 51 s; 50 of 50 pass; no probe leftovers | 50 s and 52 s; 50 of 50 pass; no probe leftovers |
 | `PutAccount` handshake through the pair | `ACTIVE` | not registered (`small` uses one cell account) |
@@ -242,23 +243,24 @@ the platform account and cell accounts A and B as above, fleet `stressw5`,
 | Account check, with a list that leaves out the two `*-spike` account-base stacks | refused: both `*-spike` stacks are tagged account-base but not on the list | refused, the same |
 | Account check, expecting the policies without the suffix | refused: each pair half holds a managed policy outside its stack's set and lacks the expected one | refused, the same |
 
-Before the rebase, the check also refused cell account B while
-`CellBoundaryProbe` was deployed. The workload probe stack deploys through
-the cell bootstrap, so the check counts it as a cell. The unit tests in
+The check refuses an account while `CellBoundaryProbe` is deployed: it is
+none of the stacks a cell account may hold. `CellWorkloadProbe` deploys
+through the cell bootstrap, so the check counts it as a cell. Remove the
+probe stacks (step 3) before a run. The unit tests in
 `samples/control-plane/test/stress/account-check.test.ts` cover the cases no
 live account should be put into: a `cdk-hnb659fds-*` role, a role pair on
 `/cell/`, under either cell boundary, holding a policy its stack did not
-give it or with a widened trust, a `/cell/` role trusted from another account, a federated
-principal, `*` or an unused service, a stack with another service role, and
-a stack ARN from another Region or a recreated stack.
-`stress/test/role-pair-app.test.ts` pins the role pair template.
+give it or with a widened trust, a `/cell/` role trusted from another
+account, a federated principal, `*` or an unused service, a stack with
+another service role, and a stack ARN from another Region or a recreated
+stack. `stress/test/role-pair-app.test.ts` pins the role pair template.
 
 Q-1, one cell built by the control plane's cell CodeBuild project into cell
-account A (`BUILD_GENERAL1_SMALL`, 3,831 MiB, 2 vCPUs), from the run
-`20261120T142632Z` on the merged code, with the three runs before the rebase
-for comparison (the in-build lines of one were not kept):
+account A (`BUILD_GENERAL1_SMALL`, 3,831 MiB, 2 vCPUs), one column per run;
+the last column spans three earlier runs (the in-build lines of one were
+not kept):
 
-| | Merged code | Before the rebase |
+| | `20261120T142632Z` | Three earlier runs |
 |---|---|---|
 | `CreateDeployment` to the cell `ACTIVE` (the cell record's own times) | 486 s | 456 to 471 s |
 | Install of the runtime-isolation sample (`npm ci`) | 20 s | 21 to 22 s |
@@ -274,26 +276,27 @@ the cell deploys with the role pair's cell role and `cell-build-policy` alone,
 without the bootstrap's lookup role. The cell build's log holds ids,
 timings and resource bundling lines, and none of the stack's outputs.
 
-The slice run (`./run.sh run --tier small --slices control-plane
---remove-fixtures`), in the results file the runner wrote:
+The slice runs (`./run.sh run --tier small --slices control-plane
+--remove-fixtures`), from the results file the runner wrote:
 
-Run `20261120T142632Z`: PASSED, pass criteria met, deploy 223 s, destroy
-765 s (the cell delete is most of it), 2,499 s in all.
-
-| Scenario | Requests | Isolation (mismatches / assertions) | Unattributed | Measured |
+| Run | Result | Deploy | Destroy | In all |
 |---|---|---|---|---|
-| PS-1 | 65 | 0 / 63 | 0 | 20 of 20 onboarded in 550 s, the first with its cell; onboard p50 31 s once the cell is up; peak 19 operations in flight |
-| placement-race | 27 | 0 / 25 | 0 | 10 racers on 5 free slots: 5 placed, 5 refused `InsufficientCapacityError`, each attributed |
-| read-rate | 678 | 0 / 1,015 | 0 | 598 reads at 10 rps while 5 deployments were placed and tenants updated |
-| build-limit-scaling | 194 | 0 / 189 | 0 | 20 deployments in 152 s at limit 5, 49 s at 20, 48 s at 50 (one tenant build is about 25 s, so 20 fit at once at 20 and 50); 2 `DELETE_FAILED:retried` |
+| `20261120T142632Z` | PASSED, pass criteria met | 223 s | 765 s (the cell delete is most of it) | 2,499 s |
 
-Leftovers after the run: none of the slice's in either cell account (cell
-stacks, cell and tenant parameters, `/cell/` roles: 0). In the platform
-account no stack, project, state machine or `stressw5-*` role; listed and
-not counted (control-plane README, Known issues): the API access log groups
-and `SourceZipLogs` that late writes recreated, the setup stack's default
-Lambda log groups of this and earlier runs, and one retained API Gateway
-CloudWatch role per run.
+| Run | Scenario | Requests | Isolation (mismatches / assertions) | Unattributed | Measured |
+|---|---|---|---|---|---|
+| `20261120T142632Z` | PS-1 | 65 | 0 / 63 | 0 | 20 of 20 onboarded in 550 s, the first with its cell; onboard p50 31 s once the cell is up; peak 19 operations in flight |
+| `20261120T142632Z` | placement-race | 27 | 0 / 25 | 0 | 10 racers on 5 free slots: 5 placed, 5 refused `InsufficientCapacityError`, each attributed |
+| `20261120T142632Z` | read-rate | 678 | 0 / 1,015 | 0 | 598 reads at 10 rps while 5 deployments were placed and tenants updated |
+| `20261120T142632Z` | build-limit-scaling | 194 | 0 / 189 | 0 | 20 deployments in 152 s at limit 5, 49 s at 20, 48 s at 50 (one tenant build is about 25 s, so 20 fit at once at 20 and 50); 2 `DELETE_FAILED:retried` |
+
+Leftovers after run `20261120T142632Z`: none of the slice's in either cell
+account (cell stacks, cell and tenant parameters, `/cell/` roles: 0). In the
+platform account no stack, project, state machine or `stressw5-*` role;
+listed and not counted (control-plane README, Known issues): the API access
+log groups and `SourceZipLogs` that late writes recreated, the setup stack's
+default Lambda log groups of this and earlier runs, and one retained API
+Gateway CloudWatch role per run.
 
 ### W-10: the cell policies and probes
 
@@ -370,7 +373,6 @@ publishes and reads assets, and it holds only cell assets.
 - A cell is stamped with its source when it is created: a fixed cell or
   tenant script reaches an existing cell only after it is deleted and created
   again (ADR-0014).
-
 - The request path under the workload boundary (authoriser, TVM, model
   call, tools) has not run in a cell account; the first platform run at
   `small` is the check (spec Q-5).

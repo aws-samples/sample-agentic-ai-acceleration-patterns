@@ -9,6 +9,7 @@
  * fleet as it found it, apart from PS-1, which onboards the seeded tenants for the rest.
  */
 
+import type { CallResult } from './api';
 import { sleep } from './aws';
 import {
   assertPlaced,
@@ -17,6 +18,7 @@ import {
   type CellState,
   type DeploymentState,
   deploymentsOf,
+  expectStatus,
   type FleetEnv,
   onboardSeconds,
   paced,
@@ -217,6 +219,7 @@ export async function readRate(s: ScenarioEnv): Promise<void> {
   const interval = 1000 / s.tier.steadyRps;
   let n = 0;
   const inflight: Promise<void>[] = [];
+  const updates: Promise<CallResult>[] = [];
   let writeIndex = 0;
   while (Date.now() < end) {
     const i = n;
@@ -247,20 +250,25 @@ export async function readRate(s: ScenarioEnv): Promise<void> {
         }
       })(),
     );
-    // A record write every tenth tick: UpdateTenant runs the record event (no build).
+    // A record write every tenth tick: UpdateTenant runs the record event (no build). A
+    // ConflictError (409) is the tenant still UPDATING from its last write: expected, no refusal.
     if (i % 10 === 0) {
       const w = tenants[writeIndex % tenants.length];
       writeIndex += 1;
-      inflight.push(
-        s.api.call('update-tenant', 'PUT', `/tenants/${enc(w)}`, w, { description: `stress read-rate write ${writeIndex}` }).then(() => undefined),
-      );
+      updates.push(s.api.call('update-tenant', 'PUT', `/tenants/${enc(w)}`, w, { description: `stress read-rate write ${writeIndex}` }, [409]));
     }
     await sleep(interval);
   }
   await Promise.all(inflight);
+  const written = await Promise.all(updates);
+  for (const r of written) {
+    if (!(r.status === 409 && r.errorType === 'ConflictError')) expectStatus(s, r, 202, 'UpdateTenant');
+  }
+  const landed = written.filter((r) => r.status === 202).length;
+  if (landed === 0) s.rec.finding(`no UpdateTenant write was accepted (${written.length} sent): the reads ran under no writes`);
   const results = await writes;
   const accepted = s.manifest.churn.filter((_, i) => results[i] === 'accepted' || results[i] === 'exists');
-  s.log(`read rate: ${n} reads at ${s.tier.steadyRps} rps; ${accepted.length} churn deployments placed`);
+  s.log(`read rate: ${n} reads at ${s.tier.steadyRps} rps; ${landed} of ${written.length} tenant updates accepted; ${accepted.length} churn deployments placed`);
   await waitDeployments(s, accepted, { timeoutSeconds: waveTimeout(accepted.length, s.buildLimit) });
   await assertFleet(s, accepted);
   await offboard(s, accepted);
@@ -292,8 +300,13 @@ export async function buildLimitScaling(s: ScenarioEnv): Promise<void> {
       await assertFleet(s, wave);
     }
   } finally {
+    // A failed restore is a finding; it must not replace the error that stopped the waves.
     if (limits.length > 0 && limits[limits.length - 1] !== s.buildLimit) {
-      await s.setBuildLimit(s.buildLimit);
+      try {
+        await s.setBuildLimit(s.buildLimit);
+      } catch (e) {
+        s.rec.finding(`restore of build limit ${s.buildLimit} failed: ${(e as Error)?.message ?? String(e)}`);
+      }
     }
   }
 }

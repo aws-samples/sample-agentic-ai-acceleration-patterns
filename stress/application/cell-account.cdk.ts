@@ -93,7 +93,8 @@ export class CellPoliciesStack extends Stack {
     });
     // An explicit DeletionPolicy (the same Delete CloudFormation applies anyway) lets an owner
     // bring the policy back under the stack with `cdk import` when a deploy without it left
-    // the policy behind, attached to the role pair (README, step 1).
+    // the policy behind, attached to the role pair (README, "Bring back a tenant build
+    // policy left behind").
     this.tenantBuildPolicy.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
     const reason =

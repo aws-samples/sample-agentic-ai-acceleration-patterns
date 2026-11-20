@@ -49,14 +49,14 @@ export interface ResultRecordJson {
   };
 }
 
+/** The control plane's message for a placement whose transaction outcome it cannot tell (spec §7). */
+export const AMBIGUOUS_PLACEMENT = /^Deployment placement failed ambiguously/;
+
 /**
  * Server errors the control plane answers with a reason a client acts on (P-7): a placement
  * whose outcome it cannot tell, which the driver retries with the same client token (stress
  * ADR-0013). They are attributed to their tenant with this reason; every other 5xx is not.
  */
-/** The control plane's message for a placement whose transaction outcome it cannot tell (spec §7). */
-export const AMBIGUOUS_PLACEMENT = /^Deployment placement failed ambiguously/;
-
 const ATTRIBUTABLE_SERVER_ERRORS: readonly { readonly message: RegExp; readonly reason: string }[] = [
   { message: AMBIGUOUS_PLACEMENT, reason: 'ambiguous-placement' },
 ];

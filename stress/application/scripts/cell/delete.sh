@@ -20,6 +20,10 @@ set -euo pipefail
 # shellcheck source=../lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
+if ! [[ "$CELL_ID" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
+  echo "CELL_ID is not a ULID: refusing"
+  exit 1
+fi
 caller_arn="$(aws sts get-caller-identity --query Arn --output text)"
 caller="$(aws sts get-caller-identity --query Account --output text)"
 if [ "$caller" != "$CELL_ACCOUNT_ID" ]; then

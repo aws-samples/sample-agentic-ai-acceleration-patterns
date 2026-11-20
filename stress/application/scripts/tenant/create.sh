@@ -57,7 +57,10 @@ if [ "$status" != 200 ]; then
   echo "PutTenantSubscription for ${TENANT_ID} returned HTTP ${status} ($(jq -r '.reason // .__type // "no reason"' "$response" 2> /dev/null || echo 'no body'))"
   exit 1
 fi
-version="$(jq -er '.subscription.version' "$response")"
+version="$(jq -er '.subscription.version' "$response")" || {
+  echo "PutTenantSubscription for ${TENANT_ID} returned HTTP 200 with no subscription.version" >&2
+  exit 1
+}
 echo "Subscribed ${TENANT_ID} on cell ${CELL_ID} (version ${version})"
 
 state="$(jq -cn --arg cell "$CELL_ID" --arg app "$APPLICATION_ID" --arg tenant "$TENANT_ID" --argjson version "$version" \

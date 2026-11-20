@@ -92,6 +92,6 @@ sigv4() {
     args+=(-H 'Content-Type: application/json' --data "$body")
   fi
   status="$(printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" \
-    | curl "${args[@]}" "$url" || echo 000)"
-  echo "$status"
+    | curl "${args[@]}" "$url")" || true
+  echo "${status:-000}"
 }

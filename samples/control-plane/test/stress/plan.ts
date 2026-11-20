@@ -32,7 +32,7 @@ export const BUILD_PROJECTS = 2;
 /** The stress application's id. */
 export const APPLICATION_ID = 'stress';
 
-const PREFIX = /^[A-Za-z][A-Za-z0-9-]{2,40}$/;
+const PREFIX = /^[A-Za-z][A-Za-z0-9-]{2,31}$/;
 const FLEET = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 export interface StackNames {

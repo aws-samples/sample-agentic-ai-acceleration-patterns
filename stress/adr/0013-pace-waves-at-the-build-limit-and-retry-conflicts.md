@@ -35,6 +35,10 @@ queue.
 P-7 asks that every refusal names a tenant and a reason, and that a bare 500 is a finding.
 This 500 names its reason, and the driver knows its tenant.
 
+Two choices follow: how the driver handles a conflict (options 1 to 3), and how it sends a
+wave of creates and deletes while the control plane refuses builds over the limit (options
+4 to 6).
+
 ## Options considered
 ### Option 1: Retry with the client token and attribute the 500
 Every `CreateDeployment` carries a client token per placement, the same on each retry. A
@@ -52,22 +56,47 @@ retryable behaviour, and the scenario never gets past it to what it measures.
 Pros: no 500 at all; a cancelled transaction did not apply. Cons: a change to a decision of
 the control-plane sample, outside the stress test; it needs its own review.
 
-## Decision
-Option 1, and Option 3 goes to the control-plane owner as a finding (control-plane README, Known issues). The same rule covers
-the workflow's terminal writes: a deployment that ends `CREATE_FAILED` or `DELETE_FAILED`
-with a `TransactionCanceledException` reason is removed and created again, or deleted
-again, at most twice, and each retry is counted under `requests` as
-`CREATE_FAILED:retried` or `DELETE_FAILED:retried`. A failure with any other reason fails
-the scenario at once.
+### Option 4: Send each wave unpaced and count the refused builds
+Every create or delete of a wave goes out at once, and a deployment that ends
+`CREATE_FAILED` or `DELETE_FAILED` on a refused build is counted. Pros: the driver acts as
+a client that trusts ADR-0046; no pacing code. Cons: at a limit below the wave size the
+scenario measures the workflow's retry window, not the onboarding rate, and every such
+run fails on a refusal the control plane documents the other way.
 
-Every wave of creates and deletes keeps at most the build limit in flight, as any client
-must while the control plane does not queue builds. That makes build-limit scaling measure
-the onboarding rate at each limit, which is what spec §5.2 asks. The refused `StartBuild`
-goes to the control-plane owner as a finding (the same Known issues): either the workflow waits and retries until a
-build slot is free, or ADR-0046 and the README say that a client must stay under the limit.
+### Option 5: Pace each wave at the build limit
+The driver keeps at most the build limit of creates and deletes in flight and starts the
+next one as one settles. Pros: what any client must do while the control plane does not
+queue builds; build-limit scaling measures the onboarding rate at each limit, which is
+what spec §5.2 asks. Cons: the driver works around a control-plane defect, so a run no
+longer shows the refusal; the finding has to carry it.
+
+### Option 6: Raise the build limit above the wave size
+Pros: no pacing and no refusals. Cons: build-limit scaling exists to compare limits 5, 20
+and 50, so a fixed high limit removes what it measures, and every run then needs the
+CodeBuild quota for the larger limit.
+
+## Decision
+Option 1 and Option 5. Option 3 goes to the control-plane owner as a finding
+(control-plane README, Known issues). The same rule covers the workflow's terminal
+writes: a deployment that ends `CREATE_FAILED` or `DELETE_FAILED` with a
+`TransactionCanceledException` reason is removed and created again, or deleted again, at
+most twice, and each retry is counted under `requests` as `CREATE_FAILED:retried` or
+`DELETE_FAILED:retried`. A failure with any other reason fails the scenario at once.
+
+Every wave of creates and deletes keeps at most the build limit in flight. The refused
+`StartBuild` goes to the control-plane owner as a finding (the same Known issues): either
+the workflow waits and retries until a build slot is free, or ADR-0046 and the README say
+that a client must stay under the limit.
+
+The slice run `20261120T142632Z` (stress application README, Results) picked both. Paced
+at limit 5, build-limit scaling placed its 20 deployments in 152 s with no refused build,
+where the unpaced second run had builds refused and deployments `CREATE_FAILED`. Option 6
+could not have given the 152 s, 49 s and 48 s the scenario compares across limits. With
+the retries, every scenario passed with no unattributed request, and the record shows the
+conflicts it met as two `DELETE_FAILED:retried`.
 
 ## Consequences
 The slice's records show `500:internal-server` requests, `ambiguous-placement` refusals
-and `CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts; the control-plane README's stress section says how to
-read them. If the control plane adopts Option 3,
-they drop to zero and the special case can go.
+and `CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts; the control-plane README's
+stress section says how to read them. If the control plane adopts Option 3, they drop to
+zero and the special case can go.

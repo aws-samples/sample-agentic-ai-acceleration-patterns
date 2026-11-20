@@ -35,7 +35,10 @@ Pros: the zip holds only committed files. Cons: adds a minute or two and two dow
 every cell build, and makes Q-1's timing a measure of the tool install.
 
 ## Decision
-Option 1.
+Option 1, an S3 zip of the commit with the generated code. The run deploys exactly the
+commit it was built from, pushed or not, and the cell build runs no Java. Options 2 and 3
+both put the Smithy CLI install into every cell build, and Q-1 would time that install
+instead of the cell.
 
 ## Consequences
 The slice needs `git`, `zip` and the Smithy CLI on the runner's host. A fixed cell or tenant

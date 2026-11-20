@@ -44,6 +44,7 @@ import {
 } from './plan';
 import { type Identity, Recorder, type ResultRecordJson } from './recorder';
 import { SCENARIOS, type ScenarioEnv } from './scenarios';
+import { awaitTenantsActive, existingTenants, pollRecord } from './seed';
 
 const SLICE = 'control-plane';
 const log = (line: string): void => {
@@ -116,24 +117,6 @@ function loadManifest(): Manifest {
   const m = readManifest(manifestFile());
   if (m === undefined) throw new Error('no manifest: run seed first');
   return m;
-}
-
-/** Polls a record's Get until `done` says so, at most `seconds`. */
-async function pollRecord(
-  api: ControlPlaneApi,
-  hop: string,
-  p: string,
-  tenant: string,
-  done: (status: number, body: any) => boolean,
-  seconds = 300,
-): Promise<boolean> {
-  const deadline = Date.now() + seconds * 1000;
-  while (Date.now() < deadline) {
-    const r = await api.call(hop, 'GET', p, tenant, undefined, [404]);
-    if (done(r.status, r.body)) return true;
-    await sleep(5000);
-  }
-  return false;
 }
 
 // --- check-accounts -------------------------------------------------------------------------
@@ -281,16 +264,8 @@ async function seed(): Promise<number> {
   const api = c.api(new Recorder());
   const prefix = need('STRESS_PREFIX');
   let m = readManifest(file) ?? emptyManifest(prefix, t.name, need('STRESS_COMMIT'));
-  // Keep only tenants that still exist.
-  const alive = async (ids: readonly string[]): Promise<string[]> => {
-    const out: string[] = [];
-    for (const id of ids) {
-      const r = await api.call('get-tenant', 'GET', `/tenants/${id}`, id, undefined, [404]);
-      if (r.status === 200 && r.body?.tenant?.status === 'ACTIVE') out.push(id);
-    }
-    return out;
-  };
-  m = { ...m, seeded: await alive(m.seeded), churn: await alive(m.churn), extra: await alive(m.extra) };
+  // Keep every tenant whose record still exists, failed ones too, so sweep deletes them.
+  m = { ...m, seeded: await existingTenants(api, m.seeded), churn: await existingTenants(api, m.churn), extra: await existingTenants(api, m.extra) };
   writeManifest(file, m);
   const create = async (set: 'seeded' | 'churn' | 'extra', wanted: number): Promise<void> => {
     while (m[set].length < wanted) {
@@ -304,11 +279,7 @@ async function seed(): Promise<number> {
   await create('seeded', sets.seeded);
   await create('churn', sets.churn);
   await create('extra', sets.extra);
-  for (const id of allTenants(m)) {
-    if (!(await pollRecord(api, 'get-tenant', `/tenants/${id}`, id, (s, b) => s === 200 && /^(ACTIVE|[A-Z]+_FAILED)$/.test(String(b?.tenant?.status)), 120))) {
-      throw new Error(`tenant ${id} is not ACTIVE`);
-    }
-  }
+  await awaitTenantsActive(api, allTenants(m));
   log(`seed: ${m.seeded.length} seeded, ${m.churn.length} churn, ${m.extra.length} extra tenants`);
   return 0;
 }

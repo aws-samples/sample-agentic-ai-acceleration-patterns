@@ -32,7 +32,10 @@ if [ "$caller" != "$CELL_ACCOUNT_ID" ]; then
   exit 1
 fi
 
-STACK="$(node -e 'const id = process.argv[1]; if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(id)) process.exit(1); console.log(`StressCell-${id}`)' "$CELL_ID")"
+STACK="$(node -e 'const id = process.argv[1]; if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(id)) process.exit(1); console.log(`StressCell-${id}`)' "$CELL_ID")" || {
+  echo "CELL_ID is not a ULID: refusing" >&2
+  exit 1
+}
 echo "Cell ${CELL_ID} of ${APPLICATION_ID} (${OPERATION:-CREATE}): stack ${STACK} in ${CELL_ACCOUNT_ID}"
 echo "memory_total_mib=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo) cpus=$(nproc)"
 

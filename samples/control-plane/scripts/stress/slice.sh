@@ -108,13 +108,22 @@ source_zip() {
   local commit="${STRESS_COMMIT:?slice.sh: STRESS_COMMIT is not set}" zip tree
   zip="${RUN_HOME}/source-${commit}.zip"
   if [ ! -s "$zip" ]; then
+    rm -f "${zip}.tmp"
     tree="$(mktemp -d "${RUN_HOME}/source.XXXXXX")"
-    git -C "$REPO" archive --format=tar "$commit" stress/application stress/tsconfig.json samples/agentic-runtime-isolation | tar -x -C "$tree"
-    (cd "${tree}/samples/agentic-runtime-isolation" && smithy build > /dev/null)
-    rm -rf "${tree}/samples/agentic-runtime-isolation/build"
-    (cd "$tree" && zip -q -r -X "${zip}.tmp" stress samples)
+    # source_zip runs in a command substitution, where bash does not apply set -e, so each
+    # step is chained: a failed archive, build or zip leaves no tree and no partial zip, and
+    # the function fails, which fails the caller's assignment.
+    if ! { git -C "$REPO" archive --format=tar "$commit" stress/application stress/tsconfig.json samples/agentic-runtime-isolation | tar -x -C "$tree" &&
+      (cd "${tree}/samples/agentic-runtime-isolation" && smithy build > /dev/null) &&
+      rm -rf "${tree}/samples/agentic-runtime-isolation/build" &&
+      (cd "$tree" && zip -q -r -X "${zip}.tmp" stress samples) &&
+      mv "${zip}.tmp" "$zip"; }; then
+      echo "slice.sh: could not build the source zip of ${commit}" >&2
+      rm -rf "$tree"
+      rm -f "${zip}.tmp"
+      return 1
+    fi
     rm -rf "$tree"
-    mv "${zip}.tmp" "$zip"
   fi
   printf '%s' "$zip"
 }
@@ -213,7 +222,8 @@ case "$verb" in
         for stack in "$CP_STACK" "$SETUP_STACK"; do
           if stack_exists "$stack"; then
             echo "teardown: destroying ${stack}"
-            (cd "$SAMPLE_DIR" && STRESS_SOURCE_ZIP="$(source_zip)" node_modules/.bin/cdk \
+            zip="$(source_zip)" || { status=1; continue; }
+            (cd "$SAMPLE_DIR" && STRESS_SOURCE_ZIP="$zip" node_modules/.bin/cdk \
               --app "node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/stress-app.ts" \
               --output "$CDK_OUT" destroy "$stack" --force) || status=1
           fi
@@ -227,8 +237,11 @@ case "$verb" in
         [ "$status" -ne 0 ] || rm -f "${RUN_HOME}/control-plane.json" "${RUN_HOME}"/source-*.zip
       fi
       # What of the fleet is left in the platform account: roles, projects, the workflow
-      # and log groups named after it (the stacks own them).
-      left="$(aws iam list-roles --query "Roles[?starts_with(RoleName, '${FLEET}-')].RoleName" --output text)"
+      # and log groups named after it (the stacks own them). The REST API's CloudWatch role
+      # is retained on destroy and listed below, not counted: with an all-lower-case prefix
+      # its name (after the stack, in the prefix's own case) also starts with ${FLEET}-.
+      cw_role="${CP_STACK}-ApiCloudWatchRole"
+      left="$(aws iam list-roles --query "Roles[?starts_with(RoleName, '${FLEET}-') && !starts_with(RoleName, '${cw_role}')].RoleName" --output text)"
       left+=" $(aws codebuild list-projects --query "projects[?starts_with(@, '${FLEET}-')]" --output text)"
       left+=" $(aws stepfunctions list-state-machines --query "stateMachines[?starts_with(name, '${FLEET}-')].name" --output text)"
       left="$(tr '\t ' '\n\n' <<< "$left" | grep -v -e '^$' -e '^None$' || true)"
@@ -243,7 +256,7 @@ case "$verb" in
       fi
       # The REST API's CloudWatch role is retained on destroy (the CDK default), since the
       # account's API Gateway setting may still point at it.
-      kept="$(aws iam list-roles --query "Roles[?starts_with(RoleName, '${CP_STACK}-ApiCloudWatchRole')].RoleName" --output text | tr '\t' '\n' | grep -v -e '^$' -e '^None$' || true)"
+      kept="$(aws iam list-roles --query "Roles[?starts_with(RoleName, '${cw_role}')].RoleName" --output text | tr '\t' '\n' | grep -v -e '^$' -e '^None$' || true)"
       if [ -n "$kept" ]; then
         echo "teardown: API Gateway CloudWatch roles the stack retains (listed, not counted; see README.md, Known issues):"
         printf '  %s\n' $kept
