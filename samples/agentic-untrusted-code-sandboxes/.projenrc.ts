@@ -178,7 +178,7 @@ const testRunner = project.addTask('test:runner', {
 });
 testRunner.exec('python3 -B -m unittest discover -s runner/tests -t .');
 // The runner's kernel-level checks (uid drop, rlimits, seccomp, sweep, cgroups) need root: unittest skips them in a plain build.
-// A pipeline sets RUNNER_REQUIRE_LINUX_TESTS=1 so a skip fails the build, and runs this task on an x86_64 Docker host.
+// A pipeline that must prove them sets RUNNER_REQUIRE_LINUX_TESTS=1 so a skip fails the build, and runs this task on an x86_64 Docker host.
 const testRunnerLinux = project.addTask('test:runner:linux', {
   description: 'The runner tests that need root, in privileged containers (x86_64 Docker host)',
 });

@@ -27,8 +27,8 @@ AL2023 `python3` package). The wire protocol is in [PROTOCOL.md](PROTOCOL.md).
 
 `npx projen build` runs every test under `runner/tests/` (ADR-0026).
 `test_linux.py` needs root and Linux privileges; outside Docker it is
-skipped and unittest reports the skips. A pipeline sets
-`RUNNER_REQUIRE_LINUX_TESTS=1`, which turns that skip into a failure, and runs
+skipped and unittest reports the skips. A pipeline that must prove the
+kernel-level checks sets `RUNNER_REQUIRE_LINUX_TESTS=1`, which turns that skip into a failure, and runs
 `npx projen test:runner:linux` (`scripts/test-runner-docker.sh`) on an x86_64 Docker host: one fresh
 privileged container per test class, on the image `runner/Dockerfile`
 builds (Python 3.13) and on AL2023 minimal with the pinned `python3`

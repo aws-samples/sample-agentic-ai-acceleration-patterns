@@ -57,4 +57,4 @@ Python test, in every contributor's branch. A Python linter is not part of the
 gate. A check that needs an exception edits the allowed list in the script
 with a reason.
 
-Note 2026-11-20: amended by the round 1 review (H-3). A build with `RUNNER_REQUIRE_LINUX_TESTS=1` fails when the Linux tests of `runner/tests/test_linux.py` are skipped, and `npx projen test:runner:linux` runs them in privileged containers (`scripts/test-runner-docker.sh`). The plain build keeps skipping them, so a developer without root or Docker is not blocked.
+Note 2026-11-20: A build with `RUNNER_REQUIRE_LINUX_TESTS=1` fails when the Linux tests of `runner/tests/test_linux.py` are skipped, and `npx projen test:runner:linux` runs them in privileged containers (`scripts/test-runner-docker.sh`). The plain build keeps skipping them, so a developer without root or Docker is not blocked.

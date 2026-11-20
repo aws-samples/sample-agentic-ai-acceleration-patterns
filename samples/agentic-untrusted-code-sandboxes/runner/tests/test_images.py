@@ -14,7 +14,7 @@ import unittest
 RUNNER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NITRO_AGENTCORE = os.path.join(RUNNER, "Dockerfile")
 MICROVM = os.path.join(RUNNER, "microvm", "Dockerfile")
-FETCHERS = re.compile(r"\b(pip3?|curl|wget|apt(-get)?|npm|git|ADD)\b")
+FETCHERS = re.compile(r"\b(pip3?|curl|wget|apt(-get)?|npm|git|ADD)\b", re.I)
 
 
 def instructions(path):
@@ -24,12 +24,15 @@ def instructions(path):
     return [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
 
 
-def copied(path):
-    """File names copied into the image, without a leading runner/ directory."""
+def copied(path, prefix=""):
+    """File names copied into the image from the build context; each source is prefix + name."""
     names = set()
     for line in instructions(path):
-        if line.startswith("COPY "):
-            names.update(os.path.basename(part) for part in line.split()[1:-1])
+        if line.upper().startswith("COPY "):
+            for part in line.split()[1:-1]:
+                if part.startswith("--"):
+                    continue
+                names.add(part[len(prefix):] if part.startswith(prefix) else "?" + part)
     return names
 
 
@@ -45,8 +48,11 @@ def imported_modules(entry="runner.py"):
             source = f.read()
         for module in re.findall(r"^\s*from runner\.(\w+) import", source, re.M):
             queue.append(module + ".py")
-        for names in re.findall(r"^\s*from runner import ([\w, ]+?)(?: as \w+)?\s*(?:#.*)?$", source, re.M):
-            queue.extend(n.strip().split(" as ")[0] + ".py" for n in names.split(","))
+        for names in re.findall(r"^\s*from runner import \(?([\w, \n]+?)\)?\s*(?:#.*)?$", source, re.M):
+            queue.extend(n.strip().split(" as ")[0] + ".py" for n in names.split(",") if n.strip())
+        for module in re.findall(r"^\s*import runner\.(\w+)", source, re.M):
+            queue.append(module + ".py")
+        assert not re.search(r"^\s*(from \. import|import importlib|__import__)", source, re.M), "an import form the walk does not follow: " + name
     return seen
 
 
@@ -66,8 +72,9 @@ class ImageTest(unittest.TestCase):
         lines = instructions(MICROVM)
         runs = [line for line in lines if line.startswith("RUN ")]
         self.assertEqual(len(runs), 1)
-        installs = re.findall(r"dnf install -y (\S+)", runs[0])
+        installs = re.findall(r"dnf install -y ([^&;|]+?)\s*(?:&&|$)", runs[0])
         self.assertEqual(len(installs), 1)
+        self.assertEqual(len(installs[0].split()), 1, "one package: " + installs[0])
         self.assertRegex(installs[0], r"^python3-\d+\.\d+\.\d+-\d+\.amzn\d+\.\d+\.\d+$")
         self.assertEqual(runs[0].count("&&"), 1)  # install, then clean: nothing else runs
         self.assertTrue(runs[0].endswith("dnf clean all"))
@@ -76,8 +83,8 @@ class ImageTest(unittest.TestCase):
     def test_both_images_copy_every_module_the_runner_imports(self):
         needed = imported_modules() | {"__init__.py"}
         self.assertTrue({"runner.py", "wire.py", "server.py", "job.py", "sizing.py", "seccomp.py"} <= needed)
-        for path in (NITRO_AGENTCORE, MICROVM):
-            self.assertEqual(needed - copied(path), set(), path)
+        self.assertEqual(needed - copied(NITRO_AGENTCORE), set())  # context runner/: sources sit at its root
+        self.assertEqual(needed - copied(MICROVM, "runner/"), set())  # context is the staged artifact: sources under runner/
 
 
 if __name__ == "__main__":
