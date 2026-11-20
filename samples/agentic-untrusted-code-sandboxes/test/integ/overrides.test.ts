@@ -77,15 +77,18 @@ describe('RC_INTEG_OVERRIDES (T-88, M-60)', () => {
   test('only run-time code names it, and no CDK-side file names it or imports a file that does', () => {
     const files = sourceFiles(SRC);
     const holders = files.filter((f) => readFileSync(f, 'utf8').includes('RC_INTEG'));
-    // Allowed: the tool, the reaper and the backends' run-time classes (they spell the names locally).
-    const allowed = (f: string): boolean => /[\\/](tool|reaper)[\\/]|\.function\.ts$/.test(f) || (/[\\/]backends[\\/]/.test(f) && !/\.cdk\.ts$/.test(f));
+    // Allowed: the names file (src/env.ts `TEST_HOOKS`), the tool, the reaper and the backends' run-time classes.
+    const allowed = (f: string): boolean => /[\\/]env\.ts$|[\\/](tool|reaper)[\\/]|\.function\.ts$/.test(f) || (/[\\/]backends[\\/]/.test(f) && !/\.cdk\.ts$/.test(f));
     expect(holders.filter((f) => !allowed(f))).toEqual([]);
     const cdkSide = files.filter((f) => /\.cdk\.ts$|[\\/](props|main|backend-construct|handler-entry|index|backend|protocol)\.ts$|[\\/]gateway[\\/]/.test(f));
     expect(cdkSide.length).toBeGreaterThan(0);
-    const stems = new Set(holders.map((f) => f.replace(/\.ts$/, '')));
+    // The construct imports `env.ts` for its function variables; it may not import any other holder, and it may not use `TEST_HOOKS`.
+    const stems = new Set(holders.filter((f) => !/[\\/]env\.ts$/.test(f)).map((f) => f.replace(/\.ts$/, '')));
     for (const f of cdkSide) {
-      expect(readFileSync(f, 'utf8')).not.toContain('RC_INTEG');
-      for (const m of readFileSync(f, 'utf8').matchAll(/from '(\.[^']*)'/g)) {
+      const text = readFileSync(f, 'utf8');
+      expect(text).not.toContain('RC_INTEG');
+      expect(text).not.toContain('TEST_HOOKS');
+      for (const m of text.matchAll(/from '(\.[^']*)'/g)) {
         expect(stems.has(path.resolve(path.dirname(f), m[1]))).toBe(false);
       }
     }
