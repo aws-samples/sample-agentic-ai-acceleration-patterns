@@ -186,9 +186,10 @@ and the records in
 4. The driver creates the tenant's users with tenant-identity `CreateUser`
    and polls through the edge until the first `report` is served. It
    then makes one `/api/*` call through the edge to the cell API, whose
-   answer carries the route hint (§5.3). The run's first tenant is the warm-up tenant
-   of §3.5: its deployment builds the cell, and `/agents/*` answers 404
-   until front-door phase two, so it is not timed in PS-1.
+   answer carries the route hint (§5.3). The run's first tenant is the
+   warm-up tenant of §3.5: its deployment builds the cell, and
+   `/agents/*` answers 404 until front-door phase two, so it is not
+   timed in PS-1.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -298,7 +299,7 @@ hook with 409 until an operator backfills the route (front-door spec
 | 1 | control plane deployed | `control-plane` `deploy` |
 | 2 | front-door phase one, first deploy: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `agentIngress` unset, so `/agents/*` answers 404 (front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
 | 3 | front-door phase one, second deploy: the same app with `registrarUrl`, read from the edge parameter, which adds the `RouteHookAccess` stack in the control plane's account (front-door ADR-0027); then the control plane's `globalHookManagedPolicyArns` update and the global hooks registered with `register-hooks.sh` | `tenant-front-door` `deploy`, with a second `control-plane` update |
-| 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); then the cell account registered for it, with `maxCells` 1 at `small`. The cell app passes the ARN to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7 | `control-plane` `seed` |
+| 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); then the cell account registered for it, with `maxCells` 1 at `small`. The cell app passes the ARN to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7 | `control-plane` (application and account registration) |
 | 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the runner waits for the cell to be `ACTIVE`; the tenant's users and readiness poll (§3.3 step 4) run after step 6 | `control-plane`, not timed in PS-1 |
 | 6 | front-door phase two: a main-stack update with `agentIngress` set to that cell's ingress, `registrarUrl` kept | `tenant-front-door` |
 | 7 | the rest of the tier's onboarding (PS-1 at `buildLimit`), then the other scenarios | §5.1 |
@@ -334,6 +335,7 @@ time is an operating rule (`stress/README.md`, known limitations).
 | `appDomain` | none | a test subdomain with a public hosted zone in the platform account, for the front door |
 | `buildLimit` | 50 | concurrent builds per control-plane CodeBuild project for the stress deployment (§8, decision 2). The limit applies to every CodeBuild project the control plane creates. The stress application declares no hooks, so there are two, the cell and the tenant project. Both run in the platform account on `BUILD_GENERAL1_SMALL`, so 50 each draws 100 on that account's Linux/Small quota. The service default for that size is 1, so the platform account raises it before the first run |
 | `pinnedCommit` | the run's `main` commit | the commit the cell scripts deploy |
+| ingress reader role | none | the ARN of the read-only role in a cell account's account base that allows `ssm:GetParameter` on `/application-plane/shared/agent-runtime/ingress` only; the `tenant-front-door` slice assumes it for front-door phase two (§3.5) |
 
 ### 3.7 Cell accounts
 
@@ -598,9 +600,9 @@ Q-5.
 | W-4 control-plane build-limit prop | decision 2 | yes, now |
 | W-5 control-plane slice and the stress application, with the stress cell's cell API origin, its `frontDoorApiDomain` output and the distribution ARN cell parameter (§3.3 step 2, §3.5) | W-1, W-4, W-10; W-11 for Q-1 and the account check | after W-1, W-4 and W-10; Q-1 after W-11 |
 | W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, workload boundary, `/cell/` path aspect and the cell bootstrap, in `stress/application/` | decision 7; the deny probes ran in the path spike (`stress/spikes/cell-path/`); the second boundary is ADR-0011 | done: the prop in control-plane ADR-0047, the rest in `stress/application/` |
-| W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair, and a read-only role in the account base that allows `ssm:GetParameter` on the ingress parameter only, for front-door phase two (§3.5) | §3.7; W-10's policies and prop for the bootstrap and the role pair | accounts and the cell bootstrap yes, now (`stress/application/`); the role pair with W-5 |
+| W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair, and a read-only role in the account base that allows `ssm:GetParameter` on the ingress parameter only, for front-door phase two (§3.5) | §3.7; W-10's policies and prop for the bootstrap and the role pair | accounts, the cell bootstrap and the ingress reader role yes, now (`stress/application/`); the role pair with W-5 |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
-| W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1 | no: blocked on the front door |
+| W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | no: blocked on the front door |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part yes; front-door part after its merge |
 | W-9 first platform run at `small` | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | no |
 

@@ -131,10 +131,9 @@ ingress and the vended credential instead, and sees an edge fault only
 as a wrong admit or refusal. The change that removes the limit is an
 ingress that echoes the hint it received; Option 1 would bring it too.
 A `medium` or `large` platform run cannot start until Q-7 is decided. A
-direct call to the
-ingress with a valid token is served, by design (front-door spec §1.2),
-so PS-7 there refuses a token whose payload names another tenant and
-serves the tenant's own.
+direct call to the ingress with a valid token is served, by design
+(front-door spec §1.2), so PS-7 there refuses a token whose payload
+names another tenant and serves the tenant's own.
 
 The stress cell serves a cell API origin. The front door writes a tenant
 route only for a cell that has a cell route, and the cell route needs the
@@ -144,5 +143,7 @@ the cell script deploys a cell API origin with `CellRouteAccess`, which
 takes the distribution ARN from a cell parameter, and writes that output
 (spec §3.3 step 2, §3.5); a tenant is routed on `/agents/*` only once
 this holds. Phase two reads the ingress's `baseUrl` from its published
-parameter in the cell account (front-door spec §6.3). Revisit when Q-7
+parameter in the cell account (front-door spec §6.3) through a read-only
+role in the account base that allows `ssm:GetParameter` on that one
+parameter (spec §3.6, §3.7). Revisit when Q-7
 is decided, or if the front door gains per-cell agent origins.
