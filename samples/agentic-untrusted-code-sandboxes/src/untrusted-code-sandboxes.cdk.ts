@@ -322,7 +322,11 @@ export class UntrustedCodeSandboxes extends Construct {
     const prefixes = logCleanups.flatMap((c) => c.prefixes);
     const names = logCleanups.flatMap((c) => c.names);
     const cleanup = prefixes.length + names.length > 0 ? new LogCleanup(this, 'LogCleanup', { prefixes, names }) : undefined;
-    this.nagContext = { ...this.nagContext, logGroups: names.map((g) => nagFindingResource(this, g)), logGroupPrefixes: prefixes.map((g) => nagFindingResource(this, g)) };
+    this.nagContext = {
+      ...this.nagContext,
+      logGroups: names.map((g) => nagFindingResource(this, g)),
+      logGroupPrefixes: prefixes.map((g) => nagFindingResource(this, g)),
+    };
     if (!props.inputBucket) this.ownAutoDeleteLogGroup();
     for (const b of enabled) {
       for (const resource of b.drainOrder()) {
