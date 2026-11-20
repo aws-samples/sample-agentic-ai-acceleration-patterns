@@ -12,7 +12,8 @@ import { fingerprint, recordOf, STREAM_EVENTS, STREAM_GAP_MS, writeStream } from
 import { streamTo } from './agent-ingress/stream.function';
 import { redact } from './edge-tool';
 
-const TOKEN = 'eyJhbGciOiJSUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJhIn0.c2ln';
+// A plain placeholder: the token verifier is a stub, so no JWT shape is needed.
+const TOKEN = 'placeholder-bearer-token-value';
 
 describe('the stand-in record', () => {
   it('holds the stage path, the method, the route hint and a fingerprint, never the bearer', () => {
