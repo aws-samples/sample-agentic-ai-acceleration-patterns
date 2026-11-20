@@ -129,6 +129,16 @@ example `-v2`) deploys a second set of names beside the first, for an
 account that already has policies by the default names; every script and
 the cell synth context then need the same suffix, and step 2 must run again.
 
+A deploy of `CellPolicies` from a version without `cell-tenant-build-policy`
+cannot delete that policy while the role pair holds it: CloudFormation leaves
+it behind, and the next step 1 fails on the name. Bring it back under the
+stack instead of deleting it:
+
+```bash
+echo '{"CellTenantBuildPolicy37F02D91":{"PolicyArn":"arn:aws:iam::<account>:policy/cell-tenant-build-policy<suffix>"}}' > /tmp/import.json
+npx cdk --app "npx ts-node --transpile-only application/owner-app.ts" import CellPolicies --resource-mapping /tmp/import.json --output cdk.application.out/import --force
+```
+
 ## Probe the policies
 
 `probe-deploy.sh` deploys `CellBoundaryProbe`, an owner stack with one role,
