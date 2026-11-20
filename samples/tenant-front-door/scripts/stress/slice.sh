@@ -32,7 +32,7 @@ SAMPLE_DIR="$(cd "${here}/../.." && pwd)"
 verb="${1:-}"
 [[ $# -eq 0 ]] || shift
 
-for name in STRESS_TIER_JSON STRESS_PREFIX STRESS_HOME STRESS_MODE; do
+for name in STRESS_TIER_JSON STRESS_PREFIX STRESS_HOME STRESS_MODE STRESS_RUN_ID; do
   if [[ -z "${!name:-}" ]]; then
     echo "slice.sh: ${name} is not set" >&2
     exit 2

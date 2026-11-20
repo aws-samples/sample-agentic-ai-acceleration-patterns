@@ -5,13 +5,13 @@
 # Stress slice, `teardown [--fixtures]`: removes what the slice deployed and
 # checks that nothing it owned is left.
 #
-# Order, which matters (stress plan review, finding 12):
-#   1. the run's tenants, their routes and their cell namespace parameters;
-#   2. the front door's two global hooks on the control plane, when the run has
-#      one (STRESS_CONTROL_PLANE_URL and CONTROL_PLANE_TOKEN set, platform
-#      mode): a control plane whose hooks still point at a destroyed registrar
-#      fails every cell and deployment delete. Slice mode has no hooks to
-#      remove, and says so;
+# Order, which matters:
+#   1. the front door's two global hooks on the control plane, when the run has
+#      one (STRESS_CONTROL_PLANE_URL and CONTROL_PLANE_TOKEN set): a control
+#      plane whose hooks still point at a destroyed registrar fails every cell
+#      and deployment delete. A slice-mode run registers no hook, and says so;
+#   2. the run's tenants in tenant-identity and their namespace parameters, and
+#      their routes while the registrar exists;
 #   3. the stacks, last deployed first: cell, edge logging, main, edge,
 #      stand-in control plane, support.
 # Each stack's destroy time is printed. The tenants stay only at a tier whose
@@ -19,10 +19,10 @@
 # always go, they are not fixtures.
 #
 # Prints one `stack=<name> destroy_seconds=<n>` line per stack and exits
-# non-zero when a stack, a resource it owned, a log group or the edge
-# parameter is still there. A leftover is listed with the AWS CLI line that
-# removes it: this script never deletes a log group, a bucket or an EC2 resource
-# by hand.
+# non-zero when a stack, a resource it owned, a tenant, a log group or the edge
+# parameter is still there, or when it cannot tell. A leftover that needs a
+# person is listed with the AWS CLI line that removes it: this script never
+# deletes a log group, a bucket or an EC2 resource by hand.
 
 set -euo pipefail
 
@@ -46,34 +46,51 @@ status=0
 TEARDOWN_START_MS="$(( $(date +%s) * 1000 ))"
 echo "teardown: account $(aws sts get-caller-identity --query Account --output text), ${AWS_REGION}, prefix ${PREFIX}"
 
-# 1. Tenants, routes, parameters. At `large` the seeded tenants stay unless --fixtures (stress ADR-0004).
-onboarding=every-run
-[[ -z "${STRESS_TIER_JSON:-}" ]] || onboarding="$(jq -er .onboarding <<<"$STRESS_TIER_JSON")"
-if [[ "$fixtures" -eq 1 || "$onboarding" == every-run ]]; then
-  if [[ -s "$OUTPUTS" ]] && stack_exists "$STACK_MAIN"; then
-    (cd "$SAMPLE_DIR" && node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/driver.ts sweep) || status=1
-  else
-    echo "teardown: the front door is not deployed: no routes to remove"
-  fi
-fi
+driver() { (cd "$SAMPLE_DIR" && node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/driver.ts "$@"); }
 
-# 2. The global hooks.
+# 1. The global hooks, before anything they call goes.
 if [[ -n "${STRESS_CONTROL_PLANE_URL:-}" && -n "${CONTROL_PLANE_TOKEN:-}" ]]; then
   echo "teardown: unregistering the front door's global hooks on the control plane"
   CONTROL_PLANE_URL="$STRESS_CONTROL_PLANE_URL" "${SAMPLE_DIR}/scripts/register-hooks.sh" --delete || status=1
+elif [[ "${STRESS_MODE:-slice}" == platform ]]; then
+  echo "teardown: a platform run needs STRESS_CONTROL_PLANE_URL and CONTROL_PLANE_TOKEN to unregister the front door's global hooks" >&2
+  status=1
 else
   echo "teardown: no control plane in this run (slice mode: a stand-in control plane, no hooks): no global hooks to unregister"
 fi
 
-# 3. What the stacks own, read before they go: the ids are the only way back.
-: >"$RESOURCES"
+# 2. Tenants, parameters, routes. At `large` the seeded tenants stay unless --fixtures (stress ADR-0004).
+onboarding=every-run
+[[ -z "${STRESS_TIER_JSON:-}" ]] || onboarding="$(jq -er .onboarding <<<"$STRESS_TIER_JSON")"
+if [[ "$fixtures" -eq 1 || "$onboarding" == every-run ]]; then
+  # The tenants are not the stacks': remove them whether or not the front door is still there. Its routes go with it.
+  if stack_exists "$STACK_MAIN"; then
+    driver sweep || status=1
+  else
+    driver sweep --no-routes || status=1
+  fi
+  if [[ -e "${STATE_DIR}/manifest.json" ]]; then
+    echo "teardown: ${STATE_DIR}/manifest.json is still there: some tenants were not removed" >&2
+    status=1
+  fi
+fi
+
+# 3. What the stacks own, read before they go: the ids are the only way back. A rerun adds to what an earlier run read.
+found="${LOGS}/resources.jsonl"
+: >"$found"
 for s in "$STACK_CELL" "$STACK_LOGGING" "$STACK_MAIN" "$STACK_EDGE" "$STACK_CP" "$STACK_SUPPORT"; do
   if stack_exists "$s"; then
-    aws cloudformation describe-stack-resources --region "$(stack_region "$s")" --stack-name "$s" \
-      --query 'StackResources[].{type: ResourceType, id: PhysicalResourceId}' --output json \
-      | jq -c --arg r "$(stack_region "$s")" '.[] | . + {region: $r}' >>"$RESOURCES" || true
+    if listed="$(aws cloudformation describe-stack-resources --region "$(stack_region "$s")" --stack-name "$s" \
+      --query 'StackResources[].{type: ResourceType, id: PhysicalResourceId}' --output json)"; then
+      jq -c --arg r "$(stack_region "$s")" '.[] | . + {region: $r}' <<<"$listed" >>"$found"
+    else
+      echo "teardown: could not list the resources of ${s}; the leftover check cannot cover it" >&2
+      status=1
+    fi
   fi
 done
+[[ ! -e "$RESOURCES" ]] || cat "$RESOURCES" >>"$found"
+sort -u "$found" >"$RESOURCES"
 chmod 600 "$RESOURCES"
 
 destroy_stack() { # STACK KIND
@@ -116,15 +133,24 @@ if aws ssm get-parameter --name "$PARAM_EDGE" >/dev/null 2>&1; then
   status=1
 fi
 
-# exists TYPE ID REGION: 0 when the resource is still there, 1 when it is gone, 2 when this script cannot tell.
+# log_group_created GROUP REGION -> the group's creation time in epoch milliseconds, `none` when it is not there; fails when AWS does not answer.
+log_group_created() {
+  local out
+  out="$(aws logs describe-log-groups --region "$2" --log-group-name-prefix "$1" --query "logGroups[?logGroupName=='$1'].creationTime | [0]" --output text)" || return 1
+  [[ "$out" == None || -z "$out" ]] && echo none || echo "$out"
+}
+
+# exists TYPE ID REGION: 0 when the resource is still there, 1 when it is gone, 2 when the type is one this
+# script does not read, 3 when AWS did not say (a throttle, a denial): the check cannot tell.
 exists() {
-  local type="$1" id="$2" region="$3" err
+  local type="$1" id="$2" region="$3" err created
   case "$type" in
     AWS::Lambda::Function)
       err="$(aws lambda get-function --region "$region" --function-name "$id" 2>&1 >/dev/null)" && return 0
       grep -q 'ResourceNotFoundException' <<<"$err" && return 1 ;;
     AWS::Logs::LogGroup)
-      [[ -n "$(aws logs describe-log-groups --region "$region" --log-group-name-prefix "$id" --query "logGroups[?logGroupName=='${id}'].logGroupName" --output text)" ]] && return 0 || return 1 ;;
+      created="$(log_group_created "$id" "$region")" || return 3
+      [[ "$created" == none ]] && return 1 || return 0 ;;
     AWS::ApiGateway::RestApi)
       err="$(aws apigateway get-rest-api --region "$region" --rest-api-id "$id" 2>&1 >/dev/null)" && return 0
       grep -q 'NotFoundException' <<<"$err" && return 1 ;;
@@ -144,7 +170,8 @@ exists() {
       err="$(aws cloudfront get-distribution --id "$id" 2>&1 >/dev/null)" && return 0
       grep -q 'NoSuchDistribution' <<<"$err" && return 1 ;;
     AWS::CloudFront::Function)
-      err="$(aws cloudfront describe-function --name "$id" 2>&1 >/dev/null)" && return 0
+      # CloudFormation gives the function's ARN; the CLI takes its name.
+      err="$(aws cloudfront describe-function --name "${id##*/}" 2>&1 >/dev/null)" && return 0
       grep -q 'NoSuchFunctionExists' <<<"$err" && return 1 ;;
     AWS::CloudFront::KeyValueStore)
       err="$(aws cloudfront describe-key-value-store --name "$id" 2>&1 >/dev/null)" && return 0
@@ -157,19 +184,25 @@ exists() {
       grep -q 'ResourceNotFoundException' <<<"$err" && return 1 ;;
     *) return 2 ;;
   esac
-  return 2
+  return 3
 }
+
+# The log group of a function a CDK custom resource provider creates is not declared in any stack: Lambda makes it
+# on the first call. CDK names such a function <prefix>-<stack part>-Custom...-<12 characters> or ...-AWS<hex>-<12 characters>.
+CDK_PROVIDER="^${PREFIX}-[A-Za-z-]+-(Custom[A-Za-z0-9]+|AWS[0-9a-f]{20,32})-[A-Za-z0-9]{12}\$"
 
 unchecked=0
 unowned=0
 left=0
+unsure=0
 while IFS= read -r line; do
   type="$(jq -r .type <<<"$line")"; id="$(jq -r .id <<<"$line")"; region="$(jq -r .region <<<"$line")"
   rc=0
   exists "$type" "$id" "$region" || rc=$?
   case "$rc" in
     0)
-      created="$(aws logs describe-log-groups --region "$region" --log-group-name-prefix "$id" --query "logGroups[?logGroupName=='${id}'].creationTime | [0]" --output text 2>/dev/null || echo 0)"
+      created=0
+      [[ "$type" != AWS::Logs::LogGroup ]] || created="$(log_group_created "$id" "$region")" || created=0
       if [[ "$type" == AWS::Logs::LogGroup && "$created" =~ ^[0-9]+$ && "$created" -ge "$TEARDOWN_START_MS" ]]; then
         # The stack deleted this group and a function that was still logging made it again (late log delivery).
         echo "teardown: NOTE log group ${id} (${region}) was made again by a late write after the stack deleted it; remove it with: aws logs delete-log-group --log-group-name ${id} --region ${region}" >&2
@@ -180,22 +213,28 @@ while IFS= read -r line; do
       fi
       ;;
     2) unchecked=$((unchecked + 1)) ;;
+    3) echo "teardown: could not tell whether ${type} ${id} (${region}) is gone" >&2; unsure=$((unsure + 1)) ;;
   esac
-  # A Lambda function's own log group, which CloudFormation does not own unless the stack declares it. A function that a CDK
-  # custom resource provider creates has none declared: Lambda makes the group on the first call. Those are listed with their
-  # removal line and do not fail the check; any other function's group does.
-  if [[ "$type" == AWS::Lambda::Function && "$rc" -ne 2 ]]; then
-    if [[ -n "$(aws logs describe-log-groups --region "$region" --log-group-name-prefix "/aws/lambda/${id}" --query "logGroups[?logGroupName=='/aws/lambda/${id}'].logGroupName" --output text)" ]]; then
-      if [[ "$id" =~ -(Custom|AWS[0-9a-f]{4})[A-Za-z0-9]* ]]; then
-        echo "teardown: NOTE log group /aws/lambda/${id} (${region}) was created by a CDK custom resource function and no stack owns it; remove it with: aws logs delete-log-group --log-group-name /aws/lambda/${id} --region ${region}" >&2
-        unowned=$((unowned + 1))
-      else
-        echo "teardown: log group /aws/lambda/${id} is still there; remove it with: aws logs delete-log-group --log-group-name /aws/lambda/${id} --region ${region}" >&2
-        left=$((left + 1))
+  # A Lambda function's own log group, which CloudFormation does not own unless the stack declares it.
+  if [[ "$type" == AWS::Lambda::Function && "$rc" -eq 1 ]]; then
+    if created="$(log_group_created "/aws/lambda/${id}" "$region")"; then
+      if [[ "$created" != none ]]; then
+        if [[ "$id" =~ $CDK_PROVIDER ]]; then
+          echo "teardown: NOTE log group /aws/lambda/${id} (${region}) was created by a CDK custom resource function and no stack owns it; remove it with: aws logs delete-log-group --log-group-name /aws/lambda/${id} --region ${region}" >&2
+          unowned=$((unowned + 1))
+        else
+          echo "teardown: log group /aws/lambda/${id} is still there; remove it with: aws logs delete-log-group --log-group-name /aws/lambda/${id} --region ${region}" >&2
+          left=$((left + 1))
+        fi
       fi
+    else
+      echo "teardown: could not tell whether log group /aws/lambda/${id} (${region}) is gone" >&2
+      unsure=$((unsure + 1))
     fi
   fi
 done <"$RESOURCES"
-if (( left > 0 )); then status=1; fi
-(( status == 0 )) && echo "teardown: no stack, resource, log group or edge parameter left (${unchecked} resources of types this check does not read; ${unowned} log groups noted above)"
+if (( left > 0 || unsure > 0 )); then status=1; fi
+if (( status == 0 )); then
+  echo "teardown: no stack, tenant, resource, log group or edge parameter left (${unchecked} resources of types this check does not read; ${unowned} log groups noted above)"
+fi
 exit "$status"

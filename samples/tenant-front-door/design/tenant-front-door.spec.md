@@ -1056,14 +1056,14 @@ given below):
    writes at once, then one write a second for 30 s): a write takes
    0.50 s at the median, 7.2 to 7.5 s at the 95th percentile and 8.2
    to 8.3 s at the 99th, because every writer waits on the store's one
-   ETag. The 20 writes of the burst clear in 16 s, so the store takes
-   about 1.25 writes a second under conflicts, and 4 or 5 of the 54 or
-   55 registrar calls of a run ended in 503 after five attempts, which
-   the route hook retries. The load assumed is about one write a
-   second; nothing throttles the registrar to it, and at that load the
-   store has room for the retries. A burst of 100 simultaneous creates
-   has not been run: at 1.25 writes a second it takes about 80 s,
-   inside the hook's two minutes. A larger burst leaves creates in
+   ETag. The 20 writes of the burst were all written 16 s after it
+   started, which includes the writer's own wait of about 5 s before it
+   tries a 503 again, so the store takes no longer than that. 4 or 5 of
+   the 54 or 55 registrar calls of a run ended in 503 after five
+   attempts, which the route hook retries. The load assumed is about one
+   write a second; nothing throttles the registrar to it, and at that
+   load the store has room for the retries. A burst of 100 simultaneous
+   creates has not been run. A larger burst leaves creates in
    `CREATE_FAILED`, which the operator deletes and creates again (route
    hook, after step 4). Sharding by distribution, each shard with its
    own store and ETag (ADR-0012), is the way past the ceiling.
@@ -2130,9 +2130,8 @@ Limits of these promises:
   application's parameter in the same change (§3.1).
 - Route writes share one store ETag, so sustained writes above about
   one a second, or a burst above about 100, fail creates (§3.4
-  step 5). The first figure is the load the registrar is sized for;
-  the burst of 20 writes measured at 1.25 writes a second is the only
-  burst run so far.
+  step 5). The first figure is the load the registrar is sized for; the
+  only burst run so far is 20 writes, written 16 s after it started.
 - `single` mode has no edge rate rule. The origin's per-tenant limit
   counts verified requests only (ADR-0009).
 - In `host` mode the edge rate rules count a request before the router

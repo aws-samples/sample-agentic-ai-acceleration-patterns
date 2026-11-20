@@ -2,12 +2,17 @@
 // SPDX-License-Identifier: MIT-0
 
 import { classify, EXPECT, meets, type RequestKind } from './classify';
-import { forgeToken, newUlid, payloadOf, unsignedToken } from './clients';
+import { forgeToken, newUlid, payloadOf, registrarCause, retrying, unsignedToken } from './clients';
 import { compareCell, expectedAtCell, joinEdge, type EdgeRow } from './join';
+import { paced, pool, Rate } from './load';
 import { drawsOf, parseTier, planOf, tenantsToSeed } from './plan';
 import { percentiles, Recorder } from './recorder';
+import { type Watch, watchRoute } from './scenarios';
+import { regionOf } from './sigv4';
 import { Sink, answerOf } from './sink';
 import type { RequestLine } from './state';
+import { parseDraws } from '../../../../stress/src/budget';
+import { recordProblems } from '../../../../stress/src/result';
 
 const SMALL = JSON.stringify({ name: 'small', tenantsSeeded: 20, tenantsActive: 20, onboarding: 'every-run', churnPerRun: 5, steadyRps: 10, peakRps: 40, scenarioSeconds: 60 });
 const LARGE = JSON.stringify({ name: 'large', tenantsSeeded: 4000, tenantsActive: 1000, onboarding: 'fixture', churnPerRun: 100, steadyRps: 500, peakRps: 1000, scenarioSeconds: 600 });
@@ -119,7 +124,7 @@ describe('recorder and sink', () => {
 });
 
 describe('join', () => {
-  const line = (id: string, over: Partial<RequestLine> = {}): RequestLine => ({ id, kind: 'whoami', tenant: 'T1', status: 200, seconds: 0.1, edgeTenant: 't1', ...over });
+  const line = (id: string, over: Partial<RequestLine> = {}): RequestLine => ({ id, kind: 'whoami', tenant: 'T1', status: 200, seconds: 0.1, edgeTenant: 't1', at: 0, ...over });
   const row = (id: string, over: Partial<EdgeRow> = {}): EdgeRow => ({ id, status: 200, resultType: 'Miss', tenant: 't1', seconds: 0.05, ...over });
 
   it('joins on the request id and reports what is missing or different', () => {
@@ -181,9 +186,113 @@ describe('tokens and ids', () => {
 });
 
 describe('signing Region', () => {
-  it('takes the Region from the API Gateway host, so the registrar and tenant-identity may be in different Regions', async () => {
-    const { regionOf } = await import('./sigv4');
+  it('takes the Region from the API Gateway host, so the registrar and tenant-identity may be in different Regions', () => {
     expect(regionOf('https://abcde12345.execute-api.eu-central-1.amazonaws.com/prod/', 'eu-west-2')).toBe('eu-central-1');
     expect(regionOf('https://example.org/x', 'eu-west-2')).toBe('eu-west-2');
+  });
+});
+
+describe('what the runner reads', () => {
+  it('builds a record that the contract accepts, and a budget that parses', () => {
+    const rec = new Recorder();
+    const sink = new Sink(rec);
+    sink.take({ kind: 'no-token', tenant: '-', edgeTenant: '-' }, { status: 401, headers: {}, body: '{"status":401}', ttfb: 0.01, total: 0.02 });
+    sink.take({ kind: 'whoami', tenant: 'T1', expect: 'T1' }, { status: 200, headers: {}, body: '{"tenantId":"T1","routeHint":"t1"}', ttfb: 0.01, total: 0.05 });
+    rec.tally('200:registrar-write');
+    rec.hop('time-to-routable', 12.5);
+    const record = rec.build({ runId: 'r1', tier: 'small', mode: 'slice', commit: '62c208f' }, 'edge-refusals');
+    expect(recordProblems(record)).toEqual([]);
+    expect(parseDraws('tenant-front-door', JSON.stringify({ draws: drawsOf(parseTier(SMALL)) }), 1)).toHaveLength(1);
+  });
+});
+
+describe('load helpers', () => {
+  it('paces calls at the rate and finishes them all', async () => {
+    const started: number[] = [];
+    const r = await paced(50, 0.2, async () => { started.push(Date.now()); });
+    expect(r.started).toBe(10);
+    expect(started).toHaveLength(10);
+    expect(started[9] - started[0]).toBeGreaterThanOrEqual(150);
+  });
+
+  it('keeps at most the cap in flight', async () => {
+    let now = 0;
+    let peak = 0;
+    await paced(1000, 0.02, async () => {
+      now += 1;
+      peak = Math.max(peak, now);
+      await new Promise((r) => setTimeout(r, 15));
+      now -= 1;
+    }, 4);
+    expect(peak).toBeLessThanOrEqual(4);
+  });
+
+  it('runs the pool to the end and then rejects with the first error', async () => {
+    const seen: number[] = [];
+    await expect(pool([1, 2, 3, 4], 2, async (n) => {
+      seen.push(n);
+      if (n === 2) throw new Error('two');
+    })).rejects.toThrow('two');
+    expect(seen).toContain(1);
+  });
+
+  it('spaces a shared gate', async () => {
+    const gate = new Rate(50);
+    const t0 = Date.now();
+    await Promise.all([gate.take(), gate.take(), gate.take()]);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(35);
+  });
+
+  it('retries a transient answer with a backoff and returns the last one', async () => {
+    const answers = [503, 503, 200];
+    const r = await retrying(async () => ({ status: answers.shift() as number, headers: {}, body: '', ttfb: 0, total: 0 }), (x) => x.status === 503, 5);
+    expect(r.status).toBe(200);
+    const still = await retrying(async () => ({ status: 503, headers: {}, body: '', ttfb: 0, total: 0 }), (x) => x.status === 503, 1);
+    expect(still.status).toBe(503);
+  }, 20_000);
+
+  it('names a registrar 503 by its cause', () => {
+    const r = (body: string) => ({ status: 503, headers: {}, body, ttfb: 0, total: 0 });
+    expect(registrarCause(r('{"message":"the route table is busy; retry"}'))).toBe('route-table-busy');
+    expect(registrarCause(r('{"message":"the control plane could not be read"}'))).toBe('control-plane-unreadable');
+    expect(registrarCause(r('{}'))).toBe('other');
+  });
+});
+
+describe('watching a written route', () => {
+  const answer = (status: number) => ({
+    status,
+    headers: {},
+    body: status === 200 ? '{"tenantId":"T1","routeHint":"t1"}' : '{"status":403}',
+    ttfb: 0,
+    total: 0.01,
+  });
+
+  async function watch(statuses: number[], seconds: number): Promise<{ w: Watch; rec: Recorder }> {
+    const queue = [...statuses];
+    const http = await import('./http');
+    jest.spyOn(http, 'request').mockImplementation(async () => answer(queue.shift() ?? 200));
+    jest.spyOn(http, 'sleep').mockResolvedValue(undefined);
+    const rec = new Recorder();
+    const w: Watch = { tenantId: 'T1', flaps: 0, finalMisses: 0 };
+    await watchRoute({ out: { appDomain: 'app.example.com' } } as never, new Sink(rec), w, () => 'tok', seconds);
+    return { w, rec };
+  }
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('counts a request that misses the route after the watch window', async () => {
+    const { w, rec } = await watch([403, 200, 403, 200, 200], 0);
+    expect(w.finalMisses).toBe(2);
+    expect(rec.count('403:edge-no-route')).toBe(2);
+    expect(rec.counts.assertions).toBe(8);
+  });
+
+  it('notes the first request that is routed and a miss after it', async () => {
+    const { w } = await watch([403, 403, 200, 403, 200], 0.05);
+    expect(w.firstRoutable).toBeGreaterThanOrEqual(0);
+    expect(w.lastMiss).toBeDefined();
+    expect(w.flaps).toBeGreaterThanOrEqual(1);
+    expect(w.finalMisses).toBe(0);
   });
 });

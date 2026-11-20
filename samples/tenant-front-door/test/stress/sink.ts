@@ -74,6 +74,7 @@ export class Sink {
       reason: c.reason,
       seconds: r.total,
       edgeTenant: p.edgeTenant ?? '',
+      at: Date.now(),
     });
   }
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import type { RequestKind } from './classify';
-import { forgeToken, newUlid, payloadOf, registrarCause, unsignedToken, type IdentityClient, type Registrar } from './clients';
+import { forgeToken, newUlid, payloadOf, registrarCause, retrying, unsignedToken, type IdentityClient, type Registrar } from './clients';
 import { request, sleep } from './http';
 import { paced, pool, shuffled } from './load';
 import { LARGE_TOKEN_BYTES, OVER_LIMIT_BYTES, planOf } from './plan';
@@ -38,6 +38,8 @@ export interface Outcome {
 }
 
 const TOKEN_ISSUE_CONCURRENCY = 8;
+/** A registrar answer worth trying again: the route table was busy, or no answer. */
+const busy = (r: { status: number }): boolean => r.status === 503 || r.status === 0;
 /** Quiet time after the last answer: the next scenario's window never touches this one's (collect counts by window). */
 const QUIET_MS = 5000;
 
@@ -46,17 +48,28 @@ const identityOf = (ctx: Ctx): RecorderIdentity => ({ runId: ctx.env.runId, tier
 const active = (ctx: Ctx): TenantEntry[] => ctx.manifest.tenants.filter((t) => t.kind === 'active');
 const writePool = (ctx: Ctx): TenantEntry[] => ctx.manifest.tenants.filter((t) => t.kind === 'write');
 
-/** An access token per tenant. Held in memory for the scenario; never written down. */
+/** Tokens live five minutes (tenant-identity's access token); a scenario that runs longer issues new ones before these expire. */
+const TOKEN_REFRESH_MS = 200_000;
+
+/**
+ * An access token per tenant. Held in memory for the scenario, never written down. The map is
+ * refreshed in the background every `TOKEN_REFRESH_MS`, so a scenario of any length reads live
+ * tokens; the timer does not keep the process alive, and one scenario runs per process.
+ */
 async function tokensFor(ctx: Ctx, tenants: readonly TenantEntry[]): Promise<Map<string, string>> {
   const tokens = new Map<string, string>();
-  await pool(tenants, TOKEN_ISSUE_CONCURRENCY, async (t) => {
+  const issue = (): Promise<void> => pool(tenants, TOKEN_ISSUE_CONCURRENCY, async (t) => {
     tokens.set(t.tenantId, await ctx.identity.issueToken(t.tenantId, t.username));
   });
+  await issue();
   const first = tokens.values().next().value;
   if (first !== undefined) {
     const p = payloadOf(first);
-    console.log(`tokens: ${tokens.size} issued, lifetime ${Number(p.exp) - Number(p.iat)} s`);
+    console.log(`tokens: ${tokens.size} issued, lifetime ${Number(p.exp) - Number(p.iat)} s, refreshed every ${TOKEN_REFRESH_MS / 1000} s`);
   }
+  setInterval(() => {
+    issue().catch((e: unknown) => console.error(`tokens: refresh failed, the old ones stay: ${e instanceof Error ? e.message : String(e)}`));
+  }, TOKEN_REFRESH_MS).unref();
   return tokens;
 }
 
@@ -132,7 +145,7 @@ export async function ps7(ctx: Ctx): Promise<Outcome> {
 // route-write: route write rate and time to edge
 // ---------------------------------------------------------------------------
 
-interface Watch {
+export interface Watch {
   readonly tenantId: string;
   firstRoutable?: number;
   lastMiss?: number;
@@ -141,13 +154,14 @@ interface Watch {
 }
 
 /** After a write, requests for the tenant every second; the answers give time to routable and the last miss. */
-async function watchRoute(ctx: Ctx, sink: Sink, w: Watch, t: string, seconds: number): Promise<void> {
+/** `tokenOf` is read on every request, so a refreshed token is used. */
+export async function watchRoute(ctx: Ctx, sink: Sink, w: Watch, tokenOf: () => string, seconds: number): Promise<void> {
   const from = Date.now();
   const until = from + seconds * 1000;
   let seenRoutable = false;
   while (Date.now() < until) {
     const tick = Date.now();
-    const r = await request({ method: 'GET', url: `https://${ctx.out.appDomain}/api/whoami`, headers: { authorization: bearer(t) } });
+    const r = await request({ method: 'GET', url: `https://${ctx.out.appDomain}/api/whoami`, headers: { authorization: bearer(tokenOf()) } });
     const at = (Date.now() - from) / 1000;
     sink.take({ kind: 'route-watch', tenant: w.tenantId, edgeTenant: w.tenantId.toLowerCase(), expect: w.tenantId }, r);
     if (r.status === 200) {
@@ -161,7 +175,7 @@ async function watchRoute(ctx: Ctx, sink: Sink, w: Watch, t: string, seconds: nu
   }
   // Ninety seconds on, every request must see the route (spec §3.4 step 5): ten more, a quarter second apart.
   for (let i = 0; i < 10; i += 1) {
-    const r = await request({ method: 'GET', url: `https://${ctx.out.appDomain}/api/whoami`, headers: { authorization: bearer(t) } });
+    const r = await request({ method: 'GET', url: `https://${ctx.out.appDomain}/api/whoami`, headers: { authorization: bearer(tokenOf()) } });
     sink.take({ kind: 'route-watch', tenant: w.tenantId, edgeTenant: w.tenantId.toLowerCase(), expect: w.tenantId }, r);
     if (r.status !== 200) w.finalMisses += 1;
     await sleep(250);
@@ -201,15 +215,20 @@ export async function routeWrite(ctx: Ctx): Promise<Outcome> {
         rec.hop('registrar-write', r.total);
         const w: Watch = { tenantId: t.tenantId, flaps: 0, finalMisses: 0 };
         watches.push(w);
-        watching.push(watchRoute(ctx, sink, w, token(tokens, t.tenantId), plan.routeWatchSeconds));
+        watching.push(watchRoute(ctx, sink, w, () => token(tokens, t.tenantId), plan.routeWatchSeconds));
         return;
       }
       const reason = r.status === 503 ? `registrar-${registrarCause(r)}` : `registrar-${r.status === 0 ? 'network' : 'refused'}`;
       rec.request(r.status === 0 ? 599 : r.status, { tenant: t.tenantId, reason });
       rec.hop('registrar-write-failed', r.total);
-      if (r.status !== 503) break;
+      if (r.status !== 503) {
+        // The registrar's documented refusals of a write the hook role may make are 503s only; anything else is a finding.
+        sink.violate(`route-write: the registrar answered a write with ${r.status === 0 ? 'no answer (network)' : `HTTP ${r.status}`}`);
+        break;
+      }
       await sleep(5000 * (0.5 + Math.random()));
     }
+    // A 503 after the driver's five attempts is counted, by cause, and does not fail the run: the hook retries it and the spec sets no limit before it is measured.
     failedWrites += 1;
   };
 
@@ -237,7 +256,7 @@ export async function routeWrite(ctx: Ctx): Promise<Outcome> {
     failures: rec.failures,
     notes: [
       `writes: burst ${burst.length} at once, then ${sustained.length} at ${plan.sustainedWritesPerSecond}/s; ${attempts} registrar calls, ${failedWrites} writes failed after five attempts`,
-      `burst finished ${Math.round((burstDone - rec.started.getTime()) / 1000)} s after the start`,
+      `the burst's ${burst.length} writes were all written (or given up) ${Math.round((burstDone - rec.started.getTime()) / 1000)} s after it started, the driver's own waits before a retry included`,
       `a route served once and refused again before it settled (edge locations learn a write at different times): ${flapping.length} of ${watches.length} routes, ${flapping.reduce((a, w) => a + w.flaps, 0)} requests`,
       `registrar 503 by cause: ${refused503.length === 0 ? 'none' : refused503.join(' ')}`,
     ],
@@ -260,13 +279,23 @@ export async function routerLoad(ctx: Ctx): Promise<Outcome> {
   const plan = planOf(ctx.env.tier);
   const tenants = active(ctx);
   const tokens = await tokensFor(ctx, tenants);
-  const large = new Map(tenants.map((t) => [t.tenantId, forgeToken(token(tokens, t.tenantId), t.tenantId, LARGE_TOKEN_BYTES)]));
+  // A padded token per live token: built once, again only when the token is refreshed.
+  const padded = new Map<string, string>();
+  const large = (tenantId: string): string => {
+    const live = token(tokens, tenantId);
+    let p = padded.get(live);
+    if (p === undefined) {
+      p = forgeToken(live, tenantId, LARGE_TOKEN_BYTES);
+      padded.set(live, p);
+    }
+    return p;
+  };
   const rec = new Recorder();
   const sink = new Sink(rec);
   const one = (i: number): Promise<void> => {
     const t = tenants[i % tenants.length];
     if (Math.random() < plan.largeTokenShare) {
-      return send(ctx, sink, { kind: 'large-token', tenant: t.tenantId, edgeTenant: t.tenantId.toLowerCase() }, { auth: bearer(large.get(t.tenantId) as string) });
+      return send(ctx, sink, { kind: 'large-token', tenant: t.tenantId, edgeTenant: t.tenantId.toLowerCase() }, { auth: bearer(large(t.tenantId)) });
     }
     return send(ctx, sink, whoami(t.tenantId), { auth: bearer(token(tokens, t.tenantId)) });
   };
@@ -319,11 +348,11 @@ export async function edgeRefusals(ctx: Ctx): Promise<Outcome> {
   const notes: string[] = [];
 
   // The spare: routed, then suspended; the refusal kind needs the suspension to be live at the edge.
-  const put = await ctx.registrar.putTenant(spare.tenantId);
+  const put = await retrying(() => ctx.registrar.putTenant(spare.tenantId), busy);
   if (put.status !== 200) throw new Error(`PutTenantRoute for the spare tenant: HTTP ${put.status}`);
   await waitFor(ctx, token(tokens, spare.tenantId), 200, 150);
   const s0 = Date.now();
-  const suspend = await ctx.registrar.setStatus(spare.tenantId, 'suspended');
+  const suspend = await retrying(() => ctx.registrar.setStatus(spare.tenantId, 'suspended'), busy);
   if (suspend.status !== 200) throw new Error(`UpdateTenantRouteStatus: HTTP ${suspend.status}`);
   const toSuspended = await waitFor(ctx, token(tokens, spare.tenantId), 503, 150);
   notes.push(`time from the suspend call to five 503s in a row: ${Math.round((Date.now() - s0) / 100) / 10} s (the first of them ${Math.round(toSuspended * 10) / 10} s into the wait)`);
@@ -351,7 +380,7 @@ export async function edgeRefusals(ctx: Ctx): Promise<Outcome> {
   const order = shuffled(kinds);
   await paced(ctx.env.tier.steadyRps, order.length / ctx.env.tier.steadyRps, async (i) => order[i]());
   sink.flush();
-  const resume = await ctx.registrar.setStatus(spare.tenantId, 'active');
+  const resume = await retrying(() => ctx.registrar.setStatus(spare.tenantId, 'active'), busy);
   if (resume.status !== 200) rec.problem(`the spare tenant could not be resumed: HTTP ${resume.status}`);
   await sleep(QUIET_MS);
   return { record: rec.build(identityOf(ctx), 'edge-refusals'), lines: sink.lines, failures: rec.failures, notes: [...notes, `${kinds.length} requests of ${new Set(sink.lines.map((l) => l.kind)).size} kinds`] };

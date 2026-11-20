@@ -11,7 +11,8 @@ import * as https from 'node:https';
  * logged here.
  */
 
-const agent = new https.Agent({ keepAlive: true, maxSockets: 256 });
+// At least as many sockets as the load generator's in-flight cap (load.ts), so the agent never queues a request and adds its wait to a latency.
+const agent = new https.Agent({ keepAlive: true, maxSockets: 512 });
 const BODY_LIMIT = 4096;
 
 export interface HttpResult {

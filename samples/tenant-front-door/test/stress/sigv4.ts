@@ -28,15 +28,22 @@ export function assumedCredentials(roleArn: string, region: string, sessionName:
   const sts = new STSClient({ region });
   let cached: AwsCredentialIdentity | undefined;
   let renewAt = 0;
-  return async () => {
-    if (cached === undefined || Date.now() > renewAt) {
-      const out = await sts.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: sessionName, DurationSeconds: 3600 }));
-      const c = out.Credentials;
-      if (c?.AccessKeyId === undefined || c.SecretAccessKey === undefined || c.Expiration === undefined) throw new Error(`AssumeRole ${roleArn} returned no credentials`);
-      cached = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration };
-      renewAt = c.Expiration.getTime() - 5 * 60_000;
-    }
+  // Concurrent callers share one AssumeRole.
+  let pending: Promise<AwsCredentialIdentity> | undefined;
+  const assume = async (): Promise<AwsCredentialIdentity> => {
+    const out = await sts.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: sessionName, DurationSeconds: 3600 }));
+    const c = out.Credentials;
+    if (c?.AccessKeyId === undefined || c.SecretAccessKey === undefined || c.Expiration === undefined) throw new Error(`AssumeRole ${roleArn} returned no credentials`);
+    cached = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration };
+    renewAt = c.Expiration.getTime() - 5 * 60_000;
     return cached;
+  };
+  return async () => {
+    if (cached !== undefined && Date.now() <= renewAt) return cached;
+    pending ??= assume().finally(() => {
+      pending = undefined;
+    });
+    return pending;
   };
 }
 

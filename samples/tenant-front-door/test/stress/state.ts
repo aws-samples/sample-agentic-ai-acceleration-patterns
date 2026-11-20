@@ -81,8 +81,12 @@ export type TenantKind = 'active' | 'write';
 
 export interface TenantEntry {
   readonly tenantId: string;
-  readonly username: string;
+  /** Empty until tenant-identity has confirmed the create: the manifest knows the tenant first, so no failure leaks one. */
+  username: string;
   readonly kind: TenantKind;
+  readonly name?: string;
+  /** The tenant's namespace parameter is written. */
+  ready?: boolean;
 }
 
 export interface Manifest {
@@ -119,6 +123,8 @@ export interface RequestLine {
   readonly seconds: number;
   /** The tenant the client expects the edge log to name; `-` for none. */
   readonly edgeTenant: string;
+  /** When the answer came, in epoch milliseconds: `collect` looks for a missing log line near it. */
+  readonly at: number;
 }
 
 export function requestLogPath(env: Env, scenario: string): string {

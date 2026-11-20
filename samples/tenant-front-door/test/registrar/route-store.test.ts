@@ -24,7 +24,7 @@ describe('KvsRouteStore on a stale ETag', () => {
       },
     };
     const s = new KvsRouteStore({ client: client as never, arn: 'arn:aws:cloudfront::123456789012:key-value-store/x', sleep: async () => undefined, random: () => 0 });
-    return Object.defineProperty({ store: s }, 'updates', { get: () => state.updates }) as { store: KvsRouteStore; updates: number };
+    return { store: s, get updates(): number { return state.updates; } };
   }
 
   it('retries a pre-condition ValidationException and then writes', async () => {

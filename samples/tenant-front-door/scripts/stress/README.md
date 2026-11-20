@@ -19,10 +19,15 @@ message when `STRESS_MODE` is `platform`.
 
 ## Run it
 
-You need a non-production account that is bootstrapped for the CDK in the
-Region you choose and in `us-east-1`, a public hosted zone there for a test
-subdomain, and the `tenant-identity` shared-pool deployment's published
-parameters (`/application-plane/shared/identity/*`) in some Region.
+You need AWS credentials for a non-production account, with the rights to
+create the stacks (an IAM role, a CloudFront distribution and web ACL, Lambda
+functions, API Gateway, DynamoDB, Cognito); that account bootstrapped for the
+CDK in the Region you choose and in `us-east-1`; a public hosted zone in it for
+a test subdomain; and the `tenant-identity` shared-pool deployment's published
+parameters (`/application-plane/shared/identity/*`) in some Region. On the
+machine: bash, the AWS CLI, `jq`, node, the `smithy` CLI (the registrar's
+generated server code is built on a fresh checkout) and `npm ci` in this
+sample and in `stress/`.
 
 ```bash
 export AWS_REGION=<region for the front door>
@@ -38,9 +43,12 @@ cd stress
 The runner calls `slice.sh` with each verb (`budget`, `deploy`, `seed`,
 `run <scenario>`, `collect`, `teardown`), writes `results.md` and the records
 under `$STRESS_HOME/$STRESS_PREFIX/<run id>/`, and tears down when anything
-fails. `STRESS_HOME` defaults to `~/.aaa-stress`. Tools: bash, aws, jq, node and
-`npm ci` in this sample (run once when missing). The tier is `small`; the slice
-reads `STRESS_TIER_JSON` and seeds at most 100 tenants at any tier.
+fails. `STRESS_HOME` defaults to `~/.aaa-stress`. The tier is `small`; the
+slice reads `STRESS_TIER_JSON` and seeds `min(tenantsActive, 100)` active
+tenants, a write pool of `min(100, tenantsSeeded)` plus the sustained writes
+(30 at `small`, up to 60), and one spare: 71 tenants at `small`, up to 261 at
+`large`. A deploy takes about 11 minutes (the main stack, with the
+distribution, is most of it) and a destroy about 8.
 
 | Input | Meaning |
 |---|---|
@@ -69,8 +77,8 @@ application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 
 | Id | What it sends | Pass criteria |
 |---|---|---|
-| `PS-7` | per round: a plain request, a token whose payload names another tenant, a client `x-tenant-route` header, a client `x-tenant-token` header, a token with a `tenants` list, a claim with no route, and a direct call to the cell's function URL | a probe that must be refused is never served; the headers the client supplies change nothing; the cell's log shows no request for any refused probe |
-| `route-write` | a burst of 20 `PutTenantRoute` calls at once, then one a second for 30 s, as the global hook role; each written tenant is watched for 90 s with one request a second, then asked ten more times | every answer names the right tenant; after 90 s every request sees its route. No limit on the write cycle or the time to routable until they are measured |
+| `PS-7` | per round: a plain request, a token whose payload names another tenant, a client `x-tenant-route` header, a client `x-tenant-token` header, a token with a `tenants` list, a claim with no route, and a direct call to the cell's function URL | a probe that must be refused is never served; the headers the client supplies change nothing; the cell's log holds exactly the requests the driver saw reach it (the plain request, the two header probes, and the forged tokens, which the cell refuses with 403); the router refuses the `tenants` list and the unrouted claim, and IAM refuses the direct call, so none of those three reaches the cell |
+| `route-write` | a burst of 20 `PutTenantRoute` calls at once, then one a second for 30 s, as the global hook role; each written tenant is watched for 90 s with one request a second, then asked ten more times | every answer names the right tenant; after 90 s every request sees its route; the registrar answers a write with 200 or 503 only. No limit on the write cycle or the time to routable until they are measured, and a 503 that survives the driver's five attempts is counted by cause, not failed |
 | `router-load` | 10 requests a second for 40 s, then 40 a second for 20 s, over the active tenants; one in five carries a token padded to about 8,000 bytes that the cell refuses | no mismatch; every refusal is the cell's `403` for the padded token or its rate limit |
 | `edge-refusals` | 60 each of: no token, an undecodable token, a tenant with no route, a suspended tenant, a cross-site call, an Authorization over 8,192 bytes, `/agents` | every request is refused with its reason; the cell's log has no line for the window |
 
@@ -79,11 +87,13 @@ with a reason that names the hop (`edge-no-route`, `cell-forbidden`,
 `origin-iam-denied`, ...). A refusal is attributed to the tenant the request
 named, or `-` when it named none, which is also what the edge log shows
 (spec P-7). An answer no hop owns is an unattributed refusal and fails the
-run. A 503 from the registrar is counted by cause: `route-table-busy` (five
-ETag conflicts) or `control-plane-unreadable`.
+run; so does a driver-side timeout or network error (status 0), which no hop
+answered. A 503 from the registrar is counted by cause: `route-table-busy`
+(five ETag conflicts) or `control-plane-unreadable`.
 
 The tokens come from `tenant-identity`'s test aid `IssueToken`; they live
-5 minutes, and a scenario issues its own. Forged tokens reuse a real token's
+5 minutes, so a scenario issues its own and issues new ones every 200 s while
+it runs. Forged tokens reuse a real token's
 header and signature, so the router (which never checks signatures,
 ADR-0005) routes them and the cell refuses them.
 
@@ -98,6 +108,14 @@ The same join gives the edge's own time (`time-taken`) as the `edge` hop and
 shows that every router refusal is a `FunctionGeneratedResponse`. The origin
 is joined by its counts, not per request: the cell's log counts by status
 must equal the number of requests the driver saw reach it.
+
+`collect` writes more than the late `refusals` and `cost` fields of the
+contract: it adds the `edge` hop to `latency`, and the router's highest
+compute utilization of the scenario's minutes to `quotas.platform` under
+`cloudfront-function-compute-utilization-pct`, a key that is not a budgeted
+quota. The runner accepts both because it re-hashes the slice's own records
+after `collect`. Each scenario waits up to 5 minutes for its own logs. A
+router error metric with no datapoint is reported as not checked.
 
 ## Measured (small tier)
 
@@ -122,7 +140,9 @@ What the numbers say:
 
 - A write takes half a second when alone and up to 8 s when 20 contend for the
   store's one ETag; about one call in ten ends in 503 after five attempts. The
-  route hook retries those.
+  route hook retries those. The 16 s the burst took includes the driver's own
+  wait (about 5 s) before it retries a 503, so it is an upper bound on the
+  store's time, not its throughput.
 - A route is not seen everywhere at once. Edge locations learn a write at
   different times, up to 59 s in these runs, and a request can see a route and
   then lose it before it settles. That is longer than the 45 s the route hook
@@ -154,8 +174,12 @@ What the numbers say:
   for `cloudfront` and `apigateway`), so `stress/src/budget.ts` has nothing
   to name and the slice declares only Lambda concurrency. The router's compute
   utilization is reported in the record under a key of its own.
-- At most 100 tenants are seeded at any tier, and the write burst is
-  `min(100, tenantsSeeded)`; only the small tier (a burst of 20) has run.
+- At most 100 active tenants and a write burst of `min(100, tenantsSeeded)`;
+  only the small tier (a burst of 20) has run. At `medium` and `large` a
+  scenario that outlasts 5 minutes relies on the token refresh, which has not
+  been run that long, and `large`'s tenants stay between runs while its stacks
+  and their stand-in control plane records do not: `seed` writes the records
+  again for every tenant of the manifest.
 - The driver runs on the host that runs the slice, not the stress driver host,
   so client latencies include that host's path to CloudFront.
 - A failed first write is retried four more times, 5 s apart; the real hook

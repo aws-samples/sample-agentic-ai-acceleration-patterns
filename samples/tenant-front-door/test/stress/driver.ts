@@ -64,6 +64,9 @@ async function seed(env: Env, out: Outputs): Promise<void> {
   const ssm = new SSMClient({ region: env.region });
   const gate = new Rate(SSM_PER_SECOND);
 
+  // An entry whose create tenant-identity never confirmed has no username: remove that tenant (404 is fine) and make it again.
+  for (const t of tenants.filter((x) => x.username === '')) await ctx.identity.deleteTenant(t.tenantId);
+  tenants.splice(0, tenants.length, ...tenants.filter((x) => x.username !== ''));
   const haveActive = tenants.filter((t) => t.kind === 'active').length;
   const wanted: TenantEntry['kind'][] = [];
   for (let i = haveActive; i < plan.activeTenants; i += 1) wanted.push('active');
@@ -72,12 +75,20 @@ async function seed(env: Env, out: Outputs): Promise<void> {
   await pool(wanted, SEED_CONCURRENCY, async (kind) => {
     const tenantId = newUlid();
     const name = `${prefix}-${kind === 'active' ? 'a' : 'w'}-${tenantId.slice(-8).toLowerCase()}`;
-    const username = await ctx.identity.createTenant(tenantId, name);
-    await putParameter(ssm, gate, namespaceParameter(out, tenantId));
-    await fixtures.tenant(tenantId, name);
-    tenants.push({ tenantId, username, kind });
+    // The manifest knows the tenant before tenant-identity does, so a failure at any step leaves nothing the sweep cannot find.
+    const entry: TenantEntry = { tenantId, username: '', kind, name };
+    tenants.push(entry);
+    writeManifest(env, { version: 1, tenants });
+    entry.username = await ctx.identity.createTenant(tenantId, name);
     writeManifest(env, { version: 1, tenants });
   });
+  await pool(tenants.filter((t) => t.ready !== true), SEED_CONCURRENCY, async (t) => {
+    await putParameter(ssm, gate, namespaceParameter(out, t.tenantId));
+    t.ready = true;
+    writeManifest(env, { version: 1, tenants });
+  });
+  // The stand-in control plane's table goes with its stack, so its records are written again for every tenant of the manifest.
+  await pool(tenants, 8, (t) => fixtures.tenant(t.tenantId, t.name ?? t.tenantId));
   console.log(`seed: ${tenants.length} tenants (${tenants.filter((t) => t.kind === 'active').length} active, ${tenants.filter((t) => t.kind === 'write').length} write) in ${Math.round((Date.now() - started) / 1000)} s`);
 
   // The cell's route and the active tenants' routes, through the registrar as the global hook role writes them.
@@ -106,11 +117,15 @@ async function seed(env: Env, out: Outputs): Promise<void> {
   console.log(`seed: every active route answered five times in a row ${Math.round((Date.now() - ready) / 1000)} s after the last write`);
 }
 
-async function sweep(env: Env): Promise<number> {
+async function sweep(env: Env, routes: boolean): Promise<number> {
   const file = path.join(env.stateDir, 'manifest.json');
-  if (!fs.existsSync(file) || !fs.existsSync(path.join(env.stateDir, 'outputs.json'))) {
-    console.log('sweep: no manifest or no deploy outputs: nothing to remove');
+  if (!fs.existsSync(file)) {
+    console.log('sweep: no manifest: nothing to remove');
     return 0;
+  }
+  if (!fs.existsSync(path.join(env.stateDir, 'outputs.json'))) {
+    console.error('sweep: the manifest names tenants but there are no deploy outputs to find their account and API by');
+    return 1;
   }
   const out = readOutputs(env);
   const manifest = readManifest(env);
@@ -118,10 +133,13 @@ async function sweep(env: Env): Promise<number> {
   const ssm = new SSMClient({ region: env.region });
   let failed = 0;
   await pool(manifest.tenants, SEED_CONCURRENCY, async (t) => {
-    const route = await ctx.registrar.deleteTenant(t.tenantId);
-    if (route.status !== 200) {
-      failed += 1;
-      console.log(`sweep: DeleteTenantRoute HTTP ${route.status}`);
+    // The routes go with the front door's stacks: with `routes` off the registrar is gone and only the tenant remains to remove.
+    if (routes) {
+      const route = await ctx.registrar.deleteTenant(t.tenantId);
+      if (route.status !== 200) {
+        failed += 1;
+        console.log(`sweep: DeleteTenantRoute HTTP ${route.status}`);
+      }
     }
     const id = await ctx.identity.deleteTenant(t.tenantId);
     if (id !== 200 && id !== 204 && id !== 404) {
@@ -134,13 +152,15 @@ async function sweep(env: Env): Promise<number> {
     await gate.take();
     await ssm.send(new DeleteParametersCommand({ Names: manifest.tenants.slice(i, i + 10).map((t) => namespaceParameter(out, t.tenantId)) }));
   }
-  const cell = await ctx.registrar.deleteCell(out.cellId);
-  if (cell.status !== 200) {
-    failed += 1;
-    console.log(`sweep: DeleteCellRoute HTTP ${cell.status}`);
+  if (routes) {
+    const cell = await ctx.registrar.deleteCell(out.cellId);
+    if (cell.status !== 200) {
+      failed += 1;
+      console.log(`sweep: DeleteCellRoute HTTP ${cell.status}`);
+    }
   }
   if (failed === 0) fs.rmSync(file);
-  console.log(`sweep: ${manifest.tenants.length} tenants, their routes and parameters removed; ${failed} failures`);
+  console.log(`sweep: ${manifest.tenants.length} tenants, ${routes ? 'their routes and ' : ''}parameters removed; ${failed} failures`);
   return failed === 0 ? 0 : 1;
 }
 
@@ -185,7 +205,7 @@ async function main(): Promise<number> {
       return r.failures.length === 0 ? 0 : 1;
     }
     case 'sweep':
-      return sweep(readEnv());
+      return sweep(readEnv(), arg !== '--no-routes');
     default:
       console.error('usage: driver.ts budget | seed | run <scenario> | collect | sweep');
       return 2;

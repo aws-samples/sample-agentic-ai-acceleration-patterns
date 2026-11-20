@@ -24,6 +24,7 @@ import { readRequestLog, type Env, type Outputs } from './state';
 
 type Row = Record<string, string>;
 
+/** How long collect waits for one scenario's logs. */
 const DEADLINE_MS = 300_000;
 
 async function insights(client: CloudWatchLogsClient, group: string, fromMs: number, toMs: number, query: string): Promise<Row[]> {
@@ -50,20 +51,28 @@ async function insights(client: CloudWatchLogsClient, group: string, fromMs: num
 const EDGE_QUERY =
   'fields `x-edge-request-id` as id, `sc-status` as status, `x-edge-result-type` as resultType, `viewer-request-log-data` as tenant, `time-taken` as seconds | filter ispresent(id) | limit 10000';
 
-async function edgeRows(
+/** Adds the edge log's rows for the window to `rows`; returns how many it skipped for a status or a time that is not a number. */
+async function loadEdgeRows(
   client: CloudWatchLogsClient,
   group: string,
   fromMs: number,
   toMs: number,
   chunkSeconds: number,
-): Promise<Map<string, EdgeRow>> {
-  const rows = new Map<string, EdgeRow>();
+  rows: Map<string, EdgeRow>,
+): Promise<number> {
+  let skipped = 0;
   for (let t = fromMs; t < toMs; t += chunkSeconds * 1000) {
     for (const r of await insights(client, group, t, Math.min(toMs, t + chunkSeconds * 1000), EDGE_QUERY)) {
-      rows.set(r.id, { id: r.id, status: Number(r.status), resultType: r.resultType ?? '', tenant: r.tenant ?? '', seconds: Number(r.seconds) });
+      const status = Number(r.status);
+      const seconds = Number(r.seconds);
+      if (!Number.isFinite(status) || !Number.isFinite(seconds) || r.status === '' || r.seconds === '') {
+        skipped += 1;
+        continue;
+      }
+      rows.set(r.id, { id: r.id, status, resultType: r.resultType ?? '', tenant: r.tenant ?? '', seconds });
     }
   }
-  return rows;
+  return skipped;
 }
 
 async function cellCounts(client: CloudWatchLogsClient, group: string, fromMs: number, toMs: number): Promise<Map<number, number>> {
@@ -118,7 +127,6 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
   const cellLogs = new CloudWatchLogsClient({ region: out.region });
   const metrics = new CloudWatchClient({ region: out.edgeRegion });
   const chunk = Math.min(60, Math.max(5, Math.floor(8000 / env.tier.peakRps)));
-  const deadline = Date.now() + DEADLINE_MS;
   let joinedAll = 0;
   let expectedAll = 0;
 
@@ -126,12 +134,20 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
     const lines = readRequestLog(env, scenario);
     const fromMs = Date.parse(record.window.start);
     const toMs = Date.parse(record.window.end);
+    // Each scenario waits for its own logs: one that is late must not shorten the next one's wait.
+    const deadline = Date.now() + DEADLINE_MS;
     // Logs land late: CloudFront's standard log in about half a minute, Insights a little after.
-    let join = joinEdge(lines, await edgeRows(edgeLogs, out.edgeLogGroup, fromMs - 60_000, toMs + 60_000, chunk));
+    const rows = new Map<string, EdgeRow>();
+    let skipped = await loadEdgeRows(edgeLogs, out.edgeLogGroup, fromMs - 60_000, toMs + 60_000, chunk, rows);
+    let join = joinEdge(lines, rows);
     while (join.missing > 0 && Date.now() < deadline) {
       await sleep(15_000);
-      join = joinEdge(lines, await edgeRows(edgeLogs, out.edgeLogGroup, fromMs - 60_000, toMs + 60_000, chunk));
+      // Only the stretch of the window the missing requests were sent in.
+      const at = lines.filter((l) => l.id !== '' && !rows.has(l.id)).map((l) => l.at);
+      skipped += await loadEdgeRows(edgeLogs, out.edgeLogGroup, Math.min(...at) - 5_000, Math.max(...at) + 60_000, chunk, rows);
+      join = joinEdge(lines, rows);
     }
+    if (skipped > 0) failures.push(`${scenario}: ${skipped} edge log rows have a status or a time-taken that is not a number`);
     joinedAll += join.matched;
     expectedAll += join.expected;
     if (join.missing > 0) failures.push(`${scenario}: ${join.missing} of ${join.expected} requests have no edge log line for their x-amz-cf-id`);
@@ -150,16 +166,30 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
       if (key !== previous) quietSince = Date.now();
       previous = key;
       const total = [...want.values()].reduce((a, b) => a + b, 0);
-      if ((diff.length === 0 && (total > 0 || Date.now() - quietSince > 60_000)) || Date.now() > deadline) break;
+      const quiet = Date.now() - quietSince > 60_000;
+      if (diff.length === 0 && (total > 0 || quiet)) break;
+      if (Date.now() > deadline) {
+        // Nothing expected at the cell and its log never stayed quiet for a minute: the check did not run to its end.
+        if (diff.length === 0) failures.push(`${scenario}: the cell log was still changing at the deadline; no origin call is not shown`);
+        break;
+      }
       await sleep(10_000);
     }
     for (const d of diff) failures.push(`${scenario}: ${d}`);
 
     const hops = { ...record.latency, edge: percentiles(join.edgeSeconds) };
     const compute = await routerMetric(metrics, routerName, 'FunctionComputeUtilization', 'Maximum', fromMs, toMs);
-    const errors = await routerMetric(metrics, routerName, 'FunctionExecutionErrors', 'Sum', fromMs, toMs);
-    const throttles = await routerMetric(metrics, routerName, 'FunctionThrottles', 'Sum', fromMs, toMs);
-    if (errors.max > 0 || throttles.max > 0) failures.push(`${scenario}: the router had execution errors or throttles in the window (errors ${errors.max}, throttles ${throttles.max})`);
+    // CloudFront publishes a datapoint a minute, and only when there was something to count: no point means the metric has not arrived,
+    // and a minute shared with a neighbouring scenario counts its errors too.
+    const bad: string[] = [];
+    let unchecked = 0;
+    for (const name of ['FunctionExecutionErrors', 'FunctionThrottles', 'FunctionValidationErrors']) {
+      const m = await routerMetric(metrics, routerName, name, 'Sum', fromMs, toMs);
+      if (m.points === 0) unchecked += 1;
+      else if (m.max > 0) bad.push(`${name} ${m.max}`);
+    }
+    if (bad.length > 0) failures.push(`${scenario}: the router reported ${bad.join(', ')} in the minutes of the window (a neighbouring scenario's minute may share them)`);
+    if (unchecked > 0) notes.push(`${scenario}: ${unchecked} of 3 router error metrics had no datapoint yet and were not checked`);
     const next: ResultRecordJson = {
       ...record,
       latency: join.edgeSeconds.length > 0 ? hops : record.latency,
@@ -172,7 +202,7 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
         `router compute max ${compute.points > 0 ? `${compute.max.toFixed(1)} %` : 'no datapoint yet'}`,
     );
   }
-  fs.writeFileSync(path.join(env.stateDir, 'correlation.json'), `${JSON.stringify({ requestsWithId: expectedAll, joinedOnAmzCfId: joinedAll })}\n`);
+  fs.writeFileSync(path.join(env.stateDir, 'correlation.json'), `${JSON.stringify({ requestsWithId: expectedAll, joinedOnAmzCfId: joinedAll })}\n`, { mode: 0o600 });
   notes.push(`correlation: ${joinedAll} of ${expectedAll} requests joined the edge log on x-amz-cf-id = x-edge-request-id`);
   return { failures, notes };
 }

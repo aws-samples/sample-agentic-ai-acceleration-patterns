@@ -74,13 +74,33 @@ stack_exists() {
   ! grep -q 'does not exist' <<<"$err"
 }
 
+# present NAME VALUE: the value, or a failure when AWS or jq gave none (the CLI prints `None` or `null` for a missing value).
+present() {
+  if [[ -z "$2" || "$2" == None || "$2" == null ]]; then
+    echo "slice: ${1} is missing" >&2
+    return 1
+  fi
+  printf '%s' "$2"
+}
+
 stack_output() { # STACK KEY
-  aws cloudformation describe-stacks --region "$(stack_region "$1")" --stack-name "$1" \
-    --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text
+  local v
+  v="$(aws cloudformation describe-stacks --region "$(stack_region "$1")" --stack-name "$1" \
+    --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text)" || return 1
+  present "output $2 of $1" "$v"
 }
 
 param() { # NAME [REGION]
-  aws ssm get-parameter --region "${2:-$AWS_REGION}" --name "$1" --query Parameter.Value --output text
+  local v
+  v="$(aws ssm get-parameter --region "${2:-$AWS_REGION}" --name "$1" --query Parameter.Value --output text)" || return 1
+  present "parameter $1" "$v"
+}
+
+resource() { # STACK TYPE -> physical id of the first resource of that type
+  local v
+  v="$(aws cloudformation describe-stack-resources --region "$(stack_region "$1")" --stack-name "$1" \
+    --query "StackResources[?ResourceType=='$2'].PhysicalResourceId | [0]" --output text)" || return 1
+  present "resource $2 of $1" "$v"
 }
 
 # The CDK context of the front door stacks, from context.json (written by deploy.sh).

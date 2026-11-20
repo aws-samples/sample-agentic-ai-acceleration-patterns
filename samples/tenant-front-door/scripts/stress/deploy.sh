@@ -12,8 +12,9 @@
 # account, the test subdomain the front door's `appDomain` goes under. The
 # application domain is `<prefix in lower case>.<zone name>`, one per run
 # prefix. INTEG_DEPLOY_CONCURRENCY (default 2) bounds the CDK's parallel
-# stack deploys: API Gateway's control plane throttles more
-# (docs/testing-and-spikes, W-8).
+# stack deploys: API Gateway's control plane answers a deploy that runs
+# more of them with 429 (six REST APIs at concurrency 6 failed in the
+# runtime-isolation integration test; two worked).
 #
 # Needs the tenant-identity shared-pool deployment's published parameters in
 # this Region, or in STRESS_FD_IDENTITY_REGION when it is another one. Prints one `stack=<name> deploy_seconds=<n>` line per stack.
@@ -31,6 +32,8 @@ done
 
 APP_DOMAIN="${PREFIX_LOWER}.${STRESS_FD_ZONE_NAME}"
 mkdir -p -m 700 "$STATE_DIR"
+# A new deploy starts the list of what teardown must check afresh.
+rm -f "$RESOURCES"
 cd "$SAMPLE_DIR"
 LOGS="$(mktemp -d)"
 trap 'rm -rf "$LOGS"' EXIT
@@ -76,8 +79,11 @@ deploy_stack "$STACK_SUPPORT" smoke
 deploy_stack "$STACK_CP" smoke
 OPERATOR_ROLE="$(stack_output "$STACK_SUPPORT" EdgeOperatorRoleArn)"
 HOOK_ROLE="$(stack_output "$STACK_SUPPORT" GlobalHookRoleArn)"
-CONTROL_PLANE="$(jq -nc --arg u "$(stack_output "$STACK_CP" ApiUrl)" --arg a "$ACCOUNT" --arg r "$AWS_REGION" \
-  --arg t "$(stack_output "$STACK_CP" TokenUrl)" --arg c "$(stack_output "$STACK_CP" ClientId)" --arg s "$(stack_output "$STACK_CP" ClientSecretArn)" \
+CP_API="$(stack_output "$STACK_CP" ApiUrl)"
+CP_TOKEN_URL="$(stack_output "$STACK_CP" TokenUrl)"
+CP_CLIENT="$(stack_output "$STACK_CP" ClientId)"
+CP_SECRET="$(stack_output "$STACK_CP" ClientSecretArn)"
+CONTROL_PLANE="$(jq -nc --arg u "$CP_API" --arg a "$ACCOUNT" --arg r "$AWS_REGION" --arg t "$CP_TOKEN_URL" --arg c "$CP_CLIENT" --arg s "$CP_SECRET" \
   '{apiUrl: $u, accountId: $a, region: $r, vendorIdp: {tokenUrl: $t, clientId: $c, clientSecretArn: $s}}')"
 FIXTURE_TABLE="$(stack_output "$STACK_CP" FixtureTable)"
 
@@ -93,24 +99,26 @@ deploy_stack "$STACK_MAIN" fd
 deploy_stack "$STACK_LOGGING" fd
 
 EDGE_PARAM="$(param "$PARAM_EDGE")"
-DISTRIBUTION_ARN="$(jq -r .distributionArn <<<"$EDGE_PARAM")"
-REGISTRAR_URL="$(jq -r .registrarUrl <<<"$EDGE_PARAM")"
-jq --arg d "$DISTRIBUTION_ARN" '. + {distributionArn: $d}' "$CONTEXT" >"${CONTEXT}.new" && mv "${CONTEXT}.new" "$CONTEXT"
+DISTRIBUTION_ARN="$(present "distributionArn of ${PARAM_EDGE}" "$(jq -r .distributionArn <<<"$EDGE_PARAM")")"
+REGISTRAR_URL="$(present "registrarUrl of ${PARAM_EDGE}" "$(jq -r .registrarUrl <<<"$EDGE_PARAM")")"
+jq --arg d "$DISTRIBUTION_ARN" '. + {distributionArn: $d}' "$CONTEXT" >"${CONTEXT}.new"
+mv "${CONTEXT}.new" "$CONTEXT"
 chmod 600 "$CONTEXT"
 
 # 3. The demo cell, granted to the distribution.
 deploy_stack "$STACK_CELL" smoke
 
 # 4. What the driver reads.
-resource() { # STACK TYPE -> physical id of the first resource of that type
-  aws cloudformation describe-stack-resources --region "$(stack_region "$1")" --stack-name "$1" \
-    --query "StackResources[?ResourceType=='$2'].PhysicalResourceId | [0]" --output text
-}
+CELL_API="$(stack_output "$STACK_CELL" ApiDomain)"
+CELL_URL="$(stack_output "$STACK_CELL" FunctionUrl)"
+CELL_LOGS="$(resource "$STACK_CELL" AWS::Logs::LogGroup)"
+EDGE_LOGS="$(resource "$STACK_LOGGING" AWS::Logs::LogGroup)"
+ROUTER="$(resource "$STACK_MAIN" AWS::CloudFront::Function)"
 jq -n \
   --arg region "$AWS_REGION" --arg edgeRegion "$EDGE_REGION" --arg account "$ACCOUNT" --arg domain "$APP_DOMAIN" --arg app "$APPLICATION_ID" \
-  --arg registrar "$REGISTRAR_URL" --arg cell "$CELL_ID" --arg cellApi "$(stack_output "$STACK_CELL" ApiDomain)" --arg cellUrl "$(stack_output "$STACK_CELL" FunctionUrl)" \
-  --arg cellLogs "$(resource "$STACK_CELL" AWS::Logs::LogGroup)" --arg edgeLogs "$(resource "$STACK_LOGGING" AWS::Logs::LogGroup)" \
-  --arg router "$(resource "$STACK_MAIN" AWS::CloudFront::Function)" --arg table "$FIXTURE_TABLE" --arg op "$OPERATOR_ROLE" --arg hook "$HOOK_ROLE" \
+  --arg registrar "$REGISTRAR_URL" --arg cell "$CELL_ID" --arg cellApi "$CELL_API" --arg cellUrl "$CELL_URL" \
+  --arg cellLogs "$CELL_LOGS" --arg edgeLogs "$EDGE_LOGS" \
+  --arg router "$ROUTER" --arg table "$FIXTURE_TABLE" --arg op "$OPERATOR_ROLE" --arg hook "$HOOK_ROLE" \
   --arg idApi "$IDENTITY_API" --arg idClient "$APP_CLIENT_ID" \
   '{region: $region, edgeRegion: $edgeRegion, accountId: $account, appDomain: $domain, applicationId: $app, registrarUrl: $registrar, cellId: $cell,
     cellApiDomain: $cellApi, cellFunctionUrl: $cellUrl, cellLogGroup: $cellLogs, edgeLogGroup: $edgeLogs, routerFunction: $router, fixtureTable: $table,

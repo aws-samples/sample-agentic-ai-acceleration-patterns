@@ -18,6 +18,12 @@
  * - `TfdSmoke-dns`: the DNS records a dedicated-domain run publishes, from
  *   the `dnsRecords` context.
  *
+ * The stack names start with `TfdSmoke` and the stand-in hook role is named
+ * `tfd-smoke-global-hook`. The stress slice (`scripts/stress/`) passes the
+ * contexts `smokePrefix` and `smokeFleet` to name them after its run prefix,
+ * so that two runs, or a run and the smoke test, share neither a stack name
+ * nor an IAM role name.
+ *
  * Not part of the sample: nothing here is deployed by `src/main.ts`.
  */
 
