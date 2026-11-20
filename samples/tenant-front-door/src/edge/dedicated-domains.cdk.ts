@@ -100,12 +100,15 @@ function registrarTagsOnCreate(distributionId: string, alsoEquals: Record<string
 }
 
 /**
- * The tag grants: as on create, and only on a resource that carries no
- * distribution tag yet, so the registrar cannot put this distribution's tag
- * on a resource that already has one (threat model AR-33).
+ * The tag grants: as on create, and only where `aws:ResourceTag` already
+ * names this distribution. CloudFront and ACM authorise a create's tags
+ * through these actions with the request's tags as the resource's tags,
+ * so a create passes, while a resource with no distribution tag, or
+ * another's, is refused (threat model AR-33, design/spikes.md Smoke run).
  */
-function registrarTagsOnUntagged(distributionId: string): Record<string, Record<string, unknown>> {
-  return { ...registrarTagsOnCreate(distributionId), Null: { [`aws:ResourceTag/${TAG_DISTRIBUTION_ID}`]: 'true' } };
+function registrarTagsOnOwn(distributionId: string): Record<string, Record<string, unknown>> {
+  const create = registrarTagsOnCreate(distributionId);
+  return { ...create, StringEquals: { ...create.StringEquals, [`aws:ResourceTag/${TAG_DISTRIBUTION_ID}`]: distributionId } };
 }
 
 const IN_CERTIFICATE_REGION = { StringEquals: { 'aws:RequestedRegion': CERTIFICATE_REGION } };
@@ -246,7 +249,7 @@ export function registrarDedicatedDomainsPolicy(scope: Construct, id: string, ro
         sid: 'DistributionTenantTagOnCreate',
         actions: ['cloudfront:TagResource'],
         resources: [a.distributionTenants],
-        conditions: registrarTagsOnUntagged(distributionId),
+        conditions: registrarTagsOnOwn(distributionId),
       }),
       new iam.PolicyStatement({
         sid: 'DistributionTenantUpdate',
@@ -271,7 +274,7 @@ export function registrarDedicatedDomainsPolicy(scope: Construct, id: string, ro
         sid: 'CertificateTagOnRequest',
         actions: ['acm:AddTagsToCertificate'],
         resources: [a.certificates],
-        conditions: registrarTagsOnUntagged(distributionId),
+        conditions: registrarTagsOnOwn(distributionId),
       }),
       // Reads any certificate's tags: one tagged for another tenant or
       // distribution answers 409 (§3.4 step 4).
@@ -293,15 +296,15 @@ export function registrarDedicatedDomainsPolicy(scope: Construct, id: string, ro
     policy,
     `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, a.distributionTenants)}]`,
     'Distribution tenant ids are made by CloudFront at create, outside the stack, so no ARN is known. Reads cover any tenant, because '
-    + 'a domain another tenant or distribution holds answers 409; tagging carries the aws:RequestTag condition and applies only to a '
-    + `tenant without ${TAG_DISTRIBUTION_ID}, and updates carry the aws:ResourceTag condition on it (M-16, AR-33, ADR-0018).`,
+    + 'a domain another tenant or distribution holds answers 409; tagging carries the aws:RequestTag and aws:ResourceTag conditions '
+    + `on ${TAG_DISTRIBUTION_ID}, and updates the aws:ResourceTag condition (M-16, AR-33, ADR-0018).`,
   );
   acknowledge(
     policy,
     `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, a.certificates)}]`,
     'The registrar requests certificates outside the stack, so no ARN is known. Tag reads cover any certificate, because one tagged for '
-    + `another tenant answers 409; tagging carries the aws:RequestTag condition on ${TAG_DISTRIBUTION_ID} and applies only to a `
-    + 'certificate without it (M-16, M-23, AR-33, ADR-0018).',
+    + `another tenant answers 409; tagging carries the aws:RequestTag and aws:ResourceTag conditions on ${TAG_DISTRIBUTION_ID} `
+    + '(M-16, M-23, AR-33, ADR-0018).',
   );
   return policy;
 }

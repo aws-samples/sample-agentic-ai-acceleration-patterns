@@ -20,8 +20,11 @@ const TAGS_ON_CREATE = {
   'StringEquals': { [`aws:RequestTag/${TAG_DISTRIBUTION_ID}`]: DISTRIBUTION },
   'ForAllValues:StringEquals': { 'aws:TagKeys': [TAG_TENANT_ID, TAG_DISTRIBUTION_ID, TAG_COST_TENANT_ID] },
 };
-/** The tag grants: as on create, and only on a resource with no distribution tag yet (AR-33). */
-const TAGS_ON_UNTAGGED = { ...TAGS_ON_CREATE, Null: { [`aws:ResourceTag/${TAG_DISTRIBUTION_ID}`]: 'true' } };
+/** The tag grants: as on create, and only on a resource whose distribution tag is this distribution (AR-33). */
+const TAGS_ON_OWN = {
+  ...TAGS_ON_CREATE,
+  StringEquals: { ...TAGS_ON_CREATE.StringEquals, [`aws:ResourceTag/${TAG_DISTRIBUTION_ID}`]: DISTRIBUTION },
+};
 const IN_US_EAST_1 = { StringEquals: { 'aws:RequestedRegion': 'us-east-1' } };
 
 type Resources = Record<string, { Type: string; Properties: Record<string, any>; DependsOn?: string[] }>;
@@ -108,7 +111,7 @@ describe('dedicatedDomains on: registrar (spec §3.4)', () => {
       Resource: TENANT_ARNS,
     });
     expect(bySid(list, 'DistributionTenantCreate')).toEqual({ Action: 'cloudfront:CreateDistributionTenant', Resource: '*', Condition: TAGS_ON_CREATE });
-    expect(bySid(list, 'DistributionTenantTagOnCreate')).toEqual({ Action: 'cloudfront:TagResource', Resource: TENANT_ARNS, Condition: TAGS_ON_UNTAGGED });
+    expect(bySid(list, 'DistributionTenantTagOnCreate')).toEqual({ Action: 'cloudfront:TagResource', Resource: TENANT_ARNS, Condition: TAGS_ON_OWN });
     expect(bySid(list, 'DistributionTenantUpdate')).toEqual({ Action: 'cloudfront:UpdateDistributionTenant', Resource: TENANT_ARNS, Condition: DISTRIBUTION_TAG });
     expect(bySid(list, 'CertificateList')).toEqual({ Action: 'acm:ListCertificates', Resource: '*', Condition: IN_US_EAST_1 });
     expect(bySid(list, 'CertificateRequest')).toEqual({
@@ -116,7 +119,7 @@ describe('dedicatedDomains on: registrar (spec §3.4)', () => {
       Resource: '*',
       Condition: { ...TAGS_ON_CREATE, StringEquals: { ...TAGS_ON_CREATE.StringEquals, ...IN_US_EAST_1.StringEquals } },
     });
-    expect(bySid(list, 'CertificateTagOnRequest')).toEqual({ Action: 'acm:AddTagsToCertificate', Resource: CERT_ARNS, Condition: TAGS_ON_UNTAGGED });
+    expect(bySid(list, 'CertificateTagOnRequest')).toEqual({ Action: 'acm:AddTagsToCertificate', Resource: CERT_ARNS, Condition: TAGS_ON_OWN });
     expect(bySid(list, 'CertificateRead')).toEqual({ Action: ['acm:DescribeCertificate', 'acm:ListTagsForCertificate'], Resource: CERT_ARNS });
   });
 
