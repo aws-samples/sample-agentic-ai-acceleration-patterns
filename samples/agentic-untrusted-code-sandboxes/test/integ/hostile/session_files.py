@@ -17,12 +17,12 @@ def sid(tenant):
 if creds is not None:
     own = "sessions/" + sid(CONFIG["tenant"]) + "/note.txt"
     if CONFIG["mode"] == "write":
-        attempt("put", lambda: s3_request("PUT", own, creds, CONFIG["value"].encode())[0])
+        attempt("put", lambda: s3_request("PUT", own, creds, CONFIG["value"].encode(), timeout=8)[0])
     elif CONFIG["mode"] == "read":
         def get():
-            status, body = s3_request("GET", own, creds)
+            status, body = s3_request("GET", own, creds, timeout=8)
             return {"status": status, "match": body.decode(errors="replace") == CONFIG["value"]}
         attempt("get", get)
     else:
-        attempt("get_other", lambda: s3_request("GET", "sessions/" + sid(CONFIG["other"]) + "/note.txt", creds)[0])
+        attempt("get_other", lambda: s3_request("GET", "sessions/" + sid(CONFIG["other"]) + "/note.txt", creds, timeout=8)[0])
 done()
