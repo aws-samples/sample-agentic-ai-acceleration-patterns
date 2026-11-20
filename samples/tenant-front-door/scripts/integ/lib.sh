@@ -17,6 +17,10 @@ check() { # NAME WANT GOT: WANT is an extended regex matched whole
   if [[ "$3" =~ ^($2)$ ]]; then PASS=$((PASS + 1)); echo "  PASS $1 ($3)"; else
     FAILS=$((FAILS + 1)); echo "  FAIL $1: want $2, got $3 (body: $(head -c 200 "$BODY" 2>/dev/null | tr -cd '[:print:]'))"; fi
 }
+check_eq() { # NAME WANT GOT: a literal comparison, for values holding regex characters (JSON)
+  if [[ "$3" == "$2" ]]; then PASS=$((PASS + 1)); echo "  PASS $1"; else
+    FAILS=$((FAILS + 1)); echo "  FAIL $1: want $2, got $3"; fi
+}
 skip() { SKIPS=$((SKIPS + 1)); echo "  SKIP $*"; }
 yes_no() { if "$@"; then echo yes; else echo no; fi; }
 elapsed() { echo $(( $(date +%s) - $1 )); }
@@ -135,7 +139,7 @@ edge() {
   : >"$BODY"; : >"$HEAD"
   curl -s -D "$HEAD" -o "$BODY" -w '%{http_code}' --max-time 30 -X "$method" "$@" --config - "https://${host}${path}" <<<"$config" || echo 000
 }
-header() { grep -i "^$1:" "$HEAD" | head -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//'; }
+header() { { grep -i "^$1:" "$HEAD" || true; } | head -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//'; }
 has_header() { [[ -n "$(header "$1")" ]] && echo yes || echo no; }
 body_tenant() { jq -r '.tenantId // empty' "$BODY" 2>/dev/null | tr '[:lower:]' '[:upper:]'; }
 body_cell() { jq -r '.cellId // empty' "$BODY" 2>/dev/null; }
@@ -288,7 +292,9 @@ edge_tool() { as_test npx ts-node -P test/tsconfig.json --prefer-ts-exts test/in
 log_count() {
   local runner=as_test
   [[ "${5:-}" == cp ]] && runner=in_cp
-  $runner aws logs filter-log-events --region "$2" --log-group-name "$1" --start-time "$4" --filter-pattern "$3" \
+  local pattern=()
+  [[ -z "$3" ]] || pattern=(--filter-pattern "$3")
+  $runner aws logs filter-log-events --region "$2" --log-group-name "$1" --start-time "$4" "${pattern[@]}" \
     --query 'length(events)' --output text 2>/dev/null || echo error
 }
 now_ms() { echo $(( $(date +%s) * 1000 )); }

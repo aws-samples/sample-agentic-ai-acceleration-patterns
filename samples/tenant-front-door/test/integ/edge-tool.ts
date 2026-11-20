@@ -3,9 +3,9 @@
 
 /**
  * The integration test's route table helper (spec §10), run by
- * `scripts/integ.sh` under the test role. It uses the sample's own store
- * client and codec, so the fixture is written with the store's ETag as
- * every other writer does.
+ * `scripts/integ.sh` under the test role. It writes with the store's ETag,
+ * as every other writer does, and with the sample's own codec, using
+ * `PutKey` and `DeleteKey`, the two writes the test role holds (spec §6.1).
  *
  *   edge-tool.ts host-put <kvsArn> <host> <tenantId> <account>   step 2 fixture
  *   edge-tool.ts host-delete <kvsArn> <host>                     step 24
@@ -18,8 +18,17 @@
  * driver keeps in a variable; the key never leaves this process.
  */
 
-import { CloudFrontKeyValueStoreClient } from '@aws-sdk/client-cloudfront-keyvaluestore';
-import { KvsRouteStore } from '../../src/registrar/route-store';
+// The data API signs with SigV4A; the pure-JS signer is loaded for its side effect (no CRT build).
+import '@aws-sdk/signature-v4a';
+import {
+  CloudFrontKeyValueStoreClient,
+  ConflictException,
+  DeleteKeyCommand,
+  DescribeKeyValueStoreCommand,
+  GetKeyCommand,
+  PutKeyCommand,
+  ResourceNotFoundException,
+} from '@aws-sdk/client-cloudfront-keyvaluestore';
 import { decodeSigninEntry, encodeEntry, hostEntry, hostKey, KEY_SIGNIN, toStoredId } from '../../src/shared/route-table';
 import { mintState } from '../support/signin-state';
 
@@ -36,34 +45,53 @@ export function redact(raw: string | undefined): Record<string, unknown> | null 
   return out;
 }
 
+const client = new CloudFrontKeyValueStoreClient({ region: 'us-east-1' });
+
+async function read(arn: string, key: string): Promise<string | undefined> {
+  try {
+    return (await client.send(new GetKeyCommand({ KvsARN: arn, Key: key }))).Value;
+  } catch (error) {
+    if (error instanceof ResourceNotFoundException) return undefined;
+    throw error;
+  }
+}
+
+/** One write with the store's ETag, as every writer does (§4.1); a few attempts on a conflict. */
+async function withEtag(arn: string, write: (etag: string) => Promise<unknown>): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    const etag = (await client.send(new DescribeKeyValueStoreCommand({ KvsARN: arn }))).ETag ?? '';
+    try {
+      await write(etag);
+      return;
+    } catch (error) {
+      if (!(error instanceof ConflictException) || attempt >= 5) throw error;
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const [mode, arn, ...rest] = process.argv.slice(2);
-  const store = new KvsRouteStore({ client: new CloudFrontKeyValueStoreClient({ region: 'us-east-1' }), arn });
   switch (mode) {
     case 'host-put': {
       const [host, tenantId, account] = rest;
-      await store.update(async () => ({
-        puts: { [hostKey(host)]: encodeEntry(hostEntry({ t: toStoredId(tenantId), ac: account })) },
-        result: undefined,
-      }));
+      const Value = encodeEntry(hostEntry({ t: toStoredId(tenantId), ac: account }));
+      await withEtag(arn, (IfMatch) => client.send(new PutKeyCommand({ KvsARN: arn, Key: hostKey(host), Value, IfMatch })));
       console.log(`wrote ${hostKey(host)}`);
       return;
     }
     case 'host-delete': {
-      await store.update(async (read) => (await read(hostKey(rest[0]))) === undefined
-        ? { result: undefined }
-        : { deletes: [hostKey(rest[0])], result: undefined });
+      if ((await read(arn, hostKey(rest[0]))) !== undefined) {
+        await withEtag(arn, (IfMatch) => client.send(new DeleteKeyCommand({ KvsARN: arn, Key: hostKey(rest[0]), IfMatch })));
+      }
       console.log(`removed ${hostKey(rest[0])}`);
       return;
     }
-    case 'entry': {
-      const value = await store.update(async (read) => ({ result: await read(rest[0]) }));
-      console.log(JSON.stringify(redact(value)));
+    case 'entry':
+      console.log(JSON.stringify(redact(await read(arn, rest[0]))));
       return;
-    }
     case 'state': {
       const [host, expiresIn] = rest;
-      const raw = await store.update(async (read) => ({ result: await read(KEY_SIGNIN) }));
+      const raw = await read(arn, KEY_SIGNIN);
       if (raw === undefined) throw new Error('no signin key: the front door is not in host mode');
       const signin = decodeSigninEntry(raw);
       const exp = Math.floor(Date.now() / 1000) + Number(expiresIn ?? 600);

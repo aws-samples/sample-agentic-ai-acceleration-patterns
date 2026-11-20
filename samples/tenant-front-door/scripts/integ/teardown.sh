@@ -20,6 +20,15 @@ cp_stack_exists() { in_cp aws cloudformation describe-stacks --region "$REGION" 
 
 # The run's values that later parts need, from whatever is still deployed.
 teardown_read() {
+  # Every value a part may read starts empty, so a run that stopped early
+  # never trips `set -u` in the middle of its teardown.
+  local v
+  for v in VENDOR_POOL VENDOR_ISSUER VENDOR_OPERATOR_CLIENT VENDOR_READER_CLIENT VENDOR_READER_SECRET VENDOR_TOKEN_URL \
+      EDGE_OPERATOR STRANGER EDGE_PROBE_POLICY AGENT_INGRESS_URL INGRESS_LOG INGRESS_LOG_ARN SOURCE_BUCKET SOURCE_KEY \
+      CP_PROBE_POLICY SOURCE_VERSION CP_API REGISTRAR DIST_ARN DIST_ID KVS ROUTER_ARN ROUTER_NAME TEST_ROLE HOOK_POLICY \
+      OPERATOR_PASSWORD; do
+    [[ -n "${!v+x}" ]] || printf -v "$v" '%s' ''
+  done
   if stack_exists "$S_SUPPORT"; then read_phase_1 2>/dev/null || true; fi
   [[ -n "${OPERATOR_PASSWORD:-}" || -z "${VENDOR_POOL:-}" ]] || set_operator_password
   if cp_stack_exists "$S_CP"; then read_phase_2 2>/dev/null || true; fi
@@ -184,7 +193,10 @@ teardown() {
 LEFT=0
 left() { LEFT=$((LEFT + 1)); note "LEFTOVER $*"; }
 leftovers_cp() {
-  cp_stack_exists "$S_CP_SETUP" || { note "the control plane setup stack is gone: its account's leftovers cannot be read (check by hand)"; return 1; }
+  if ! cp_stack_exists "$S_CP_SETUP"; then
+    note "NOT CHECKED: the control plane setup stack, and with it the driver's access role, is gone; check the control plane's account by hand"
+    return 0
+  fi
   local s name id
   for s in "$S_CP" "$S_RHA" "$S_CELL_A"; do cp_stack_exists "$s" && left "stack $s (control plane's account)"; done
   in_cp aws ssm get-parameter --region "$REGION" --name "$HOOK_PARAMETER" >/dev/null 2>&1 && left "hook parameter $HOOK_PARAMETER"

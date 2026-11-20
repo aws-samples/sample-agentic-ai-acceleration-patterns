@@ -10,11 +10,17 @@
 
 host_of() { echo "${1,,}.${APP_DOMAIN}"; }           # a tenant's pooled host (host mode)
 front() { if [[ "$MODE" == host ]]; then host_of "$1"; else echo "$APP_DOMAIN"; fi; }
-json_get() { jq -r "$1" "$BODY" 2>/dev/null; }
+json_get() { jq -r "$1" "$BODY" 2>/dev/null || true; }
 entry() { edge_tool entry "$KVS" "$1"; }               # a redacted route table entry
 need() { "$@" || die "precondition failed: $* ($(head -c 200 "$BODY" | tr -cd '[:print:]'))"; }
 # api_expect NAME WANT METHOD PATH [JSON]: one control plane call with a status check.
-api_expect() { local st; st="$(api "$3" "$4" "${5:-}")"; check "$1" "$2" "$st"; [[ "$st" =~ ^($2)$ ]]; }
+# It returns 0 and leaves LAST_OK yes or no, so a mismatch is a FAIL and the run goes on.
+api_expect() {
+  local st
+  st="$(api "$3" "$4" "${5:-}")"
+  check "$1" "$2" "$st"
+  if [[ "$st" =~ ^($2)$ ]]; then LAST_OK=yes; else LAST_OK=no; fi
+}
 
 # -- Step 1: accounts, the front door, the hooks, the demo application ----------------
 step_01() {
@@ -55,7 +61,8 @@ application_definition() {
 # create_tenant T NAME: one tenant in the control plane and the same id in tenant-identity.
 create_tenant() {
   local t="${1^^}" id
-  api_expect "CreateTenant $1 202" 202 POST tenants "$(jq -nc --arg n "$2" '{name: $n}')" || die "CreateTenant $1"
+  api_expect "CreateTenant $1 202" 202 POST tenants "$(jq -nc --arg n "$2" '{name: $n}')"
+  [[ "$LAST_OK" == yes ]] || die "CreateTenant $1"
   id="$(json_get .tenant.tenantId)"
   state_set "TENANT_${t}" "$id"
   need api_poll "tenants/${id}" .tenant.status ACTIVE 300 5
@@ -67,8 +74,9 @@ create_deployment() {
   local id_var="TENANT_${1^^}" body
   body="$(jq -nc --arg app "${3:-$APP}" --arg e "success+tfd-integ-$1@simulator.amazonses.com" --arg acc "${2:-}" \
     '{applicationId: $app, adminEmail: $e} + (if $acc == "" then {} else {accountId: $acc} end)')"
-  api_expect "CreateDeployment $1 in ${3:-$APP} 202" 202 POST "tenants/${!id_var}/deployments" "$body" || return 1
-  api_poll "$(deployment_path "${!id_var}" "${3:-$APP}")" .deployment.status ACTIVE 1800 30
+  api_expect "CreateDeployment $1 in ${3:-$APP} 202" 202 POST "tenants/${!id_var}/deployments" "$body"
+  [[ "$LAST_OK" == yes ]] || return 1
+  api_poll "$(deployment_path "${!id_var}" "${3:-$APP}")" .deployment.status ACTIVE 1800 30 || true
   check "deployment $1 in ${3:-$APP} ACTIVE" ACTIVE "$POLLED" || true
   DEPLOYED_CELL="$(json_get .deployment.cellId)"
   [[ "$POLLED" == ACTIVE ]]
@@ -232,9 +240,9 @@ step_11() {
   STEP11_T0="$(now_ms)"
   api_expect "UpdateDeployment b with the step 11 probe 202" 202 PUT "$(deployment_path "$TENANT_B")" \
     "$(jq -nc --arg p "$TENANT_A" '{parameters: {TFD_PROBE: "step11", TFD_PROBE_PEER: $p}}')"
-  api_poll "$(deployment_path "$TENANT_B")" .deployment.status ACTIVE 1200 30
+  api_poll "$(deployment_path "$TENANT_B")" .deployment.status ACTIVE 1200 30 || true
   check "b's update ACTIVE: the tenant role got 403 on every call" ACTIVE "$POLLED"
-  check "tenant role answers" '{"put-own-route":"403","put-peer-route":"403","put-own-custom-domain":"403"}' \
+  check_eq "tenant role answers" '{"put-own-route":"403","put-peer-route":"403","put-own-custom-domain":"403"}' \
     "$(aws ssm get-parameter --region "$REGION" --name "/application-plane/tenants/${TENANT_B}/${APP}/registrar-probe" --query Parameter.Value --output text 2>/dev/null)"
   check "no host# key for dedicated-b.example.com" null "$(entry host#dedicated-b.example.com)"
   token_for a A_TOKEN
@@ -253,15 +261,15 @@ step_12() {
   section "12. no cell role and no stranger in the edge account can delete a cell route"
   api_expect "UpdateCell B with the step 12 probe 202" 202 PUT "cells/${CELL_B}" \
     "$(jq -nc --arg p "$CELL_A" '{parameters: {TFD_CELL_PROBE: "step12", TFD_CELL_PROBE_PEER: $p}}')"
-  api_poll "cells/${CELL_B}" .cell.status ACTIVE 1200 30
+  api_poll "cells/${CELL_B}" .cell.status ACTIVE 1200 30 || true
   check "cell B's update ACTIVE: the edge account's cell role got 403" ACTIVE "$POLLED"
-  check "edge account cell role answers" '{"delete-own-cell":"403","delete-peer-cell":"403"}' \
+  check_eq "edge account cell role answers" '{"delete-own-cell":"403","delete-peer-cell":"403"}' \
     "$(aws ssm get-parameter --region "$REGION" --name "/application-plane/cells/${CELL_B}/registrar-probe" --query Parameter.Value --output text 2>/dev/null)"
   api_expect "UpdateCell A with the step 12 probe 202" 202 PUT "cells/${CELL_A}" \
     "$(jq -nc --arg p "$CELL_B" '{parameters: {TFD_CELL_PROBE: "step12", TFD_CELL_PROBE_PEER: $p}}')"
-  api_poll "cells/${CELL_A}" .cell.status ACTIVE 1200 30
+  api_poll "cells/${CELL_A}" .cell.status ACTIVE 1200 30 || true
   check "cell A's update ACTIVE: the control plane account's cell role got 403" ACTIVE "$POLLED"
-  check "control plane account cell role answers" '{"delete-own-cell":"403","delete-peer-cell":"403"}' \
+  check_eq "control plane account cell role answers" '{"delete-own-cell":"403","delete-peer-cell":"403"}' \
     "$(in_cp aws ssm get-parameter --region "$REGION" --name "/application-plane/cells/${CELL_A}/registrar-probe" --query Parameter.Value --output text 2>/dev/null)"
   local st; st="$(as "$STRANGER" PUT "tenants/${TENANT_B}" '{}')"
   check "an edge-account stranger with Invoke 403" 403 "$st"
@@ -276,9 +284,9 @@ step_13() {
   st="$(edge GET "$APP_DOMAIN" /api/whoami B_TOKEN)"; check "b's token 503" 503 "$st"; check_headers "503"
   st="$(edge GET "$APP_DOMAIN" /api/whoami A_TOKEN)"; check "a still served" 200 "$st"
   api_expect "UpdateDeployment b with the step 13 probe 202" 202 PUT "$(deployment_path "$TENANT_B")" '{"parameters":{"TFD_PROBE":"step13"}}'
-  api_poll "$(deployment_path "$TENANT_B")" .deployment.status ACTIVE 1200 30
+  api_poll "$(deployment_path "$TENANT_B")" .deployment.status ACTIVE 1200 30 || true
   check "b's update ACTIVE: the tenant role got 403 on DeleteTenantRoute and PutTenantRoute" ACTIVE "$POLLED"
-  check "tenant role answers" '{"delete-own-route":"403","put-own-route":"403"}' \
+  check_eq "tenant role answers" '{"delete-own-route":"403","put-own-route":"403"}' \
     "$(aws ssm get-parameter --region "$REGION" --name "/application-plane/tenants/${TENANT_B}/${APP}/registrar-probe" --query Parameter.Value --output text 2>/dev/null)"
   check "b's entry still suspended after front-door-post" suspended "$(entry "tenant#${TENANT_B,,}" | jq -r .s)"
   propagate 90
@@ -320,6 +328,7 @@ certs_for() { # DOMAIN -> ARNs of the registrar's certificates (this distributio
     [[ "$(as_test aws acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
       --query "Tags[?Key=='tenant-front-door:distribution'].Value | [0]" --output text)" == "$DIST_ID" ]] && echo "$arn"
   done
+  return 0
 }
 utc_window() { # waits until at least 15 minutes remain before 00:00 UTC
   local left=$(( 86400 - $(date -u +%s) % 86400 ))
@@ -359,7 +368,7 @@ step_14() {
   local st TA TB RANDOM_VALUE t0 cert arn1 arn2 arn3 token
   RANDOM_VALUE="tfd-verify=$(random_token)"
   # The name holds a record before the registrar first looks it up (spike S-10).
-  txt_publish "$RANDOM_VALUE"
+  txt_publish "$RANDOM_VALUE" || true
   st="$(dd_call "$TENANT_A" "$DD")"
   check "operator sets <dd> for a: 202 domain-challenge" "202:domain-challenge" "${st}:$(json_get .stage)"
   TA="$(json_get .record.value)"
@@ -371,11 +380,11 @@ step_14() {
   st="$(dd_call "$TENANT_B" "$DD")"
   TB="$(json_get .record.value)"
   check "operator sets <dd> for b: 202 with a new token" "202:yes" "${st}:$(yes_no test -n "$TB" -a "$TB" != "$TA")"
-  txt_publish "$TA" "$RANDOM_VALUE"
+  txt_publish "$TA" "$RANDOM_VALUE" || true
   st="$(dd_call "$TENANT_B" "$DD")"
   check "b's repeat with the former holder's and a random token: 202 mismatch" "202:mismatch" "${st}:$(json_get .challenge)"
   check "still no certificate for <dd>" "" "$(certs_for "$DD" | tr '\n' ' ' | sed 's/ $//')"
-  txt_publish "$TA" "$RANDOM_VALUE" "$TB"
+  txt_publish "$TA" "$RANDOM_VALUE" "$TB" || true
   st="$(dd_call "$TENANT_B" "$DD")"
   check "b's repeat with its token: 202 certificate" "202:certificate" "${st}:$(json_get .stage)"
   check "ACM's validation record returned" CNAME "$(json_get .record.type)"
@@ -403,7 +412,7 @@ step_14() {
   check "re-check with the token published: pass, streaks 0" "pass:0:0" \
     "$(jq -r '"\(.Item.lastOutcome.S):\(.Item.missStreak.N):\(.Item.errorStreak.N)"' <<<"$SWEEP_ITEM")"
   check "no three-miss line" 0 "$(log_count "$SWEEPER_LOG" "$REGION" '"three-miss"' "$t0")"
-  txt_publish "$TA" "$RANDOM_VALUE"
+  txt_publish "$TA" "$RANDOM_VALUE" || true
   utc_window; t0="$(now_ms)"; sweeper_item_put; sweeper_run "$t0"
   check "re-check without it: the third miss" "miss:3:2:0" \
     "$(jq -r '"\(.Item.lastOutcome.S):\(.Item.missStreak.N):\(.Item.missBefore.N):\(.Item.errorStreak.N)"' <<<"$SWEEP_ITEM")"
@@ -423,7 +432,7 @@ step_14() {
   check "the main stack rolled back" UPDATE_ROLLBACK_COMPLETE "$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$S_MAIN" --query 'Stacks[0].StackStatus' --output text)"
   check "b's entry still holds <dd>" "$DD" "$(entry "tenant#${TENANT_B,,}" | jq -r .d)"
   st="$(as "$EDGE_OPERATOR" PUT "tenants/${TENANT_B}" '{}')"; check "b drops <dd> 200" 200 "$st"
-  txt_publish
+  txt_publish || true
   local start; start=$(date +%s)
   while [[ -n "$(certs_for "$DD")" ]] && (( $(elapsed "$start") < 1200 )); do sleep 60; done
   check "the sweeper deleted the certificate (after $(elapsed "$start") s)" "" "$(certs_for "$DD" | tr '\n' ' ' | sed 's/ $//')"
@@ -454,7 +463,7 @@ step_15() {
   fi
   local refused
   refused="$(as_test aws logs filter-log-events --region "$REGION" --log-group-name "$ACCESS_LOG" --start-time "$STEP11_T0" \
-    --filter-pattern '{ $.status = "403" }' --query 'events[].message' --output json 2>/dev/null | jq -r '[.[] | fromjson | .callerAccount] | unique | join(",")')"
+    --filter-pattern '{ $.status = "403" }' --query 'events[].message' --output json 2>/dev/null | jq -r '[.[] | fromjson | .callerAccount] | unique | join(",")' || true)"
   check "access log names the edge account on refused calls" yes "$(yes_no grep -q "$EDGE_ACCOUNT" <<<"$refused")"
   check "access log names the control plane's account on refused calls" yes "$(yes_no grep -q "$CP_ACCOUNT" <<<"$refused")"
   check "registrar log names the global hook role on the writes of steps 2 and 13" "[1-9][0-9]*" \
@@ -483,7 +492,7 @@ step_17() {
   st="$(edge GET "$ha" /config.json)"; check "a's host /config.json names a" "200:${TENANT_A}" "${st}:$(body_tenant)"
   st="$(edge GET "nobody-${RUN_ID}.${APP_DOMAIN}" /config.json)"; check "unregistered host 404" 404 "$st"; check_headers "host 404"
   st="$(edge GET "$ha" /api/whoami)"; check "a's host, no token 401" 401 "$st"
-  check "WWW-Authenticate: Bearer" Bearer.* "$(header www-authenticate)"
+  check "WWW-Authenticate: Bearer" 'Bearer.*' "$(header www-authenticate)"
   local t0; t0="$(now_ms)"
   st="$(edge GET "$hb" /api/whoami A_TOKEN)"; check "a's token on b's host 403" 403 "$st"
   sleep 20; check "no cell B line for it" 0 "$(log_count "$CELL_B_LOG" "$REGION" '' "$t0")"
@@ -578,14 +587,15 @@ step_20() {
   api_expect "PutHook tfd-probe 200" 200 PUT hooks/tfd-probe "$hook"
   state_set PROBE_HOOK yes
   api_expect "UpdateDeployment a 202" 202 PUT "$(deployment_path "$TENANT_A")" '{}'
-  api_poll "$(deployment_path "$TENANT_A")" .deployment.status ACTIVE 1200 30
-  check "a's update ACTIVE: tfd-probe got 409 and 409" ACTIVE "$POLLED:$(json_get '.deployment.statusReason // ""' | grep -o tfd-probe || true)"
+  api_poll "$(deployment_path "$TENANT_A")" .deployment.status ACTIVE 1200 30 || true
+  check "a's update ACTIVE: tfd-probe got 409 and 409" ACTIVE "$POLLED"
   api_expect "UpdateCell A 202" 202 PUT "cells/${CELL_A}" '{"removeParameters":["TFD_CELL_PROBE","TFD_CELL_PROBE_PEER"]}'
-  api_poll "cells/${CELL_A}" .cell.status ACTIVE 1200 30
+  api_poll "cells/${CELL_A}" .cell.status ACTIVE 1200 30 || true
   check "cell A's update ACTIVE: tfd-probe got 409 and 400" ACTIVE "$POLLED"
   token_for a A_TOKEN
   local st; st="$(edge GET "$APP_DOMAIN" /api/whoami A_TOKEN)"; check "a still served by cell A" "200:cell-a" "${st}:$(body_cell)"
-  api_expect "DeleteHook tfd-probe 200" 200 DELETE hooks/tfd-probe && state_set PROBE_HOOK no
+  api_expect "DeleteHook tfd-probe 200" 200 DELETE hooks/tfd-probe
+  [[ "$LAST_OK" == no ]] || state_set PROBE_HOOK no
 }
 
 step_21() {
@@ -596,7 +606,7 @@ step_21() {
   token_for a A_TOKEN
   local st; st="$(edge GET "$APP_DOMAIN" /api/whoami A_TOKEN)"; check "a still served" 200 "$st"
   api_expect "UpdateCell A removing FRONT_DOOR_OUTPUT 202" 202 PUT "cells/${CELL_A}" '{"removeParameters":["FRONT_DOOR_OUTPUT"]}'
-  api_poll "cells/${CELL_A}" .cell.status ACTIVE 1200 30
+  api_poll "cells/${CELL_A}" .cell.status ACTIVE 1200 30 || true
   check "cell A ACTIVE again" ACTIVE "$POLLED"
 }
 
@@ -715,7 +725,7 @@ step_23() {
   sleep 20
   local rec
   rec="$(as_test aws logs filter-log-events --region "$REGION" --log-group-name "$INGRESS_LOG" --start-time "$t0" \
-    --filter-pattern '"agent-ingress-request"' --query 'events[-1].message' --output text 2>/dev/null)"
+    --filter-pattern '"agent-ingress-request"' --query 'events[-1].message' --output text 2>/dev/null || true)"
   check "the stand-in saw the stage path without /agents" /prod/support-bot/invocations "$(jq -r .stagePath <<<"$rec" 2>/dev/null)"
   check "the stand-in saw x-tenant-route a" "${TENANT_A,,}" "$(jq -r .tenantRoute <<<"$rec" 2>/dev/null)"
   check "the stand-in saw the viewer's bearer" "$(printf 'Bearer %s' "$A_TOKEN" | sha256sum | cut -c1-16)" "$(jq -r .authorizationFingerprint <<<"$rec" 2>/dev/null)"

@@ -257,3 +257,84 @@ describe('the driver', () => {
     expect(all).not.toMatch(/--password "\$/);
   });
 });
+
+describe('the driver\'s teardown of a run that made nothing', () => {
+  const RUN = 't0nothing';
+  const runDir = path.join(SAMPLE_ROOT, '.integ', RUN);
+  /** Answers the reads the teardown and the leftover check make, as for an account where the run left nothing. */
+  const AWS_EMPTY = `#!/usr/bin/env bash
+args="$*"
+echo "$args" >> "$STUB_DIR/aws.log"
+case "$1 $2" in
+  "sts get-caller-identity") [[ "$args" == *Account* ]] && echo 111111111111 || echo arn:aws:sts::111111111111:assumed-role/Admin/s ;;
+  "iam get-role") [[ "$args" == *"--role-name Admin"* ]] && echo arn:aws:iam::111111111111:role/Admin || exit 254 ;;
+  "route53 get-hosted-zone") echo integ-placeholder.example.com. ;;
+  "route53 list-resource-record-sets") [[ "$args" == *length* ]] && echo 0 || echo null ;;
+  "ssm get-parameter") case "$args" in *identity/apiUrl*) echo https://id.example.com/prod/ ;; *identity/*) echo stub ;; *) exit 254 ;; esac ;;
+  "ssm get-parameters-by-path") echo 0 ;;
+  "cloudformation list-stacks"|"acm list-certificates"|"logs describe-log-groups") echo "" ;;
+  "apigateway get-account") echo arn:aws:iam::111111111111:role/apigw-logs ;;
+  "cloudformation describe-stacks") [[ "$args" == *TenantIdentity-shared-pool-multi-tenant* ]] && echo ok || exit 254 ;;
+  *) exit 254 ;;
+esac
+`;
+  let dir: ScriptHarness;
+  beforeEach(() => {
+    dir = new ScriptHarness();
+    fs.writeFileSync(path.join(dir.dir, 'bin', 'aws'), AWS_EMPTY, { mode: 0o755 });
+    fs.mkdirSync(path.join(runDir, 'logs'), { recursive: true });
+    fs.writeFileSync(path.join(runDir, 'state.env'), 'EXTERNAL_ID=tfd-integ-x\n');
+    fs.writeFileSync(path.join(runDir, 'context.json'), '{}');
+  });
+  afterEach(() => {
+    dir.cleanup();
+    fs.rmSync(runDir, { recursive: true, force: true });
+  });
+
+  const inputs = {
+    AWS_REGION: 'eu-central-1',
+    TFD_INTEG_ACCOUNT_B: '222222222222',
+    TFD_APP_DOMAIN: 'app.integ-placeholder.example.com',
+    TFD_HOSTED_ZONE_ID: 'ZPLACEHOLDER0',
+    TFD_DEDICATED_DOMAIN: 'dd.integ-placeholder.example.com',
+    HOME: process.env.HOME,
+  };
+
+  it('runs every part, skips what is gone, finds no leftover and calls no curl', () => {
+    const r = dir.run(path.join(SAMPLE_ROOT, 'scripts', 'integ.sh'), inputs, ['teardown', RUN, 'single']);
+    expect(r.output).toContain('teardown: (6) front door, cells, test role, agent ingress: done');
+    expect(r.output).toContain('NOT CHECKED: the control plane setup stack');
+    expect(r.output).not.toContain('LEFTOVER');
+    expect(r.output).not.toContain('unbound variable');
+    expect(r.output).toMatch(/result: \d+ passed, 0 failed/);
+    expect(r.status).toBe(0);
+    expect(dir.curlCalls()).toEqual([]);
+  });
+
+  it('a run whose first deploy fails: preflight writes the context, the EXIT trap tears down, the run fails', () => {
+    // npx fails every CDK call; smithy is a no-op.
+    fs.writeFileSync(path.join(dir.dir, 'bin', 'npx'), '#!/usr/bin/env bash\necho "npx $*" >> "$STUB_DIR/npx.log"\nexit 1\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(dir.dir, 'bin', 'smithy'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    fs.rmSync(runDir, { recursive: true, force: true });
+    const r = dir.run(path.join(SAMPLE_ROOT, 'scripts', 'integ.sh'), { ...inputs, TFD_INTEG_RUN_ID: RUN }, ['single']);
+    expect(r.status).toBe(1);
+    expect(r.output).toContain(`preflight: run ${RUN}, single mode, eu-central-1, edge account 111111111111, control plane's account 222222222222`);
+    expect(r.output).toContain('a phase 1 stack failed');
+    expect(r.output).toContain('== 24. remove the fixture, then the ordered teardown');
+    expect(r.output).not.toContain('unbound variable');
+    const context = JSON.parse(fs.readFileSync(path.join(runDir, 'context.json'), 'utf8'));
+    expect(context).toMatchObject({
+      runId: RUN,
+      edgeAccount: '111111111111',
+      controlPlaneAccount: '222222222222',
+      region: 'eu-central-1',
+      driverPrincipalArn: 'arn:aws:iam::111111111111:role/Admin',
+      zoneName: 'integ-placeholder.example.com',
+      identity: { userPoolId: 'stub', appClientId: 'stub', region: 'eu-central-1' },
+    });
+    const npx = fs.readFileSync(path.join(dir.dir, 'npx.log'), 'utf8');
+    expect(npx).toContain(`deploy --exclusively TfdInteg-${RUN}-support`);
+    expect(npx).toContain('test/integ.single.ts');
+    expect(fs.readFileSync(path.join(runDir, 'times.tsv'), 'utf8')).toMatch(/deploy\tsupport\t\d+\tfailed/);
+  });
+});
