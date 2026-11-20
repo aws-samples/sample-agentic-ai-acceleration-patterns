@@ -111,6 +111,15 @@ class AgentcoreTest(unittest.TestCase):
         self.assertEqual(run(sb, signed(NONCE), SESSION), (500, {"v": 1, "error": "tool_failed"}))
         self.assertIsNone(sb.nonce)
 
+    def test_microvm_claim_failure_ends_the_start(self):
+        def broken():
+            raise OSError("cgroup")
+        sb = server.Sandbox("microvm", broken)
+        hook = json.dumps({"nonceHash": wire.nonce_hash(NONCE), "tenant": JOB["tenantId"]}).encode()
+        self.assertEqual(sb.hook(hook), (200, {}))
+        self.assertTrue(sb.boot_failed.is_set())  # the runner exits and the MicroVM start fails at once
+        self.assertEqual(run(sb, signed(NONCE))[1]["error"], "tool_failed")
+
     def test_dirty_after_a_job_that_did_not_drain(self):
         sb, fake = make("agentcore")
         fake.left_dirty = True

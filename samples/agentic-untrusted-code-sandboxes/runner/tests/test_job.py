@@ -101,6 +101,19 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(self.executor("microvm")._oom_kills(), 0)
 
 
+class SweepDeadlineTest(unittest.TestCase):
+    def test_everything_after_a_job_shares_three_seconds(self):
+        self.assertLessEqual(jb.POST_JOB_DEADLINE_S, 3.0)  # the tool waits timeoutMs + 5 s
+        with tempfile.TemporaryDirectory() as d:
+            ex = jb.Executor("microvm", sz.Sizing("microvm", 1024 * MIB), FakeFilter(), uid=os.getuid() + 100000, sweep_dirs=(d,))
+            with mock.patch.object(jb.subprocess, "run") as run:
+                self.assertFalse(ex.sweep(time.monotonic() - 1))  # nothing is left of the budget: no SysV sweep starts
+                run.assert_not_called()
+                run.return_value = mock.Mock(stdout=b"0")
+                self.assertTrue(ex.sweep(time.monotonic() + 3))
+                self.assertLessEqual(run.call_args.kwargs["timeout"], 3.0)
+
+
 class RemoveOwnedTest(unittest.TestCase):
     def test_links_are_removed_not_followed(self):
         with tempfile.TemporaryDirectory() as d:

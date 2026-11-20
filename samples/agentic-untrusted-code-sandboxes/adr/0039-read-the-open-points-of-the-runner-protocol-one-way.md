@@ -75,3 +75,5 @@ point here that the tool must know about goes through `runner/PROTOCOL.md`
 by a maintainer decision.
 
 Note 2026-11-20: a request with neither `Content-Length` nor chunked encoding has an empty body (RFC 9112 section 6.3), not a broken one. The hook port answers it, because the MicroVM platform sends `suspend` bodiless and a 400 ended the sandbox instead of suspending it. The job port still refuses an empty body as a malformed job.
+
+Note 2026-11-20: amended by the round 1 review (N-1, N-5, M-2). The runner's TLS on `nitro` is TLS 1.3 only, as ADR-0047 requires. On `microvm`, a failed claim sets the same flag as a forced failed start, so the runner exits and the MicroVM start fails at once instead of waiting out its 20 s cap; jobs until then answer `tool_failed`. After a job ends, the kill, the sweep and the thread joins share one budget of 3 s.

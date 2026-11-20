@@ -88,12 +88,15 @@ The runner, in this order, before it writes the input or starts code:
 4. adopts the nonce only now (idempotent when it already holds it), so a
    job with a valid session header but a forged `jobAuth` cannot pin a
    nonce on `agentcore`;
-5. refuses with `busy` while another job runs, and with `dirty` once the
-   `agentcore` job group did not drain (spec §3.5 step 3).
+5. refuses with `busy` while another job runs, and with `dirty` once a
+   sweep left uid 1001 processes or the `agentcore` job group did not drain
+   (spec §3.5 step 3); a `dirty` runner refuses every later job on any backend.
 
 The tool waits at most `timeoutMs` + 5 s for an answer (spec §4.1 step
-5); a backend reports a longer wait as `no_answer`, and the tool stops the
-sandbox and returns `timedOut`.
+5). After a job ends, the kill, the sweep and the joins of the runner share
+one budget of 3 s, so the answer comes with 2 s to spare; a step cut short
+marks the sandbox `dirty`. A backend reports a longer wait as
+`no_answer`, and the tool stops the sandbox and returns `timedOut`.
 
 ### `RunResult`: HTTP 200
 
