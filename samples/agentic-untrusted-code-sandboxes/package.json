@@ -14,6 +14,7 @@
     "diff": "projen diff",
     "eject": "projen eject",
     "eslint": "projen eslint",
+    "integ": "projen integ",
     "package": "projen package",
     "post-compile": "projen post-compile",
     "post-upgrade": "projen post-upgrade",

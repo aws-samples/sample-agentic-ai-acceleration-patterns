@@ -177,6 +177,11 @@ const testRunner = project.addTask('test:runner', {
   description: 'Python unit tests of the runner and the protocol vectors',
 });
 testRunner.exec('python3 -B -m unittest discover -s runner/tests -t .');
+// The deployment integration test (spec §8, integration-test.md): not part of the build, run by hand in a test account.
+const integ = project.addTask('integ', {
+  description: 'Deployment integration test: deploy, every step of integration-test.md, destroy (needs AWS_REGION)',
+});
+integ.exec('scripts/integ.sh');
 const checkHeaders = project.addTask('check:headers', {
   description: 'MIT-0 header on every authored .py, Dockerfile and shell file',
 });
