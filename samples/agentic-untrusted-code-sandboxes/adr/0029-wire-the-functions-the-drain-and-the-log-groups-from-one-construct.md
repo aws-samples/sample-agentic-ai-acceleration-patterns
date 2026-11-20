@@ -124,8 +124,9 @@ own groups.
 ## Consequences
 
 The drain handler returns or throws on `Delete`, and the framework answers
-CloudFormation, so every path ends in a response. The failure message names
-the framework's own log group, not the drain's: the drain logs to `DrainLogs`.
+CloudFormation, so every path ends in a response. The failure message ends in
+`Logs: /aws/lambda/<drain function name>`, which is not a group of this
+stack: the drain logs to `DrainLogs` and the framework to `DrainProviderLogs`.
 A gateway function built with its own log group has that group in the app's
 hands; the core cannot put it behind its log drain. The core functions
 run on immutable role references, so a grant made through
