@@ -28,6 +28,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
   - [Per-Tenant Encrypted Ingestion for Agentic Applications](#per-tenant-encrypted-ingestion-for-agentic-applications)
   - [Tenant Memory Isolation through AgentCore Gateway](#tenant-memory-isolation-through-agentcore-gateway)
   - [Tenant usage metering for agentic applications](#tenant-usage-metering-for-agentic-applications)
+  - [Tenant front door for agentic applications](#tenant-front-door-for-agentic-applications)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -44,6 +45,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 | [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/) | One drop zone and pipeline for every tenant's documents, each tenant's encrypted with its own AWS KMS key, kept apart by key policy and identity-policy ABAC rather than code, validated by a deployer-extensible chain before it lands, in a vendor-owned or tenant-owned key tier, with cryptographic offboarding. |
 | [Tenant Memory Isolation through AgentCore Gateway](./samples/tenant-memory-isolation/) | One pooled AgentCore Memory that tenants reach only through an AgentCore Gateway with the native Memory connector: Cedar in `ENFORCE` binds every write and recall to the token's `tenant_id`, each tenant's facts live in the namespace equal to its tenant id, and a resource policy denies every data operation outside the Gateway's role. |
 | [Tenant usage metering for agentic applications](./samples/tenant-usage-metering/) | One metering service the vendor owns: emitters admitted by their SigV4 role and their registered tenant bindings, written by a registrar such as the control plane's hooks, a replayable raw store, hourly recounts under a run-time meter catalog with `ADJUSTMENT` records for late events, configured sinks and a usage bus with a subscriber construct. |
+| [Tenant front door for agentic applications](./samples/tenant-front-door/) | One CloudFront multi-tenant distribution in an edge account that serves a shared single-page app and routes each request to the cell that hosts its tenant, across vendor-owned and tenant-owned accounts. A router reads the tenant from the token or the host and looks it up in a route table that only a registrar writes, called from the control plane's global hooks; the cell verifies the token. Optional dedicated domains proved by a DNS challenge, per-tenant rate limits and one web security baseline. |
 
 ## The Cell-Based Control Plane
 
@@ -190,6 +192,31 @@ export sinks and to a usage bus that readers attach to through the
 `UsageSubscriber` construct.
 
 [Tenant usage metering for agentic applications](./samples/tenant-usage-metering/)
+
+## Tenant front door for agentic applications
+
+A multi-tenant agentic application serves one web client to every tenant, but
+the control plane places each tenant's cell in whichever registered account
+has room, the vendor's or the tenant's own. The client needs one address (or
+one per tenant) and every request must reach the right cell, without the
+edge trusting the request to say which tenant it is.
+
+This sample puts one Amazon CloudFront multi-tenant distribution in an edge
+account in front of a shared single-page app and every cell's API. A
+CloudFront Function reads the tenant from the bearer token's claim, or from
+the host in `host` mode, looks it up in a KeyValueStore route table, refuses
+unknown and suspended tenants, and sends the request to the tenant's cell; the
+cell verifies the token and checks that it serves that tenant. Only a route
+registrar writes the table, and it is called by two vendor hooks that the
+control plane runs on cell and deployment events, after it has read the
+placement back from the control plane, so no role a cell account holds can
+write a route. A tenant can bring its own domain once it proves control with a
+DNS challenge.
+
+It consumes `control-plane` (global hooks and its read API) and, for the demo
+issuer, `tenant-identity`; it ships the constructs `TenantFrontDoor`,
+`CellRouteAccess` and `RouteHookAccess`. See
+[Tenant front door for agentic applications](./samples/tenant-front-door/).
 
 ## Contributing a sample
 
