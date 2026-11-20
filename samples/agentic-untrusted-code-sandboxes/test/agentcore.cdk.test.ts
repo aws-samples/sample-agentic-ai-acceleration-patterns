@@ -129,6 +129,12 @@ describe('the runtime (spec §3.3, §3.4, ADR-0015)', () => {
     });
   });
 
+  test('the runtime names its backend to the runner, which exits at boot without it (ADR-0037)', () => {
+    t.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+      EnvironmentVariables: { RUNNER_BACKEND: 'agentcore' },
+    });
+  });
+
   test('the artifact is a container image, never a code zip (S-9)', () => {
     const [runtime] = Object.values(t.findResources('AWS::BedrockAgentCore::Runtime'));
     const artifact = (runtime as { Properties: { AgentRuntimeArtifact: Record<string, unknown> } }).Properties.AgentRuntimeArtifact;

@@ -110,6 +110,8 @@ export class AgentcoreBackendResources extends Construct implements BackendConst
       }),
       protocolConfiguration: bedrockagentcore.ProtocolType.HTTP,
       platformVersion: bedrockagentcore.PlatformVersion.V2,
+      // The runner exits at boot without it (ADR-0037); a fixed, non-secret selector.
+      environmentVariables: { RUNNER_BACKEND: 'agentcore' },
       lifecycleConfiguration: {
         idleRuntimeSessionTimeout: settings.sandboxIdle,
         maxLifetime: settings.sandboxMaxLife,
