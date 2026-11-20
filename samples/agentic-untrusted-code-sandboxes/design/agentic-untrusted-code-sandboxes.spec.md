@@ -477,8 +477,10 @@ with `busy`. The runner:
    first `fork` failed with `EAGAIN` on `microvm` and `agentcore`
    (S-18). On `agentcore` the runner then reads the job group's
    `memory.current` less `file` plus `shmem` (as the `nitro` watchdog
-   does, so the page cache of files in `/work` does not count). If it is
-   not below 32 MiB, the runner starts no further job and refuses every
+   does, so the page cache of files in `/work` does not count). The read is
+   repeated for up to 1 s of the 3 s the runner allows after a job, because
+   the memory the sweep freed takes a moment to leave the group's counters.
+   If it is still not below 32 MiB, the runner starts no further job and refuses every
    later one with `dirty`, which the tool treats as a dead handle
    (§4.1 step 3), so the takeover stops the session and the next start
    gets a fresh one under the same id. 32 MiB is a design value: no spike

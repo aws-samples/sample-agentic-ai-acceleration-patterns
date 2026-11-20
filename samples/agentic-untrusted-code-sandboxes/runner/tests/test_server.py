@@ -120,6 +120,19 @@ class AgentcoreTest(unittest.TestCase):
         self.assertTrue(sb.boot_failed.is_set())  # the runner exits and the MicroVM start fails at once
         self.assertEqual(run(sb, signed(NONCE))[1]["error"], "tool_failed")
 
+    def test_the_polled_group_read_decides_dirty(self):
+        sb, fake = make("agentcore")
+        fake.left_dirty = True  # a single read says dirty; the executor's polled read in the result wins
+        original = fake.run
+
+        def run_with_result(job):
+            result = original(job)
+            result["dirty"] = False
+            return result
+        fake.run = run_with_result
+        self.assertEqual(run(sb, signed(NONCE), SESSION)[0], 200)
+        self.assertFalse(sb.dirty)
+
     def test_dirty_after_a_job_that_did_not_drain(self):
         sb, fake = make("agentcore")
         fake.left_dirty = True
@@ -617,6 +630,11 @@ class LimitsTest(unittest.TestCase):
         fake.run = lambda job: (_ for _ in ()).throw(ToolFailed(clean=True))
         run(sb, signed(NONCE))
         self.assertFalse(sb.dirty)
+        sb, fake = make("agentcore")  # a failed job carries no polled read: the group is read once
+        fake.left_dirty = True
+        fake.run = lambda job: (_ for _ in ()).throw(ToolFailed(clean=True))
+        run(sb, signed(NONCE), SESSION)
+        self.assertTrue(sb.dirty)
 
     def test_version_type_and_deep_json(self):
         for v in (True, 1.0, "1"):

@@ -144,6 +144,7 @@ class PostJobBudgetTest(unittest.TestCase):
         deadline = sweep.call_args.args[0]
         self.assertLessEqual(deadline - before, 0.4)
         self.assertTrue(result["clean"])
+        self.assertFalse(result["dirty"])
         for t in threads:
             self.assertLessEqual(t.join.call_args.kwargs["timeout"], 0.3)  # what is left of the budget, not 5 s
 
@@ -170,6 +171,76 @@ class PostJobBudgetTest(unittest.TestCase):
             started = time.monotonic()
             self.assertFalse(ex.sweep(time.monotonic() + 0.1))
         self.assertLess(time.monotonic() - started, 1.0)
+
+
+class SettledDirtyTest(unittest.TestCase):
+    """agentcore: a group that drains a moment after the sweep is not dirty (spec 3.5 step 3)."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.ex = jb.Executor("agentcore", sz.Sizing("agentcore", 1024 * MIB), None, job_group=self.dir.name, uid=os.getuid() + 100000)
+        write(os.path.join(self.dir.name, "memory.stat"), "file 0\nshmem 0\n")
+        self.set_memory(100 * MIB)
+
+    def set_memory(self, value):
+        write(os.path.join(self.dir.name, "memory.current"), str(value))
+
+    def drain_after(self, seconds):
+        timer = threading.Timer(seconds, self.set_memory, args=(MIB,))
+        timer.start()
+        self.addCleanup(timer.cancel)
+
+    def test_a_group_that_drains_after_a_delay_is_clean(self):
+        self.assertTrue(self.ex.dirty())  # one read right after the sweep says dirty
+        self.drain_after(0.3)
+        started = time.monotonic()
+        self.assertFalse(self.ex.settled_dirty(time.monotonic() + 3))
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertLess(time.monotonic() - started, jb.DIRTY_POLL_S)
+
+    def test_a_group_that_stays_full_is_dirty_after_the_poll_time(self):
+        with mock.patch.object(jb, "DIRTY_POLL_S", 0.2):
+            started = time.monotonic()
+            self.assertTrue(self.ex.settled_dirty(time.monotonic() + 3))
+        self.assertGreaterEqual(time.monotonic() - started, 0.2)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_the_post_job_deadline_ends_the_poll(self):
+        self.drain_after(0.5)
+        started = time.monotonic()
+        self.assertTrue(self.ex.settled_dirty(time.monotonic() + 0.1))
+        self.assertLess(time.monotonic() - started, 0.4)
+
+    def test_an_unreadable_group_is_dirty_at_once(self):
+        os.unlink(os.path.join(self.dir.name, "memory.current"))
+        with mock.patch.object(jb, "log"):
+            started = time.monotonic()
+            self.assertTrue(self.ex.settled_dirty(time.monotonic() + 3))
+        self.assertLess(time.monotonic() - started, 0.3)
+
+    def test_collect_polls_the_group_inside_the_post_job_budget(self):
+        job = mock.Mock(timeout_ms=60000, code=b"", input=b"")
+        job.max_output = 10
+        proc = mock.Mock(returncode=0)
+        proc.wait.return_value = 0
+        threads = [mock.Mock(is_alive=mock.Mock(return_value=False), data=b"", cut=False, join=mock.Mock()) for _ in range(4)]
+        seen = []
+        real = self.ex.settled_dirty
+        self.ex.settled_dirty = lambda deadline: (seen.append(deadline), real(deadline))[1]
+        self.drain_after(0.3)
+        with mock.patch.object(jb, "POST_JOB_DEADLINE_S", 2.0), mock.patch.object(jb, "log"), \
+                mock.patch.object(self.ex, "_oom_kills", return_value=0), mock.patch.object(self.ex, "_kill_group"), \
+                mock.patch.object(self.ex, "sweep", return_value=True):
+            before = time.monotonic()
+            result = self.ex._collect(job, proc, before, 0, *threads, threading.Event())
+        self.assertIs(result["dirty"], False)  # the group drained during the poll
+        self.assertLessEqual(seen[0] - before, 2.1)  # the deadline is the post-job one, not a later one
+        self.assertGreaterEqual(seen[0] - before, 1.9)
+
+    def test_another_backend_is_never_dirty_by_memory(self):
+        ex = jb.Executor("microvm", sz.Sizing("microvm", 1024 * MIB), FakeFilter(), uid=os.getuid() + 100000)
+        self.assertFalse(ex.settled_dirty(time.monotonic() + 3))
 
 
 class RemoveOwnedTest(unittest.TestCase):

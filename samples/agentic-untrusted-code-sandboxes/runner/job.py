@@ -32,6 +32,8 @@ SWEEP_DEADLINE_S = 5.0
 # One budget for everything after a job ends: the kill, the sweep and the thread joins (M-2).
 # The tool waits timeoutMs + 5 s, so the answer comes with 2 s to spare.
 POST_JOB_DEADLINE_S = 3.0
+# Of that budget, how long the agentcore job group may take to show the memory the sweep freed (spec 3.5 step 3).
+DIRTY_POLL_S = 1.0
 READ_CHUNK = 65536
 CPU_LIMIT_SLACK_MS = 100
 PR_SET_NO_NEW_PRIVS = 38
@@ -382,6 +384,7 @@ class Executor:
         if not alive:  # shortcut: a live reader keeps its pipe open (a leaked fd), because the sandbox is replaced as dirty
             for pipe in (proc.stdout, proc.stderr):
                 pipe.close()
+        dirty = self.settled_dirty(deadline)
         returncode = proc.returncode if proc.returncode is not None else -signal.SIGKILL
         exceeded = self._exceeded.is_set() or self._oom_kills() > oom_before
         timed_out = timed_out or cpu_limit_hit(returncode, exceeded, duration_ms, job.timeout_ms)
@@ -390,7 +393,7 @@ class Executor:
             timed_out=timed_out, memory_exceeded=exceeded, clean=clean)
         return {"exitCode": returncode, "stdout": bytes(out.data), "stderr": bytes(err.data),
                 "cut": out.cut or err.cut, "durationMs": duration_ms, "timedOut": timed_out,
-                "memoryExceeded": exceeded, "clean": clean}
+                "memoryExceeded": exceeded, "clean": clean, "dirty": dirty}
 
     @staticmethod
     def _feed(proc, code: bytes) -> None:
@@ -508,6 +511,25 @@ class Executor:
         g = self.job_group
         return sz.counted(read_text(os.path.join(g, "memory.current")),
                           read_text(os.path.join(g, "memory.stat"))) >= sz.AGENTCORE_DIRTY
+
+    def settled_dirty(self, deadline: float) -> bool:
+        """dirty(), read again while the group drains.
+
+        Memory the sweep freed takes a moment to leave the group's counters, so a read right after the
+        sweep can say dirty for a sandbox that is clean. Polls for at most DIRTY_POLL_S and never past
+        the post-job deadline; a read that fails counts as dirty.
+        """
+        limit = min(deadline, time.monotonic() + DIRTY_POLL_S)
+        while True:
+            try:
+                if not self.dirty():
+                    return False
+            except (OSError, ValueError) as e:
+                log("dirty_check_failed", error=type(e).__name__)
+                return True
+            if time.monotonic() >= limit:
+                return True
+            time.sleep(min(0.05, max(0.0, limit - time.monotonic())))
 
     def kill_all(self) -> None:
         """On SIGTERM: end any job. No reap here: a job thread may still be in Popen.wait()."""
