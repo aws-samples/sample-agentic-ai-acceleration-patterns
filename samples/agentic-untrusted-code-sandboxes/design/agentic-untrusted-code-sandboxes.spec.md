@@ -915,10 +915,11 @@ otherwise. It:
 
 - stops `nitro` sandboxes in `READY` rows with `lastUsedAt` older than
   `sandboxIdle`; for a `STARTING` row it applies the tool's step 1 rule
-  (mark a failed start `FAILED`, leave a starting one alone); a `FAILED` or
-  `STOPPING` row already has its stop line, so the reaper only stops again a
-  sandbox the platform still lists, writes no line, and deletes the row once
-  the sandbox is gone or `expiresAt` has passed;
+  (mark a failed start `FAILED`, leave a starting one alone); for a `FAILED`
+  or `STOPPING` row the reaper stops again a sandbox the platform still
+  lists, writes no line (a stopped sandbox already has one; a start that
+  threw has none, there being no sandbox to name), and deletes the row once
+  `expiresAt` has passed and the sandbox is gone;
 - stops every task tagged by the sample whose own `startedAt` is older than
   `sandboxMaxLife`, with or without a row (the third cap on `nitro`);
 - checks each `READY` `microvm` row with `GetMicrovm`; when the MicroVM is

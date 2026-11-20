@@ -114,7 +114,7 @@ export interface SandboxSummary {
   readonly tenantId?: string;
   /** Epoch ms, when the platform reports it. */
   readonly startedAt?: number;
-  /** True while the sandbox can still serve or bill: running, suspended, pending, or stopping (a task that is stopping counts as live until it has left the list). */
+  /** True while the sandbox can still serve or bill: running, suspended, pending, or stopping (a task that is stopping counts as live while the platform lists it; a stopped task that stays listed is not live). */
   readonly live: boolean;
 }
 
