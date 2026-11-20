@@ -130,29 +130,53 @@ def reap() -> None:
 
 
 def remove_owned(top: str, uid: int, deadline: float) -> Tuple[int, bool]:
-    """Delete every entry uid owns under top, bottom up, never following links.
+    """Delete every entry uid owns under top, never following links, streaming each directory.
 
     Returns the count and whether the walk finished before deadline.
     shortcut: a path-based walk, safe only because no uid process is alive
     while it runs; use dir_fd-relative calls if that ever changes.
     """
-    removed = 0
-    for root, dirs, files in os.walk(top, topdown=False, followlinks=False):
+    removed, seen = 0, 0
+    stack = [(top, False)]
+    while stack:
         if time.monotonic() > deadline:
             return removed, False
-        for name in dirs + files:
-            path = os.path.join(root, name)
-            try:
-                st = os.lstat(path)
-                if st.st_uid != uid:
+        path, children_done = stack.pop()
+        if children_done:
+            if path != top:
+                try:
+                    if os.lstat(path).st_uid == uid:
+                        os.rmdir(path)
+                        removed += 1
+                except OSError:
+                    pass
+            continue
+        stack.append((path, True))
+        try:
+            entries = os.scandir(path)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                seen += 1
+                if seen % 256 == 0 and time.monotonic() > deadline:
+                    return removed, False
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(st.st_mode):
+                        if st.st_uid == uid:
+                            try:
+                                os.rmdir(entry.path)  # an empty one goes at once, so none is held in memory
+                                removed += 1
+                                continue
+                            except OSError:
+                                pass
+                        stack.append((entry.path, False))
+                    elif st.st_uid == uid:
+                        os.unlink(entry.path)
+                        removed += 1
+                except OSError:
                     continue
-                if stat.S_ISDIR(st.st_mode):
-                    os.rmdir(path)
-                else:
-                    os.unlink(path)
-                removed += 1
-            except OSError:
-                continue
     return removed, True
 
 
@@ -308,7 +332,13 @@ class Executor:
         except BaseException as e:  # a thread that would not start, or any other runner fault
             log("job_failed", error=type(e).__name__)
             self._kill_group(proc.pid)
-            raise ToolFailed(self.sweep()) from e
+            clean = self.sweep()
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+            raise ToolFailed(clean) from e
 
     def _finish(self, job, proc, started: float, oom_before: int) -> dict:
         out = Collector(proc.stdout, job.max_output)
@@ -318,6 +348,12 @@ class Executor:
         monitor = threading.Thread(target=self._monitor, args=(proc.pid, done), daemon=True)
         for t in (out, err, writer, monitor):
             t.start()
+        try:
+            return self._collect(job, proc, started, oom_before, out, err, writer, monitor, done)
+        finally:
+            done.set()  # the monitor never outlives this job
+
+    def _collect(self, job, proc, started, oom_before, out, err, writer, monitor, done) -> dict:
         timed_out = False
         try:
             proc.wait(timeout=job.timeout_ms / 1000.0)
@@ -422,9 +458,10 @@ class Executor:
                 return False
             time.sleep(0.005)
         files, walked = 0, True
+        walk_deadline = time.monotonic() + SWEEP_DEADLINE_S  # one budget for every directory
         for top in self.sweep_dirs:
             if os.path.isdir(top):
-                count, done = remove_owned(top, self.uid, time.monotonic() + SWEEP_DEADLINE_S)
+                count, done = remove_owned(top, self.uid, walk_deadline)
                 files, walked = files + count, walked and done
         sysv = self._sweep_sysv()
         reap()

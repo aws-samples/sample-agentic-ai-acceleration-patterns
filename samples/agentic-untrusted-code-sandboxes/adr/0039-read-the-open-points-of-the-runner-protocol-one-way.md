@@ -35,7 +35,9 @@ Option 1.
   decoding, or `maxOutputBytes` outside 0 to 16 MiB is a malformed job
   (HTTP 400, `tool_failed`). The tool's own input limit is lower. A body
   may come with `Content-Length` or chunked (chunk sizes 1 to 8 hex
-  digits, nothing else), and must arrive within 30 s. The hook port takes
+  digits, nothing else), and must arrive within 30 s in all, each read
+  bounded by what is left of that time; each read of the request line and
+  headers waits at most 10 s. The hook port takes
   bodies up to 16 KiB. Each listener serves at most 4 connections at once
   and closes a fifth before it reads a byte, which bounds the runner's
   threads and the memory a peer, tenant code on the loopback included, can
@@ -49,8 +51,8 @@ Option 1.
 - `microvm` hook paths: the platform calls
   `POST /aws/lambda-microvms/runtime/v1/{ready,run,suspend,resume,terminate}`
   on the hook port, and wraps `runHookPayload` as a JSON string in
-  `{"microvmId", "runHookPayload"}` (spike S-2; its probe runner answered
-  every name under that prefix, `terminate` included). The runner serves
+  `{"microvmId", "runHookPayload"}`; it calls every name under that
+  prefix, `terminate` included (spike S-2). The runner serves
   each name under the prefix and at `/<name>`, unwraps the payload, and
   answers `ready` with HTTP 200 once it serves and can take a job. This
   is the one change this record makes to the hook section of

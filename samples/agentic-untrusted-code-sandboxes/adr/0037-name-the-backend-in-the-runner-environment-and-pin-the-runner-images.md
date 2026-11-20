@@ -58,9 +58,12 @@ Option 1.
   `RUNNER_FAIL_AT_BOOT` is exactly `1`, before it opens a port; on
   `microvm` a `/run` hook whose payload carries `failAtBoot: true` (the
   JSON value `true`, nothing else) gets HTTP 200 `{}`, claims nothing,
-  and the runner exits 1 half a second later. The start option
-  `failAtBoot` and its payload contract are in `runner/PROTOCOL.md`. Any
-  other value, or no value, leaves the boot and every job unchanged.
+  and the runner exits 1 half a second later. `failAtBoot` is a test-only
+  field of the hook payload, outside the shape `runner/PROTOCOL.md` gives;
+  this record is its contract. It is checked before that shape, so it
+  answers 200 with or without `nonceHash` and `tenant`, and `ready` answers
+  503 from then on. Any other value, or no value, leaves the boot and every
+  job unchanged.
 
 ## Consequences
 

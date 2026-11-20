@@ -197,18 +197,29 @@ class Sandbox:
 
 
 CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,8}\Z")
+CONTENT_LENGTH = re.compile(r"[0-9]{1,10}\Z")
 BODY_DEADLINE_S = 30.0
 MAX_HOOK_BODY_BYTES = 16 * 1024  # runHookPayload is at most 4096 characters
 MAX_CONNECTIONS = 4  # jobs run one at a time; this bounds threads and pre-auth memory
 
 
-def _read_exact(rfile, size: int, deadline: float) -> Optional[bytes]:
-    """size bytes in pieces, or None at EOF or past the deadline (the socket timeout is per read only)."""
+def _timed(handler, deadline: float, read):
+    """One read with the socket timeout cut to what is left of deadline; None past it or on a socket error."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return None
+    try:
+        handler.connection.settimeout(left)
+        return read()
+    except OSError:
+        return None
+
+
+def _read_exact(handler, size: int, deadline: float) -> Optional[bytes]:
+    """size bytes, one socket read at a time, or None at EOF or past the deadline."""
     parts, left = [], size
     while left:
-        if time.monotonic() > deadline:
-            return None
-        piece = rfile.read(min(left, 65536))
+        piece = _timed(handler, deadline, lambda: handler.rfile.read1(min(left, 65536)))
         if not piece:
             return None
         parts.append(piece)
@@ -219,33 +230,49 @@ def _read_exact(rfile, size: int, deadline: float) -> Optional[bytes]:
 def read_body(handler: BaseHTTPRequestHandler, limit: int = wire.MAX_BODY_BYTES) -> Optional[bytes]:
     """The request body, Content-Length or chunked, at most limit bytes within BODY_DEADLINE_S; None when broken."""
     deadline = time.monotonic() + BODY_DEADLINE_S
+    try:
+        return _read_body(handler, limit, deadline)
+    finally:
+        try:
+            handler.connection.settimeout(handler.timeout)
+        except OSError:
+            pass
+
+
+def _read_body(handler, limit: int, deadline: float) -> Optional[bytes]:
     if handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
         data = bytearray()
         while True:
-            token = handler.rfile.readline(64).split(b";")[0].strip()
+            line = _timed(handler, deadline, lambda: handler.rfile.readline(64))
+            if line is None:
+                return None
+            token = line.split(b";")[0].strip()
             if not CHUNK_SIZE.match(token):
                 return None
             size = int(token, 16)
             if size == 0:
                 for _ in range(8):  # trailer lines, then the blank line
-                    if handler.rfile.readline(1024) in (b"\r\n", b"\n", b""):
+                    end = _timed(handler, deadline, lambda: handler.rfile.readline(1024))
+                    if end is None:
+                        return None
+                    if end in (b"\r\n", b"\n", b""):
                         return bytes(data)
                 return None
             if len(data) + size > limit:
                 return None
-            chunk = _read_exact(handler.rfile, size, deadline)
+            chunk = _read_exact(handler, size, deadline)
             if chunk is None:
                 return None
             data += chunk
-            if handler.rfile.readline(4) not in (b"\r\n", b"\n"):
+            if _timed(handler, deadline, lambda: handler.rfile.readline(4)) not in (b"\r\n", b"\n"):
                 return None
     text = handler.headers.get("Content-Length", "")
-    if not text.isdigit() or len(text) > 10:
+    if not CONTENT_LENGTH.match(text):
         return None
     length = int(text)
     if length > limit:
         return None
-    return _read_exact(handler.rfile, length, deadline)
+    return _read_exact(handler, length, deadline)
 
 
 def make_handler(sandbox: Sandbox, port_role: str):
@@ -254,7 +281,7 @@ def make_handler(sandbox: Sandbox, port_role: str):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
-        timeout = 30
+        timeout = 10  # each read of the request line and headers; the body has BODY_DEADLINE_S in all
         server_version = "runner"
         sys_version = ""
 

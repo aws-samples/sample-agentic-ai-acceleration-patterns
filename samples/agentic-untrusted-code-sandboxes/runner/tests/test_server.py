@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 from runner import server, wire
 from runner.job import ToolFailed
@@ -314,7 +315,7 @@ class HttpTest(unittest.TestCase):
                 conn.close()
             stop(*srv)
 
-    @unittest.skipUnless(os.path.exists("/usr/bin/openssl"), "no /usr/bin/openssl on this host")
+    @unittest.skipUnless(os.path.exists("/usr/bin/openssl") and hasattr(os, "memfd_create"), "no /usr/bin/openssl or no os.memfd_create")
     def test_nitro_tls_hello_then_job_on_one_connection(self):
         from runner.runner import tls_context
         sb, _ = make("nitro")
@@ -361,7 +362,41 @@ class LimitsTest(unittest.TestCase):
                 self.assertIn(b" 400 ", answer.split(b"\r\n")[0], size)
             answer = self.raw(port, b"POST /run HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\n\r\n")
             self.assertIn(b" 400 ", answer.split(b"\r\n")[0])
+            answer = self.raw(port, b"POST /run HTTP/1.1\r\nHost: x\r\nContent-Length: \xb2\r\n\r\n")
+            self.assertIn(b" 400 ", answer.split(b"\r\n")[0])  # a digit to isdigit(), not to int()
             self.assertEqual(fake.jobs, [])
+        finally:
+            stop(srv)
+
+    def test_trickled_body_is_cut_at_the_deadline(self):
+        sb, _ = make("microvm")
+        port = free_port()
+        srv = server.serve(sb, port, "hooks", host="127.0.0.1")
+        try:
+            with mock.patch.object(server, "BODY_DEADLINE_S", 0.5):
+                for head in (b"POST /run HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\n\r\n",
+                             b"POST /run HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nc\r\n"):
+                    with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                        started = time.monotonic()
+                        s.sendall(head)
+                        answer = b""
+                        for _ in range(12):
+                            try:
+                                s.sendall(b"x")
+                            except OSError:
+                                break
+                            time.sleep(0.2)
+                            s.setblocking(False)
+                            try:
+                                answer += s.recv(4096)
+                            except BlockingIOError:
+                                pass
+                            s.setblocking(True)
+                            if answer:
+                                break
+                        self.assertIn(b" 400 ", answer.split(b"\r\n")[0], head)
+                        self.assertLess(time.monotonic() - started, 1.5)
+            self.assertIsNone(sb.nonce_hash)
         finally:
             stop(srv)
 

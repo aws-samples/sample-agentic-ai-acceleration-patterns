@@ -124,6 +124,23 @@ class RemoveOwnedTest(unittest.TestCase):
             self.assertEqual(jb.remove_owned(d, os.getuid(), time.monotonic() - 1), (0, False))
             self.assertTrue(os.path.exists(os.path.join(d, "f")))
 
+    def test_deadline_inside_one_flat_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(2000):
+                open(os.path.join(d, "f%d" % i), "w").close()
+            clock = iter([0.0] * 3 + [100.0] * 10000)
+            with mock.patch.object(jb.time, "monotonic", side_effect=lambda: next(clock)):
+                count, done = jb.remove_owned(d, os.getuid(), 10.0)
+            self.assertFalse(done)
+            self.assertGreater(count, 0)
+            self.assertLess(count, 2000)
+
+    def test_empty_owned_directories_go_at_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(50):
+                os.mkdir(os.path.join(d, "d%d" % i))
+            self.assertEqual(jb.remove_owned(d, os.getuid(), time.monotonic() + 5), (50, True))
+
 
 if __name__ == "__main__":
     unittest.main()
