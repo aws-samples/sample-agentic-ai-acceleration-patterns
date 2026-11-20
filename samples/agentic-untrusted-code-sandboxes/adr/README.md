@@ -26,3 +26,7 @@
 | [0020](0020-filter-job-system-calls-on-microvm.md) | Filter job system calls on microvm, and back the caps with a free-memory floor | Proposed | 2026-11-19 |
 | [0021](0021-close-socket-and-sysv-routes-and-reap-every-job.md) | Close the socket and SysV routes, watch the nitro group, and reap every job | Proposed | 2026-11-20 |
 | [0022](0022-leave-room-for-the-runner-in-the-nitro-process-cap.md) | Leave room for the runner in the nitro process cap | Proposed | 2026-11-20 |
+| [0023](0023-ship-a-compiled-package-with-a-handler-tree-on-the-pinned-cdk-and-sdk.md) | Ship a compiled package with a handler tree on the pinned CDK and SDK | Proposed | 2026-11-20 |
+| [0024](0024-keep-the-runner-in-one-directory-and-copy-its-image-into-the-construct-repository.md) | Keep the runner in one directory and copy its image into the construct repository | Proposed | 2026-11-20 |
+| [0025](0025-pin-the-runner-wire-protocol-and-the-backend-interface.md) | Pin the runner wire protocol and the backend interface | Proposed | 2026-11-20 |
+| [0026](0026-run-the-python-tests-and-the-tree-checks-in-the-projen-build.md) | Run the Python tests and the tree checks in the projen build | Proposed | 2026-11-20 |
