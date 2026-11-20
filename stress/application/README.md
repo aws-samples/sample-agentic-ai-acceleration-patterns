@@ -238,7 +238,7 @@ the platform account and cell accounts A and B as above, fleet `stressw5`,
 | `deploy-role-pair.sh` (`stressw5-cell-account`) | no change (5 s) | no change (4 s) |
 | `probe-deploy.sh`, `probes.sh`, `probe-remove.sh` | 53 s and 51 s; 50 of 50 pass; no probe leftovers | 50 s and 52 s; 50 of 50 pass; no probe leftovers |
 | `PutAccount` handshake through the pair | `ACTIVE` | not registered (`small` uses one cell account) |
-| Account check, with the owner's account-base list and the `-w10` suffix, reading the pair's policies and trust (rerun after the second review) | passed (6 stacks, 67 roles) | passed (6 stacks, 66 roles) |
+| Account check, with the owner's account-base list and the `-w10` suffix, reading the pair's policies and trust | passed (6 stacks, 67 roles) | passed (6 stacks, 66 roles) |
 | Account check, with a list that leaves out the two `*-spike` account-base stacks | refused: both `*-spike` stacks are tagged account-base but not on the list | refused, the same |
 | Account check, expecting the policies without the suffix | refused: each pair half holds a managed policy outside its stack's set and lacks the expected one | refused, the same |
 

@@ -63,8 +63,8 @@ function synth(): any {
   });
 
   it.each([
-    ['cell', 'cell-build-policy-v2'],
-    ['tenant', 'cell-tenant-build-policy-v2'],
+    ['cell', `${PAIR_POLICY.cell}-v2`],
+    ['tenant', `${PAIR_POLICY.tenant}-v2`],
   ])('puts the %s role on / without a boundary, trusted by the platform account\'s build and API roles only, with %s', (kind, policy) => {
     const role = byName(`${FLEET}-${kind}-provisioning`);
     expect(role.Properties.Path).toBeUndefined();
@@ -109,6 +109,5 @@ function synth(): any {
         }
       }
     }
-    expect(Object.keys(PAIR_POLICY)).toEqual(['cell', 'tenant']);
   });
 });

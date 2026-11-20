@@ -13,8 +13,8 @@ Spec §3.7 has the control-plane slice refuse a cell account that holds more tha
 bootstrap, the role pair, the owner's account-base stacks and cells, before every run. The
 check needs the stack list in each Region the run uses and `iam:ListRoles` in each cell
 account, and for the two role pair roles `iam:GetRole` (path, boundary, trust),
-`iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and `iam:GetRolePolicy`. The slice runs with the platform account's
-credentials. The control plane's role pair is the only cross-account path into a cell
+`iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and `iam:GetRolePolicy`.
+The slice runs with the platform account's credentials. The control plane's role pair is the only cross-account path into a cell
 account, and its roles hold the SSM namespace grants and the two owner policies only.
 The owner names the account-base stacks by stack ARN (W-11).
 
