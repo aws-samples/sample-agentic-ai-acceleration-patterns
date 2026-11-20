@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Untrusted code sandboxes for agentic applications: specification
 
-Status: draft, not built. Spikes S-1 to S-13 ran on 2026-11-18 (§7.1, §7.2).
+Status: draft, not built. Spikes S-1 to S-20 ran from 2026-11-18 to 2026-11-20 (§7.1 to §7.7).
 
 ## 1. Problem statement
 
@@ -182,7 +182,7 @@ claim in the README without a test row behind it is a defect.
 | DNS Firewall (optional) | Route 53 Resolver DNS Firewall | AWS-names-only DNS, blocked-lookup log | one rule group on the VPC, a query-log group (§3.9) |
 | Reaper | Lambda on a 5-minute schedule | Idle stop, orphan sweep | the reaper role (§3.6) |
 | Drain | CloudFormation custom resource | Stop everything on delete | the drain role (§3.6) |
-| Offboard | Lambda, invoked with IAM | Stop a tenant's sandboxes | the drain role |
+| Offboard | Lambda, invoked with IAM | Stop a tenant's sandboxes | the reaper role (§3.6), which holds no instance action |
 
 ### 3.2 Caller and identity model
 
@@ -268,7 +268,7 @@ no unsigned entry.
 | `inputBucket` | `s3.IBucket` | created | the bucket with `inputs/<tenant>/` |
 | `microvm.memoryMiB` | `number` | 1024 | MicroVM image `MinimumMemoryInMiB`; the guest gets about four times this (S-15: 1024 gives 3998 MiB and 2 vCPUs, 2048 gives 8016 MiB and 4) |
 | `nitro.cpu`, `nitro.memoryMiB` | `number` | 512, 1024 | task size |
-| `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements, and the architecture of the `nitro` runner image. The default is the one type run end to end; `m7g.large` (Graviton, 2 vCPU) reports Nitro Enclaves support and is likely cheaper, but has not been run on ECS. Synth checks each type against a static table of types with Nitro Enclaves support (Intel types need 4 vCPU or more, so `m7i.large` is refused) |
+| `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements, and the architecture of the `nitro` runner image. The default is the one type run end to end; `m7g.large` (Graviton, 2 vCPU) reports Nitro Enclaves support and is likely cheaper, but has not been run on ECS. Synth checks each type against a static table of types with Nitro Enclaves support (Intel types need 4 vCPU or more, so `m7i.large` is refused), and refuses a type whose architecture has no `nitro` job filter table (§3.5) |
 | `agentcore.sessionFiles` | `boolean` | `false` | grant the runtime role `sessions/${aws:AgentCoreRuntimeSourceSid}/*` on the input bucket (ADR-0007) |
 
 Timing budget: the tool Lambda timeout is set to
@@ -474,7 +474,7 @@ with `busy`. The runner:
    first `fork` failed with `EAGAIN` on `microvm` and `agentcore`
    (S-18). On `agentcore` the runner then reads the job group's
    `memory.current` and returns `tool_failed` rather than start the next
-   job if it is not near zero. Files in `/work` stay (below).
+   job if it is not below 32 MiB. Files in `/work` stay (below).
 4. Returns `exitCode`, `stdout`, `stderr` (together at most
    `maxOutputBytes`, stdout cut first, `truncated` flag), `durationMs`,
    `timedOut`, `memoryExceeded`, `bootId` and the nonce proof.
@@ -598,12 +598,19 @@ per job start. `/proc/sys` is read-only in the guest, so the runner
 cannot lower the kernel's own limits instead (S-17).
 
 Job filter on `nitro` (ADR-0021). The runner installs the same kind of
-filter in every `nitro` job, with `AUDIT_ARCH_X86_64` and the x86_64
-numbers, returning `EPERM` for `semget`, `msgget`, `shmget` and
-`shmat`. It has the same child check. In S-18 the three creates failed
+filter in every `nitro` job, returning `EPERM` for `semget`, `msgget`,
+`shmget` and `shmat`. The filter takes its architecture constant and its
+syscall numbers from the architecture of the runner image, which follows
+`nitro.instanceTypes` (§3.3): `AUDIT_ARCH_X86_64` with the x86_64 numbers
+for Intel types, `AUDIT_ARCH_AARCH64` with the aarch64 generic table for
+Graviton types. A port that changed only the constant would block the
+wrong calls, or kill every job. The runner holds one table per
+architecture, and `synth` refuses a `nitro.instanceTypes` entry whose
+architecture has no table. Only the x86_64 table has run (S-18, S-19). It
+has the same child check. In S-18 the three creates failed
 at once, nothing was charged, and the sweep and the next job were fine.
-The x32 ABI, whose numbers carry bit 30, is off in the `nitro` kernel
-(an unfiltered x32 call returns `ENOSYS`), and the filter kills any
+On x86_64 the x32 ABI, whose numbers carry bit 30, is off in the `nitro`
+kernel (an unfiltered x32 call returns `ENOSYS`), and the filter kills any
 call with that bit set with `SIGSYS` (S-19).
 
 On `agentcore` the
@@ -622,7 +629,8 @@ that reason.
 
 Files in `/work` persist for the sandbox's life, so a tenant's second call
 can read what the first wrote. uid 1001 cannot signal the runner, open its
-file descriptors, or write outside `/work`. The runner logs only
+file descriptors, or write outside `/work`, `/tmp` and, on `nitro` and
+`agentcore`, `/dev/shm`. The runner logs only
 sizes, exit code and duration, never code, input or output. The tool's log
 line (§3.8) is the record of a run; the runner's log is secondary, because
 on `nitro` and `agentcore` it shares a stream with whatever the code prints
@@ -637,8 +645,8 @@ to its own stdout through the runner.
 | Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only, with the request tag condition and `ecs:cluster` = the sample's cluster; `ecs:TagResource` on `task/<cluster>/*` with the request tag condition and `ecs:CreateAction` = `RunTask` (the action has no `ecs:cluster` key, and this stops the role retagging existing tasks); `ecs:StopTask` with the resource tag condition and `ecs:cluster`; `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
 | Task execution role | `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
 | AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime; code can create extra groups under the prefix, which the cleanup resource removes); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
-| Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms` on `*` (it takes no resource; the call filters by image), `GetMicrovm`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime | the input bucket |
-| Drain role | the reaper role, plus `ecs:ListContainerInstances` and `ecs:DeregisterContainerInstance` on the cluster (their only resource type), `ecs:DescribeContainerInstances` on `container-instance/<cluster>/*`, and `ec2:DescribeInstances` (which takes no resource) | the input bucket; the reaper role never holds the instance actions, because a forced deregister ends the instance and a live tenant's sandbox on it |
+| Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms` on `*` (it takes no resource; the call filters by image), `GetMicrovm`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime; `offboardTenant` runs as this role, because it needs only the row writes and the stop actions | the input bucket; the instance actions of the drain role |
+| Drain role | the reaper role, plus `ecs:ListContainerInstances` and `ecs:DeregisterContainerInstance` on the cluster (their only resource type), `ecs:DescribeContainerInstances` on `container-instance/<cluster>/*`, and `ec2:DescribeInstances` (which takes no resource) | the input bucket; the reaper role never holds the instance actions, because a forced deregister ends the instance and a live tenant's sandbox on it, so `offboardTenant`, which the vendor's tenant delete script calls at run time, does not run as this role |
 | MicroVM image build role | trust `lambda.amazonaws.com`; `s3:GetObject` on the runner code artifact; `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents` on `/aws/lambda-microvms/<imageName>` | everything else |
 | MicroVM connector operator role | trust `lambda.amazonaws.com`; `ec2:CreateNetworkInterface` on network interfaces, the sandbox subnets and the connector security group; `ec2:CreateTags` on network interfaces with `ec2:ManagedResourceOperator` = `network-connectors.lambda.amazonaws.com` | everything else |
 | Log cleanup role (the log cleanup resource and the task log drain) | `logs:DescribeLogGroups`; `logs:DeleteLogGroup` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*`, on `/aws/lambda-microvms/<imageName>` and on the task log group | every other log group; everything else |
@@ -992,8 +1000,10 @@ returns a result with `exitCode`, `timedOut` and its output.
 A Lambda function the vendor invokes with IAM (`lambda:InvokeFunction`),
 input `{ "tenantId": … }`. It sets each of the tenant's rows `STOPPING`
 with a version condition, stops the sandbox, deletes the row, and returns
-the stopped handles. It is idempotent: a repeat call stops nothing and
-returns the same shape. The caller removes the tenant's `run_code` grant
+the stopped handles. It runs as the reaper role (§3.6), which holds the stop actions and
+no instance action, so an offboard call cannot end another tenant's
+sandbox by ending the instance it shares. It is idempotent: a repeat call
+stops nothing and returns the same shape. The caller removes the tenant's `run_code` grant
 first, so no call can start a new sandbox in between. The control plane's
 tenant delete script is the intended caller.
 
@@ -1020,9 +1030,12 @@ after the deregister, no replacement started, and the stack delete then
 succeeded first time in 38 s. Without the drain, the capacity provider
 delete waits for scale-in (`ScaleInAfter` plus about 15 s, 162 s in
 all at 120 s) and fails when `ScaleInAfter` is long (S-14, 900 s). The
+sample sets `ScaleInAfter` to 120 s (S-7, S-16), so instances go about
+two minutes after the last task (ADR-0020). The
 capacity provider has no minimum-instances setting, so the sample
 keeps no warm instance. The `synth` test checks that the drain role may
-deregister on the cluster and the reaper role may not. A
+deregister on the cluster and the reaper role may not, and that the
+offboard function runs as the reaper role. A
 `StopTask` takes 45 to 78 s, so the runner
 exits at once on `SIGTERM`. AgentCore sessions in rows are stopped with
 `StopRuntimeSession`; sessions with no row end within about 20 s of the
@@ -1420,7 +1433,7 @@ touched.
 | max-life | `nitro`: the driver invokes the reaper with `maxLifeSeconds` of 60 while A's task runs a long job; the task is stopped and A's next call gets a fresh one. Test-only shortcut: the reaper honours `maxLifeSeconds` only when its environment has `RC_INTEG_OVERRIDES=1`, which the integration stack sets through a CDK escape hatch and no prop exposes |
 | failed-start | `nitro` and `microvm`: for tenant `E` the tool passes the runner an exit-at-boot flag (test-only shortcut, honoured only with `RC_INTEG_OVERRIDES=1`); the driver retries `E`'s call until the first `sandbox_failed`, bounded by the backend's start cap; a reaper run then leaves the `FAILED` row alone and writes no stop line; a call before `retryAt` returns `sandbox_failed` and starts nothing (checked with `ListTasks` or `ListMicrovms`); a call after `retryAt` starts again; the tool line carries the reason, and exactly one stop line exists for the failed sandbox |
 | microvm-stop | A's MicroVM, idle past `sandboxIdle` (2 min in the integration stack), shows `SUSPENDED`; the driver then ends it with `TerminateMicrovm` out of band and invokes the reaper; a stop line for A's MicroVM carries `sandboxSeconds`, `runningSeconds`, `suspendedSeconds` and `estimated` |
-| synth | a unit test synthesises two construct instances in one stack and asserts that every §5.3 name is unique and matches its charset, and that the drain role's policy allows `ecs:DeregisterContainerInstance` on the cluster ARN and the reaper role's does not |
+| synth | a unit test synthesises two construct instances in one stack and asserts that every §5.3 name is unique and matches its charset, and that the drain role's policy allows `ecs:DeregisterContainerInstance` on the cluster ARN and the reaper role's does not, and the offboard function runs as the reaper role |
 | session-files | `run-code-files`: A's session writes and reads its own `sessions/<sid>/`; a `GetObject` on B's session prefix is denied |
 | dns | `run-code` (firewall on): A's script looks up `example.com`, a unique `<token>.example.com`, a 40-character exfil label and a TXT name, then `logs.<region>.amazonaws.com`; the first four return NXDOMAIN and appear in the query log as `BLOCK`, the last resolves to an endpoint address. `run-code-files` (firewall off): `example.com` resolves to a public address. On `nitro` the `BLOCK` line's `srcaddr` is A's task address |
 | dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9); any other blocked name is a platform name missing from the allow list and fails the step |
