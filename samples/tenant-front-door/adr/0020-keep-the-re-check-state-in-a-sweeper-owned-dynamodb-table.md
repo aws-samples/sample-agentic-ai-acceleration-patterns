@@ -142,3 +142,8 @@ UTC date to each page, which must match today and is then today for
 every read and write; the three-miss count is emitted only on a miss;
 each page re-reads its passed tenants' entries with `GetKey`; and the
 sweeper's role also holds `dynamodb:BatchWriteItem`.
+
+Note 2026-11-19: the sweeper's role holds `dynamodb:GetItem`, `Query`,
+`UpdateItem` and `BatchWriteItem` on the table. It does not hold
+`DeleteItem`: the lister deletes entry items with `BatchWriteItem`
+(ADR-0022), and no code path deletes a single item.

@@ -1,0 +1,91 @@
+{
+  "_comment": "Golden sign-in state cases (spec §3.5, ADR-0016), signed with the signin entry from route-table.json. The router is tested against these; test/support/signin-state.ts is the reference that checks them.",
+  "signin": "{\"v\":1,\"cur\":\"k2\",\"k\":{\"k1\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"k2\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=\"}}",
+  "nowSeconds": 1795080000,
+  "valid": [
+    {
+      "name": "signin-state with nonce, current key",
+      "payload": {
+        "v": 1,
+        "kid": "k2",
+        "h": "01hzx8k9p0qrst7vwxyz1a2b3c.tenants.example.com",
+        "n": "AbCdEfGhIjKlMnOp_-0123",
+        "exp": 1795080600
+      },
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk"
+    },
+    {
+      "name": "logout state, no nonce",
+      "payload": {
+        "v": 1,
+        "kid": "k2",
+        "h": "01hzx8k9p0qrst7vwxyz1a2b3c.tenants.example.com",
+        "exp": 1795080600
+      },
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwiZXhwIjoxNzk1MDgwNjAwfQ.E-3DUvue4blBWnXjdTEgBXyExPd-CIa1qFDtq6htqIE"
+    },
+    {
+      "name": "previous key still listed",
+      "payload": {
+        "v": 1,
+        "kid": "k1",
+        "h": "01hzx8k9p0qrst7vwxyz1a2b3c.tenants.example.com",
+        "n": "AbCdEfGhIjKlMnOp_-0123",
+        "exp": 1795080600
+      },
+      "state": "eyJ2IjoxLCJraWQiOiJrMSIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.I9WjZ8jWmbh6VL7Tv-kXVn5h-N6jeeE3L3Q0j9RUjy4"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "expired (exp equals now)",
+      "why": "expired",
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODAwMDB9.aBciiM6KmazD_8ueciRy4u2PDxGnE9pDWQs6C_XLpVM"
+    },
+    {
+      "name": "payload changed, MAC kept",
+      "why": "hmac",
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiJvdGhlci50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk"
+    },
+    {
+      "name": "kid not in the signin entry",
+      "why": "kid",
+      "state": "eyJ2IjoxLCJraWQiOiJrOSIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk"
+    },
+    {
+      "name": "MAC from another payload",
+      "why": "hmac",
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.E-3DUvue4blBWnXjdTEgBXyExPd-CIa1qFDtq6htqIE"
+    },
+    {
+      "name": "MAC with a non-canonical last character",
+      "why": "hmac",
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnl"
+    },
+    {
+      "name": "MAC with a character outside base64url",
+      "why": "hmac",
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk!"
+    },
+    {
+      "name": "payload is JSON null",
+      "why": "shape",
+      "state": "bnVsbA.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk"
+    },
+    {
+      "name": "payload is a JSON array",
+      "why": "shape",
+      "state": "WzFd.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk"
+    },
+    {
+      "name": "no dot",
+      "why": "shape",
+      "state": "eyJ2IjoxLCJraWQiOiJrMiIsImgiOiIwMWh6eDhrOXAwcXJzdDd2d3h5ejFhMmIzYy50ZW5hbnRzLmV4YW1wbGUuY29tIiwibiI6IkFiQ2RFZkdoSWpLbE1uT3BfLTAxMjMiLCJleHAiOjE3OTUwODA2MDB9"
+    },
+    {
+      "name": "payload not JSON",
+      "why": "shape",
+      "state": "bm9wZQ.SNpb7oUDOInbAbXHP2bZbWe-NgNcijGp2HOAvjhGvnk"
+    }
+  ]
+}
