@@ -87,7 +87,7 @@ describe('microvm resources', () => {
       CpuConfigurations: [{ Architecture: 'ARM_64' }],
       Resources: [{ MinimumMemoryInMiB: 1024 }],
       AdditionalOsCapabilities: [],
-      EnvironmentVariables: [],
+      EnvironmentVariables: [{ Key: 'RUNNER_BACKEND', Value: 'microvm' }],
       EgressNetworkConnectors: [INTERNET],
       BuildRoleArn: { 'Fn::GetAtt': [Match.stringLikeRegexp('^BackendmicrovmImageBuildRole'), 'Arn'] },
       CodeArtifact: { Uri: Match.anyValue() },
@@ -139,7 +139,10 @@ describe('microvm resources', () => {
   test('the build role: Lambda trust, one object read, the one build log group', () => {
     const role = Object.entries(template.findResources('AWS::IAM::Role')).find(([id]) => id.includes('ImageBuildRole'))![1];
     expect(role.Properties.AssumeRolePolicyDocument.Statement).toEqual([expect.objectContaining({
-      Action: 'sts:AssumeRole', Effect: 'Allow', Principal: { Service: 'lambda.amazonaws.com' },
+      Action: 'sts:AssumeRole',
+      Effect: 'Allow',
+      Principal: { Service: 'lambda.amazonaws.com' },
+      Condition: { StringEquals: { 'aws:SourceAccount': ACCOUNT } },
     })]);
     const policy = Object.entries(template.findResources('AWS::IAM::Policy')).find(([id]) => id.includes('ImageBuildRole'))![1];
     const st = policy.Properties.PolicyDocument.Statement as Record<string, any>[];
@@ -153,7 +156,10 @@ describe('microvm resources', () => {
   test('the connector operator role: Lambda trust, interface creation in the sandbox subnets, tags only on managed interfaces', () => {
     const operator = Object.entries(template.findResources('AWS::IAM::Role')).find(([id]) => id.includes('ConnectorOperatorRole'))![1];
     expect(operator.Properties.AssumeRolePolicyDocument.Statement).toEqual([expect.objectContaining({
-      Action: 'sts:AssumeRole', Effect: 'Allow', Principal: { Service: 'lambda.amazonaws.com' },
+      Action: 'sts:AssumeRole',
+      Effect: 'Allow',
+      Principal: { Service: 'lambda.amazonaws.com' },
+      Condition: { StringEquals: { 'aws:SourceAccount': ACCOUNT } },
     })]);
     const policy = Object.entries(template.findResources('AWS::IAM::Policy')).find(([id]) => id.includes('ConnectorOperatorRole'))![1];
     const st = policy.Properties.PolicyDocument.Statement as Record<string, any>[];

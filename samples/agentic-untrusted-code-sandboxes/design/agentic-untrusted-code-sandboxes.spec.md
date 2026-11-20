@@ -868,8 +868,10 @@ Reuse rule, per call (the tool):
    replaced, if any, then starts and records `handle` (and `address` when
    the start returns it), then probes as in step 1.
 3. Run. A failed identity check, a `wrong_sandbox` or `dirty` refusal
-   from the runner, "not found", or a connection refusal marks
-   the row dead: go to step 2 with the version just read. A call that has
+   from the runner, "not found", a connection refusal, or a no answer (a
+   proxy 502 included, which the platform also sends for a terminated MicroVM)
+   from a MicroVM that `GetMicrovm` shows `TERMINATED` more than 2 s before the
+   request left, marks the row dead: go to step 2 with the version just read. A call that has
    already waited for a start in this invocation does not wait again after
    a takeover: it returns `sandbox_starting`. A changed `bootId` means the
    sandbox restarted (on `agentcore`, the session under the same id): the

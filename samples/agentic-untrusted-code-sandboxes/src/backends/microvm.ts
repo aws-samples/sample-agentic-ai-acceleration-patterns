@@ -72,6 +72,12 @@ const ENDPOINT_HOST = /^[a-z0-9-]+\.lambda-microvm\.([a-z0-9-]+)\.on\.aws$/;
 /** Connection failures that happen before the request is sent. */
 const NOT_SENT: readonly string[] = ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'];
 
+/** A MicroVM that ended this long before the request left cannot have run the job; the margin covers clock skew with the platform. */
+const TERMINATED_BEFORE_CALL_MS = 2000;
+
+/** The state lookup behind a no-answer must not hold the call past the tool's own deadline. */
+const NO_ANSWER_LOOKUP_MS = 3000;
+
 /** States in which a MicroVM is gone or going. */
 const ENDED_STATES: readonly string[] = ['TERMINATING', 'TERMINATED'];
 
@@ -336,6 +342,7 @@ export class MicrovmBackend implements SandboxBackend {
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), job.timeoutMs + NO_ANSWER_MARGIN_MS);
+    const sentAt = Date.now();
     let status: number;
     let text: string;
     try {
@@ -348,14 +355,40 @@ export class MicrovmBackend implements SandboxBackend {
       status = res.status;
       text = await res.text();
     } catch (e) {
-      if (controller.signal.aborted) return { kind: 'no_answer' };
+      if (controller.signal.aborted) return await this.noAnswer(handle, sentAt);
       // Only a failure before the request left is a dead handle; after that the job may have run, and a rerun in a fresh MicroVM would run the tenant's code twice (ADR-0044).
       const code = errorCode(e);
-      return NOT_SENT.includes(code) ? { kind: 'dead', reason: `connection_failed: ${code}` } : { kind: 'no_answer' };
+      return NOT_SENT.includes(code) ? { kind: 'dead', reason: `connection_failed: ${code}` } : await this.noAnswer(handle, sentAt);
     } finally {
       clearTimeout(timer);
     }
-    return interpret(status, text, job);
+    const outcome = interpret(status, text, job);
+    return outcome.kind === 'no_answer' ? this.noAnswer(handle, sentAt) : outcome;
+  }
+
+  /**
+   * No answer. The proxy answers 502 for a MicroVM that was terminated (smoke run), the same as for one that did not
+   * respond. When the platform says the MicroVM was TERMINATED more than 2 s before the request left, the job cannot
+   * have run: a dead handle. TERMINATING, a missing `terminatedAt`, a MicroVM that is still running and an unreadable
+   * or slow answer all stay no answer, the safe one (ADR-0044).
+   */
+  private async noAnswer(handle: SandboxHandle, sentAt: number): Promise<RunOutcome> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const lookup = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('GetMicrovm took too long')), NO_ANSWER_LOOKUP_MS);
+      });
+      const info = await Promise.race([this.get(handle.handle), lookup]);
+      const endedAt = toMs(info.terminatedAt);
+      if (info.state === 'TERMINATED' && endedAt !== undefined && endedAt + TERMINATED_BEFORE_CALL_MS < sentAt) {
+        return { kind: 'dead', reason: info.stateReason ?? 'terminated_before_call' };
+      }
+    } catch {
+      // Unreadable or slow: keep no_answer.
+    } finally {
+      clearTimeout(timer);
+    }
+    return { kind: 'no_answer' };
   }
 
   public async stop(handle: SandboxHandle, _creds?: TenantCredentials): Promise<void> {
