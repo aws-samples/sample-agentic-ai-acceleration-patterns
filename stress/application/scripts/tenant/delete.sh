@@ -31,7 +31,7 @@ echo "Removing tenant ${TENANT_ID} of ${APPLICATION_ID} from cell ${CELL_ID}"
 if api="$(get_param "$(cell_param entitlements-api-url)" 2> /dev/null)"; then
   response="$(mktemp)"
   trap 'rm -f "$response"' EXIT
-  status="$(sigv4 DELETE "${api%/}/entitlements/tenants/${TENANT_ID}" "$response")"
+  status="$(sigv4 DELETE "${api%/}/tenants/${TENANT_ID}" "$response")"
   case "$status" in
     200 | 204 | 404) echo "Subscription of ${TENANT_ID} removed (HTTP ${status})" ;;
     *)

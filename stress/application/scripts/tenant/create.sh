@@ -41,14 +41,14 @@ echo "Tenant ${TENANT_ID} of ${APPLICATION_ID} into cell ${CELL_ID} (${OPERATION
 
 api="$(get_param "$(cell_param entitlements-api-url)")"
 echo "Read $(cell_param entitlements-api-url)"
-api="${api%/}"
+api="${api%/}"  # the API base: .../<stage>/entitlements
 
 # Names to JSON with jq; PARAM_ values are operator text, so they are never logged or eval'd.
 body="$(jq -cn --arg agents "${PARAM_AGENTS-}" --arg tools "${PARAM_TOOLS-}" \
   '{agents: ($agents | split(",") | map(select(length > 0))), tools: ($tools | split(",") | map(select(length > 0)))}')"
 response="$(mktemp)"
 trap 'rm -f "$response"' EXIT
-status="$(sigv4 PUT "${api}/entitlements/tenants/${TENANT_ID}" "$response" "$body")"
+status="$(sigv4 PUT "${api}/tenants/${TENANT_ID}" "$response" "$body")"
 if [ "$status" != 200 ]; then
   echo "PutTenantSubscription for ${TENANT_ID} returned HTTP ${status} ($(jq -r '.reason // .__type // "no reason"' "$response" 2> /dev/null || echo 'no body'))"
   exit 1

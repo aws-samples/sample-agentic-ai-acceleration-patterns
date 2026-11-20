@@ -50,23 +50,23 @@ function password(): string {
 
 /**
  * Signs the slice's operator in to the vendor IdP: creates `stress-operator` once, sets a
- * fresh random password, and returns the ID token. The password and the token reach the CLI
- * on stdin and come back in memory; neither is written or printed.
+ * fresh random password, and returns the ID token. The password reaches the CLI as input
+ * JSON in a memory-backed file (`aws`), the token comes back in memory; neither is printed.
  */
 export async function operatorToken(userPoolId: string, clientId: string): Promise<string> {
   const username = 'stress-operator';
   try {
-    await aws(['cognito-idp', 'admin-create-user', '--cli-input-json', 'file:///dev/stdin'], {
+    await aws(['cognito-idp', 'admin-create-user', ], {
       input: { UserPoolId: userPoolId, Username: username, MessageAction: 'SUPPRESS' },
     });
   } catch (e) {
     if (!(e instanceof AwsError) || e.errorName !== 'UsernameExistsException') throw e;
   }
   const secret = password();
-  await aws(['cognito-idp', 'admin-set-user-password', '--cli-input-json', 'file:///dev/stdin'], {
+  await aws(['cognito-idp', 'admin-set-user-password', ], {
     input: { UserPoolId: userPoolId, Username: username, Password: secret, Permanent: true },
   });
-  const out = await aws(['cognito-idp', 'admin-initiate-auth', '--cli-input-json', 'file:///dev/stdin'], {
+  const out = await aws(['cognito-idp', 'admin-initiate-auth', ], {
     input: { UserPoolId: userPoolId, ClientId: clientId, AuthFlow: 'ADMIN_USER_PASSWORD_AUTH', AuthParameters: { USERNAME: username, PASSWORD: secret } },
   });
   const token = out?.AuthenticationResult?.IdToken;
