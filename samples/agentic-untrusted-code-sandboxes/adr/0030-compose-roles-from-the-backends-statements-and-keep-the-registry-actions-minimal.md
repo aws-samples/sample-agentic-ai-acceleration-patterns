@@ -59,8 +59,10 @@ Option 1.
   insights rule (ADR-0013) and the image copy library's role (ADR-0029).
   The table is built for one deployment: a tenant prefix is accepted only
   under this deployment's input bucket, for `GetObject` on `inputs/` or
-  `PutObject` on `outputs/`; a log group wildcard needs a group name before it
-  that does not end in `/`; a task wildcard needs the cluster segment.
+  `PutObject` on `outputs/`; a log group wildcard is accepted only after a
+  name or prefix that a backend lists in `logCleanup()`, so another group or a
+  whole service's groups stays a finding; a task or container instance
+  wildcard needs a cluster resource of this stack.
 
 ## Consequences
 

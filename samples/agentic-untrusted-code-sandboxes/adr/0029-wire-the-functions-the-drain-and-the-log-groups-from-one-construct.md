@@ -60,10 +60,13 @@ Option 1.
   underlying `CfnFunction`. The tool statements and the network interface
   statement go on the function's own role, so a bound function holds the
   same rights as the tool role without running as it, and the role is added
-  to the tenant role's trust. The two managed policies a default function role
-  carries (basic execution and VPC access) are removed from it, because
-  both allow log writes on every group; the function writes to its owned
-  group, or to its own group's ARN when it was built with one. The function resource, not its role, becomes
+  to the tenant role's trust. The managed execution policies of the Lambda
+  event sources (basic, VPC access, SQS, Kinesis, DynamoDB, MSK) are removed
+  from it, because each allows log writes on every group; the function
+  writes to its owned group, or to its own group's ARN when it was built with
+  one. Attach other managed policies before binding, and give the function a
+  role of its own: a role shared with another function loses those policies
+  for both. The function resource, not its role, becomes
   a dependent of the drain. If the function was built with its own log group
   the core reads it; if not the core creates an unnamed group (retention one
   month, deleted on destroy), sets it on the function, grants the role the
@@ -79,9 +82,10 @@ Option 1.
   policy. A function writes only to its own group.
 - The image copy library puts one Lambda in the stack, shared by every copy,
   with ECR write and S3 read on every resource and no log group of its own.
-  The core asks for its own memory size (1,024 MiB), which gives it a
+  The core asks for its own memory size (1,088 MiB), which gives it a
   function and role of its own, so an app's other image copies in the same
-  stack keep the library's defaults and are not denied anything. It adds
+  stack keep the library's defaults and are not denied anything (an app that
+  asks for exactly 1,088 MiB would share the function and its denies). It adds
   explicit denies to that role (ECR write outside the stack's runner
   repositories, any S3 action on the stack's input buckets, log group
   creation), gives the function a log group the core owns behind the log

@@ -75,12 +75,17 @@ interface KnownWildcard {
 export interface KnownContext {
   /** The input bucket's ARN as cdk-nag renders it (`nagFindingResource`), so a tenant prefix of another bucket stays a finding. */
   readonly inputBucket: string;
+  /**
+   * The log group names and prefixes the backends own (`logCleanup()`), as cdk-nag renders them. A log wildcard is
+   * accepted only after one of these (`:*` or a stream part after a name, `*` or a stream part after a prefix), so
+   * another group, a sibling of a name, or a whole service's groups stays a finding.
+   */
+  readonly logGroups: readonly string[];
+  readonly logGroupPrefixes: readonly string[];
 }
 
 const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** A log group name before a wildcard: not empty, no wildcard or colon in it (a rendered token `<...>` may hold both), and not ending in `/` (that would be a whole service's groups). */
-const LOG_GROUP = String.raw`:log-group:(?:<[^>]*>|[^*\s:<>])*(?:<[^>]*>|[^*\s:<>/])(\*|:\*|\*:log-stream:\*|:log-stream:\*)$`;
 
 /**
  * The wildcards the backends' statements and roles carry, each with the
@@ -90,6 +95,8 @@ const LOG_GROUP = String.raw`:log-group:(?:<[^>]*>|[^*\s:<>])*(?:<[^>]*>|[^*\s:<
  */
 export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
   const bucket = escape(ctx.inputBucket);
+  const names = ctx.logGroups.map(escape).join('|');
+  const prefixes = ctx.logGroupPrefixes.map(escape).join('|');
   return [
     {
       resource: /^\*$/,
@@ -122,19 +129,24 @@ export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
       reason: 'The connector operator role creates and tags network interfaces, which have no id before creation; its subnet and security group resources are the sample\'s and CreateTags needs the managed-operator condition (spec 3.6 MicroVM connector operator role).',
     },
     {
-      resource: new RegExp(LOG_GROUP),
+      // Never matches with no known group.
+      resource: new RegExp([
+        names === '' ? '(?!)' : `:log-group:(${names})(:\\*|:log-stream:\\*)$`,
+        prefixes === '' ? '(?!)' : `:log-group:(${prefixes})(\\*|\\*:log-stream:\\*)$`,
+      ].join('|')),
       actions: /^logs:(CreateLogGroup|CreateLogStream|PutLogEvents|DescribeLogStreams|DeleteLogGroup)$/,
-      reason: 'The wildcard is a log stream, or the id the service appends to a runtime or image group name; the group name or prefix before it is this deployment\'s own and never a whole service\'s groups (spec 3.6, 5.3).',
+      reason: 'The wildcard is a log stream, or the id the service appends to a runtime name; the group name or prefix before it is one the deployment\'s backends own and the log cleanup resource deletes (spec 3.6, 5.3).',
     },
     {
-      resource: /:task\/<[^>]+>\/\*$/,
+      // A cluster resource of this stack: a logical id ending in Cluster and its hash, not a pseudo parameter.
+      resource: /:task\/<[^>.:]*Cluster[0-9A-F]{8}>\/\*$/,
       actions: /^ecs:(DescribeTasks|StopTask|TagResource)$/,
-      reason: 'The wildcard is the task id under this deployment\'s own cluster, which ECS assigns at run time; the statements carry the tag or cluster conditions of spec 3.6 and ADR-0014 where the action supports them.',
+      reason: 'The wildcard is the task id under a cluster of this stack, which ECS assigns at run time; the statements carry the tag or cluster conditions of spec 3.6 and ADR-0014 where the action supports them.',
     },
     {
-      resource: /:container-instance\/<[^>]+>\/\*$/,
+      resource: /:container-instance\/<[^>.:]*Cluster[0-9A-F]{8}>\/\*$/,
       actions: /^ecs:DescribeContainerInstances$/,
-      reason: 'The wildcard is the container instance id under this deployment\'s own cluster (spec 3.6 Drain role).',
+      reason: 'The wildcard is the container instance id under a cluster of this stack (spec 3.6 Drain role).',
     },
     {
       resource: /:container-instance\/\*$/,
@@ -142,9 +154,9 @@ export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
       reason: 'The ECS agent on a managed instance polls and reports for its own instance id, which no one knows before launch; these are the actions of the ECS-written instance role (ADR-0004).',
     },
     {
-      resource: /<[^>]*\.AgentRuntimeArn>\/runtime-endpoint\/\*$/,
+      resource: /<[^>.:]+\.AgentRuntimeArn>\/runtime-endpoint\/\*$/,
       actions: /^bedrock-agentcore:(InvokeAgentRuntime|StopRuntimeSession)$/,
-      reason: 'The wildcard is an endpoint of this deployment\'s own runtime (spec 3.6 Tool role); no other runtime is named.',
+      reason: 'The wildcard is an endpoint of a runtime of this stack (spec 3.6 Tool role); no runtime outside the stack is named.',
     },
   ];
 }
@@ -209,8 +221,8 @@ function acknowledgeStatements(target: IConstruct, statements: ResolvedStatement
 
 const copyAcknowledged = new WeakSet<Stack>();
 
-/** Memory of the image copy function. It is not the library's default, so the function (and its role) is the construct's alone (ADR-0029). */
-export const IMAGE_COPY_MEMORY_MIB = 1024;
+/** Memory of the image copy function. It is not the library's default or a round size, so the function (and its role) is the construct's alone unless an app picks the same number (ADR-0029). */
+export const IMAGE_COPY_MEMORY_MIB = 1088;
 
 /**
  * The image copy library puts one Lambda in the stack for every memory size.

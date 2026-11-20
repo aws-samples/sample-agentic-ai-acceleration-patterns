@@ -32,7 +32,7 @@ import { DnsFirewall } from './core/dns-firewall';
 import { SandboxEndpoints } from './core/endpoints';
 import { LogCleanup } from './core/log-cleanup';
 import { LogDrain } from './core/log-drain';
-import { acknowledge, acknowledgeKnownFindings, acknowledgeServiceTimeout, flatten, type KnownContext, nagFindingResource } from './core/nag';
+import { acknowledge, acknowledgeGranularFinding, acknowledgeKnownFindings, acknowledgeServiceTimeout, flatten, type KnownContext, nagFindingResource } from './core/nag';
 import { InsightRules } from './core/observability';
 import { RunnerImages, type RunnerArch } from './core/runner-image';
 import { ENV, TENANT_KEY_PREFIX, TENANT_TAG, REGISTRY } from './env';
@@ -118,7 +118,7 @@ export class UntrustedCodeSandboxes extends Construct {
   private readonly logDrain: LogDrain;
   private readonly drainResource: CustomResource;
   private readonly toolSubnets: ec2.SubnetSelection;
-  private readonly nagContext: KnownContext;
+  private nagContext: KnownContext;
 
   public constructor(scope: Construct, id: string, props: UntrustedCodeSandboxesProps = {}) {
     super(scope, id);
@@ -162,7 +162,7 @@ export class UntrustedCodeSandboxes extends Construct {
         'The tool reads inputs with the tool tenant role and writes one structured line per call with tenantId, runId and input size (spec 3.8, ADR-0013); that line is the access record. A vendor who needs object-level records adds S3 data events.',
       );
     }
-    this.nagContext = { inputBucket: nagFindingResource(this, this.inputBucket.bucketArn) };
+    this.nagContext = { inputBucket: nagFindingResource(this, this.inputBucket.bucketArn), logGroups: [], logGroupPrefixes: [] };
     const containers = this.config.backends.some((b) => b === 'nitro' || b === 'agentcore');
     if (containers) {
       this.runnerRepository = new ecr.Repository(this, 'RunnerRepository', {
@@ -322,6 +322,7 @@ export class UntrustedCodeSandboxes extends Construct {
     const prefixes = logCleanups.flatMap((c) => c.prefixes);
     const names = logCleanups.flatMap((c) => c.names);
     const cleanup = prefixes.length + names.length > 0 ? new LogCleanup(this, 'LogCleanup', { prefixes, names }) : undefined;
+    this.nagContext = { ...this.nagContext, logGroups: names.map((g) => nagFindingResource(this, g)), logGroupPrefixes: prefixes.map((g) => nagFindingResource(this, g)) };
     if (!props.inputBucket) this.ownAutoDeleteLogGroup();
     for (const b of enabled) {
       for (const resource of b.drainOrder()) {
@@ -371,8 +372,13 @@ export class UntrustedCodeSandboxes extends Construct {
    * budget, a place in the tool tenant role's trust policy, the tool role's
    * statements, an owned log group and the Contributor Insights rules. The
    * function must be a `lambda.Function` (a `NodejsFunction` is one) with
-   * a role the construct may add statements to; the subnets, the timeout
-   * and the environment are set through the underlying `CfnFunction`.
+   * a role created in this app; the subnets, the timeout and the environment
+   * are set through the underlying `CfnFunction`. The role loses the managed
+   * execution policies of the Lambda event sources (basic, VPC access, SQS,
+   * Kinesis, DynamoDB, MSK), which allow log writes on every group, and
+   * gets the exact statements instead (ADR-0029): attach any other managed
+   * policy before binding, and give the function a role of its own, because
+   * a role shared with another function loses those policies for both.
    */
   public bindRunCode(fn: lambda.IFunction): void {
     if (!(fn instanceof lambda.Function)) {
@@ -392,8 +398,9 @@ export class UntrustedCodeSandboxes extends Construct {
       // below replace them (ADR-0029).
       const cfnRole = role.node.defaultChild as iam.CfnRole;
       const managed = (Stack.of(role).resolve(cfnRole.managedPolicyArns) as unknown[] | undefined) ?? [];
-      const keep = managed.filter((m) => !/:iam::aws:policy\/service-role\/AWSLambda(Basic|VPCAccess)ExecutionRole$/.test(flatten(m)));
-      if (keep.length !== managed.length) cfnRole.addPropertyOverride('ManagedPolicyArns', keep.length > 0 ? keep : undefined);
+      const keep = managed.filter((m) => !/:iam::aws:policy\/service-role\/AWSLambda(Basic|VPCAccess|SQSQueue|Kinesis|DynamoDB|MSK)ExecutionRole$/.test(flatten(m)));
+      // The property itself, not an override, so cdk-nag sees the role as it is.
+      if (keep.length !== managed.length) cfnRole.managedPolicyArns = keep.length > 0 ? (keep as string[]) : undefined;
       role.addToPrincipalPolicy(vpcAccessStatement());
       this.toolStatements.forEach((s) => role.addToPrincipalPolicy(s));
       this.tenantRole.assumeRolePolicy?.addStatements(new iam.PolicyStatement({
@@ -408,11 +415,17 @@ export class UntrustedCodeSandboxes extends Construct {
     let groupName: string;
     if (config?.logGroup) {
       groupName = config.logGroup;
+      const ownGroupArn = Stack.of(this).formatArn({ service: 'logs', resource: 'log-group', resourceName: `${groupName}:*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
       role.addToPrincipalPolicy(new iam.PolicyStatement({
         sid: 'WriteOwnLogGroup',
         actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
-        resources: [Stack.of(this).formatArn({ service: 'logs', resource: 'log-group', resourceName: `${groupName}:*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+        resources: [ownGroupArn],
       }));
+      acknowledgeGranularFinding(
+        role,
+        `AwsSolutions-IAM5[Resource::${nagFindingResource(this, ownGroupArn)}]`,
+        'The wildcard is the log stream part of the function\'s own log group, which it was built with; no other group is named (ADR-0029).',
+      );
     } else {
       const group = new logs.LogGroup(this, `BoundLogs${this.bound.length}`, {
         retention: logs.RetentionDays.ONE_MONTH,
