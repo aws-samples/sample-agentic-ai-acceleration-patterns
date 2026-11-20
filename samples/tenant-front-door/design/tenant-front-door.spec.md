@@ -1138,8 +1138,9 @@ three. The tag grants also require `aws:ResourceTag/tenant-front-door:distributi
 to be this distribution's id. CloudFront and ACM authorise the tags of
 a create through the tag grants with the request's tags as the
 resource's, so a create passes; a resource with no distribution tag, or
-another front door's, is refused, so the role cannot put the tag on a
-resource it did not create. `UpdateDistributionTenant` requires
+another front door's, is refused, so the role cannot put the
+distribution tag on a resource it did not create; it can still rewrite
+the tenant tags on its own (threat model AR-33). `UpdateDistributionTenant` requires
 `aws:ResourceTag/tenant-front-door:distribution` to be this
 distribution's id. The main stack creates the pooled distribution tenant
 with `tenant-front-door:distribution` set to `pooled/<distribution id>`.
