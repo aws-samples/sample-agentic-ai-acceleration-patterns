@@ -37,6 +37,14 @@ MACHINE = platform.machine()
 TEST_UID = int(os.environ.get("RUNNER_TEST_UID", str(jb.UID)))
 
 
+class LinuxTestsRanTest(unittest.TestCase):
+    """With RUNNER_REQUIRE_LINUX_TESTS=1 a host that cannot run the Linux tests fails the build instead of skipping them."""
+
+    @unittest.skipUnless(os.environ.get("RUNNER_REQUIRE_LINUX_TESTS") == "1", "set RUNNER_REQUIRE_LINUX_TESTS=1 where the build must prove the kernel-level checks")
+    def test_the_linux_tests_can_run_here(self):
+        self.assertTrue(ENABLED, "the Linux tests are skipped here (they need root and RUNNER_LINUX_TESTS=1): run scripts/test-runner-docker.sh")
+
+
 def make_job(code, input_bytes=b"", timeout_ms=10000, max_output=262144):
     return wire.Job("run-1", "tenant-a", "", code.encode(), input_bytes, timeout_ms, max_output, "")
 

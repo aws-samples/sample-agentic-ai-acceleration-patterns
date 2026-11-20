@@ -177,6 +177,12 @@ const testRunner = project.addTask('test:runner', {
   description: 'Python unit tests of the runner and the protocol vectors',
 });
 testRunner.exec('python3 -B -m unittest discover -s runner/tests -t .');
+// The runner's kernel-level checks (uid drop, rlimits, seccomp, sweep, cgroups) need root: unittest skips them in a plain build.
+// A pipeline sets RUNNER_REQUIRE_LINUX_TESTS=1 so a skip fails the build, and runs this task on an x86_64 Docker host.
+const testRunnerLinux = project.addTask('test:runner:linux', {
+  description: 'The runner tests that need root, in privileged containers (x86_64 Docker host)',
+});
+testRunnerLinux.exec('scripts/test-runner-docker.sh');
 // The deployment integration test (spec §8, integration-test.md): not part of the build, run by hand in a test account.
 const integ = project.addTask('integ', {
   description: 'Deployment integration test: deploy, every step of integration-test.md, destroy (needs AWS_REGION)',

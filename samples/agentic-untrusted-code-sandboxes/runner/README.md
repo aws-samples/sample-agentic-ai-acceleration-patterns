@@ -27,8 +27,9 @@ AL2023 `python3` package). The wire protocol is in [PROTOCOL.md](PROTOCOL.md).
 
 `npx projen build` runs every test under `runner/tests/` (ADR-0026).
 `test_linux.py` needs root and Linux privileges; outside Docker it is
-skipped and unittest reports the skips. Run it with
-`scripts/test-runner-docker.sh` on an x86_64 Docker host: one fresh
+skipped and unittest reports the skips. A pipeline sets
+`RUNNER_REQUIRE_LINUX_TESTS=1`, which turns that skip into a failure, and runs
+`npx projen test:runner:linux` (`scripts/test-runner-docker.sh`) on an x86_64 Docker host: one fresh
 privileged container per test class, on the image `runner/Dockerfile`
 builds (Python 3.13) and on AL2023 minimal with the pinned `python3`
 package (Python 3.9). The job tests drop to `RUNNER_TEST_UID` (61001),
@@ -41,6 +42,7 @@ the runner entry tests run their jobs as the real uid 1001.
 | Job parsing, output cut, sizing (A, N, L), cgroup parsers | unit tests |
 | Adoption order, `busy`, `dirty`, `tool_failed` (a runner fault included), hook rules, every hook path in both forms, the wrapped `runHookPayload`, `/invocations` always 200, chunked and oversized bodies, the connection cap, TLS `/hello` and the job on one connection | unit tests, fake executor |
 | The `microvm` floor and the `nitro` watchdog thresholds, mark before kill, the `agentcore` 32 MiB `dirty` threshold, the timeout rule, the file walk (links removed, not followed; the deadline) | unit tests, fake cgroup files |
+| Both Dockerfiles: base pinned by digest, the runner image has no `RUN`, the MicroVM image installs one package at an exact version, every module `runner.py` imports is copied | unit tests (`test_images.py`) |
 | Filter logic, both architectures | unit tests, a BPF interpreter over each program |
 | Syscall numbers | unit tests against the host's kernel headers (`asm/unistd_64.h`, `asm-generic/unistd.h`) |
 | the job uid, own session and process group, every rlimit soft = hard, `oom_score_adj`, `NoNewPrivs` on every backend, job environment, input written as uid 1001 through a planted link | Docker, x86_64 |

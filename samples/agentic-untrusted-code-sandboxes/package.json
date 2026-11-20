@@ -23,6 +23,7 @@
     "synth:silent": "projen synth:silent",
     "test": "projen test",
     "test:runner": "projen test:runner",
+    "test:runner:linux": "projen test:runner:linux",
     "test:watch": "projen test:watch",
     "upgrade": "projen upgrade",
     "watch": "projen watch",
