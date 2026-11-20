@@ -5,7 +5,7 @@
 - Status: Proposed
 - Date: 2026-11-19
 - Amends: ADR-0010, ADR-0011, ADR-0016, ADR-0018
-- Amended by: ADR-0020, ADR-0021, ADR-0022
+- Amended by: ADR-0020, ADR-0021, ADR-0022, ADR-0038
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -110,3 +110,5 @@ Note 2026-11-19: amended by ADR-0020. On `microvm` the rlimits do not count an u
 Note 2026-11-20: amended by ADR-0021. The `nitro` watchdog reads the task group's `memory.current` instead of summing resident memory, and a `nitro` job filter blocks SysV IPC. `agentcore` needs no filter: its job group bounds SysV and socket memory (S-18).
 
 Note 2026-11-20: amended by ADR-0022. On `nitro` A is L less 64 MiB, because the runner's own memory counts in the task group. S-19 showed the watchdog is an early warning, not the cover: the kernel killed first in some fast fills, and the runner lived in all 85 fills.
+
+Note 2026-11-20: amended by ADR-0038. `RLIMIT_NOFILE` and `RLIMIT_AS` are set last in the job child, after the uid drop and the filter install; `RLIMIT_CPU`, `RLIMIT_NPROC` and `RLIMIT_FSIZE` are still set before the drop. All are soft = hard, so code cannot raise them.

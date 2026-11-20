@@ -441,11 +441,13 @@ with `busy`. The runner:
 1. Writes the input to `/work/input`. `/work` is owned by uid 1001.
 2. Starts `python3 -I -S` on the code as uid 1001 (`sandbox`), in a new
    session and process group, with `/work` as the working directory and
-   these limits, each with soft = hard and set before the drop to uid
-   1001, so code cannot raise them (S-15): `RLIMIT_CPU` = `runTimeout`,
-   `RLIMIT_AS` = A, `RLIMIT_NPROC` = N, `RLIMIT_FSIZE` = 100 MiB,
-   `RLIMIT_NOFILE` = 256 (64 on `microvm`, which bounds the Unix socket
-   buffers each process can hold). A, N and what caps the job's total memory depend
+   these limits, each with soft = hard so code cannot raise them (S-15):
+   `RLIMIT_CPU` = `runTimeout`, `RLIMIT_NPROC` = N and `RLIMIT_FSIZE` =
+   100 MiB, set before the drop to uid 1001; and `RLIMIT_NOFILE` = 256 (64
+   on `microvm`, which bounds the Unix socket buffers each process can hold)
+   and `RLIMIT_AS` = A, set last, after the drop and the filter install,
+   because the child is a fork of the runner and may hold more descriptors
+   and address space than the job may until it execs (ADR-0038). A, N and what caps the job's total memory depend
    on the backend (memory cap, below). The runner sets the job's
    `oom_score_adj` to 1000, which needs no capability, and tries to set
    its own to -1000, ignoring `EACCES`. No backend grants
@@ -716,7 +718,10 @@ them): `tenantId`, `backend`, `handle` (MicroVM id, task ARN or
 written by whoever moves the sandbox's row out of `STARTING` or `READY`
 with a successful conditional write: the tool (dead handle, overrun,
 failed start), the reaper, the drain, or the offboard function. A writer
-that finds the row already `FAILED` or `STOPPING` writes none. A sandbox
+that finds the row already `FAILED` or `STOPPING` writes none. A start call
+that throws before the platform returns a handle sets `FAILED` and writes no
+line, because there is no sandbox to name; a sandbox the call launched anyway
+is an orphan the sweep stops. A sandbox
 with no row (an orphan the sweep or the drain stops: a handle-less
 takeover, a crashed start, or a row TTL removed while the reaper was not
 running) gets its line from the stopper, marked `orphan` = true, with
@@ -910,8 +915,11 @@ otherwise. It:
 
 - stops `nitro` sandboxes in `READY` rows with `lastUsedAt` older than
   `sandboxIdle`; for a `STARTING` row it applies the tool's step 1 rule
-  (mark a failed start `FAILED`, leave a starting one alone), and it leaves
-  `FAILED` rows to the tool until `expiresAt`;
+  (mark a failed start `FAILED`, leave a starting one alone); for a `FAILED`
+  or `STOPPING` row the reaper stops again a sandbox the platform still
+  lists, writes no line (a stopped sandbox already has one; a start that
+  threw has none, there being no sandbox to name), and deletes the row once
+  `expiresAt` has passed and the sandbox is gone;
 - stops every task tagged by the sample whose own `startedAt` is older than
   `sandboxMaxLife`, with or without a row (the third cap on `nitro`);
 - checks each `READY` `microvm` row with `GetMicrovm`; when the MicroVM is
@@ -998,7 +1006,7 @@ Errors (tool error `code`, no stack, no tenant data):
 
 | Code | Retry | When |
 |---|---|---|
-| `context_invalid` | no | gateway entry: the context failed verification (from `toolHandler`) |
+| `context_invalid` | no | gateway entry: the context failed verification (from `toolHandler`), or the verified tenant id breaks the §5.1 tenant id rule |
 | `invalid_argument` | no | a field breaks its rule |
 | `input_not_found` | no | no such object under the tenant's prefix |
 | `input_too_large` | no | the object exceeds `maxInputBytes` (`HeadObject` before any start) |
