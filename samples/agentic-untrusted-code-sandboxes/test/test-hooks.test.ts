@@ -37,7 +37,7 @@ describe('the reaper hook', () => {
 describe('the reaper pass', () => {
   const stopped = (h: ReturnType<typeof harness>) => h.backends.get('nitro')?.calls.filter((c) => c.startsWith('stop')) ?? [];
 
-  test('an override pass stops a task older than it, and the next pass without it does not', async () => {
+  test('a pass without the hook leaves a 90 s old task, a pass with a 60 s override stops it, and the shared deps stay unchanged', async () => {
     const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
     await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t, expiresAt: h.clock.t + 9 * 3_600_000 }, 'nitro');
     h.clock.t += 90_000;
