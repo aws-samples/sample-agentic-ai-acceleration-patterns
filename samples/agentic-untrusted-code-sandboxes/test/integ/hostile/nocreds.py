@@ -52,8 +52,9 @@ def load():
 
 
 early = [probe("imds_role_path", role_path), probe("ecs_credentials_path", ecs_path), probe("imds_credentials_loaded", load)]
-# The metadata calls go to address literals (no lookup) and normally end in under 2 s; they get until 9 s so the
-# reads of B's data below keep 8 s of the shared deadline (a lookup of 5 s, a connect and an answer).
+# The metadata calls go to address literals (no lookup) and normally end in under 2 s; they get until 9 s. The
+# reads of B's data below get what is left of the shared deadline; one that does not finish leaves its key out
+# of R, and the check fails.
 join_all(early, until=START + 9)
 R["credentials_loaded"] = creds[0] is not None
 

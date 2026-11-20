@@ -51,6 +51,8 @@ threads = [threading.Thread(target=run, args=(n, f)) for n, f in
            (("read_invoice_b", read_invoice_b), ("read_row_b", read_row_b), ("post_internet", post_internet), ("post_presigned", post_presigned))]
 for t in threads:
     t.start()
+# The requests get what is left of the shared deadline after the credential lookup above; one that does not
+# finish leaves its key out of R, and the check fails.
 join_all(threads)
 # Any answer to the post to the internet, or a completed connect to it, means the connection was made;
 # a 200 or 204 to a read or the presigned PUT means it worked.

@@ -37,7 +37,8 @@ def join_all(threads, until=None):
 
 
 def done():
-    sys.stdout.write("\n" + json.dumps(R, sort_keys=True) + "\n")
+    # A copy: a request thread still running past the deadline may write to R while it is printed.
+    sys.stdout.write("\n" + json.dumps(dict(R), sort_keys=True) + "\n")
     sys.stdout.flush()
 
 
@@ -102,7 +103,11 @@ def _resolve(url):
         if isinstance(got[1], socket.gaierror) and got[1].errno == socket.EAI_AGAIN:
             raise ProbeLookupSlow("the resolver failed (EAI_AGAIN)")
         raise got[1]
-    return [(family, kind, proto, addr) for family, kind, proto, _name, addr in got[1]][:MAX_ADDRESSES]
+    addrs = [(family, kind, proto, addr) for family, kind, proto, _name, addr in got[1]]
+    # IPv4 first: a host with an IPv6 route lists AAAA first, and four IPv6 addresses that fail at once must not
+    # use every slot before an open IPv4 address is tried.
+    addrs.sort(key=lambda a: 0 if a[0] == socket.AF_INET else 1)
+    return addrs[:MAX_ADDRESSES]
 
 
 def _connect(targets, timeout):

@@ -503,6 +503,28 @@ describe('the hostile probes', () => {
     expect(lines).toEqual(['200', 'ConnectionRefusedError']);
   });
 
+  test('IPv4 addresses are tried first, and at most four addresses are tried', () => {
+    const lib = `CONFIG = {}\n${readFileSync(path.join(HOSTILE_DIR, '_lib.py'), 'utf8')}`;
+    const script = [
+      'srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(5); port = srv.getsockname()[1]',
+      'gone = socket.socket(); gone.bind(("127.0.0.1", 0)); cport = gone.getsockname()[1]; gone.close()',
+      'closed4 = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", cport))',
+      'open4 = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))',
+      'v6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", cport, 0, 0))',
+      'socket.getaddrinfo = lambda *a, **k: [v6, v6, v6, v6, open4]',
+      'print(len(_resolve("http://x.example.com/")), _resolve("http://x.example.com/")[0][3][1] == port)',
+      'socket.getaddrinfo = lambda *a, **k: [closed4, closed4, closed4, open4]',
+      '_connect(_resolve("http://x.example.com/"), 1); print("connected")',
+      'socket.getaddrinfo = lambda *a, **k: [closed4, closed4, closed4, closed4, open4]',
+      'try:',
+      '    _connect(_resolve("http://x.example.com/"), 1)',
+      'except BaseException as e:',
+      '    print(type(e).__name__)',
+    ].join('\n');
+    const lines = execFileSync('python3', ['-I', '-S', '-B', '-c', `${lib}\n${script}`], { encoding: 'utf8', timeout: 15_000 }).trim().split('\n');
+    expect(lines).toEqual(['4 True', 'connected', 'ConnectionRefusedError']);
+  });
+
   test('the slot precheck needs every slot the stack creates', () => {
     expect(slotsFree(7, 3)).toBe(true);
     expect(slotsFree(8, 3)).toBe(false);
