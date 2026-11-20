@@ -192,13 +192,14 @@ and the records in
    the control-plane tenant id, which creates the first admin, then
    `CreateUser` for each further user the tier lists (§4.1; users per active
    tenant count the admin, so only active tenants get further users). It
-   does this for each tenant PS-1 onboards and for the `large` fleet's
-   seed; a churn create (PS-5) gets identity calls only where PS-1 is timed
-   on it (`large`), because PS-5's own probes need no token (§5.1). The
+   does this for each tenant PS-1 onboards, the warm-up tenant included,
+   and for the `large` fleet's seed; a churn create (PS-5) gets identity
+   calls only where PS-1 is timed on it (`large`), because PS-5's own
+   probes need no token (§5.1). The
    driver then polls through the edge until the first `report` is served.
    It then makes one `/api/*` call through the edge to the cell API, whose
-   answer carries the route hint (§5.3). The
-   identity calls and the polling are part of PS-1's time to the first
+   answer carries the route hint (§5.3). The identity calls and the polling
+   are part of PS-1's time to the first
    served request (§5.1). The run's first tenant is the warm-up tenant of
    §3.5: its deployment builds the cell, and `/agents/*` is refused at the
    edge (404, or CloudFront's own 403 for a `POST`) until front-door phase
@@ -493,12 +494,12 @@ two tenants are usable. The identity tenants the control-plane driver
 creates (§3.3 step 4) are not in `tenant-identity.json`, which only that
 slice's `seed` writes; the driver records them in `identity[]` (stress
 ADR-0017, W-9), and a control-plane tenant with no entry is refused
-(`no-identity-tenant`). The
-`control-plane` `teardown` deletes the identity tenants of the run's
-deployments, those that PS-5 deleted included, and removes their
+(`no-identity-tenant`). The `control-plane` `teardown` deletes the identity
+tenants of every deployment of the run, the seeded tenants of `small` and
+`medium` and the churn tenants that PS-5 deleted included, and removes their
 `identity[]` entries, because the control plane's `DeleteDeployment` does
 not and the `tenant-identity` `teardown` removes only the tenants it
-seeded; the reverse order runs it before `tenant-identity`'s (P-6). The
+seeded; the reverse order of §3.4 runs it before `tenant-identity`'s. The
 `large` fleet is a fixture (P-5): its identity tenants stay with it, and
 `--fixtures` removes them. `DeleteTenant` scans the whole pool in
 `shared-pool` (tenant-identity README), so that teardown's time at `large`
