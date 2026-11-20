@@ -104,7 +104,7 @@ function registrarTagsOnCreate(distributionId: string, alsoEquals: Record<string
  * names this distribution. CloudFront and ACM authorise a create's tags
  * through these actions with the request's tags as the resource's tags,
  * so a create passes, while a resource with no distribution tag, or
- * another's, is refused (threat model AR-33, design/spikes.md Smoke run).
+ * another's, is refused (threat model AR-33, design/spikes.md, Dedicated-domain run).
  */
 function registrarTagsOnOwn(distributionId: string): Record<string, Record<string, unknown>> {
   const create = registrarTagsOnCreate(distributionId);

@@ -154,6 +154,10 @@ cleanup() {
     unfixture "/tenants/$A"; unfixture "/tenants/$A/deployments/$APPLICATION_ID"
   fi
   unfixture "/cells/$CELL_ID"
+  # The run's DNS records go; the route deletes above dropped the domain, and
+  # one removal run starts on what that left (the 15-minute schedule finishes it).
+  aws lambda invoke --function-name "$SWEEPER" --cli-binary-format raw-in-base64-out --payload '{"job":"remove"}' "$TMP/remove-trap.json" >/dev/null 2>&1 || true
+  dns_deploy '[]' >/dev/null 2>&1 || echo "  the TfdSmoke-dns reset failed; deploy it with dnsRecords='[]'"
 }
 trap 'cleanup; rm -f "$TMP"/*; rmdir "$TMP"' EXIT
 
@@ -222,7 +226,11 @@ for i in $(seq 1 10); do
 done
 VAL_NAME="$(jq -r .record.name "$BODY")"; VAL_VALUE="$(jq -r .record.value "$BODY")"
 check "ACM validation record returned" CNAME "$(jq -r .record.type "$BODY")"
-CERT_ARN="$(acm list-certificates --includes 'keyTypes=RSA_2048,EC_prime256v1,EC_secp384r1' --query "CertificateSummaryList[?DomainName=='${DD}'].CertificateArn | [0]" --output text)"
+CERT_ARN=""
+for arn in $(acm list-certificates --includes 'keyTypes=RSA_2048,EC_prime256v1,EC_secp384r1' --query "CertificateSummaryList[?DomainName=='${DD}'].CertificateArn" --output text); do
+  if [[ "$(acm list-tags-for-certificate --certificate-arn "$arn" --query "Tags[?Key=='tenant-front-door:tenant'].Value | [0]" --output text)" == "${A,,}" ]]; then CERT_ARN="$arn"; fi
+done
+[[ -n "$CERT_ARN" ]] || { echo "no certificate tagged for tenant a"; exit 1; }
 TAGS="$(acm list-tags-for-certificate --certificate-arn "$CERT_ARN" --output json)"
 check "certificate tag tenant" "${A,,}" "$(jq -r '.Tags[] | select(.Key=="tenant-front-door:tenant") | .Value' <<<"$TAGS")"
 check "certificate tag distribution" "$DIST_ID" "$(jq -r '.Tags[] | select(.Key=="tenant-front-door:distribution") | .Value' <<<"$TAGS")"
@@ -247,7 +255,7 @@ DT="$(cf get-distribution-tenant-by-domain --domain "$DD" --output json)"
 DT_ID="$(jq -r .DistributionTenant.Id <<<"$DT")"; DT_ARN="$(jq -r .DistributionTenant.Arn <<<"$DT")"
 check "on this distribution" "$DIST_ID" "$(jq -r .DistributionTenant.DistributionId <<<"$DT")"
 check "in the stack's connection group" "$(cf list-distribution-tenants --query "DistributionTenantList[?Domains[0].Domain=='${SMOKE_APP_DOMAIN}'].ConnectionGroupId | [0]" --output text)" "$(jq -r .DistributionTenant.ConnectionGroupId <<<"$DT")"
-check "with the certificate" "$CERT_ARN" "$(jq -r .DistributionTenant.Customizations.Certificate.Arn <<<"$DT")"
+check "with the certificate" yes "$([[ "$(jq -r .DistributionTenant.Customizations.Certificate.Arn <<<"$DT")" == "$CERT_ARN" ]] && echo yes || echo no)"
 check "name within CloudFront's limit" 'tfd-[0-9a-f]{32}' "$(jq -r .DistributionTenant.Name <<<"$DT")"
 DT_TAGS="$(cf list-tags-for-resource --resource "$DT_ARN" --output json)"
 check "distribution tenant tag tenant" "${A,,}" "$(jq -r '.Tags.Items[] | select(.Key=="tenant-front-door:tenant") | .Value' <<<"$DT_TAGS")"
