@@ -47,6 +47,20 @@ between cells.
 
 ## Architecture
 
+![Components: a tenant user's request reaches a distribution tenant and the multi-tenant distribution, whose tenant router looks the tenant up in the route table and sends the request to the cell's API (or the SPA bucket for static files); the route hook, run by the control plane, calls the route registrar, which reads the cell or deployment from the control plane and is the only writer of routes; the sweeper reads the route table and removes dedicated tenants and certificates; each box names the pattern it carries](./diagrams/tenant-front-door.components.drawio.svg)
+
+A tenant user's request reaches the distribution, the router looks the tenant
+up in the route table, and CloudFront sends the request, signed, to the
+tenant's cell, while the control plane's route hook calls the registrar, which
+checks the record with the control plane and then writes the route table.
+
+![Architecture: a tenant user calls the CloudFront multi-tenant distribution, whose Function looks the tenant up in the KeyValueStore and signs the request to the cell's Lambda function URL, or reads the SPA from S3; the control plane's CodeBuild route hook reads the hook parameter, calls the registrar's API Gateway, and the registrar Lambda reads the cell or deployment from the control plane API and writes the KeyValueStore; an optional EventBridge Scheduler runs the sweeper Lambda; the certificate, web ACL and access log are in us-east-1](./diagrams/tenant-front-door.drawio.svg)
+
+A request goes from the tenant user through CloudFront and the router function
+to the cell's Lambda function URL, and a route goes from the control plane's
+CodeBuild route hook through the registrar's API Gateway and Lambda into the
+CloudFront KeyValueStore.
+
 The components:
 
 - **Edge stack** (`us-east-1`): the ACM certificate for `<appDomain>` and the
