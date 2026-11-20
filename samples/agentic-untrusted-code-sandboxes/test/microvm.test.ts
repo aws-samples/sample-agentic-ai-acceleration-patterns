@@ -17,7 +17,7 @@ import {
 import type { MicrovmState } from '@aws-sdk/client-lambda-microvms';
 import { mockClient } from 'aws-sdk-client-mock';
 import type { RegistryRow, RunJob, SandboxHandle, TenantCredentials } from '../src/backend';
-import { MICROVM_START_CAP_MS, MicrovmBackend, MicrovmStartError, endpointOrigin, httpIngressConnectorArn, terminatedReason } from '../src/backends/microvm';
+import { MICROVM_START_CAP_MS, MicrovmBackend, MicrovmStartError, endpointOrigin, httpIngressConnectorArn, stopReasonOf, terminatedReason } from '../src/backends/microvm';
 import { BACKEND_ENV, ENV, TEST_HOOK_ENV } from '../src/env';
 import { buildJob, newNonce, nonceHash, resultProof, startToken } from '../src/protocol';
 import type { RunResult } from '../src/protocol';
@@ -556,6 +556,16 @@ describe('run', () => {
       expect(terminatedReason('')).toBe('terminated_before_call');
       expect(terminatedReason(undefined)).toBe('terminated_before_call');
       expect(terminatedReason('\u00e9\u00e9')).toBe('terminated_before_call');
+    });
+
+    test('the stop line gets a reason only for an ended MicroVM with a usable platform reason', () => {
+      expect(stopReasonOf('TERMINATED', 'Max duration')).toBe('terminated: max_duration');
+      expect(stopReasonOf('TERMINATING', 'by caller')).toBe('terminated: by_caller');
+      expect(stopReasonOf('TERMINATED', '')).toBeUndefined();
+      expect(stopReasonOf('TERMINATED', '!!')).toBeUndefined();
+      expect(stopReasonOf('TERMINATED', undefined)).toBeUndefined();
+      expect(stopReasonOf('RUNNING', 'max duration')).toBeUndefined();
+      expect(stopReasonOf(undefined, 'max duration')).toBeUndefined();
     });
 
     test('a connection lost after the request left is dead only for the same finding', async () => {

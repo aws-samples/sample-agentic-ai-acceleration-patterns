@@ -47,7 +47,6 @@ export const AGENTCORE_START_CAP_MS = 30_000;
 
 const REFUSAL_CODES: readonly RefusalCode[] = ['wrong_sandbox', 'busy', 'dirty', 'tool_failed'];
 
-
 export class AgentcoreBackend implements SandboxBackend {
   public readonly name = 'agentcore' as const;
   public readonly startCapMs = AGENTCORE_START_CAP_MS;

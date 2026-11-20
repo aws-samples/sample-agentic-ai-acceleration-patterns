@@ -77,17 +77,30 @@ const TERMINATED_BEFORE_CALL_MS = 2000;
 /** The state lookup behind a no-answer must not hold the call past the tool's own deadline (counted in the budget test). */
 export const NO_ANSWER_LOOKUP_MS = 3000;
 
+/** States in which a MicroVM is gone or going. */
+const ENDED_STATES: readonly string[] = ['TERMINATING', 'TERMINATED'];
+
+/** The platform's free-text `stateReason` as a code of lowercase letters, digits and `_`, at most 48 characters; '' when none is left. */
+function reasonCode(stateReason: string | undefined): string {
+  return (stateReason ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48).replace(/_+$/, '');
+}
+
 /**
- * The platform's `stateReason` as a short code for the result and the stop line, which feeds a Contributor Insights
- * key: lowercase letters, digits and `_`, at most 48 characters, like nitro's connection reasons.
+ * The reason of a `dead` handle, which the stop line carries as a Contributor Insights key: `terminated: ` followed by
+ * the platform's `stateReason` as a code (lowercase letters, digits and `_`, at most 48 characters), like nitro's
+ * connection reasons; `terminated_before_call` when the platform gives no usable reason.
  */
 export function terminatedReason(stateReason: string | undefined): string {
-  const code = (stateReason ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48).replace(/_+$/, '');
+  const code = reasonCode(stateReason);
   return code === '' ? 'terminated_before_call' : `terminated: ${code}`;
 }
 
-/** States in which a MicroVM is gone or going. */
-const ENDED_STATES: readonly string[] = ['TERMINATING', 'TERMINATED'];
+/** The stop line's reason for a MicroVM the platform ended, or undefined: a running MicroVM or one with no usable reason has none. */
+export function stopReasonOf(state: string | undefined, stateReason: string | undefined): string | undefined {
+  const code = reasonCode(stateReason);
+  return state !== undefined && ENDED_STATES.includes(state) && code !== '' ? `terminated: ${code}` : undefined;
+}
+
 
 /** Why a start failed, for the tool line and for a vendor reading the log. */
 export type MicrovmStartFailure = 'quota' | 'throttled' | 'capacity' | 'failed';
@@ -442,8 +455,7 @@ export class MicrovmBackend implements SandboxBackend {
   public async stopReason(handle: SandboxHandle): Promise<StopFacts> {
     try {
       const info = await this.get(handle.handle);
-      const reason = info.stateReason === undefined ? undefined : terminatedReason(info.stateReason);
-      return { startedAt: toMs(info.startedAt), stoppedAt: toMs(info.terminatedAt), reason };
+      return { startedAt: toMs(info.startedAt), stoppedAt: toMs(info.terminatedAt), reason: stopReasonOf(info.state, info.stateReason) };
     } catch (e) {
       if (isNotFound(e)) return {};
       throw e;

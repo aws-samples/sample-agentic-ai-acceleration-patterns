@@ -18,6 +18,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { DockerImageName, ECRDeployment } from 'cdk-ecr-deployment';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { logCleanupOverride, requestedNames } from './fake-core-backend';
+import { NO_ANSWER_MARGIN_MS } from '../src/backend';
 import { NO_ANSWER_LOOKUP_MS } from '../src/backends/microvm';
 import { ALLOW_PRIORITY, BLOCK_PRIORITY, DNS_FIREWALL_ALLOWED_DOMAINS } from '../src/core/dns-firewall';
 import { CLEANUP_SOURCE } from '../src/core/log-cleanup';
@@ -242,7 +243,7 @@ describe('functions (spec 3.1, 3.3, 3.7)', () => {
 
   test('the budget holds a microvm call that waits out a start, the run and the 3 s state lookup behind no answer', () => {
     const r = resolveProps({});
-    const worst = 5 + r.settings.startWait.toSeconds() + r.settings.runTimeout.toSeconds() + 5 + NO_ANSWER_LOOKUP_MS / 1000;
+    const worst = 5 + r.settings.startWait.toSeconds() + r.settings.runTimeout.toSeconds() + NO_ANSWER_MARGIN_MS / 1000 + NO_ANSWER_LOOKUP_MS / 1000;
     expect(worst).toBeLessThanOrEqual(r.toolBudget.toSeconds());
   });
 
