@@ -131,6 +131,26 @@ const integ = project.addTask('integ', {
 integ.exec('scripts/integ.sh');
 
 // ---------------------------------------------------------------------------
+// Package entry for a consumer that installs this sample through a `file:`
+// dependency (agentic-untrusted-code-sandboxes ADR-0017). `.` is the
+// construct surface; `./tools` is the tool-side library only, so a tool
+// Lambda bundle does not pull in the constructs or aws-cdk-lib. Both point at
+// `src/`: the symlink of a `file:` install resolves to a real path outside
+// node_modules, so ts-node compiles it and the `__dirname` handler entries stay
+// valid. shortcut: a registry or tarball copy has no `src/` (see .npmignore)
+// and is not supported; add a `lib/` entry with a handler tree if that is needed.
+// `typesVersions` serves the `./tools` types to consumers on node10 resolution.
+// ---------------------------------------------------------------------------
+project.package.addField('main', 'src/index.ts');
+project.package.addField('types', 'src/index.ts');
+project.package.addField('exports', {
+  '.': './src/index.ts',
+  './tools': './src/tools/context.ts',
+  './package.json': './package.json',
+});
+project.package.addField('typesVersions', { '*': { tools: ['src/tools/context.ts'] } });
+
+// ---------------------------------------------------------------------------
 // Exact version pins (supply chain, Holmes CSR finding 2026-10-27). projen
 // writes caret ranges for the toolchain it adds itself (eslint, jest,
 // typescript, projen, constructs, ...). Pin every dependency that is not
