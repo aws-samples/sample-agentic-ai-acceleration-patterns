@@ -57,6 +57,10 @@ Option 1.
   wildcard with a wider action, or a shape not in the table, stays a finding.
   The same module acknowledges the ECS-required managed policy, the cluster
   insights rule (ADR-0013) and the image copy library's role (ADR-0029).
+  The table is built for one deployment: a tenant prefix is accepted only
+  under this deployment's input bucket, for `GetObject` on `inputs/` or
+  `PutObject` on `outputs/`; a log group wildcard needs a group name before it
+  that does not end in `/`; a task wildcard needs the cluster segment.
 
 ## Consequences
 

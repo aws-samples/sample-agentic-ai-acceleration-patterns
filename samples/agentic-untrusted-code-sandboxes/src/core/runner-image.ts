@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { type CfnResource, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import type * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -11,7 +11,7 @@ import type * as s3 from 'aws-cdk-lib/aws-s3';
 import { DockerImageName, ECRDeployment } from 'cdk-ecr-deployment';
 import { Construct } from 'constructs';
 import type { LogDrain } from './log-drain';
-import { acknowledgeImageCopy } from './nag';
+import { acknowledgeImageCopy, acknowledgeServiceTimeout, IMAGE_COPY_MEMORY_MIB } from './nag';
 
 export type RunnerArch = 'arm64' | 'amd64';
 
@@ -22,6 +22,9 @@ interface ProviderState {
 }
 
 const providers = new WeakMap<Stack, ProviderState>();
+
+/** The copy function's timeout (15 minutes, set by the library) plus a minute. */
+const SERVICE_TIMEOUT_SECONDS = 960;
 
 /**
  * Copies the runner image into the construct-owned repository, once per
@@ -72,7 +75,12 @@ export class RunnerImages extends Construct {
         src: new DockerImageName(asset.imageUri),
         dest: new DockerImageName(`${this.props.repository.repositoryUri}:${tag}`),
         imageArch: [arch],
+        memoryLimit: IMAGE_COPY_MEMORY_MIB,
       });
+      // A provider that cannot start never holds the delete for the default hour; the function's own timeout is 15 minutes.
+      const resource = copy.node.findChild('CustomResource');
+      (resource.node.defaultChild as CfnResource).addPropertyOverride('ServiceTimeout', String(SERVICE_TIMEOUT_SECONDS));
+      acknowledgeServiceTimeout(resource);
       this.constrainProvider(copy);
       found = { tag, copy };
       this.built.set(arch, found);
@@ -118,7 +126,7 @@ export class RunnerImages extends Construct {
   }
 
   private provider(stack: Stack): Construct {
-    const found = stack.node.children.find((c) => c.node.id.startsWith('Custom::CDKECRDeployment'));
+    const found = stack.node.children.find((c) => c.node.id.startsWith('Custom::CDKECRDeployment') && c.node.id.endsWith(`${IMAGE_COPY_MEMORY_MIB}MiB`));
     if (!found) throw new Error('the image copy library did not create its function');
     return found as Construct;
   }

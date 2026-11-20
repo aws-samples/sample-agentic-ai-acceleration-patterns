@@ -71,58 +71,87 @@ interface KnownWildcard {
   readonly reason: string;
 }
 
+/** What the table needs to know about one deployment. */
+export interface KnownContext {
+  /** The input bucket's ARN as cdk-nag renders it (`nagFindingResource`), so a tenant prefix of another bucket stays a finding. */
+  readonly inputBucket: string;
+}
+
+const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** A log group name before a wildcard: not empty, no wildcard or colon in it (a rendered token `<...>` may hold both), and not ending in `/` (that would be a whole service's groups). */
+const LOG_GROUP = String.raw`:log-group:(?:<[^>]*>|[^*\s:<>])*(?:<[^>]*>|[^*\s:<>/])(\*|:\*|\*:log-stream:\*|:log-stream:\*)$`;
+
 /**
  * The wildcards the backends' statements and roles carry, each with the
  * reason it is accepted. A wildcard that matches none of these stays a
  * finding. The resources are this deployment's own: a cluster, a runtime,
  * a log group name or prefix, or the tenant's own prefix.
  */
-export const KNOWN_WILDCARDS: readonly KnownWildcard[] = [
-  {
-    resource: /^\*$/,
-    actions: /^(ecr:GetAuthorizationToken|ec2:DescribeInstances|lambda:ListMicrovms|ecs:ListTasks|ecs:DiscoverPollEndpoint|logs:DescribeLogGroups)$/,
-    reason: 'These actions take no resource (spec 3.6, ADR-0011, ADR-0051): ECR token, EC2 and MicroVM listing, the ECS poll endpoint, log group listing. ecs:ListTasks carries an ecs:cluster condition. None reads tenant data.',
-  },
-  {
-    resource: /^\*$/,
-    actions: /^ec2:(CreateNetworkInterface|DescribeNetworkInterfaces|DescribeSubnets|DeleteNetworkInterface|AssignPrivateIpAddresses|UnassignPrivateIpAddresses)$/,
-    reason: 'A function in a VPC manages its own network interfaces, which have no id before they exist; these six actions are the managed VPC access policy minus its log writes, so no role here can write another function\'s log group (spec 3.6, ADR-0029).',
-  },
-  {
-    resource: /\/(inputs|outputs)\/<aws:PrincipalTag\/TenantId>\/\*$/,
-    actions: /^s3:(GetObject|PutObject)$/,
-    reason: 'The wildcard is the object name under the caller\'s own prefix, resolved from the TenantId session tag; the role reaches no other prefix (spec 3.6, C-5, ADR-0030).',
-  },
-  {
-    resource: /\/sessions\/<aws:AgentCoreRuntimeSourceSid>\/\*$/,
-    actions: /^s3:(GetObject|PutObject)$/,
-    reason: 'The wildcard is the object name under the one prefix the platform derives from the session, so a session reaches only its own prefix (ADR-0007, spec 3.6 AgentCore runtime role).',
-  },
-  {
-    resource: /:network-interface\/\*$/,
-    actions: /^ec2:(CreateNetworkInterface|CreateTags)$/,
-    reason: 'The connector operator role creates and tags network interfaces, which have no id before creation; its subnet and security group resources are the sample\'s and CreateTags needs the managed-operator condition (spec 3.6 MicroVM connector operator role).',
-  },
-  {
-    resource: /:log-group:[^ ]*(\*|:\*)$/,
-    actions: /^logs:(CreateLogGroup|CreateLogStream|PutLogEvents|DescribeLogStreams|DeleteLogGroup)$/,
-    reason: 'The wildcard is a log stream, or the id the service appends to a runtime or image group name; the group name or prefix is this deployment\'s own (spec 3.6, 5.3).',
-  },
-  {
-    resource: /:(task|container-instance)\/(<[^>]*>\/)?\*$/,
-    actions: /^ecs:(DescribeTasks|StopTask|TagResource|DescribeContainerInstances|Poll|StartTelemetrySession|PutSystemLogEvents)$/,
-    reason: 'The wildcard is the task or container instance id under this deployment\'s own cluster, which ECS assigns at run time; the statements carry the tag or cluster conditions of spec 3.6 and ADR-0014 where the action supports them.',
-  },
-  {
-    resource: /<[^>]*\.AgentRuntimeArn>\/runtime-endpoint\/\*$/,
-    actions: /^bedrock-agentcore:(InvokeAgentRuntime|StopRuntimeSession)$/,
-    reason: 'The wildcard is an endpoint of this deployment\'s own runtime (ADR-0050); no other runtime is named.',
-  },
-];
+export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
+  const bucket = escape(ctx.inputBucket);
+  return [
+    {
+      resource: /^\*$/,
+      actions: /^(ecr:GetAuthorizationToken|ec2:DescribeInstances|lambda:ListMicrovms|ecs:ListTasks|ecs:DiscoverPollEndpoint|logs:DescribeLogGroups)$/,
+      reason: 'These actions take no resource (spec 3.6, ADR-0011, ADR-0030): ECR token, EC2 and MicroVM listing, the ECS poll endpoint, log group listing. ecs:ListTasks carries an ecs:cluster condition. None reads tenant data.',
+    },
+    {
+      resource: /^\*$/,
+      actions: /^ec2:(CreateNetworkInterface|DescribeNetworkInterfaces|DescribeSubnets|DeleteNetworkInterface|AssignPrivateIpAddresses|UnassignPrivateIpAddresses)$/,
+      reason: 'A function in a VPC manages its own network interfaces, which have no id before they exist; these six actions are the managed VPC access policy minus its log writes, so no role here can write another function\'s log group (spec 3.6, ADR-0029).',
+    },
+    {
+      resource: new RegExp(`^${bucket}/inputs/<aws:PrincipalTag/TenantId>/\\*$`),
+      actions: /^s3:GetObject$/,
+      reason: 'The wildcard is the object name under the caller\'s own inputs prefix, resolved from the TenantId session tag; the role reaches no other prefix (spec 3.6, C-5, ADR-0030).',
+    },
+    {
+      resource: new RegExp(`^${bucket}/outputs/<aws:PrincipalTag/TenantId>/\\*$`),
+      actions: /^s3:PutObject$/,
+      reason: 'The wildcard is the object name under the caller\'s own outputs prefix, resolved from the TenantId session tag; the role reaches no other prefix (spec 3.6, C-5, ADR-0030).',
+    },
+    {
+      resource: new RegExp(`^${bucket}/sessions/<aws:AgentCoreRuntimeSourceSid>/\\*$`),
+      actions: /^s3:(GetObject|PutObject)$/,
+      reason: 'The wildcard is the object name under the one prefix the platform derives from the session, so a session reaches only its own prefix (ADR-0007, spec 3.6 AgentCore runtime role).',
+    },
+    {
+      resource: /:network-interface\/\*$/,
+      actions: /^ec2:(CreateNetworkInterface|CreateTags)$/,
+      reason: 'The connector operator role creates and tags network interfaces, which have no id before creation; its subnet and security group resources are the sample\'s and CreateTags needs the managed-operator condition (spec 3.6 MicroVM connector operator role).',
+    },
+    {
+      resource: new RegExp(LOG_GROUP),
+      actions: /^logs:(CreateLogGroup|CreateLogStream|PutLogEvents|DescribeLogStreams|DeleteLogGroup)$/,
+      reason: 'The wildcard is a log stream, or the id the service appends to a runtime or image group name; the group name or prefix before it is this deployment\'s own and never a whole service\'s groups (spec 3.6, 5.3).',
+    },
+    {
+      resource: /:task\/<[^>]+>\/\*$/,
+      actions: /^ecs:(DescribeTasks|StopTask|TagResource)$/,
+      reason: 'The wildcard is the task id under this deployment\'s own cluster, which ECS assigns at run time; the statements carry the tag or cluster conditions of spec 3.6 and ADR-0014 where the action supports them.',
+    },
+    {
+      resource: /:container-instance\/<[^>]+>\/\*$/,
+      actions: /^ecs:DescribeContainerInstances$/,
+      reason: 'The wildcard is the container instance id under this deployment\'s own cluster (spec 3.6 Drain role).',
+    },
+    {
+      resource: /:container-instance\/\*$/,
+      actions: /^ecs:(Poll|StartTelemetrySession|PutSystemLogEvents)$/,
+      reason: 'The ECS agent on a managed instance polls and reports for its own instance id, which no one knows before launch; these are the actions of the ECS-written instance role (ADR-0004).',
+    },
+    {
+      resource: /<[^>]*\.AgentRuntimeArn>\/runtime-endpoint\/\*$/,
+      actions: /^bedrock-agentcore:(InvokeAgentRuntime|StopRuntimeSession)$/,
+      reason: 'The wildcard is an endpoint of this deployment\'s own runtime (spec 3.6 Tool role); no other runtime is named.',
+    },
+  ];
+}
 
 /** The known-wildcard entry that accepts a resource for all of a statement's actions, if any. */
-export function knownWildcard(resource: string, actions: readonly string[]): KnownWildcard | undefined {
-  return KNOWN_WILDCARDS.find((k) => k.resource.test(resource) && actions.length > 0 && actions.every((a) => k.actions.test(a)));
+export function knownWildcard(resource: string, actions: readonly string[], ctx: KnownContext): KnownWildcard | undefined {
+  return knownWildcards(ctx).find((k) => k.resource.test(resource) && actions.length > 0 && actions.every((a) => k.actions.test(a)));
 }
 
 interface ResolvedStatement { Action?: string | string[]; Resource?: unknown }
@@ -135,19 +164,19 @@ function statementsOf(doc: unknown): ResolvedStatement[] {
 
 /**
  * Acknowledges the IAM5 findings of every statement under `root` whose
- * wildcard resource is in {@link KNOWN_WILDCARDS}, and the other findings of
+ * wildcard resource is in {@link knownWildcards}, and the other findings of
  * the backends' resources that the sample accepts (ECS cluster insights,
  * the ECS-required managed policy), each with its reason. Call it after the
  * statements are added.
  */
-export function acknowledgeKnownFindings(root: IConstruct): void {
+export function acknowledgeKnownFindings(root: IConstruct, ctx: KnownContext): void {
   const stack = Stack.of(root);
   for (const node of root.node.findAll()) {
     if (node instanceof iam.CfnPolicy) {
-      acknowledgeStatements(node, statementsOf(stack.resolve(node.policyDocument)));
+      acknowledgeStatements(node, statementsOf(stack.resolve(node.policyDocument)), ctx);
     } else if (node instanceof iam.CfnRole) {
       const inline = stack.resolve(node.policies) as { policyDocument?: unknown; PolicyDocument?: unknown }[] | undefined;
-      acknowledgeStatements(node, (inline ?? []).flatMap((p) => statementsOf(p.policyDocument ?? p.PolicyDocument)));
+      acknowledgeStatements(node, (inline ?? []).flatMap((p) => statementsOf(p.policyDocument ?? p.PolicyDocument)), ctx);
       const managed = (stack.resolve(node.managedPolicyArns) as unknown[] | undefined) ?? [];
       if (managed.some((m) => flatten(m).endsWith(':iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances'))) {
         acknowledgeGranularFinding(
@@ -166,13 +195,13 @@ export function acknowledgeKnownFindings(root: IConstruct): void {
   }
 }
 
-function acknowledgeStatements(target: IConstruct, statements: ResolvedStatement[]): void {
+function acknowledgeStatements(target: IConstruct, statements: ResolvedStatement[], ctx: KnownContext): void {
   for (const s of statements) {
     const actions = ([] as string[]).concat(s.Action ?? []);
     for (const resource of ([] as unknown[]).concat(s.Resource ?? [])) {
       const text = flatten(resource);
       if (!text.includes('*')) continue;
-      const known = knownWildcard(text, actions);
+      const known = knownWildcard(text, actions, ctx);
       if (known) acknowledgeGranularFinding(target, `AwsSolutions-IAM5[Resource::${text}]`, known.reason);
     }
   }
@@ -180,26 +209,33 @@ function acknowledgeStatements(target: IConstruct, statements: ResolvedStatement
 
 const copyAcknowledged = new WeakSet<Stack>();
 
+/** Memory of the image copy function. It is not the library's default, so the function (and its role) is the construct's alone (ADR-0029). */
+export const IMAGE_COPY_MEMORY_MIB = 1024;
+
 /**
- * The image copy library puts one Lambda in the stack for every copy. Its
- * role holds the library's own policy: Lambda basic execution, and ECR and
- * S3 read actions on `*`. It runs at deploy time only and handles no
- * tenant data (ADR-0024, ADR-0029).
+ * The image copy library puts one Lambda in the stack for every memory size.
+ * The construct asks for its own size, so the function is its alone. The
+ * role holds the library's policy: ECR read and write and `s3:GetObject` on
+ * every resource, and the basic execution policy (log writes on every
+ * group). The construct denies ECR writes outside the runner repositories,
+ * every S3 action on the input buckets and `logs:CreateLogGroup`, and points
+ * the function at a log group it owns (ADR-0029). `s3:GetObject` on other
+ * buckets and log writes to other groups remain.
  */
 export function acknowledgeImageCopy(stack: Stack): void {
   if (copyAcknowledged.has(stack)) return;
   copyAcknowledged.add(stack);
-  for (const child of stack.node.children.filter((c) => c.node.id.startsWith('Custom::CDKECRDeployment'))) {
+  for (const child of stack.node.children.filter((c) => c.node.id.startsWith('Custom::CDKECRDeployment') && c.node.id.endsWith(`${IMAGE_COPY_MEMORY_MIB}MiB`))) {
     const role = child.node.findChild('ServiceRole');
     acknowledgeGranularFinding(
       role,
       'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
-      'The managed policy is the logs-only execution policy of the copy function, which runs at deploy time (ADR-0024, ADR-0029).',
+      'The managed policy allows CreateLogStream and PutLogEvents on every log group; CreateLogGroup is denied on the role and the function writes to a group the construct owns. The function runs at deploy and destroy time only (ADR-0029).',
     );
     acknowledgeGranularFinding(
       role,
       'AwsSolutions-IAM5[Resource::*]',
-      'The copy library asks for ECR and S3 read actions on every resource, because the source image and its layers are in the CDK asset repository and bucket; the function runs at deploy time only and handles no tenant data (ADR-0024, ADR-0029).',
+      'Blanket acknowledgement of Resource::* on this role, which holds the copy library\'s own policy: ECR read and write and s3:GetObject on every resource. The construct denies ECR writes outside the runner repositories, every S3 action on the input buckets and logs:CreateLogGroup; s3:GetObject on other buckets remains, because the library needs the CDK asset bucket and repository, whose names are not known here. The function runs at deploy and destroy time only and handles the runner image (ADR-0024, ADR-0029).',
     );
   }
 }

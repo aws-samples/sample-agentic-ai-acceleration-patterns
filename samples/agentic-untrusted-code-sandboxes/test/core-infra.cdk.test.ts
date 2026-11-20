@@ -8,13 +8,14 @@
  * name test.
  */
 
-import { App, Stack } from 'aws-cdk-lib';
+import { App, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import { DockerImageName, ECRDeployment } from 'cdk-ecr-deployment';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { requestedNames } from './fake-core-backend';
 import { ALLOW_PRIORITY, BLOCK_PRIORITY, DNS_FIREWALL_ALLOWED_DOMAINS } from '../src/core/dns-firewall';
@@ -330,6 +331,26 @@ describe('bindRunCode (spec 3.3)', () => {
     expect(runs).toContain('BoundLogs0');
   });
 
+  test('a bound function built with the default role loses its managed policies and writes only to its own group', () => {
+    const s = synth({ standalone: false }, (stack, c) => {
+      c.bindRunCode(new lambda.Function(stack, 'PlainFn', { ...inline }));
+      c.bindRunCode(new lambda.Function(stack, 'OwnGroupDefault', { ...inline, logGroup: new logs.LogGroup(stack, 'TheirGroup', { logGroupName: 'their-group' }) }));
+    });
+    const roles = Object.entries(s.t.findResources('AWS::IAM::Role')).filter(([, r]) => /\/(PlainFn|OwnGroupDefault)\/ServiceRole\/Resource$/.test(pathOf(r as Json)));
+    expect(roles).toHaveLength(2);
+    for (const [id] of roles) {
+      expect(managedPoliciesOf(s.t, id)).toEqual([]);
+      const stmts = statementsOfRole(s.t, id);
+      for (const st of stmts) {
+        for (const a of Array.isArray(st.Action) ? st.Action : [st.Action]) {
+          if (/^logs:/.test(a)) expect(JSON.stringify(st.Resource)).not.toBe('"*"');
+        }
+      }
+      expect(actionsOf(stmts)).toEqual(expect.arrayContaining(['ec2:CreateNetworkInterface', 'logs:PutLogEvents', 'sts:AssumeRole']));
+      expect(actionsOf(stmts)).not.toContain('logs:CreateLogGroup');
+    }
+  });
+
   test('a function with an imported role is refused', () => {
     expect(() => synth({ standalone: false }, (stack, c) => {
       const role = iam.Role.fromRoleArn(stack, 'Imported', stack.formatArn({ service: 'iam', region: '', resource: 'role', resourceName: 'x' }));
@@ -381,13 +402,11 @@ describe('teardown order and log ownership (spec 5.3)', () => {
   test('the cleanup resource gets every prefix and name, and its role deletes only those', () => {
     const cleanup = Object.values(base.t.toJSON().Resources as Record<string, Json>).find((r) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('LogCleanup')) as Json;
     expect(cleanup.Properties.Prefixes).toEqual(['/aws/bedrock-agentcore/runtimes/Fake_agentcore-']);
-    expect(cleanup.Properties.Names).toHaveLength(3);
-    // the third is the log group of the bucket's auto-delete provider, named from its function
-    expect(JSON.stringify(cleanup.Properties.Names[2])).toContain('/aws/lambda/');
+    expect(cleanup.Properties.Names).toHaveLength(2);
     const stmts = statementsOfRole(base.t, logicalIdByPath(base.t, 'AWS::IAM::Role', '/LogCleanup/Role/Resource'));
     const del = stmts.find((s) => s.Sid === 'DeleteOwnedLogGroups') as Json;
     expect(del.Action).toBe('logs:DeleteLogGroup');
-    expect(del.Resource).toHaveLength(1 + 2 * 3);
+    expect(del.Resource).toHaveLength(1 + 2 * 2);
     expect(stmts.find((s) => s.Sid === 'DescribeLogGroups')!.Action).toBe('logs:DescribeLogGroups');
   });
 
@@ -784,8 +803,21 @@ describe('known wildcards (ADR-0030)', () => {
     ['<Bucket.Arn>/sessions/*', ['s3:GetObject'], false],
     ['<Bucket.Arn>/*', ['s3:GetObject'], false],
     ['<Bucket.Arn>/other/*', ['s3:GetObject'], false],
+    ['<Bucket.Arn>/outputs/<aws:PrincipalTag/TenantId>/*', ['s3:PutObject'], true],
+    ['<Bucket.Arn>/outputs/<aws:PrincipalTag/TenantId>/*', ['s3:GetObject'], false],
+    ['<Bucket.Arn>/inputs/<aws:PrincipalTag/TenantId>/*', ['s3:PutObject'], false],
+    ['<Other.Arn>/outputs/<aws:PrincipalTag/TenantId>/*', ['s3:PutObject'], false],
+    ['<Other.Arn>/sessions/<aws:AgentCoreRuntimeSourceSid>/*', ['s3:GetObject'], false],
+    ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:*', ['logs:DeleteLogGroup'], false],
+    ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:*:*', ['logs:PutLogEvents'], false],
+    ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/lambda/*', ['logs:CreateLogGroup'], false],
+    ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/x-*:log-stream:*', ['logs:PutLogEvents'], true],
+    [`${arn}:task/*`, ['ecs:StopTask'], false],
+    [`${arn}:task/*`, ['ecs:DescribeTasks'], false],
+    [`${arn}:container-instance/*`, ['ecs:DescribeContainerInstances'], false],
+    [`${arn}:container-instance/<Cluster>/*`, ['ecs:Poll'], false],
   ])('%s with %p is %s', (resource, actions, accepted) => {
-    expect(knownWildcard(resource, actions) !== undefined).toBe(accepted);
+    expect(knownWildcard(resource, actions, { inputBucket: '<Bucket.Arn>' }) !== undefined).toBe(accepted);
   });
 
   test('a wider action on a known resource stays a finding, and a known one is acknowledged', () => {
@@ -794,14 +826,14 @@ describe('known wildcards (ADR-0030)', () => {
     role.addToPolicy(new iam.PolicyStatement({ actions: ['ecr:GetAuthorizationToken'], resources: ['*'] }));
     const wide = new iam.Role(stack, 'Wide', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
     wide.addToPolicy(new iam.PolicyStatement({ actions: ['ecr:GetAuthorizationToken', 's3:GetObject'], resources: ['*'] }));
-    acknowledgeKnownFindings(stack);
+    acknowledgeKnownFindings(stack, { inputBucket: '<Bucket.Arn>' });
     const found = new AwsSolutionsChecks(stack).validateScope(stack).violations.flatMap((v) => v.violatingResources.map((r) => r.constructPath));
     expect(found.some((p) => p.startsWith('S/R/'))).toBe(false);
     expect(found.some((p) => p.startsWith('S/Wide/'))).toBe(true);
   });
 });
 
-describe('review round 1 fixes', () => {
+describe('least privilege and teardown details', () => {
   const dependsOn = (r: Json): string[] => (Array.isArray(r.DependsOn) ? r.DependsOn : r.DependsOn ? [r.DependsOn] : []);
   const resources = () => base.t.toJSON().Resources as Record<string, Json>;
 
@@ -903,13 +935,38 @@ describe('review round 1 fixes', () => {
     expect(buckets).toContain('TwoInputBucket');
   });
 
-  test('every function has a log group the stack owns, except the auto-delete provider, which the cleanup resource clears', () => {
+  test('every function has a log group the stack owns, the auto-delete provider and the image copy included, behind the log drain', () => {
     const all = resources();
     const plain = Object.entries(all).filter(([, r]) => r.Type === 'AWS::Lambda::Function' && !r.Properties.LoggingConfig?.LogGroup);
-    expect(plain.map(([, r]) => pathOf(r)).filter((p) => !/S3AutoDeleteObjects/.test(p))).toEqual([]);
-    const bucketCr = Object.values(all).find((r) => r.Type === 'Custom::S3AutoDeleteObjects') as Json;
-    const cleanupId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogCleanup/Resource'))![0];
-    expect(dependsOn(bucketCr)).toContain(cleanupId);
+    expect(plain.map(([, r]) => pathOf(r))).toEqual([]);
+    const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogDrain/Resource'))![0];
+    const provider = Object.entries(all).find(([, r]) => r.Type === 'AWS::Lambda::Function' && /S3AutoDeleteObjects/.test(pathOf(r)))!;
+    expect(JSON.stringify(provider[1].Properties.LoggingConfig.LogGroup)).toContain('AutoDeleteLogs');
+    expect(dependsOn(provider[1])).toContain(drainId);
+    expect(dependsOn(all[drainId])).toContain(logicalIdByPath(base.t, 'AWS::Logs::LogGroup', '/AutoDeleteLogs/Resource'));
+  });
+
+  test('an app bucket in the same stack shares the auto-delete provider and its log group', () => {
+    const s = synth({ backends: ['microvm'] }, (stack) => {
+      new s3.Bucket(stack, 'AppBucket', { removalPolicy: RemovalPolicy.DESTROY, autoDeleteObjects: true });
+    });
+    const providers = Object.values(s.t.findResources('AWS::Lambda::Function')).filter((f) => /S3AutoDeleteObjects/.test(pathOf(f as Json)));
+    expect(providers).toHaveLength(1);
+    expect((providers[0] as Json).Properties.LoggingConfig.LogGroup).toBeDefined();
+  });
+
+  test('a foreign image copy in the same stack gets its own function and none of the denies', () => {
+    const s = synth({ backends: ['nitro'] }, (stack) => {
+      new ECRDeployment(stack, 'Foreign', {
+        src: new DockerImageName('docker://example.com/app:1'),
+        dest: new DockerImageName('docker://example.com/app:2'),
+      });
+    });
+    const copies = Object.values(s.t.findResources('AWS::Lambda::Function')).filter((f) => /Custom::CDKECRDeployment/.test(pathOf(f as Json))) as Json[];
+    expect(copies).toHaveLength(2);
+    const roles = copies.map((f) => f.Properties.Role['Fn::GetAtt'][0] as string);
+    const sids = roles.map((r) => statementsOfRole(s.t, r).map((st) => st.Sid));
+    expect(sids.filter((ids) => ids.includes('NoInputBucket'))).toHaveLength(1);
   });
 
   test('a core with a supplied bucket has no auto-delete provider to clean', () => {
@@ -922,8 +979,9 @@ describe('review round 1 fixes', () => {
     const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/DrainResource/'))![0];
     const rule = Object.values(all).find((r) => r.Type === 'AWS::Events::Rule') as Json;
     expect(dependsOn(rule)).toContain(drainId);
-    const mine = Object.values(all).filter((r) => r.Type === 'AWS::CloudFormation::CustomResource');
-    expect(mine.length).toBeGreaterThanOrEqual(3);
+    // every custom resource of the construct: its own, and the two image copies; the bucket's auto-delete one is CDK's
+    const mine = Object.values(all).filter((r) => /^(AWS::CloudFormation::CustomResource|Custom::)/.test(r.Type) && pathOf(r).includes('/Sandboxes/') && !/InputBucket/.test(pathOf(r)));
+    expect(mine.length).toBeGreaterThanOrEqual(5);
     for (const r of mine) expect(Number(r.Properties.ServiceTimeout)).toBeGreaterThan(0);
   });
 

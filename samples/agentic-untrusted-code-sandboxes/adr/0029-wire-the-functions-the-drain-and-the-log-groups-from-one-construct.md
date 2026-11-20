@@ -60,7 +60,10 @@ Option 1.
   underlying `CfnFunction`. The tool statements and the network interface
   statement go on the function's own role, so a bound function holds the
   same rights as the tool role without running as it, and the role is added
-  to the tenant role's trust. The function resource, not its role, becomes
+  to the tenant role's trust. The two managed policies a default function role
+  carries (basic execution and VPC access) are removed from it, because
+  both allow log writes on every group; the function writes to its owned
+  group, or to its own group's ARN when it was built with one. The function resource, not its role, becomes
   a dependent of the drain. If the function was built with its own log group
   the core reads it; if not the core creates an unnamed group (retention one
   month, deleted on destroy), sets it on the function, grants the role the
@@ -76,17 +79,26 @@ Option 1.
   policy. A function writes only to its own group.
 - The image copy library puts one Lambda in the stack, shared by every copy,
   with ECR write and S3 read on every resource and no log group of its own.
-  The core adds explicit denies to its role (ECR write outside the stack's
-  runner repositories, any S3 action on the stack's input buckets, log
-  group creation), gives it a log group the core owns behind the log drain,
-  and makes it wait for the log drain. The bucket's auto-delete provider,
-  which CDK adds with no log group, has its group deleted by the log cleanup
-  resource after the bucket has been emptied.
-- The reaper schedule is deleted before the drain starts, so the reaper
-  and the drain never sweep at once.
-- Every custom resource of the construct sets `ServiceTimeout` a little above
-  its function's timeout, so a function that cannot start never holds a delete
-  for the default hour.
+  The core asks for its own memory size (1,024 MiB), which gives it a
+  function and role of its own, so an app's other image copies in the same
+  stack keep the library's defaults and are not denied anything. It adds
+  explicit denies to that role (ECR write outside the stack's runner
+  repositories, any S3 action on the stack's input buckets, log group
+  creation), gives the function a log group the core owns behind the log
+  drain, and makes it wait for the log drain. The role still reads any other
+  bucket (`s3:GetObject` on `*`: the library needs the CDK asset bucket) and
+  writes to any log group through the basic execution policy; the
+  acknowledgement says so. The bucket's auto-delete provider, which CDK adds
+  to the stack with no log group, is pointed at a group the core owns behind
+  the log drain too.
+- The reaper schedule is deleted before the drain starts, so no new reaper run
+  begins during the drain. A run already in flight (timeout four minutes) can
+  still overlap it; both may then write an `orphan` stop line for the same
+  sandbox, a double count bounded to one run.
+- Every custom resource of the construct, the two image copies included, sets
+  `ServiceTimeout` a little above its function's timeout, so a function that
+  cannot start never holds a delete for the default hour. The bucket's
+  auto-delete resource is CDK's own.
 - `reaper` and `offboard` share one role; the drain has its own.
 - The core copies the runner image (ADR-0024) for every container backend:
   `BackendContext.runnerImageTag(arch)` builds the image asset and the copy
@@ -101,7 +113,10 @@ Option 1.
 
 A handler author writes `Delete` so that every path ends in a response. A
 gateway function built with its own log group has that group in the app's
-hands; the core cannot put it behind its log drain. The function lists in
+hands; the core cannot put it behind its log drain. The core functions
+run on immutable role references, so a grant made through
+`runCodeFunction.role` or `offboardFunction.role` does nothing; statements go
+on `toolRole`. The function lists in
 the spec say a bound function runs as the shared tool role; it holds the
 same statements on its own role instead, because a function's role is fixed
 when it is built. Revisit if the spec wants one role.

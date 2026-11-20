@@ -11,7 +11,7 @@
  * It writes no backend-specific action itself (ADR-0025).
  */
 
-import { type CfnResource, CustomResource, Duration, Fn, RemovalPolicy, Stack, Tags } from 'aws-cdk-lib';
+import { ArnFormat, type CfnResource, CustomResource, Duration, RemovalPolicy, Stack, Tags } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
@@ -32,7 +32,7 @@ import { DnsFirewall } from './core/dns-firewall';
 import { SandboxEndpoints } from './core/endpoints';
 import { LogCleanup } from './core/log-cleanup';
 import { LogDrain } from './core/log-drain';
-import { acknowledge, acknowledgeKnownFindings, acknowledgeServiceTimeout } from './core/nag';
+import { acknowledge, acknowledgeKnownFindings, acknowledgeServiceTimeout, flatten, type KnownContext, nagFindingResource } from './core/nag';
 import { InsightRules } from './core/observability';
 import { RunnerImages, type RunnerArch } from './core/runner-image';
 import { ENV, TENANT_KEY_PREFIX, TENANT_TAG, REGISTRY } from './env';
@@ -74,6 +74,9 @@ function vpcAccessStatement(): iam.PolicyStatement {
   });
 }
 
+/** The log group that holds the stack's auto-delete provider logs, made by the first instance in the stack. */
+const autoDeleteGroups = new WeakMap<Stack, logs.LogGroup>();
+
 /** Registry actions: the tool tenant role writes its own rows; the reaper role reads, updates and deletes any row. */
 const TENANT_ROW_ACTIONS = ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'];
 const ALL_ROW_ACTIONS = ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'];
@@ -93,9 +96,15 @@ export class UntrustedCodeSandboxes extends Construct {
   public readonly toolRole: iam.IRole;
   /** The role the tool assumes with a `TenantId` session tag (spec §3.6 "Tool tenant role"). */
   public readonly toolTenantRole: iam.IRole;
-  /** Stops one tenant's sandboxes; runs as the reaper role, which holds no instance action (spec §5.2). */
+  /**
+   * Stops one tenant's sandboxes; runs as the reaper role, which holds no instance action (spec §5.2). Like the other
+   * core functions it runs on an immutable role reference: a grant made through its own `role` does nothing.
+   */
   public readonly offboardFunction: lambda.IFunction;
-  /** Only with `standalone: true` (ADR-0017). */
+  /**
+   * Only with `standalone: true` (ADR-0017). It runs on an immutable reference to `toolRole`, so a grant made through its
+   * own `role` does nothing: add statements to `toolRole` instead.
+   */
   public readonly runCodeFunction?: lambda.IFunction;
   /** The shared environment of every function the construct deploys. */
   public readonly environment: Readonly<Record<string, string>>;
@@ -109,6 +118,7 @@ export class UntrustedCodeSandboxes extends Construct {
   private readonly logDrain: LogDrain;
   private readonly drainResource: CustomResource;
   private readonly toolSubnets: ec2.SubnetSelection;
+  private readonly nagContext: KnownContext;
 
   public constructor(scope: Construct, id: string, props: UntrustedCodeSandboxesProps = {}) {
     super(scope, id);
@@ -152,6 +162,7 @@ export class UntrustedCodeSandboxes extends Construct {
         'The tool reads inputs with the tool tenant role and writes one structured line per call with tenantId, runId and input size (spec 3.8, ADR-0013); that line is the access record. A vendor who needs object-level records adds S3 data events.',
       );
     }
+    this.nagContext = { inputBucket: nagFindingResource(this, this.inputBucket.bucketArn) };
     const containers = this.config.backends.some((b) => b === 'nitro' || b === 'agentcore');
     if (containers) {
       this.runnerRepository = new ecr.Repository(this, 'RunnerRepository', {
@@ -310,15 +321,8 @@ export class UntrustedCodeSandboxes extends Construct {
     const logCleanups = enabled.map((b) => b.logCleanup());
     const prefixes = logCleanups.flatMap((c) => c.prefixes);
     const names = logCleanups.flatMap((c) => c.names);
-    // The bucket's auto-delete provider is a function CDK adds to the stack; Lambda makes its log group on first use,
-    // so the cleanup resource deletes it, after the provider has emptied the bucket (spec 6.2 C-6).
-    const autoDelete = props.inputBucket ? undefined : Stack.of(this).node.tryFindChild('Custom::S3AutoDeleteObjectsCustomResourceProvider');
-    if (autoDelete) {
-      const provider = autoDelete as unknown as { serviceToken: string };
-      names.push(`/aws/lambda/${Fn.select(6, Fn.split(':', provider.serviceToken))}`);
-    }
     const cleanup = prefixes.length + names.length > 0 ? new LogCleanup(this, 'LogCleanup', { prefixes, names }) : undefined;
-    if (cleanup && autoDelete) this.inputBucket.node.findChild('AutoDeleteObjectsCustomResource').node.addDependency(cleanup.resource);
+    if (!props.inputBucket) this.ownAutoDeleteLogGroup();
     for (const b of enabled) {
       for (const resource of b.drainOrder()) {
         // The resource that runs the image waits for the copy of every architecture its backend asked for (ADR-0029).
@@ -352,7 +356,7 @@ export class UntrustedCodeSandboxes extends Construct {
       this.logDrain.writer(this.dnsFirewall.queryLogAssociation);
     }
 
-    acknowledgeKnownFindings(this);
+    acknowledgeKnownFindings(this, this.nagContext);
 
     this.node.addValidation({
       validate: () => (this.config.standalone || this.bound.length > 0
@@ -384,6 +388,12 @@ export class UntrustedCodeSandboxes extends Construct {
       throw new Error('UntrustedCodeSandboxes.bindRunCode needs a function built with a role created in this app, not an imported one (ADR-0029)');
     }
     if (role !== this.toolRole) {
+      // The two managed policies a default function role carries allow log writes on every group; the statements
+      // below replace them (ADR-0029).
+      const cfnRole = role.node.defaultChild as iam.CfnRole;
+      const managed = (Stack.of(role).resolve(cfnRole.managedPolicyArns) as unknown[] | undefined) ?? [];
+      const keep = managed.filter((m) => !/:iam::aws:policy\/service-role\/AWSLambda(Basic|VPCAccess)ExecutionRole$/.test(flatten(m)));
+      if (keep.length !== managed.length) cfnRole.addPropertyOverride('ManagedPolicyArns', keep.length > 0 ? keep : undefined);
       role.addToPrincipalPolicy(vpcAccessStatement());
       this.toolStatements.forEach((s) => role.addToPrincipalPolicy(s));
       this.tenantRole.assumeRolePolicy?.addStatements(new iam.PolicyStatement({
@@ -398,6 +408,11 @@ export class UntrustedCodeSandboxes extends Construct {
     let groupName: string;
     if (config?.logGroup) {
       groupName = config.logGroup;
+      role.addToPrincipalPolicy(new iam.PolicyStatement({
+        sid: 'WriteOwnLogGroup',
+        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [Stack.of(this).formatArn({ service: 'logs', resource: 'log-group', resourceName: `${groupName}:*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+      }));
     } else {
       const group = new logs.LogGroup(this, `BoundLogs${this.bound.length}`, {
         retention: logs.RetentionDays.ONE_MONTH,
@@ -412,7 +427,7 @@ export class UntrustedCodeSandboxes extends Construct {
     // Only the function resource waits for the drain, not its role, which the tenant role's trust names.
     cfn.addResourceDependency(this.drainResource.node.defaultChild as CfnResource);
     this.insights.addToolLogGroup(groupName);
-    acknowledgeKnownFindings(role);
+    acknowledgeKnownFindings(role, this.nagContext);
     this.bound.push(fn);
   }
 
@@ -446,6 +461,25 @@ export class UntrustedCodeSandboxes extends Construct {
     for (const subnet of vpc.selectSubnets({ subnetGroupName: SUBNET_GROUPS.tool }).subnets) Tags.of(subnet).add(TIER_TAG, 'tool');
     for (const subnet of vpc.selectSubnets({ subnetGroupName: SUBNET_GROUPS.sandbox }).subnets) Tags.of(subnet).add(TIER_TAG, 'sandbox');
     return vpc;
+  }
+
+  /**
+   * The bucket's auto-delete provider is a function CDK adds to the stack, shared by every bucket in it, with no log
+   * group of its own: Lambda would make one that a destroy leaves behind. Point it at a group the construct owns,
+   * behind the log drain (spec 6.2 C-6).
+   */
+  private ownAutoDeleteLogGroup(): void {
+    const stack = Stack.of(this);
+    const handler = stack.node.tryFindChild('Custom::S3AutoDeleteObjectsCustomResourceProvider')?.node.tryFindChild('Handler') as CfnResource | undefined;
+    if (!handler) return;
+    let group = autoDeleteGroups.get(stack);
+    if (!group) {
+      group = new logs.LogGroup(this, 'AutoDeleteLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: RemovalPolicy.DESTROY });
+      autoDeleteGroups.set(stack, group);
+      handler.addPropertyOverride('LoggingConfig', { LogGroup: group.logGroupName });
+      this.logDrain.protect(group);
+    }
+    this.logDrain.writer(handler);
   }
 
   /** An execution role for the functions in the tool subnets. */
