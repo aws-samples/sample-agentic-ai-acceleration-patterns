@@ -474,7 +474,7 @@ class LimitsTest(unittest.TestCase):
                         except OSError:
                             got = b""
                     self.assertIsNotNone(got)
-                    self.assertLess(time.monotonic() - start, 0.75)
+                    self.assertLess(time.monotonic() - start, 0.45)  # one byte per read: 0.3 s; readline(4): 0.6 s
             self.assertIsNone(sb.nonce_hash)
         finally:
             stop(srv)
