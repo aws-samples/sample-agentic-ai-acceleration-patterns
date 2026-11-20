@@ -57,11 +57,15 @@ HTTPS (secret or SigV4) or the export bucket.
 
 1. **Register.** A cell's emitter is the IAM role that the cell's
    workload signs its usage events with; it is the only identity the
-   ingest door accepts for that cell. Whatever places tenants in cells
-   calls `PutCellEmitter` when a cell is created, to register that role,
-   and `PutTenantBinding` when a tenant is placed in a cell, so the role
-   may report usage for that tenant. Deletes close the registration after a grace period
-   (spec §3.4). (With the [`control-plane`](../control-plane/) sample, a
+   ingest door accepts for that cell. The cell create step creates the
+   role in the cell's account with a policy from `ingestStatement`. The
+   system that places tenants in cells, signing as a role in
+   `registrarPrincipalArns`, calls `PutCellEmitter` when a cell is
+   created, to register that role, and `PutTenantBinding` when a tenant
+   is placed in a cell, so the role may report usage for that tenant.
+   Deletes close the registration at once; events timed before the close
+   are still admitted for a grace period (spec §3.4, §4.2). (With the
+   [`control-plane`](../control-plane/) sample, a
    global vendor hook makes these calls: `PutCellEmitter` on
    `CELL_CREATE`, `PutTenantBinding` on `DEPLOYMENT_CREATE` and
    `DEPLOYMENT_UPDATE`, both in `PRE`, and the deletes in `POST`.)
@@ -281,11 +285,13 @@ meters, in the first month:
 Batching is the largest lever: send many events per ingest call. The
 workload that emits usage owns the batching: the service accepts up to
 100 events per call but does not require more than one. With
-`UsageEmitter`, each `flush()` sends what has been recorded since the
-last one, so call it on a timer or after a number of events, not after
-every `record()`. Storage
-grows with retention: the raw event storage of the third traffic row adds about 500 GB a
-month and reaches about 6.5 TB, about $160 a month, after 400 days. Usage
+`UsageEmitter`, each `flush()` sends what is pending: events still to be
+retried first, then those recorded since the last flush. Call it on a
+timer or after a number of events, not after every `record()`;
+`record()` throws once `maxPending` events (100,000 by default) wait.
+Storage grows with retention: the raw event storage of the third traffic
+row adds about 500 GB a month and reaches about 6.5 TB, about $160 a
+month, after 400 days. Usage
 records stay in the table, which has no TTL on them: at about 0.5 KB a
 record, 21.9 million records add about 11 GB a month, and with PITR each
 month adds about $6 to the monthly bill.
@@ -321,8 +327,10 @@ Threats, mitigations and residuals: [`threat-model.md`](threat-model.md).
 - [ ] A reconciliation of the registry against the control plane's
       deployments, for delete hooks that were skipped (T-9).
 - [ ] Where cells share an account, a trust policy on each emitter role
-      that names only that cell's compute, never the account root, and
-      `iam:PassRole` scoped per cell; or one account per cell (T-28).
+      that names only that cell's compute, never the account root;
+      `iam:PassRole` scoped per cell; `iam:CreateRole` and
+      `iam:DeleteRole` on `<fleet>-ue-*` only for the cell provisioning
+      role; or one account per cell (T-28).
 - [ ] `RemovalPolicy.RETAIN` on the table and the buckets (M-24 residual:
       a stack delete removes them).
 - [ ] A distributed map in the recounter for hours larger than one task's
