@@ -7,8 +7,9 @@ import { ENV } from '../src/env';
 import { handleLessStaleMs, loadConfig, toolTimeoutMs } from '../src/tool/config';
 import { stsCredentialSource } from '../src/tool/credentials';
 import { loadBackends } from '../src/tool/deps';
-import { buildStopLine } from '../src/tool/log';
+import { buildStopLine, errorName, Logger, MAX_REASON_CHARS } from '../src/tool/log';
 import { InputError, s3ObjectStore, validInputName } from '../src/tool/objects';
+import * as runCodeModule from '../src/tool/run-code';
 import { handler } from '../src/tool/run-code.function';
 
 const env = {
@@ -188,6 +189,34 @@ describe('the standalone entry', () => {
     } finally {
       write.mockRestore();
     }
+  });
+});
+
+describe('the error and reason fields of a line', () => {
+  test('errorName keeps a plain class name and nothing else', () => {
+    expect(errorName(new TypeError('x'))).toBe('TypeError');
+    expect(errorName(Object.assign(new Error('x'), { name: 'a'.repeat(65) }))).toBe('Error');
+    expect(errorName(Object.assign(new Error('x'), { name: 'bad name\n{"event":"x"}' }))).toBe('Error');
+    expect(errorName('text')).toBe('Error');
+  });
+
+  test('a platform reason is cut to 200 characters on a stop line and on a run line', () => {
+    const line = buildStopLine({ row: { tenantId: 't', backend: 'nitro', handle: 'h' }, facts: { reason: 'r'.repeat(500) }, now: 1, sandboxIdleMs: 1, by: 'x' });
+    expect(line.stoppedReason).toHaveLength(MAX_REASON_CHARS);
+    const written: string[] = [];
+    new Logger((l) => written.push(l)).run({ tenantId: 't', outcome: 'sandbox_failed', stoppedReason: 'r'.repeat(500) });
+    expect(JSON.parse(written[0]).stoppedReason).toHaveLength(MAX_REASON_CHARS);
+  });
+});
+
+describe('the standalone entry passes the function\'s remaining time on', () => {
+  test('as options.remainingMs', async () => {
+    const run = jest.spyOn(runCodeModule, 'runCode').mockResolvedValue({ error: 'tool_failed' });
+    await handler({ tenantId: 'tenant-a', code: 'x' }, { getRemainingTimeInMillis: () => 4321 });
+    expect(run.mock.calls[0][2]?.remainingMs?.()).toBe(4321);
+    await handler({ tenantId: 'tenant-a', code: 'x' });
+    expect(run.mock.calls[1][2]?.remainingMs).toBeUndefined();
+    run.mockRestore();
   });
 });
 

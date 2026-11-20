@@ -57,6 +57,16 @@ describe('registry over the in-memory DynamoDB', () => {
     expect(await registry.get(T, 'microvm')).toMatchObject({ state: 'READY', handle: 'h', version: 4 });
   });
 
+  test('a row with an unknown state is a partial write too, and a takeover records the handle it replaces', async () => {
+    const { db, registry } = setup();
+    db.seed(rowItem({ tenantId: T, backend: 'microvm', state: 'READY', handle: 'h' }, now));
+    db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.state = 'WHAT';
+    const base = { tenantId: T, backend: 'microvm' as const, now, startCapMs: 1000, sandboxMaxLifeMs: 1000 };
+    expect(await registry.get(T, 'microvm')).toBeUndefined();
+    expect(await registry.takeOver({ ...base, nonce: 'n', replaces: 'old-handle' }, undefined)).toMatchObject({ replaces: 'old-handle' });
+    expect(await registry.takeOver({ ...base, nonce: 'm' }, undefined)).toBeUndefined();
+  });
+
   test('a row with a state but no version is a partial write: takeOver replaces it', async () => {
     const { db, registry } = setup();
     db.seed({ PK: 'TENANT#tenant-a', SK: 'SANDBOX#microvm', state: 'READY', handle: 'h' });
@@ -90,6 +100,14 @@ describe('registry over the in-memory DynamoDB', () => {
     expect(await registry.markStart(read, now + 200, 40)).toBeUndefined();
     const again = await registry.markStart(marked!, now + 200, 5);
     expect(again).toMatchObject({ lastUsedAt: now + 200, suspendedMs: 45, version: 3 });
+  });
+
+  test('markStart refuses a row recreated with another nonce', async () => {
+    const { db, registry } = setup();
+    db.seed(rowItem({ tenantId: T, backend: 'microvm', state: 'READY', handle: 'h', version: 1, nonce: 'A'.repeat(43) }, now));
+    const read = (await registry.get(T, 'microvm'))!;
+    expect(await registry.markStart({ ...read, nonce: 'B'.repeat(43) }, now, undefined)).toBeUndefined();
+    expect(await registry.markStart(read, now, undefined)).toBeDefined();
   });
 
   test('markStart refuses a row that is no longer READY for the handle', async () => {

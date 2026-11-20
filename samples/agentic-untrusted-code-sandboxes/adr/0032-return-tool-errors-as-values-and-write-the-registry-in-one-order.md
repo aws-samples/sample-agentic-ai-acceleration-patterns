@@ -79,11 +79,16 @@ Registry writes, in the spec's order:
 - `sandbox` is `started` when the call won a takeover, waited for a start, or
   saw a `bootId` different from the one on the row. The first `bootId` a row
   gets (`agentcore` has none from `ready`) is recorded and is not a restart.
-- A result whose `bootId` is not 1 to 64 letters or digits is a dead handle; the
-  tool never writes a runner's free text to a row.
+- A result whose `bootId` is not 1 to 64 letters or digits is a dead handle, and
+  a backend's `ready` patch with such a `bootId` is ignored; the tool never writes
+  a runner's free text to a row.
 - With `options.remainingMs` (the Lambda's remaining time) a call that has used
   most of its time does not start a second sandbox after a dead handle: it
-  returns `sandbox_starting` and leaves the row for the next call.
+  fails the dead handle as for a second one: `FAILED` with a 30 s backoff, stop,
+  line, `sandbox_failed`. A dead handle is never kept for lack of time.
+- A takeover records the handle it replaces on the new row (`replaces`), so no
+  sweep takes the old sandbox, which may take a minute to stop, for an orphan
+  (ADR-0034).
 - The run line names the sandbox (`handle`) on a reused call too, because
   `agentcore` cost is joined through it (spec §3.8).
 - Credentials are one `AssumeRole` with the `TenantId` session tag, cached per

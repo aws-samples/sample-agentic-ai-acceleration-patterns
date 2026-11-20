@@ -151,6 +151,24 @@ describe('offboardTenant', () => {
     expect(h.events('sandbox_stopped')).toHaveLength(1);
   });
 
+  test('a sandbox that lingers after its stop is stopped again on the repeat read, but listed once', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
+    jest.spyOn(h.backends.get('microvm')!, 'isAlive').mockResolvedValue(true);
+    let raced = false;
+    h.db.hook = (op) => {
+      if (op === 'delete' && !raced) {
+        raced = true;
+        const item = h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!;
+        item.version = (item.version as number) + 1;
+      }
+    };
+    const out = await offboardTenant(A, maintenanceDeps(h));
+    expect(out.stopped).toEqual([{ backend: 'microvm', handle: 'fake-1' }]);
+    expect(h.backends.get('microvm')!.stops).toHaveLength(2);
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
+  });
+
   test.each([undefined, null, 5, '', 'a b', 'a#b', '-a', 'a'.repeat(65), { tenantId: A }])('refuses the tenant id %p', async (bad) => {
     const h = harness();
     await seedSandbox(h, 'READY');

@@ -64,18 +64,29 @@ export async function drain(deps: DrainDeps, limitMs: number = Number.POSITIVE_I
   try {
     for await (const row of registry.scan()) {
       const backend = deps.backends.get(row.backend);
+      if (backend !== undefined && row.replaces !== undefined) {
+        // The sandbox a takeover replaced has its line from that takeover; the drain only makes sure it is stopped.
+        lined.add(key(row.backend, row.replaces));
+        await stopQuietly(backend, { backend: row.backend, tenantId: row.tenantId, handle: row.replaces, nonce: '' }, log);
+        stoppedAt.set(key(row.backend, row.replaces), deps.now());
+      }
       if (backend === undefined || row.handle === undefined) continue;
       const handle = { ...row, handle: row.handle };
       const k = key(row.backend, row.handle);
       // A row already STOPPING or FAILED has its line. A READY or STARTING row earns it for whoever moves it.
       let hasLine = row.state === 'STOPPING' || row.state === 'FAILED';
       let moved = false;
+      // The row now names another sandbox, or none: whoever replaced or deleted it wrote this sandbox's line.
+      let lost = false;
       let cur: RegistryRow = row;
       for (let attempt = 0; attempt < MAX_ROW_READS && !hasLine && !moved; attempt++) {
         moved = await registry.update(cur, { state: 'STOPPING' }) !== undefined;
         if (moved) break;
         const fresh = await registry.get(row.tenantId, row.backend);
-        if (fresh?.handle !== row.handle || fresh.nonce !== row.nonce) break;
+        if (fresh?.handle !== row.handle || fresh.nonce !== row.nonce) {
+          lost = true;
+          break;
+        }
         hasLine = fresh.state === 'STOPPING' || fresh.state === 'FAILED';
         cur = fresh;
       }
@@ -83,12 +94,12 @@ export async function drain(deps: DrainDeps, limitMs: number = Number.POSITIVE_I
       if (stoppedNow) stoppedAt.set(k, deps.now());
       // A row that kept changing under the drain could not be moved. The sandbox is stopped now and nothing else will line it
       // (the sweep below sees it ended), so the drain writes the line, once the stop worked.
-      if (moved || (!hasLine && stoppedNow)) {
+      if (moved || (!hasLine && !lost && stoppedNow)) {
         stats.rowsStopped += 1;
         await writeStopLine({ log, backend, row: handle, now: deps.now(), sandboxIdleMs: idle, by: 'drain', reason: 'drain' });
       }
       // A stop that failed leaves the sandbox listed, and the sweep below stops it and writes its one line.
-      if (moved || hasLine || stoppedNow) lined.add(k);
+      if (moved || hasLine || lost || stoppedNow) lined.add(k);
     }
   } catch (error) {
     if (!tableGone(error)) throw error;

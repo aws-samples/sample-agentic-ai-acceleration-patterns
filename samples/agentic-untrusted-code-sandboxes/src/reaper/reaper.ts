@@ -95,6 +95,13 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
   for await (const row of registry.scan()) {
     stats.rows += 1;
     if (row.handle !== undefined) known.add(key(row.backend, row.handle));
+    // A takeover names the handle it is replacing until that sandbox is stopped: it is not an orphan, and a stop that failed is retried.
+    if (row.replaces !== undefined) {
+      known.add(key(row.backend, row.replaces));
+      const old = live.get(row.backend)?.get(row.replaces);
+      const oldBackend = deps.backends.get(row.backend);
+      if (old !== undefined && oldBackend !== undefined) await stopQuietly(oldBackend, orphanHandle(old), log);
+    }
     const backend = deps.backends.get(row.backend);
     if (backend === undefined) continue;
     try {
@@ -105,7 +112,9 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
 
       if (row.state === 'STOPPING' || row.state === 'FAILED') {
         // Already has its stop line. Stop again only a sandbox the platform still lists.
-        const gone = summary === undefined || handled === undefined || await stopQuietly(backend, handleOf(handled), log);
+        // Not listed means gone only when the list worked: a failed list says nothing about the sandbox.
+        const notListed = listed.has(row.backend) && summary === undefined;
+        const gone = notListed || handled === undefined || await stopQuietly(backend, handleOf(handled), log);
         // The row stays while a stop is failing: it is what makes the next pass stop the sandbox again.
         if (expired && gone && await registry.delete(row)) stats.deletedRows += 1;
         continue;

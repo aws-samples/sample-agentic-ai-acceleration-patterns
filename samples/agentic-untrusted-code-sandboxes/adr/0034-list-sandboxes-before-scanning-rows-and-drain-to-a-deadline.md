@@ -57,6 +57,11 @@ stopped and then gets an `orphan` line; a stop that fails writes no line and
 is tried again on the next pass, so an orphan has one line however many
 passes it takes. A row whose stop fails stays `STOPPING` (also when expired)
 and is stopped again while the platform lists its sandbox.
+A takeover that replaces a sandbox writes the replaced handle on the new row
+(`replaces`) and keeps it there, so the old sandbox, which a `nitro` stop keeps
+listed for a minute, is neither an orphan nor lined twice; the reaper and the
+drain stop it again if it is still listed. A list that failed says nothing about
+a sandbox, so a row is not treated as gone because it was not listed.
 The shield uses the platform's `startedAt` against the row's `createdAt`
 (with 5 s of clock slack), so a real orphan is not shielded for as long as
 new starts keep arriving. `agentcore` lists nothing. A row that
@@ -81,10 +86,17 @@ gone counts as no rows.
 
 The drain must be deleted before the table, the cluster, the runtime and the
 image (`BackendConstruct.drainOrder`), and the construct wires it as the
-`onEvent` handler of a custom resource provider, with a function timeout that
-covers the ten-minute bound plus the backend cleanup. A start in flight when the drain runs (a handle-less `STARTING` row the drain
+`onEvent` handler of a custom resource provider. A Lambda is capped at 15
+minutes, so the function timeout is that cap: the wait and the cleanup share
+it, each cut to the time left. A start in flight when the drain runs (a handle-less `STARTING` row the drain
 skips) can produce a second line for its sandbox: an `orphan` line from the
 drain's sweep and a `failed_start` line from the tool call that finds it
 stopped. The window is one start, and the integration test's teardown has
 no calls in flight. A drain that fails leaves the sandboxes it could not end for the
 operator to remove, and its error names how many.
+
+What a backend owes this logic: `stop` does not throw for a sandbox that is
+already gone; a stopped sandbox leaves the `live` set of `list()` before the next
+five-minute pass (a `nitro` task in its stopping states counts as live, spec
+§5.3); and `ready` answers within the budget of a probe, because a dead handle
+that takes long to detect leaves the tool call too little time for a new start.

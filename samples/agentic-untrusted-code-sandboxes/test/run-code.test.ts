@@ -5,8 +5,9 @@
 // condition semantics (ADR-0036). Behaviour only a real backend can show
 // (the wire, the platform's idea of "gone") is out of reach here.
 
-import { harness, rowItem, signedResult, type Harness } from './harness';
+import { harness, maintenanceDeps, rowItem, signedResult, type Harness } from './harness';
 import { jobAuth } from '../src/protocol';
+import { reapOnce } from '../src/reaper/reaper';
 import { runCode } from '../src/tool/run-code';
 import type { RunCodeRequest, RunCodeResult } from '../src/tool/types';
 
@@ -398,16 +399,50 @@ describe('a sandbox that is not the one the call read', () => {
     expect(out.truncated).toBe(true);
   });
 
-  test('a second sandbox is not started when too little of the function\'s time is left', async () => {
+  test('a second sandbox is not started when too little of the function\'s time is left: the dead handle is failed, not kept', async () => {
     const h = harness();
     await runCode(req(), h.deps);
     h.backends.get('microvm')!.script.nextRun = { kind: 'refused', refusal: { v: 1, error: 'wrong_sandbox' } };
     const result = await runCode(req(), h.deps, { remainingMs: () => 10_000 });
-    expect(result).toEqual({ error: 'sandbox_starting', retryAfterSeconds: 1 });
+    expect(result).toEqual({ error: 'sandbox_failed', retryAfterSeconds: 30 });
     expect(starts(h)).toBe(1);
-    expect((await rowA(h))?.state).toBe('READY');
+    expect(await rowA(h)).toMatchObject({ state: 'FAILED', handle: 'fake-1' });
+    expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: 'fake-1', reason: 'dead' })]);
+    h.clock.t += 30_000;
+    ok(await runCode(req(), h.deps, { remainingMs: () => 120_000 }));
+    expect(starts(h)).toBe(2);
+  });
+
+  test('with time to spare a dead handle is replaced in the same call', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
     h.backends.get('microvm')!.script.nextRun = { kind: 'refused', refusal: { v: 1, error: 'wrong_sandbox' } };
     expect(ok(await runCode(req(), h.deps, { remainingMs: () => 120_000 })).sandbox).toBe('started');
+  });
+
+  test('the sandbox being replaced stays named on the new row, and the reaper does not line it as an orphan meanwhile', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    h.clock.t += 60_000;
+    const b = h.backends.get('microvm')!;
+    b.kill('fake-1');
+    b.sandboxes.get('fake-1')!.live = true;
+    b.script.nextRun = { kind: 'refused', refusal: { v: 1, error: 'wrong_sandbox' } };
+    const realStop = b.stop.bind(b);
+    let pass: unknown;
+    let ran = false;
+    jest.spyOn(b, 'stop').mockImplementation(async (handle, creds) => {
+      // the takeover is written and the old sandbox is not yet stopped: a reaper pass runs now (once: it stops fake-1 itself)
+      if (handle.handle === 'fake-1' && !ran) {
+        ran = true;
+        pass = await reapOnce(maintenanceDeps(h));
+      }
+      return realStop(handle, creds);
+    });
+    ok(await runCode(req(), h.deps));
+    expect(pass).toMatchObject({ orphans: 0 });
+    expect(h.events('sandbox_stopped').filter((l) => l.handle === 'fake-1')).toEqual([expect.objectContaining({ by: 'tool', reason: 'dead' })]);
+    expect(h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')?.replaces).toBe('fake-1');
   });
 });
 

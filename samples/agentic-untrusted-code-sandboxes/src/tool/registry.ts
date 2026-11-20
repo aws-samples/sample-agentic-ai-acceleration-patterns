@@ -16,8 +16,16 @@ import { REGISTRY, registryPk, registrySk, SANDBOX_KEY_PREFIX, TENANT_KEY_PREFIX
 
 const R = REGISTRY;
 
+/** Attribute of a row written by a takeover that replaced a sandbox: the handle being stopped (ADR-0034). */
+export const REPLACES = 'replaces';
+
+/** A row as stored: the spec's attributes, and the handle the takeover that wrote it is replacing, if any. */
+export type StoredRow = RegistryRow & { readonly replaces?: string };
+
 /** Fields a writer sets on a `STARTING` row it takes over (spec §4.1 step 2). */
 export interface NewRow {
+  /** The handle the takeover replaces. It stays named on the new row until it is stopped, so no sweep takes it for an orphan. */
+  readonly replaces?: string;
   readonly tenantId: string;
   readonly backend: BackendName;
   readonly nonce: string;
@@ -50,7 +58,7 @@ export function isConditionFailure(error: unknown): boolean {
 const STATES: readonly string[] = ['STARTING', 'READY', 'STOPPING', 'FAILED'];
 
 /** A row from an item, or undefined for an item with no valid `state` (a partial write counts as missing, spec §4.1). */
-export function rowFromItem(item: Record<string, unknown> | undefined): RegistryRow | undefined {
+export function rowFromItem(item: Record<string, unknown> | undefined): StoredRow | undefined {
   if (item === undefined) return undefined;
   const pk = item[R.PK];
   const sk = item[R.SK];
@@ -83,6 +91,7 @@ export function rowFromItem(item: Record<string, unknown> | undefined): Registry
     expiresAt,
     ttlAt: num(R.TTL_AT) ?? Math.floor((expiresAt + 3_600_000) / 1000),
     version,
+    replaces: str(REPLACES),
   };
 }
 
@@ -94,13 +103,13 @@ export class Registry {
   public constructor(private readonly client: DynamoDBDocumentClient, private readonly table: string) {}
 
   /** A strongly consistent read; undefined when there is no row or it has no valid `state`. */
-  public async get(tenantId: string, backend: BackendName): Promise<RegistryRow | undefined> {
+  public async get(tenantId: string, backend: BackendName): Promise<StoredRow | undefined> {
     const out = await this.client.send(new GetCommand({ TableName: this.table, Key: keyOf(tenantId, backend), ConsistentRead: true }));
     return rowFromItem(out.Item);
   }
 
   /** Every row of every tenant (the reaper role only), paged. */
-  public async *scan(): AsyncIterable<RegistryRow> {
+  public async *scan(): AsyncIterable<StoredRow> {
     let start: Record<string, unknown> | undefined;
     do {
       const out = await this.client.send(new ScanCommand({ TableName: this.table, ConsistentRead: true, ExclusiveStartKey: start }));
@@ -131,6 +140,7 @@ export class Registry {
       [R.EXPIRES_AT]: expiresAt,
       [R.TTL_AT]: Math.floor((expiresAt + 3_600_000) / 1000),
       [R.VERSION]: version,
+      ...(next.replaces === undefined ? {} : { [REPLACES]: next.replaces }),
     };
     try {
       await this.client.send(new PutCommand({
@@ -140,10 +150,12 @@ export class Registry {
           ? {
             // Missing, or a partial write: no state, or a field the tool needs is absent (spec §4.1, a row it cannot read is missing).
             ConditionExpression: 'attribute_not_exists(#state) OR attribute_not_exists(#version) OR attribute_not_exists(#nonce) '
-              + 'OR attribute_not_exists(#created) OR attribute_not_exists(#expires)',
+              + 'OR attribute_not_exists(#created) OR attribute_not_exists(#expires) '
+              + 'OR (#state <> :s1 AND #state <> :s2 AND #state <> :s3 AND #state <> :s4)',
             ExpressionAttributeNames: {
               '#state': R.STATE, '#version': R.VERSION, '#nonce': R.NONCE, '#created': R.CREATED_AT, '#expires': R.EXPIRES_AT,
             },
+            ExpressionAttributeValues: { ':s1': STATES[0], ':s2': STATES[1], ':s3': STATES[2], ':s4': STATES[3] },
           }
           : {
             ConditionExpression: '#version = :v AND #nonce = :n',

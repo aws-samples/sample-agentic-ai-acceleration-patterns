@@ -77,6 +77,23 @@ describe('two callers on one tenant', () => {
     expect(b.stops.map((s) => s.handle)).toEqual(['fake-1']);
   });
 
+  test('three start marks lost to other calls: the row is read again and the call still runs', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    let lost = 0;
+    h.db.hook = (op, input) => {
+      if (op === 'update' && String(input.UpdateExpression).startsWith('SET #last = :t') && lost < 3) {
+        lost += 1;
+        const item = h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!;
+        item.lastUsedAt = (item.lastUsedAt as number) + 1;
+      }
+    };
+    h.clock.t += 1000;
+    const out = ok(await runCode(req(), h.deps));
+    expect(lost).toBe(3);
+    expect(out.sandbox).toBe('reused');
+  });
+
   test('a row with a state but no version (a partial write) does not wedge the tenant', async () => {
     const h = harness();
     h.db.seed({ PK: 'TENANT#tenant-a', SK: 'SANDBOX#microvm', state: 'READY', handle: 'h' });

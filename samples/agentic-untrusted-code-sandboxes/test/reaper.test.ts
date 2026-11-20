@@ -323,6 +323,47 @@ describe('a pass', () => {
     expect(h.events('sandbox_stopped')).toHaveLength(1);
   });
 
+  test('an expired STOPPING row whose stop keeps failing stays, and a list that failed does not make it "gone"', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
+    h.clock.t += 8 * HOUR;
+    const b = h.backends.get('microvm')!;
+    jest.spyOn(b, 'stop').mockRejectedValue(new Error('throttled'));
+    await reapOnce(maintenanceDeps(h));
+    await reapOnce(maintenanceDeps(h));
+    expect(await row(h)).toMatchObject({ state: 'STOPPING' });
+    // the list fails too: the row still stays, so the sandbox is not later lined a second time as an orphan
+    jest.spyOn(b, 'list').mockImplementation(() => { throw new TypeError('x'); });
+    await expect(reapOnce(maintenanceDeps(h))).rejects.toThrow(/error/);
+    expect(await row(h)).toMatchObject({ state: 'STOPPING' });
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
+  });
+
+  test('the shield\'s clock slack is exactly 5 s', async () => {
+    const h = harness();
+    const start = (t: string) => h.backends.get('microvm')!.start(t, 'A'.repeat(43), { tenantId: t, accessKeyId: 'k', secretAccessKey: 's', sessionToken: 't' });
+    await start('t1');
+    h.clock.t += 5000;
+    await start('t2');
+    h.clock.t += 1;
+    h.db.seed(rowItem({ tenantId: A, backend: 'microvm', state: 'STARTING', createdAt: h.clock.t, leaseUntil: h.clock.t + 20_000 }, h.clock.t));
+    const summary = await reapOnce(maintenanceDeps(h));
+    // t1 started 5001 ms before the row: swept. t2 started 1 ms before: inside the slack, shielded
+    expect(summary.orphans).toBe(1);
+    expect(stops(h)).toEqual(['fake-1']);
+  });
+
+  test('a sandbox a takeover replaced is known while the new row names it, and is stopped again if it is still listed', async () => {
+    const h = harness();
+    const handle = await seedSandbox(h, 'READY');
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.handle = 'fake-new';
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replaces = handle.handle;
+    const summary = await reapOnce(maintenanceDeps(h));
+    expect(summary.orphans).toBe(0);
+    expect(stops(h)).toEqual(['fake-1']);
+    expect(h.events('sandbox_stopped').filter((l) => l.handle === 'fake-1')).toEqual([]);
+  });
+
   test('one pass logs its totals', async () => {
     const h = harness();
     await reapOnce(maintenanceDeps(h));

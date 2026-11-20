@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { harness, maintenanceDeps, seedSandbox, type Harness } from './harness';
+import { harness, maintenanceDeps, rowItem, seedSandbox, type Harness } from './harness';
 import { drain, DRAIN_BOUND_MS } from '../src/drain/drain';
 import { handler } from '../src/drain/drain.function';
 import { ENV } from '../src/env';
@@ -155,6 +155,50 @@ describe('the drain', () => {
     expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: 'fake-1', by: 'drain', reason: 'drain' })]);
   });
 
+  test('a row replaced while the drain moves it is stopped, and its line is left to the call that replaced it', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY');
+    h.db.hook = (op) => {
+      if (op === 'update') {
+        h.db.hook = undefined;
+        // the tool took the row over: a new nonce, no handle, and the old handle named as replaced
+        h.db.seed(rowItem({ tenantId: A, backend: 'microvm', state: 'STARTING', createdAt: h.clock.t, version: 6 }, h.clock.t));
+        h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replaces = 'fake-1';
+      }
+    };
+    expect(await drain(deps(h))).toEqual({ rowsStopped: 0, orphansStopped: 0 });
+    expect(h.backends.get('microvm')!.sandboxes.get('fake-1')!.live).toBe(false);
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
+  test('a row the drain moved ends STOPPING', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY');
+    h.db.hook = (op) => {
+      if (op === 'update') {
+        h.db.hook = undefined;
+        h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.version = 9;
+      }
+    };
+    await drain(deps(h));
+    expect(await h.registry.get(A, 'microvm')).toMatchObject({ state: 'STOPPING', version: 10 });
+  });
+
+  test('a row another writer already moved to STOPPING keeps that writer\'s line: the drain writes none', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY');
+    h.db.hook = (op) => {
+      if (op === 'update') {
+        h.db.hook = undefined;
+        const item = h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!;
+        item.version = 9;
+        item.state = 'STOPPING';
+      }
+    };
+    expect(await drain(deps(h))).toEqual({ rowsStopped: 0, orphansStopped: 0 });
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
   test('a row that keeps changing still gets its one line, from the drain, once the sandbox is stopped', async () => {
     const h = harness();
     await seedSandbox(h, 'READY');
@@ -172,13 +216,16 @@ describe('the drain', () => {
     const b = h.backends.get('nitro')!;
     const realStop = b.stop.bind(b);
     let failures = 2;
+    const linesAtAttempt: number[] = [];
     jest.spyOn(b, 'stop').mockImplementation(async (handle, creds) => {
+      linesAtAttempt.push(h.events('sandbox_stopped').length);
       if (failures-- > 0) throw new Error('throttled');
       return realStop(handle, creds);
     });
     await drain(deps(h));
     expect(h.events('sandbox_stopped')).toHaveLength(1);
     expect(h.events('stop_failed')).toHaveLength(2);
+    expect(linesAtAttempt).toEqual([0, 0, 0]);
   });
 });
 

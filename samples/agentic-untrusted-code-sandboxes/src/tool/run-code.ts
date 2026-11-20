@@ -278,6 +278,7 @@ async function startNew(call: Call, prev: RegistryRow | undefined, why: string):
     now: deps.now(),
     startCapMs: call.backend.startCapMs,
     sandboxMaxLifeMs: deps.config.sandboxMaxLifeMs,
+    replaces: prev?.handle,
   }, prev);
   if (row === undefined) return { kind: 'reread' };
   call.sandbox = 'started';
@@ -331,7 +332,8 @@ async function probe(call: Call, start: ReadyRow): Promise<Next> {
     if (result.state === 'ended') return failStart(call, row, result.reason);
     if (result.state === 'ready') {
       const address = result.patch.address ?? row.address;
-      const bootId = result.patch.bootId ?? row.bootId;
+      // A backend's boot id goes to the row only when it looks like one (ADR-0032).
+      const bootId = result.patch.bootId !== undefined && BOOT_ID_PATTERN.test(result.patch.bootId) ? result.patch.bootId : row.bootId;
       const version = await call.registry.update(row, { state: 'READY', address, bootId });
       if (version === undefined) return { kind: 'reread' };
       call.handle = row.handle;
@@ -487,7 +489,11 @@ async function overrun(call: Call, row: ReadyRow): Promise<void> {
 /** A failed identity check or a refusal marks the row dead: take it over once, then give up with a backoff (spec §4.1 step 3). */
 async function retireDead(call: Call, row: ReadyRow): Promise<Next> {
   const { deps } = call;
-  if (call.deads >= 1) {
+  // Another start and run must fit in what is left of the function's time, or the next call finds a handle-less row.
+  // Without that time the row is failed as for a second dead handle, so a handle that is dead but slow to detect is not kept.
+  const left = call.remainingMs?.();
+  const noTime = left !== undefined && left < deps.config.startWaitMs + deps.config.runTimeoutMs + 5000;
+  if (call.deads >= 1 || noTime) {
     const version = await call.registry.update(row, { state: 'FAILED', retryAt: deps.now() + FAIL_BACKOFF_MS });
     if (version === undefined) return { kind: 'reread' };
     call.stoppedReason = 'dead';
@@ -496,11 +502,6 @@ async function retireDead(call: Call, row: ReadyRow): Promise<Next> {
       log: deps.log, backend: call.backend, row, now: deps.now(), sandboxIdleMs: deps.config.sandboxIdleMs, by: 'tool', reason: 'dead',
     });
     return { kind: 'error', error: fail('sandbox_failed', FAIL_BACKOFF_MS / 1000) };
-  }
-  // Another start and run must fit in what is left of the function's time, or the next call finds a handle-less row.
-  const left = call.remainingMs?.();
-  if (left !== undefined && left < deps.config.startWaitMs + deps.config.runTimeoutMs + 5000) {
-    return { kind: 'error', error: fail('sandbox_starting', 1) };
   }
   call.deads += 1;
   // A call that already waited for a start does not wait again (spec §4.1 step 3).
