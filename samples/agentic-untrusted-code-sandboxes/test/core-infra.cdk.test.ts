@@ -1126,3 +1126,39 @@ describe('least privilege and teardown details', () => {
     expect(() => resolveProps({ s3PrefixListId: 'nope' })).toThrow(/prefix list id/);
   });
 });
+
+describe('public members the gateway entry uses (spec 3.3)', () => {
+  const inline = { runtime: lambda.Runtime.NODEJS_24_X, handler: 'index.handler', code: lambda.Code.fromInline('exports.handler=async()=>1') };
+
+  test('config, toolRole, toolTenantRole, bindRunCode and runCodeFunction exist with their types', () => {
+    const c = base.c;
+    expect(c.config.toolBudget.toSeconds()).toBe(60);
+    expect(c.config.backends).toEqual(['microvm', 'nitro', 'agentcore']);
+    expect(c.config.defaultBackend).toBe('microvm');
+    expect(c.toolRole.roleArn).toBeDefined();
+    expect(c.toolTenantRole.roleArn).toBeDefined();
+    expect(c.toolRole).not.toBe(c.toolTenantRole);
+    expect(typeof c.bindRunCode).toBe('function');
+    expect(c.runCodeFunction).toBeDefined();
+    const without = synth({ standalone: false }, (stack, core) => core.bindRunCode(new lambda.Function(stack, 'G', { ...inline })));
+    expect(without.c.runCodeFunction).toBeUndefined();
+  });
+
+  test('a function built with the tool role and the JSON log format keeps its log format and gets the core settings', () => {
+    const s = synth({ standalone: false }, (stack, c) => {
+      c.bindRunCode(new lambda.Function(stack, 'Gateway', { ...inline, role: c.toolRole, loggingFormat: lambda.LoggingFormat.JSON }));
+    });
+    const fn = Object.values(s.t.findResources('AWS::Lambda::Function')).find((f) => pathOf(f as Json).includes('/Gateway/')) as Json;
+    expect(fn.Properties.LoggingConfig.LogFormat).toBe('JSON');
+    expect(fn.Properties.LoggingConfig.LogGroup).toBeDefined();
+    expect(fn.Properties.Timeout).toBe(60);
+    expect(fn.Properties.VpcConfig.SubnetIds).toHaveLength(2);
+    expect(fn.Properties.Role['Fn::GetAtt'][0]).toBe(roleId(s.t, 'ToolRole'));
+    // it runs as the tool role, so the trust policy gains nothing
+    const trust = (s.t.findResources('AWS::IAM::Role')[roleId(s.t, 'ToolTenantRole')] as Json).Properties.AssumeRolePolicyDocument.Statement as Json[];
+    expect(trust).toHaveLength(1);
+    // the tool role can write the group the core gave the function
+    const logWrite = statementsOfRole(s.t, roleId(s.t, 'ToolRole')).filter((st) => JSON.stringify(st.Action).includes('logs:PutLogEvents'));
+    expect(logWrite.some((st) => JSON.stringify(st.Resource).includes('BoundLogs0'))).toBe(true);
+  });
+});
