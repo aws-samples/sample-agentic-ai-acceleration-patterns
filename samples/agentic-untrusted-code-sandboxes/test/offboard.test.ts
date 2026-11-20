@@ -247,6 +247,23 @@ describe('offboardTenant', () => {
     expect(h.events('sandbox_stopped')).toHaveLength(linesBefore + 1);
   });
 
+  test('a replaced sandbox whose stop throws but that is already gone does not fail the call', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', 'tenant-z');
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', A);
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replaces = old.handle;
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replacesLined = true;
+    const b = h.backends.get('microvm')!;
+    b.kill(old.handle);
+    const real = b.stop.bind(b);
+    jest.spyOn(b, 'stop').mockImplementation(async (handle, creds) => {
+      if (handle.handle === old.handle) throw new Error('not found');
+      return real(handle, creds);
+    });
+    await offboardTenant(A, maintenanceDeps(h));
+    expect(await h.registry.get(A, 'microvm')).toBeUndefined();
+  });
+
   test('a replaced sandbox whose stop fails keeps the row and fails the call', async () => {
     const h = harness();
     const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', 'tenant-z');

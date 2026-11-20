@@ -5,6 +5,7 @@ import { harness, maintenanceDeps, rowItem, seedSandbox, type Harness } from './
 import { drain, DRAIN_BOUND_MS } from '../src/drain/drain';
 import { handler } from '../src/drain/drain.function';
 import { ENV } from '../src/env';
+import { handleLessStaleMs } from '../src/tool/config';
 
 // The entry builds its deps from the environment; the test swaps the AWS-facing builders for the in-memory ones.
 const mockWired: { h?: Harness } = {};
@@ -210,6 +211,18 @@ describe('the drain', () => {
     await drain(deps(h));
     expect(h.backends.get('microvm')!.sandboxes.get(old.handle)!.live).toBe(false);
     expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: old.handle, by: 'drain', reason: 'replaced' })]);
+  });
+
+  test('the drain claims the line only for a row older than the start window', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY');
+    const prev = (await h.registry.get(A, 'microvm'))!;
+    await h.registry.takeOver({
+      tenantId: A, backend: 'microvm', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 3_600_000, replaces: old.handle,
+    }, prev);
+    h.clock.t += handleLessStaleMs(h.deps.config);
+    await drain(deps(h));
+    expect(h.events('sandbox_stopped')).toEqual([]);
   });
 
   test('a replaced sandbox of a call still in flight is stopped with no line from the drain', async () => {

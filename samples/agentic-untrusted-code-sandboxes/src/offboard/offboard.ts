@@ -65,7 +65,9 @@ export async function offboardTenant(tenantId: unknown, deps: OffboardDeps): Pro
         row, stopAlways: true, claimAfterMs: toolTimeoutMs(config), backend, registry, log, config, now: deps.now(), by: 'offboard',
       });
       if (replaced.version !== undefined) row = { ...row, version: replaced.version, replacesLined: true };
-      if (!replaced.stopped) {
+      // A stop that threw for a sandbox that is already gone is no failure.
+      if (!replaced.stopped && row.replaces !== undefined
+        && await backend.isAlive({ backend: name, tenantId, handle: row.replaces, nonce: '' })) {
         // The replaced sandbox is still running: keep the row, which names it, and fail the call so it is repeated.
         failures += 1;
         settled = true;

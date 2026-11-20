@@ -127,6 +127,17 @@ describe('two callers on one tenant', () => {
     expect(h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')?.replacesLined).toBe(true);
   });
 
+  test('a takeover of a FAILED row writes replacesLined true itself: nothing is owed, and no later write is needed', async () => {
+    const h = harness();
+    await seed(h, 'READY');
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.state = 'FAILED';
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.retryAt = h.clock.t - 1;
+    h.backends.get('microvm')!.script.failStart = new Error('x');
+    await runCode(req(), h.deps);
+    expect(h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')).toMatchObject({ replaces: 'fake-1', replacesLined: true });
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
   test('an offboard that deletes the row between the stop of the old sandbox and the mark ends the call without a new sandbox', async () => {
     const h = harness();
     await runCode(req(), h.deps);
