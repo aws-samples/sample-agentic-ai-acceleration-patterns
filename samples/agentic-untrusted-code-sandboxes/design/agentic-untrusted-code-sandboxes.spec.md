@@ -487,7 +487,7 @@ one tenant's, and L = M less 256 MiB.
 | Backend | M | Total cap | A, N | `memoryExceeded` when |
 |---|---|---|---|---|
 | `microvm` | `MemTotal` (about four times `microvm.memoryMiB`: 3998 MiB at the default, S-15) | the rlimits, for memory counted in address space. No cgroup is mounted and the runner cannot mount one (S-14), so N × A stays at or below 60 % of M (ADR-0020; S-15 found 70 % keeps the kernel's out-of-memory killer out of reach with no other memory held). An allocation past A fails inside the job with `MemoryError` or `ENOMEM` at once (0.09 to 0.13 s for a 512 MiB cap in S-15). Memory the rlimits do not count (an unmapped `memfd`, socket buffers, SysV semaphores and queues, `vmsplice` pages, a tmpfs in a user namespace) is closed by the job's seccomp filter (below, S-17); without it one such route ended the whole MicroVM in under 2 s (S-16). With every route left open filled at once across N processes (anonymous memory to A, pipes, Unix socket pairs, loopback TCP, and in S-19 also a loopback TCP accept queue at a backlog of 8), S-18 measured 2627 to 2653 MiB held and `MemAvailable` at 1033 to 1055 MiB, and S-19 2589 to 2659 MiB held and 1028 to 1098 MiB, at worst 516 MiB above the floor. With every descriptor on Unix datagram pairs and 80 more descriptors in flight through `SCM_RIGHTS` (a per-user limit), the estimate is 2836 MiB held, 342 MiB above the floor. A free-memory floor is the backstop | A = 256 MiB, N = ⌊0.6 × M / A⌋ (9 at the default) | the free-memory floor killed the job; a single process past A sees the error itself |
-| `nitro` | the smaller of `MemTotal` and the task group's `memory.max` (the task size) | the platform's task group limit; the cgroup mount is read-only (S-14). The kernel kills only uid 1001 processes there, and the runner survived every anonymous, `memfd`, tmpfs and Unix socket fill (S-14, S-16, S-18). SysV IPC is the exception: a semaphore or shared-memory fill pinned the whole task limit in under 1 s, the objects outlived the job, and the runner died in 4 of 5 runs while it swept them, so the job filter blocks SysV IPC on `nitro` (below, S-18). The watchdog reads the task group's memory less its file cache and kills the job's processes above L, so it also sees `memfd`, tmpfs and socket memory. It is an early warning, not the cap: the 256 MiB between L and the task limit lasts only 25 to 90 ms of a fast fill, so the kernel sometimes kills first, and the runner lived in all 85 S-19 fills either way. The runner itself holds about 25 MiB of the group, and with A = L a single process at its limit reached the watchdog and was killed instead of getting `MemoryError` (S-19). So A is L less 64 MiB, which should let a single process hit its own limit first; that margin is arithmetic on S-19's small probe runner and is not yet measured (S-20) | A = L − 64 MiB, N = 64 | the watchdog killed the job, or `oom_kill` in the runner's own scope's `memory.events` grew during the job |
+| `nitro` | the smaller of `MemTotal` and the task group's `memory.max` (the task size) | the platform's task group limit; the cgroup mount is read-only (S-14). The kernel kills only uid 1001 processes there, and the runner survived every anonymous, `memfd`, tmpfs and Unix socket fill (S-14, S-16, S-18). SysV IPC is the exception: a semaphore or shared-memory fill pinned the whole task limit in under 1 s, the objects outlived the job, and the runner died in 4 of 5 runs while it swept them, so the job filter blocks SysV IPC on `nitro` (below, S-18). The watchdog reads the task group's memory less its file cache and kills the job's processes above L, so it also sees `memfd`, tmpfs and socket memory. It is an early warning, not the cap: the 256 MiB between L and the task limit lasts only 25 to 90 ms of a fast fill, so the kernel sometimes kills first, and the runner lived in all 85 S-19 fills either way. The runner itself holds about 25 MiB of the group, and with A = L a single process at its limit reached the watchdog and was killed instead of getting `MemoryError` (S-19). So A is L less 64 MiB. With a probe runner close to §3.5 (TLS, `/hello`, `jobAuth`), the runner counted about 20 MiB, and a single process at A got `MemoryError` with the watchdog silent in 14 of 14 runs, about 54 MiB below L (S-20) | A = L − 64 MiB, N = 64 | the watchdog killed the job, or `oom_kill` in the runner's own scope's `memory.events` grew during the job |
 | `agentcore` | `MemAvailable` (about 7625 of 8016 MiB at idle): a cap at `MemTotal` less 256 MiB lies above it, and the global killer would act first (S-14) | one cgroup v2 job group for the session's life, reused by every job, with `memory.max` = L and `memory.oom.group` = 1, so the kernel kills the whole job and nothing else, and memory one job leaves behind counts against the next, SysV objects included, until step 3 sweeps them. It also bounds SysV and Unix socket memory, so `agentcore` needs no job filter (S-18). The group is required, not hardening: without it an unmapped `memfd` or a large tmpfs fill ended the session even with the root's `memory.oom.group` at 0, because the job's resident memory was smaller than the runner's (S-16) | A = L, N = 64 | `oom_kill` in the job group's `memory.events` grew |
 
 `RLIMIT_NPROC` counts every process and thread of uid 1001 in the
@@ -499,8 +499,13 @@ plus `shmem`, and kills every uid 1001 process above L. Taking out
 `file` drops the page cache of files written to `/work`, which is
 disk-backed and mostly reclaimable and would otherwise push a legal job past
 L; adding back `shmem` keeps `memfd` and tmpfs pages counted. This
-correction was not in S-19's probe; S-20 checks it and records
-`file_dirty`, the part not yet written back. A fast fill outruns it: at a
+correction held in S-20: 20 jobs that wrote up to 2000 MiB to `/work`,
+with and without `fsync`, were never killed, the counted value peaked at
+36 MiB while `memory.current` reached 870 MiB, `file_dirty` peaked at
+168 MiB, and the kernel limit never acted on page cache. `memfd` and
+`/dev/shm` pages still counted. The watchdog records `memoryExceeded`
+before it sends the kill, so a job killed under it is always marked
+(S-20 found the opposite order missed one). A fast fill outruns it: at a
 200 ms poll it fires first for certain only below about 1.3 GiB/s, the
 256 MiB between L and the task limit over one poll. S-18
 dropped the earlier sum of resident memory: it counts shared pages once
@@ -1168,7 +1173,7 @@ deploy and destroy time, and cleans up on exit.
 | S-17 | On `microvm`: does a seccomp filter installed by the runner as uid 1001 block `memfd_create` and stay on, what other routes hold memory the rlimits do not count, and what does a filter cost and break? | §3.5 job filter, ADR-0020 |
 | S-18 | On `microvm`: ordinary job code under the full ADR-0020 setup, the `clone` entries, the child check, Unix sockets across N processes and in flight, every open route at once, and the free-memory floor against slow and fast fills. On `nitro` and `agentcore`: SysV and Unix socket memory against the task and job groups, and the SysV sweep | §3.5 job filters, floor, watchdog and step 3, ADR-0021 |
 | S-19 | The `nitro` watchdog on `memory.current` against every fill, and the runner's share of the group; the `nitro` filter on the x32 ABI; the 50 ms `microvm` floor against an unmapped fill the list misses; the loopback TCP accept queue at a backlog of 8 with every other open route; the blocked-call self-test | §3.5 watchdog, A on `nitro`, floor, `nitro` filter, ADR-0022 |
-| S-20 | Planned: on `nitro`, a single process at A = L − 64 MiB with the real runner gets `MemoryError`, not a watchdog kill; the watchdog's `memory.current` less `file` plus `shmem` does not kill a job that writes 900 MiB to `/work`, and still fires on `memfd` and tmpfs fills; record `file_dirty` during the `/work` write | §3.5 watchdog, A on `nitro`, ADR-0022 |
+| S-20 | On `nitro`, with a probe runner close to §3.5: the runner's share of the group; a single process at A = L − 64 MiB; `/work` file writes against the watchdog's `memory.current` less `file` plus `shmem`; the S-19 routes again; a job mixing files and anonymous memory | §3.5 watchdog, A on `nitro`, ADR-0022 |
 
 ### 7.1 Spike results, S-1 to S-12 (2026-11-18, a non-production test account, eu-central-1)
 
@@ -1355,6 +1360,24 @@ asset objects were left. The decisions are recorded in ADR-0022.
 | `nitro` x32 | the kernel has no x32 ABI; the filter kills any x32 call with `SIGSYS` |
 | `nitro` watchdog CPU at idle | about 0.06 % of one CPU at 200 ms, 0.13 % at 50 ms |
 | Deploy and teardown | `nitro` stack 217 s, drain 23 s, delete 39 s; `microvm` stack 305 s, code updates about 150 s, delete 91 s |
+
+### 7.7 Spike results, S-20 (2026-11-20, a non-production test account, eu-west-1)
+
+`nitro` only, 1 GiB task, L 768 MiB, A 704 MiB, with a probe runner close
+to §3.5 (TLS on 8443, `/hello`, `jobAuth`, the SysV filter, step 3) and
+the watchdog on `memory.current` less `file` plus `shmem`. The stack was
+removed; one INACTIVE task definition revision was left.
+
+| Check | Result |
+|---|---|
+| Runner's share of the group | about 20 MiB counted (`memory.current` 43 MiB, 24 MiB of it file cache); `VmRSS` 31 to 33 MiB |
+| One process at A | `MemoryError`, watchdog silent, `memoryExceeded` false, 14 of 14; counted peak 714 MiB, 54 MiB below L |
+| `/work` writes up to 2000 MiB, with and without `fsync` | no kill in 20 of 20; counted peak 36 MiB against `memory.current` 870 MiB; `file_dirty` up to 168 MiB, `file_writeback` 196 MiB; kernel limit never hit |
+| `memfd`, `/dev/shm`, 8-process anonymous, 64-process Unix sockets | all counted; `/dev/shm` alone stops at 611 MiB with no kill; watchdog first in 5 of 7, 3 of 7, 8 of 8 and 2 of 4, the kernel in the rest; runner alive and `memoryExceeded` true in 29 of 29 kills |
+| 600 MiB of files, then 500 MiB anonymous | counted 538 MiB, no kill, 7 of 7 |
+| 600 MiB of files, then 800 MiB anonymous in two processes | watchdog kill at 771 to 835 MiB counted, 11 of 11 |
+| Watchdog marking order | marking after the kill missed `memoryExceeded` once; marking first, 12 of 12 right |
+| Deploy and teardown | stack 217 s, drain 19 s, delete 40 s |
 
 ## 8. Integration test outline
 

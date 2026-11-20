@@ -45,3 +45,5 @@ size, and the tool description says so. A job of many processes is still
 bounded by the watchdog and the task limit. Revisit if S-20 or the
 integration test's `runaway` step shows a single process killed by the
 watchdog, or if the runner grows.
+
+Note 2026-11-20: S-20 measured both open items. With a probe runner close to spec §3.5 the runner counted about 20 MiB, and a single process at A = L less 64 MiB got `MemoryError` with the watchdog silent in 14 of 14 runs, 54 MiB below L. The file-cache correction held: jobs writing up to 2000 MiB to `/work` were never killed, while `memfd` and `/dev/shm` pages still counted. The watchdog records `memoryExceeded` before it sends the kill.
