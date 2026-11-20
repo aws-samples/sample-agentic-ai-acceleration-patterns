@@ -43,9 +43,9 @@ runtime-isolation deployment for up to `maxTenants` tenants.
   tenant that builds the first cell (§3.5).
 - Latency per hop under load: edge, router, ingress, Runtime and tools
   for agent calls; edge, router and cell origin for `/api/*`.
-- Isolation under load end to end: every request checks the tenant at the
-  layers its path crosses (§5.3): the edge, the cell, the ingress and the
-  vended credential.
+- Isolation end to end: every request checks the tenant at the layers
+  its path crosses (§5.3): the ingress and the vended credential for
+  agent calls, under load; the edge and the cell for `/api/*` calls.
 - Churn under load: route updates seen at the edge within a measured time;
   suspended and removed tenants refused at the edge, never at an origin.
 - The shared quota that gives out first at each tier, with the tenant it
@@ -168,14 +168,15 @@ and the records in
 1. The driver calls control-plane `CreateTenant`, then `CreateDeployment`
    for the stress application.
 2. The control plane places the deployment. If the cell is new, its cell
-   script runs first: it deploys one runtime-isolation cell (ingress,
-   agents, tool targets) and a cell API origin with its
-   `CellRouteAccess`, given the distribution ARN as a cell parameter
-   (§3.5), from the repository at a pinned commit, and writes
-   the cell API's `frontDoorApiDomain` and the ingress's `baseUrl` to its
-   outputs (front-door spec §3.2, §6.3). The front door's global post
-   hook then registers the cell route (`PutCellRoute`) with the route
-   registrar (front-door ADR-0017).
+   script runs first: from the repository at a pinned commit, it deploys
+   one runtime-isolation cell (ingress, agents, tool targets) and a cell
+   API origin with its `CellRouteAccess`, which takes the distribution
+   ARN from a cell parameter (§3.5). The script writes the cell API's
+   `frontDoorApiDomain` to its outputs, which the front door's global
+   post hook reads to register the cell route (`PutCellRoute`) with the
+   route registrar (front-door spec §3.2, front-door ADR-0017). The
+   ingress publishes its own parameter in the cell account, as
+   runtime-isolation does (front-door spec §6.3).
 3. The tenant script runs: tenant-identity `CreateTenant` with the
    control-plane tenant id, then `PutTenantSubscription` on the cell
    ingress's Entitlements API. The tenant script does not call
@@ -183,10 +184,11 @@ and the records in
    route once the deployment's event has run (front-door ADR-0017,
    front-door spec §3.2).
 4. The driver creates the tenant's users with tenant-identity `CreateUser`
-   and polls through the edge until the first `report` is served. The
-   run's first tenant is the warm-up tenant of §3.5: its deployment
-   builds the cell, and `/agents/*` answers 404 until front-door phase
-   two, so it is not timed in PS-1.
+   and polls through the edge until the first `report` is served. It
+   then makes one `/api/*` call to the cell API, whose answer carries
+   the route hint (§5.3). The run's first tenant is the warm-up tenant
+   of §3.5: its deployment builds the cell, and `/agents/*` answers 404
+   until front-door phase two, so it is not timed in PS-1.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -284,37 +286,39 @@ them, it is the platform run.
 
 In the platform run the front door deploys in two phases, because its
 `agentIngress` input is the first cell's ingress, which exists only
-after the control plane builds that cell (stress ADR-0016). The route
-hook is in place before that build: a cell built with no hook has no
-cell route, and every deployment placed in it fails its hook with 409
-until an operator backfills the route (front-door spec §3.2, §3.4). The
-platform run's set-up order:
+after the control plane builds that cell (stress ADR-0016). Phase one
+is two deploys of the front-door app, the second with `registrarUrl`,
+and puts the route hook in place before that build: a cell built with
+no hook has no cell route, and every deployment placed in it fails its
+hook with 409 until an operator backfills the route (front-door spec
+§3.2, §3.4). The platform run's set-up order:
 
 | # | Step | Owned by |
 |---|---|---|
-| 1 | control plane deployed, stress application registered, cell account registered with `maxCells` 1 at `small` | `control-plane` `deploy` and `seed` |
-| 2 | front-door phase one: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `agentIngress` unset, so `/agents/*` answers 404 (front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
-| 3 | the same app again with `registrarUrl`, read from the edge parameter, which adds the `RouteHookAccess` stack in the control plane's account (front-door ADR-0027); the control plane's `globalHookManagedPolicyArns` update; the global hooks registered with `register-hooks.sh` | `tenant-front-door` `deploy`, with a second `control-plane` update |
-| 4 | the distribution ARN, read from the edge parameter, set as a cell parameter of the stress application (control-plane R-34, `PARAM_<NAME>`); the cell app passes it to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7 | `control-plane` |
-| 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the runner waits for the cell to be `ACTIVE` | `control-plane`, not timed in PS-1 |
+| 1 | control plane deployed, cell account registered with `maxCells` 1 at `small` | `control-plane` `deploy` and `seed` |
+| 2 | front-door phase one, first deploy: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `agentIngress` unset, so `/agents/*` answers 404 (front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
+| 3 | front-door phase one, second deploy: the same app with `registrarUrl`, read from the edge parameter, which adds the `RouteHookAccess` stack in the control plane's account (front-door ADR-0027); then the control plane's `globalHookManagedPolicyArns` update and the global hooks registered with `register-hooks.sh` | `tenant-front-door` `deploy`, with a second `control-plane` update |
+| 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); the cell app passes it to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7 | `control-plane` |
+| 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the runner waits for the cell to be `ACTIVE`; the tenant's users and readiness poll (§3.3 step 4) run after step 6 | `control-plane`, not timed in PS-1 |
 | 6 | front-door phase two: a main-stack update with `agentIngress` set to that cell's ingress, `registrarUrl` kept | `tenant-front-door` |
 | 7 | the rest of the tier's onboarding (PS-1 at `buildLimit`), then the other scenarios | §5.1 |
 
 The warm-up tenant goes alone because the control plane places a
-deployment only into an `ACTIVE` cell: placements that arrive while the
-only cell is `CREATING` claim new cells, up to the account's `maxCells`
-(control-plane ADR-0013). `maxCells` 1 keeps `small` at one cell and one
-`agentIngress`. Steps 4 to 6 fall between two slices' verbs, which the
-runner's `deploy`-then-`seed` order (item 3 of the list in this section)
-does not express; the first platform run (W-9) adds the order to the
-runner and the slices' `needs`. The cell script writes the ingress's
-`baseUrl` to its outputs, and the `control-plane` slice records it in
-its manifest (§4.2), from which phase two takes the origin's domain and
-its path, the ingress stage (front-door spec §6.3). The ingress's own
-published parameter is in the cell account, which the platform account
-does not read, so the manifest carries the value. The runner times
-phase two as a front-door deploy (P-6): it is a CloudFront distribution
-change in the main stack, on every run at `small`.
+deployment only into an `ACTIVE` cell, and a placement that arrives
+while the only cell is `CREATING` claims a new cell slot (control-plane
+§7.2, ADR-0013 as amended by ADR-0024). At `maxCells` 1 such a placement
+is refused, so `small` keeps one cell and one `agentIngress`. Steps 2
+to 6 alternate between two slices' verbs, which the runner's
+`deploy`-then-`seed` order (item 3 of the list in this section) does
+not express; the first platform run (W-9) adds the order to the runner
+and the slices' `needs`. Phase two takes the origin's domain and its
+path, the ingress stage, from the ingress's published parameter,
+`/application-plane/shared/agent-runtime/ingress` (`baseUrl`,
+front-door spec §6.3), which the `tenant-front-door` slice reads in the
+cell account with the same read access as the account check of §3.7.
+Phase two is a CloudFront distribution change in the main stack, on
+every run at `small`. Its time is part of the front-door slice's
+`deploySeconds` (P-6), and the slice logs it on a line of its own.
 
 The lock is per prefix on the runner's host. A second run from another host
 against the same accounts is not detected; one run per set of accounts at a
@@ -404,9 +408,8 @@ single-ingress runs; platform totals are.
 ### 4.2 Manifests
 
 One file per slice under `STRESS_HOME/<prefix>/`, outside the repository:
-tenant ids, user names, deployment and cell ids, account ids, each cell's
-ingress base URL (§3.5), the tier and the commit. Never a token, a
-password or a key. `seed` reuses what a
+tenant ids, user names, deployment and cell ids, account ids, the tier and
+the commit. Never a token, a password or a key. `seed` reuses what a
 manifest lists when it still exists and creates only what is missing.
 
 ### 4.3 Result records
@@ -502,7 +505,9 @@ stress cell has one in any case: the front door writes a tenant route
 only for a cell whose route names the API domain from the cell script's
 `frontDoorApiDomain` output (front-door spec §3.2, §3.4), so the cell
 script deploys a cell API origin and writes that output (§3.3 step 2,
-W-9).
+W-5). The platform's load is agent calls, so the `/api/*` rows are made
+on the one `/api/*` call per tenant at onboarding (§3.3 step 4) and on
+the PS-7 probes, not under the load of PS-2 to PS-8.
 
 ## 6. Observability
 
@@ -590,7 +595,7 @@ Q-5.
 | W-2 driver and k6 library moved to `stress/` | W-1 schema | yes, once W-1's schema is fixed |
 | W-3 runtime-isolation slice on the contract | W-1, W-2 | yes, after W-1 and W-2 |
 | W-4 control-plane build-limit prop | decision 2 | yes, now |
-| W-5 control-plane slice and the stress application, with the stress cell's cell API origin, its `frontDoorApiDomain` and ingress `baseUrl` outputs, and the distribution ARN cell parameter (§3.3 step 2, §3.5) | W-1, W-4, W-10; W-11 for Q-1 and the account check | after W-1, W-4 and W-10; Q-1 after W-11 |
+| W-5 control-plane slice and the stress application, with the stress cell's cell API origin, its `frontDoorApiDomain` output and the distribution ARN cell parameter (§3.3 step 2, §3.5) | W-1, W-4, W-10; W-11 for Q-1 and the account check | after W-1, W-4 and W-10; Q-1 after W-11 |
 | W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, workload boundary, `/cell/` path aspect and the cell bootstrap, in `stress/application/` | decision 7; the deny probes ran in the path spike (`stress/spikes/cell-path/`); the second boundary is ADR-0011 | done: the prop in control-plane ADR-0047, the rest in `stress/application/` |
 | W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair | §3.7; W-10's policies and prop for the bootstrap and the role pair | accounts and the cell bootstrap yes, now (`stress/application/`); the role pair with W-5 |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
