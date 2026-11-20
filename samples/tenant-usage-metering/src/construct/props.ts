@@ -12,7 +12,10 @@ import { Token } from 'aws-cdk-lib';
 export type IngestPath = 'BUS' | 'DIRECT';
 
 export interface TenantUsageMeteringProps {
-  /** The control plane's fleet name, `[a-z0-9][a-z0-9-]{0,31}`. */
+  /**
+   * The prefix of the emitter role names and the sink secrets,
+   * `[a-z0-9][a-z0-9-]{0,31}`; with the control plane, its fleet name.
+   */
   readonly fleetName: string;
   /** Roles that may register emitters and tenant bindings (the control plane's `<fleet>-global-hook`). */
   readonly registrarPrincipalArns: string[];

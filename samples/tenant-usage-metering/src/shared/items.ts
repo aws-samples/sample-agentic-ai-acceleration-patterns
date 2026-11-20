@@ -62,7 +62,7 @@ export interface EmitterRoleItem extends Audit, ControlPlaneIds, Registration {
 }
 
 /** `EMITTER#<emitterId>` / `META`: which role an emitter id has. An emitter never moves. */
-export interface EmitterItem {
+export interface EmitterIdItem {
   readonly PK: string;
   readonly SK: 'META';
   readonly emitterId: string;

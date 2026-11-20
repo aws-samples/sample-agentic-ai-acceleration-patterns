@@ -23,16 +23,16 @@ offboarding drive metering with no manual step.
 
 What it is NOT: telemetry (billing events never share the metrics or logs
 path), proof that an emitter reports honest quantities, tenant isolation
-inside a pooled emitter, or a billing system. See spec §1.2.
+inside a pooled application, or a billing system. See spec §1.2.
 
 ## Architecture
 
 ![Components](diagrams/tenant-usage-metering.components.drawio.svg)
 
-An emitter signs its events as its own role; the ingest door checks them
-against the registry a registrar writes; the raw store keeps
-them; the recounter counts each hour into usage records; the outbox
-publishes each record to the usage bus and queues it for each sink.
+A workload signs its events as its emitter role; the ingest door checks
+them against the registry a registrar writes; the raw store keeps them;
+the recounter counts each hour into usage records; the outbox publishes
+each record to the usage bus and queues it for each sink.
 
 ![Architecture](diagrams/tenant-usage-metering.drawio.svg)
 
@@ -77,7 +77,7 @@ Emitters fit any layout; you do not need a cell-based design:
 |---|---|---|
 | One pooled application in one account | one | every tenant, to that emitter |
 | One application across several accounts | one per account | each tenant, to the emitters of the accounts that serve it |
-| Several applications | one per application and account | each tenant, per application it uses |
+| Several applications | one per application and account | each tenant, to the emitters of each application it uses |
 | One account per tenant (silo) | one per tenant account | that tenant, to its emitter |
 | The [`control-plane`](../control-plane/) sample | one per cell | each deployment, to its cell's emitter |
 
@@ -90,8 +90,9 @@ every layout:
   new one instead.
 - No emitter may sit in the metering account, or in an account that reads
   a bus (`ACCOUNT_NOT_ALLOWED`).
-- `fleetName` is only the role-name prefix; pick any name when there is no
-  control plane.
+- `fleetName` is the prefix of the emitter role names and the sink
+  secrets; with the control plane, its fleet name. Without one, pick any
+  name.
 
 ## How it works
 
@@ -137,7 +138,7 @@ npx cdk deploy TenantUsageMetering -c fleetName=demo
 | Context | Default | Meaning |
 |---|---|---|
 | `stackName` | `TenantUsageMetering` | the demo stack's name, so two stacks can sit in one account |
-| `fleetName` | `demo` | the emitter role-name prefix (the control plane's fleet name, when used); emitter roles are `<fleet>-ue-<emitterId>` |
+| `fleetName` | `demo` | the prefix of the emitter role names and the sink secrets; with the control plane, its fleet name. Emitter roles are `<fleet>-ue-<emitterId>` |
 | `ingestPath` | `BUS` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose) |
 | `lateGraceMinutes` | `15` | how long after an hour ends it is first counted |
 | `rawRetentionDays` | `400` | raw object lifetime |

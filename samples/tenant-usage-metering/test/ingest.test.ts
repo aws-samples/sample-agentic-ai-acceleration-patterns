@@ -11,7 +11,7 @@ import { createIngestHandler } from '../src/ingest/ingest.function';
 import type { EnrichedUsageEvent } from '../src/shared/usage-event';
 
 const NOW = Date.parse('2026-11-18T12:30:00Z');
-const EMITTER_ID = '01JD00000000000000000000C1';
+const EMITTER_ID = '01JD00000000000000000000E1';
 const ROLE = `demo-ue-${EMITTER_ID}`;
 const CALLER = `arn:aws:sts::111122223333:assumed-role/${ROLE}/emitter-1`;
 

@@ -22,7 +22,7 @@ export const keys = {
   sink: (sinkId: string): Key => ({ PK: `SINK#${sinkId}`, SK: 'META' }),
 
   emitterRole: (accountId: string, roleName: string): Key => ({ PK: `ROLE#${accountId}#${roleName}`, SK: 'META' }),
-  emitter: (emitterId: string): Key => ({ PK: `EMITTER#${emitterId}`, SK: 'META' }),
+  emitterId: (emitterId: string): Key => ({ PK: `EMITTER#${emitterId}`, SK: 'META' }),
 
   binding: (emitterId: string, tenantId: string): Key => ({ PK: `EMITTER#${emitterId}`, SK: `TENANT#${tenantId}` }),
   bindingLookup: (tenantId: string, applicationId: string, emitterId: string): Key => ({

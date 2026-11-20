@@ -180,13 +180,13 @@ the vendor's accounts and in tenants' own. When each part reports on its
 own, counts drift, any emitter can claim usage for any tenant, and a new
 meter is a redeploy.
 
-This sample is one metering service. An emitter signs its usage events as
-its own role; the ingest door admits an event only when a registrar, such
-as the control plane's vendor hooks, bound that tenant to that emitter.
-Every admitted event lands in a replayable raw store, each hour is
-recounted from it under a run-time meter catalog, and a late event gives
-an `ADJUSTMENT` record, never a changed one. Records go to HTTP or export
-sinks and to a usage bus that readers attach to through the
+This sample is one metering service. A workload signs its usage events as
+its emitter role; the ingest door admits an event only when a registrar,
+such as the control plane's vendor hooks, bound that tenant to that
+emitter. Every admitted event lands in a replayable raw store, each hour
+is recounted from it under a run-time meter catalog, and a late event
+gives an `ADJUSTMENT` record, never a changed one. Records go to HTTP or
+export sinks and to a usage bus that readers attach to through the
 `UsageSubscriber` construct.
 
 [Tenant usage metering for agentic applications](./samples/tenant-usage-metering/)

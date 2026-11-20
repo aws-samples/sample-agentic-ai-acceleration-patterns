@@ -52,20 +52,19 @@ INTEG_STACK_NAME=TenantUsageMeteringDirect INTEG_FLEET=demo2 INTEG_INGEST_PATH=D
 
 ## What it stands up
 
-One stack, `TenantUsageMetering` by default, from
-[`src/demo.cdk.ts`](src/demo.cdk.ts) with `-c integLocalEmitter=true`: the
-construct, stand-in registrar, operator and reader roles, one emitter
-role in the same account, two reader queues on the usage bus through
-`UsageSubscriber` (one unfiltered, one filtered to meter
-`agent.tokens`), on `BUS` a reader queue on the ingest bus through
-`UsageSubscriber` with `stream: raw`, and the published parameter. With
-`-c integHttpReceiver=true` (set by `scripts/integ.sh`) it also holds a
-test receiver: an `AWS_IAM` Lambda function URL that stands in for a
-billing API, the target of an `auth: AWS_IAM` sink. Only the dispatcher's
-role may invoke it, so Lambda refuses an unsigned call. It stores nothing,
-runs at most two at a time, and is deleted with the stack. The run creates
-meters, sinks, registrations and usage in it, and the destroy removes all
-of them.
+[`src/demo.cdk.ts`](src/demo.cdk.ts) with `-c integLocalEmitter=true`
+builds one stack, `TenantUsageMetering` by default: the construct,
+stand-in registrar, operator and reader roles, one emitter role in the
+same account, two reader queues on the usage bus through `UsageSubscriber`
+(one unfiltered, one filtered to meter `agent.tokens`), on `BUS` a reader
+queue on the ingest bus through `UsageSubscriber` with `stream: raw`, and
+the published parameter. With `-c integHttpReceiver=true` (set by
+`scripts/integ.sh`) it also holds a test receiver: an `AWS_IAM` Lambda
+function URL that stands in for a billing API, the target of an
+`auth: AWS_IAM` sink. Only the dispatcher's role may invoke it, so Lambda
+refuses an unsigned call. It stores nothing, runs at most two at a time,
+and is deleted with the stack. The run creates meters, sinks,
+registrations and usage in it, and the destroy removes all of them.
 
 ## Steps
 

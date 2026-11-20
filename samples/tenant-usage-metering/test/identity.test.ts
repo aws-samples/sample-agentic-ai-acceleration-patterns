@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { emitterFromCallerArn, emitterKey, emitterRoleName, emitterRolePattern } from '../src/shared/identity';
+import { emitterFromCallerArn, emitterRoleKey, emitterRoleName, emitterRolePattern } from '../src/shared/identity';
 
 const EMITTER_ID = '01JD0000000000000000000000';
 const ACCOUNT = '111122223333';
@@ -16,7 +16,7 @@ describe('emitter identity (spec §3.2, ADR-0001)', () => {
       roleArn: `arn:aws:iam::${ACCOUNT}:role/demo-ue-${EMITTER_ID}`,
       emitterId: EMITTER_ID,
     });
-    expect(emitterKey(caller!.accountId, caller!.roleName)).toEqual({ PK: `ROLE#${ACCOUNT}#demo-ue-${EMITTER_ID}`, SK: 'META' });
+    expect(emitterRoleKey(caller!.accountId, caller!.roleName)).toEqual({ PK: `ROLE#${ACCOUNT}#demo-ue-${EMITTER_ID}`, SK: 'META' });
   });
 
   test.each([

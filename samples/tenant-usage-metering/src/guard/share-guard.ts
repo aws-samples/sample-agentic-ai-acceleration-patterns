@@ -5,10 +5,10 @@
  * The bus share guard (ADR-0006, threat model M-6): before an AWS RAM share
  * of the ingest or usage bus is created or changed, the deploy reads the
  * registry and fails if any account the buses are shared with holds an
- * emitter that can still send. An emitter account that could subscribe to a bus would
- * see other tenants' usage. `PutEmitter` refuses new emitters in those
- * accounts; this check covers the emitters registered before the account was
- * added to a list.
+ * emitter that can still send. An emitter account that could subscribe to
+ * a bus would see other tenants' usage. `PutEmitter` refuses new emitters
+ * in those accounts; this check covers the emitters registered before the
+ * account was added to a list.
  */
 
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';

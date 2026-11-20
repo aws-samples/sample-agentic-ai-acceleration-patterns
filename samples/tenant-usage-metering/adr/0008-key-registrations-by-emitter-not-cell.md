@@ -9,8 +9,9 @@
 ## Context
 The admin API, its ids and the table keys named the registration unit after
 the control plane's cell: `/cells/{cellId}/emitter`, `CellEmitter`,
-`CELL#<cellId>`, `TENANT_NOT_IN_CELL`. The service therefore read as usable
-only with the control plane. Deployers outside it have other layouts: one
+`CELL#<cellId>`, `TENANT_NOT_IN_CELL`. The role-keyed item was
+`EMITTER#<account>#<role>`. The service therefore read as usable only with
+the control plane. Deployers outside it have other layouts: one
 pooled application in one account, or many applications across many
 accounts. For them the unit that signs usage is one IAM role in one account
 for one application, and "cell" is a word they would have to map onto it.
@@ -44,12 +45,15 @@ parameter. The hook script passes `CELL_ID` as the `emitterId`.
 ## Consequences
 - Breaking change to the admin API paths (`/emitters/{emitterId}` and
   `/emitters/{emitterId}/tenants[/{tenantId}]`), the table key layout
-  (`ROLE#<account>#<role>` for the role-keyed item, `EMITTER#<emitterId>`
-  for the id lookup and the binding partition), the caller field
+  (`ROLE#<account>#<role>` for the role-keyed item, which was
+  `EMITTER#<account>#<role>`; `EMITTER#<emitterId>` for the id lookup and
+  the binding partition, which were `CELL#<cellId>`), the caller field
   `emitterId` on raw and error objects, and the error code
   `TENANT_NOT_BOUND`.
-- Existing deployments must be redeployed with an empty table. This is a
-  sample; there is no migration.
+- Existing deployments must be redeployed with an empty table and empty
+  raw and error buckets. Objects written before the change carry `cellId`,
+  and recount and re-admission reject them. This is a sample; there is no
+  migration.
 - ADR-0001's "cell" wording reads as "emitter" for the API; the decision
   it records is unchanged.
 - Revisit if a consumer needs a registration unit wider than one role in

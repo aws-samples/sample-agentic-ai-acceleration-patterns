@@ -64,7 +64,9 @@ export function callersOf(operation: string): ReadonlyArray<CallerClass> {
   return ADMIN_ROUTES.find((route) => route.operation === operation)?.callers ?? [];
 }
 
-/** The `execute-api` resource path of a route, labels as `*`. */
+/** The `execute-api` resource path of a route, labels as `*`. A `*` there
+ * also matches `/`, so a route's path covers its sub-routes; routes of
+ * different callers must never overlap (test/pure.test.ts). */
 export function policyPath(route: Route): string {
   return `${route.method}${route.path.replace(/\{[^}]+\}/g, '*')}`;
 }

@@ -164,7 +164,7 @@ One table, `PK`/`SK` (spec §4):
 | Item | `PK` | `SK` |
 |---|---|---|
 | Meter version / head | `METER#<id>` | `V#<8-digit version>` / `CURRENT` |
-| Emitter / id lookup | `ROLE#<account>#<role>` / `EMITTER#<emitterId>` | `META` |
+| Emitter role / id lookup | `ROLE#<account>#<role>` / `EMITTER#<emitterId>` | `META` |
 | Binding / tenant lookup | `EMITTER#<emitterId>` / `TENANT#<tenant>` | `TENANT#<tenant>` / `APP#<app>#EMITTER#<emitterId>` |
 | Sink | `SINK#<id>` | `META` |
 | Hour / generation | `HOUR#<hour>` | `META` / `GEN` |

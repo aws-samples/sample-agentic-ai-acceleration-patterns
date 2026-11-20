@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The emitter snippet (spec §6.1, §6.3): what an emitter's workload runs to send
+ * The emitter snippet (spec §6.1, §6.3): what a workload runs to send
  * usage. It runs under the emitter role `<fleet>-ue-<emitterId>`.
  *
  * - Each event gets a ULID `eventId` once, when it is recorded, and is

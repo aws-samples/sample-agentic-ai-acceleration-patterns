@@ -701,12 +701,11 @@ list TenantBindingSummaryList {
     member: TenantBindingSummary
 }
 
-/// Binds a tenant to an emitter. 409 `PLACEMENT_MISMATCH` when the emitter has no
-/// `ACTIVE` emitter (none, or one that is `CLOSING`) or is of another
-/// application. An absent `billingAccount` keeps
-/// the stored one. A newly set billing account starts a `RESEND_BLOCKED`
-/// job for the tenant and application (spec §4.7), returned as
-/// `resendJobId`.
+/// Binds a tenant to an emitter. 409 `PLACEMENT_MISMATCH` when the emitter
+/// is unknown, `CLOSING`, or of another application. An absent
+/// `billingAccount` keeps the stored one. A newly set billing account
+/// starts a `RESEND_BLOCKED` job for the tenant and application (spec
+/// §4.7), returned as `resendJobId`.
 @idempotent
 @http(method: "PUT", uri: "/emitters/{emitterId}/tenants/{tenantId}", code: 200)
 operation PutTenantBinding {

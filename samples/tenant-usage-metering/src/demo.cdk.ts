@@ -7,8 +7,8 @@
  * (spec §6.4): a registrar, an operator and a reader. Every role trusts only
  * this account, and a principal there needs `sts:AssumeRole` on it.
  *
- * With `integLocalEmitter=true` (test only, standard §5.3) the stack also holds
- * one emitter role, `<fleet>-ue-<emitterId>`, and lets that emitter be
+ * With `integLocalEmitter=true` (test only, standard §5.3) the stack also
+ * holds one emitter role, `<fleet>-ue-<emitterId>`, and lets that emitter be
  * registered in this account, so a one-account test can send usage.
  *
  * The stack writes the published parameter
@@ -34,7 +34,7 @@ import { UsageSubscriber } from './subscriber/usage-subscriber';
 import { TenantUsageMetering } from './tenant-usage-metering';
 
 /** The id of the test emitter (a fixed ULID). */
-export const DEMO_EMITTER_ID = '01JD00000000000000000000C1';
+export const DEMO_EMITTER_ID = '01JD00000000000000000000E1';
 
 export const SERVICE_PARAMETER = '/application-plane/shared/metering/service';
 

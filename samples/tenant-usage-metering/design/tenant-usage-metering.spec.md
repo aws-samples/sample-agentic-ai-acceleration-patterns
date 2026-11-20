@@ -40,8 +40,8 @@ This sample demonstrates one metering service that the vendor owns:
   billing system or an export file, and a **usage bus** on which every
   record is also published;
 - **lifecycle wiring**: the control plane's vendor hooks
-  (control-plane ADR-044) register each cell's emitter and its tenants
-  with the metering service, so onboarding and offboarding drive
+  (control-plane ADR-044) register each cell's emitter and its tenant
+  bindings with the metering service, so onboarding and offboarding drive
   metering with no manual step.
 
 Deployment model: any (pool, silo or bridge). The registration operations
@@ -164,10 +164,11 @@ All in the metering account, one stack.
 
 ### 3.2 Callers and identity
 
-An emitter is any unit that runs in one AWS account under one IAM role
-for one application. A pooled application in one account has one
-emitter; an application deployed across N accounts has N. With the
-control plane, each cell has one emitter and `emitterId` is the cell id.
+An emitter is one IAM role in one AWS account that signs usage events
+for one application. The workload behind it is any unit that runs in that
+account under that role for that application. A pooled application in
+one account has one emitter; an application deployed across N accounts
+has N.
 
 | Caller | Proves itself by | May call |
 |---|---|---|
@@ -180,13 +181,11 @@ control plane, each cell has one emitter and `emitterId` is the cell id.
 **Ingest door resource policy.** `POST /usage-events` admits any account's
 principal whose `aws:PrincipalArn` matches
 `arn:aws:iam::*:role/<fleet>-ue-*`; every other route admits only the
-principals listed for it. The policy cannot name emitter accounts,
-because emitters are registered at run time; the registry is the gate.
-The function
-admits a caller only when `requestContext.identity.userArn` is an
-assumed-role ARN; it reduces it to
-`arn:aws:iam::<account>:role/<name>` and looks up
-`ROLE#<account>#<name>`. Any other caller, or a role with no
+principals listed for it. The policy cannot name emitter accounts, because
+emitters are registered at run time; the registry is the gate. The
+function admits a caller only when `requestContext.identity.userArn` is an
+assumed-role ARN; it reduces it to `arn:aws:iam::<account>:role/<name>`
+and looks up `ROLE#<account>#<name>`. Any other caller, or a role with no
 registration, gets a 403 for the whole batch; the function records one
 metric data point and at most one log line per caller ARN per minute, and
 stores nothing (P-8).
@@ -236,25 +235,25 @@ that bus with those accounts and the managed permission
 update its own subscribers and describe the bus, and may not publish.
 External principals are allowed; an account outside the organization
 accepts the resource share invitation before it can use the bus.
-`PutEmitter` refuses an emitter in any account on either list,
-vendor-owned or not, and in the metering account itself
-(`ACCOUNT_NOT_ALLOWED`), and a deploy-time guard reads the registry after
-the admin function's block list is updated and before the shares change,
-and fails a deploy that lists an account holding an emitter that can
-still send; a deleted emitter stops counting at its `closesAt`
-(ADR-0006). `rawSubscriberAccountIds` needs `ingestPath` `BUS`, and
-neither list may name the metering account; synth refuses both. A
-subscriber created while its account was listed keeps delivering after
-the account leaves the share, until the vendor revokes it with
-EventBridge `RevokeResource`. `UsageSubscriber`'s `meters` and `tenants` filters (a `DATA` pattern under `detail`, since `DATA` is the `PutEvents` envelope) are a
-convenience; an account a bus is shared with can create an unfiltered
-subscriber.
+`PutEmitter` refuses an emitter in any account on either list, vendor-owned
+or not, and in the metering account itself (`ACCOUNT_NOT_ALLOWED`), and a
+deploy-time guard reads the registry after the admin function's block list
+is updated and before the shares change, and fails a deploy that lists an
+account holding an emitter that can still send; a deleted emitter stops
+counting at its `closesAt` (ADR-0006). `rawSubscriberAccountIds` needs
+`ingestPath` `BUS`, and neither list may name the metering account; synth
+refuses both. A subscriber created while its account was listed keeps
+delivering after the account leaves the share, until the vendor revokes it
+with EventBridge `RevokeResource`. `UsageSubscriber`'s `meters` and
+`tenants` filters (a `DATA` pattern under `detail`, since `DATA` is the
+`PutEvents` envelope) are a convenience; an account a bus is shared with
+can create an unfiltered subscriber.
 
 ### 3.3 Deployment inputs
 
 | Input | Meaning | Default |
 |---|---|---|
-| `fleetName` | the control plane's fleet name, `[a-z0-9][a-z0-9-]{0,31}` as there, checked at synth (`<fleet>-ue-<emitterId>` is then at most 62 characters) | required |
+| `fleetName` | the prefix of the emitter role names and the sink secrets; with the control plane, its fleet name. `[a-z0-9][a-z0-9-]{0,31}` as in the control plane, checked at synth (`<fleet>-ue-<emitterId>` is then at most 62 characters) | required |
 | `registrarPrincipalArns` | roles that may register emitters and tenant bindings; synth fails if one also appears in `operatorPrincipalArns` or `readerPrincipalArns` | required |
 | `operatorPrincipalArns` | roles that may manage meters, sinks, recounts, re-admission, redrives and resends of `BLOCKED` deliveries | required |
 | `readerPrincipalArns` | roles that may read usage | `[]` |
@@ -444,19 +443,19 @@ call that made or last re-activated it) and, once `CLOSING`,
 moves the `closedBy*` pair into the interval it closes and overwrites
 `controlPlane*`.
 
-Transitions: none → `ACTIVE` (`PutEmitter`) → `CLOSING`
-(`DeleteEmitter`) → removed by TTL. An item past its `expiresAt` counts
-as absent before TTL removes it, and TTL removes the two items of a pair
-separately, so every write rewrites the other item of its pair. An emitter admits events whose
+Transitions: none → `ACTIVE` (`PutEmitter`) → `CLOSING` (`DeleteEmitter`)
+→ removed by TTL. An item past its `expiresAt` counts as absent before TTL
+removes it, and TTL removes the two items of a pair separately, so every
+write rewrites the other item of its pair. An emitter admits events whose
 `time` is at or after `activeFrom`, and, once `CLOSING`, at or before
 `closedAt`, until `closesAt`, or whose `time` falls in one of its
-`intervals`. Other events are refused `REGISTRATION_CLOSED`. Past `closesAt` the emitter is refused like an
-unregistered one. `PutEmitter` on a `CLOSING` item (an emitter
-registered again on the same id, such as a cell created again) moves the
-current `{activeFrom, closedAt}` into `intervals`, removes `closedAt`,
-`closesAt` and `expiresAt`, and sets a new `activeFrom`. Ingest and
-`READMIT` apply the same check, so an event is judged by the registration
-as it stood at the event's time.
+`intervals`. Other events are refused `REGISTRATION_CLOSED`. Past
+`closesAt` the emitter is refused like an unregistered one. `PutEmitter`
+on a `CLOSING` item (an emitter registered again on the same id, such as a
+cell created again) moves the current `{activeFrom, closedAt}` into
+`intervals`, removes `closedAt`, `closesAt` and `expiresAt`, and sets a
+new `activeFrom`. Ingest and `READMIT` apply the same check, so an event
+is judged by the registration as it stood at the event's time.
 
 ### 4.3 Tenant binding
 
@@ -472,9 +471,9 @@ as it stood at the event's time.
 
 Tenant ids are the registrar's: the control plane's are ULIDs, and any
 id in `[A-Za-z0-9][A-Za-z0-9_-]{0,63}` is accepted; ids are
-case-sensitive. `PutTenantBinding` for an emitter that is not `ACTIVE`
-(none, or one that is `CLOSING`), or of another application, is a 409 (`PLACEMENT_MISMATCH`); an absent
-`billingAccount` keeps the stored one.
+case-sensitive. `PutTenantBinding` for an emitter that is not registered,
+not `ACTIVE`, or of another application is a 409 (`PLACEMENT_MISMATCH`);
+an absent `billingAccount` keeps the stored one.
 
 Transitions as for emitters. A binding deleted and created again for the
 same emitter returns the item to `ACTIVE` and keeps the earlier interval;
@@ -875,10 +874,10 @@ Errors:
 - Parameter `/application-plane/shared/metering/service` in the metering
   account, written by the demo stack: one JSON document with `version`,
   `apiUrl`, `region`, `ingestBusArn`, `usageBusArn`,
-  `emitterRoleNamePattern`. Other accounts receive these values as
-  inputs: emitters through `METERING_API_URL` (a cell parameter with the
-  control plane), subscriber accounts from the deployer.
-  `ARCHITECTURE.md` §5.1 lists the sub-path.
+  `emitterRoleNamePattern`. Other accounts receive these values as inputs:
+  emitters through `METERING_API_URL` (a cell parameter with the control
+  plane), subscriber accounts from the deployer. `ARCHITECTURE.md` §5.1
+  lists the sub-path.
 - The hook script `scripts/control-plane/metering-hook.sh` and the
   emitter snippet `scripts/emit-usage.ts` (buffers at most `maxPending`
   events, batches of 100, ULID `eventId`s, stores each event once;

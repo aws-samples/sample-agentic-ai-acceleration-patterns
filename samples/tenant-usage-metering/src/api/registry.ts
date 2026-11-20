@@ -9,9 +9,9 @@
  *
  * An emitter is two items: `ROLE#<account>#<role>` (status and
  * intervals, what ingest reads) and `EMITTER#<emitterId>` (which role an
- * emitter id has). A binding is two copies: under the emitter (what ingest reads) and
- * under the tenant (what the recount and the dispatcher read). Both pairs
- * are written in one transaction.
+ * emitter id has). A binding is two copies: under the emitter (what
+ * ingest reads) and under the tenant (what the recount and the dispatcher
+ * read). Both pairs are written in one transaction.
  */
 
 import { QueryCommand, TransactWriteCommand, type TransactWriteCommandInput, UpdateCommand } from '@aws-sdk/lib-dynamodb';
@@ -21,7 +21,7 @@ import { startJob } from './jobs';
 import { DEFAULT_PAGE_SIZE, decodeToken, encodeToken } from './pagination';
 import { getItem } from '../shared/db';
 import { emitterRoleName } from '../shared/identity';
-import type { BindingItem, EmitterItem, EmitterRoleItem, IntervalItem } from '../shared/items';
+import type { BindingItem, EmitterIdItem, EmitterRoleItem, IntervalItem } from '../shared/items';
 import { keys, LIST_BY_TYPE_INDEX } from '../shared/keys';
 import { closeAttributes, reactivation, type Trace, updateExpression } from '../shared/registration';
 import { isConditionFailure } from '../shared/retry';
@@ -141,7 +141,7 @@ function applied<T>(stored: T, set: Record<string, unknown>, remove: ReadonlyArr
 const nowSeconds = (nowMs: number) => Math.floor(nowMs / 1000);
 
 /** The id item may be written only where it is absent, expired, or already this account's and application's. */
-function emitterPut(tableName: string, item: EmitterItem, nowMs: number): TransactItem {
+function emitterIdPut(tableName: string, item: EmitterIdItem, nowMs: number): TransactItem {
   return {
     Put: {
       TableName: tableName,
@@ -152,9 +152,9 @@ function emitterPut(tableName: string, item: EmitterItem, nowMs: number): Transa
   };
 }
 
-function emitterItemOf(emitter: EmitterRoleItem): EmitterItem {
+function emitterIdItemOf(emitter: EmitterRoleItem): EmitterIdItem {
   return {
-    ...keys.emitter(emitter.emitterId),
+    ...keys.emitterId(emitter.emitterId),
     SK: 'META',
     emitterId: emitter.emitterId,
     accountId: emitter.accountId,
@@ -165,8 +165,8 @@ function emitterItemOf(emitter: EmitterRoleItem): EmitterItem {
 }
 
 /** The live id item and the live emitter role item it names. */
-async function readEmitter(deps: AdminDeps, emitterId: string, nowMs: number): Promise<{ idItem?: EmitterItem; emitter?: EmitterRoleItem }> {
-  const idItem = live(await getItem<EmitterItem>(deps.db, deps.config.tableName, keys.emitter(emitterId), true), nowMs);
+async function readEmitter(deps: AdminDeps, emitterId: string, nowMs: number): Promise<{ idItem?: EmitterIdItem; emitter?: EmitterRoleItem }> {
+  const idItem = live(await getItem<EmitterIdItem>(deps.db, deps.config.tableName, keys.emitterId(emitterId), true), nowMs);
   if (idItem === undefined) {
     return {};
   }
@@ -188,17 +188,18 @@ export async function putEmitter(
   }
   const roleName = emitterRoleName(fleetName, input.emitterId);
   const nowMs = nowOf(deps);
-  const emitterKey = keys.emitterRole(input.accountId, roleName);
-  const idItem = live(await getItem<EmitterItem>(deps.db, tableName, keys.emitter(input.emitterId), true), nowMs);
+  const roleKey = keys.emitterRole(input.accountId, roleName);
+  const idItem = live(await getItem<EmitterIdItem>(deps.db, tableName, keys.emitterId(input.emitterId), true), nowMs);
   if (idItem !== undefined && (idItem.accountId !== input.accountId || idItem.applicationId !== input.applicationId)) {
     throw apiError.conflict('PLACEMENT_MISMATCH', 'the emitter is registered with another account or application');
   }
-  // Read by the requested key, so an emitter whose id item TTL already removed is still found.
-  const emitter = live(await getItem<EmitterRoleItem>(deps.db, tableName, emitterKey, true), nowMs);
+  // Read by the requested key, so an emitter whose id item TTL already
+  // removed is still found.
+  const emitter = live(await getItem<EmitterRoleItem>(deps.db, tableName, roleKey, true), nowMs);
 
   if (emitter === undefined) {
     const item = {
-      ...emitterKey,
+      ...roleKey,
       SK: 'META' as const,
       emitterId: input.emitterId,
       applicationId: input.applicationId,
@@ -214,7 +215,7 @@ export async function putEmitter(
       listSort: input.emitterId,
     } satisfies EmitterRoleItem & { listType: string; listSort: string };
     await transact(deps, [
-      emitterPut(tableName, emitterItemOf(item), nowMs),
+      emitterIdPut(tableName, emitterIdItemOf(item), nowMs),
       {
         Put: {
           TableName: tableName,
@@ -228,7 +229,7 @@ export async function putEmitter(
   }
   if (emitter.status === 'ACTIVE') {
     if (idItem === undefined) {
-      await transact(deps, [emitterPut(tableName, emitterItemOf(emitter), nowMs)]);
+      await transact(deps, [emitterIdPut(tableName, emitterIdItemOf(emitter), nowMs)]);
     }
     return emitter;
   }
@@ -237,14 +238,14 @@ export async function putEmitter(
   await transact(deps, [
     update(
       tableName,
-      emitterKey,
+      roleKey,
       set,
       remove,
       '#cs = :closing AND closedAt = :seen',
       { '#cs': 'status' },
       { ':closing': 'CLOSING', ':seen': emitter.closedAt },
     ),
-    emitterPut(tableName, emitterItemOf(next), nowMs),
+    emitterIdPut(tableName, emitterIdItemOf(next), nowMs),
   ]);
   return next;
 }
@@ -276,7 +277,7 @@ export async function deleteEmitter(deps: AdminDeps, emitterId: string, trace: T
       { '#cs': 'status' },
       { ':active': 'ACTIVE' },
     ),
-    emitterPut(tableName, emitterItemOf(next), nowMs),
+    emitterIdPut(tableName, emitterIdItemOf(next), nowMs),
   ]);
   return next;
 }
@@ -343,7 +344,7 @@ export async function putTenantBinding(
   const nowMs = nowOf(deps);
   const { idItem, emitter } = await readEmitter(deps, input.emitterId, nowMs);
   if (idItem === undefined || emitter === undefined || emitter.status !== 'ACTIVE' || idItem.applicationId !== input.applicationId) {
-    throw apiError.conflict('PLACEMENT_MISMATCH', 'the emitter is not ACTIVE or is of another application');
+    throw apiError.conflict('PLACEMENT_MISMATCH', 'the emitter is not registered, not ACTIVE, or of another application');
   }
   const stored = live(await getItem<BindingItem>(deps.db, tableName, keys.binding(input.emitterId, input.tenantId), true), nowMs);
   if (stored !== undefined && stored.applicationId !== input.applicationId) {

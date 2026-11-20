@@ -9,7 +9,7 @@ import { putEmitter, putTenantBinding } from '../src/api/registry';
 import { Metrics } from '../src/shared/metrics';
 
 const NOW = Date.parse('2026-11-18T12:00:00Z');
-const EMITTER_ID = '01JD00000000000000000000C1';
+const EMITTER_ID = '01JD00000000000000000000E1';
 const ROLE = `demo-ue-${EMITTER_ID}`;
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
 const ddb = mockClient(db);

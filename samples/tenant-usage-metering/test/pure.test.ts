@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { checkRange } from '../src/api/jobs';
 import { createEffectiveFrom } from '../src/api/meters';
 import { decodeToken, encodeToken } from '../src/api/pagination';
-import { ADMIN_ROUTES, policyPath } from '../src/api/routes';
+import { ADMIN_ROUTES, policyPath, type Route } from '../src/api/routes';
 import { validateSink } from '../src/api/sinks';
 import { authHeader, mappedBody, needsBillingAccount, retryDelaySeconds } from '../src/dispatcher/dispatcher';
 import { busBatches, packByHour } from '../src/ingest/publish';
@@ -33,9 +33,9 @@ const event = (overrides: Partial<EnrichedUsageEvent> = {}): EnrichedUsageEvent 
   value: '10',
   time: '2026-11-18T10:15:00Z',
   applicationId: 'demo-app',
-  emitterId: '01JD00000000000000000000C1',
+  emitterId: '01JD00000000000000000000E1',
   emitterAccountId: '111122223333',
-  emitterRole: 'demo-ue-01JD00000000000000000000C1',
+  emitterRole: 'demo-ue-01JD00000000000000000000E1',
   receivedAt: '2026-11-18T10:15:01Z',
   ...overrides,
 });
@@ -71,6 +71,16 @@ describe('routes (spec §3.2)', () => {
   });
   test('policy paths put * for labels', () => {
     expect(policyPath({ operation: 'X', method: 'PUT', path: '/emitters/{emitterId}/tenants/{tenantId}', callers: [] })).toBe('PUT/emitters/*/tenants/*');
+  });
+  test('a policy path never covers a route of other callers (an execute-api * also matches /)', () => {
+    const pattern = (route: Route) => new RegExp(`^${policyPath(route).split('*').map((part) => part.replace(/[.+?^${}()|[\]\\/]/g, '\\$&')).join('.*')}$`);
+    const concrete = (route: Route) => `${route.method}${route.path.replace(/\{[^}]+\}/g, 'x')}`;
+    const callers = (route: Route) => [...route.callers].sort().join(',');
+    for (const a of ADMIN_ROUTES) {
+      for (const b of ADMIN_ROUTES) {
+        if (callers(a) !== callers(b)) expect([a.operation, b.operation, pattern(a).test(concrete(b))]).toEqual([a.operation, b.operation, false]);
+      }
+    }
   });
 });
 

@@ -156,11 +156,11 @@ describe('bus share guard (ADR-0006)', () => {
   test('reads every page of the emitter list through the index, projected', async () => {
     ddb
       .on(QueryCommand)
-      .resolvesOnce({ Items: [emitter(VENDOR_A, 'C1')], LastEvaluatedKey: { PK: 'x' } })
-      .resolvesOnce({ Items: [emitter(ACCOUNT, 'C2'), emitter(VENDOR_B, 'C3')] });
+      .resolvesOnce({ Items: [emitter(VENDOR_A, 'E1')], LastEvaluatedKey: { PK: 'x' } })
+      .resolvesOnce({ Items: [emitter(ACCOUNT, 'E2'), emitter(VENDOR_B, 'C3')] });
     const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
     expect(await offendingEmitters(db, 'table', [VENDOR_A, VENDOR_B], NOW)).toEqual([
-      { accountId: VENDOR_A, emitterId: 'C1', status: 'ACTIVE' },
+      { accountId: VENDOR_A, emitterId: 'E1', status: 'ACTIVE' },
       { accountId: VENDOR_B, emitterId: 'C3', status: 'ACTIVE' },
     ]);
     const calls = ddb.commandCalls(QueryCommand);
@@ -175,46 +175,46 @@ describe('bus share guard (ADR-0006)', () => {
 
   test('a CLOSING emitter counts before its closesAt and not after', async () => {
     ddb.on(QueryCommand).resolves({
-      Items: [emitter(VENDOR_A, 'C1', new Date(NOW + 60_000).toISOString()), emitter(VENDOR_A, 'C2', new Date(NOW - 60_000).toISOString())],
+      Items: [emitter(VENDOR_A, 'E1', new Date(NOW + 60_000).toISOString()), emitter(VENDOR_A, 'E2', new Date(NOW - 60_000).toISOString())],
     });
     const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
     const closesAt = new Date(NOW + 60_000).toISOString();
-    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([{ accountId: VENDOR_A, emitterId: 'C1', status: 'CLOSING', closesAt }]);
+    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([{ accountId: VENDOR_A, emitterId: 'E1', status: 'CLOSING', closesAt }]);
   });
 
   test('a CLOSING emitter with no closesAt counts', async () => {
-    ddb.on(QueryCommand).resolves({ Items: [{ accountId: VENDOR_A, emitterId: 'C1', status: 'CLOSING' }] });
+    ddb.on(QueryCommand).resolves({ Items: [{ accountId: VENDOR_A, emitterId: 'E1', status: 'CLOSING' }] });
     const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
-    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([{ accountId: VENDOR_A, emitterId: 'C1', status: 'CLOSING' }]);
+    expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([{ accountId: VENDOR_A, emitterId: 'E1', status: 'CLOSING' }]);
   });
 
   test('a CLOSING emitter with an unreadable closesAt counts', async () => {
-    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, 'C1', 'not-a-date')] });
+    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, 'E1', 'not-a-date')] });
     const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
     expect(await offendingEmitters(db, 'table', [VENDOR_A], NOW)).toEqual([
-      { accountId: VENDOR_A, emitterId: 'C1', status: 'CLOSING', closesAt: 'not-a-date' },
+      { accountId: VENDOR_A, emitterId: 'E1', status: 'CLOSING', closesAt: 'not-a-date' },
     ]);
   });
 
   test.each(['Create', 'Update'] as const)('%s fails when a listed account holds an emitter, naming the account, the emitter and its state', async (type) => {
-    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, '01JD00000000000000000000C1')] });
-    await expect(handler(event(type, [VENDOR_A]))).rejects.toThrow(`account ${VENDOR_A} (emitter 01JD00000000000000000000C1, ACTIVE)`);
+    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, '01JD00000000000000000000E1')] });
+    await expect(handler(event(type, [VENDOR_A]))).rejects.toThrow(`account ${VENDOR_A} (emitter 01JD00000000000000000000E1, ACTIVE)`);
   });
 
   test('the refusal gives a closing emitter its close time', async () => {
     // The handler reads the wall clock, so the close time is far ahead of it.
     const closesAt = '2999-01-01T00:00:00.000Z';
-    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, 'C1', closesAt)] });
-    await expect(handler(event('Create', [VENDOR_A]))).rejects.toThrow(`(emitter C1, CLOSING until ${closesAt})`);
+    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, 'E1', closesAt)] });
+    await expect(handler(event('Create', [VENDOR_A]))).rejects.toThrow(`(emitter E1, CLOSING until ${closesAt})`);
   });
 
   test.each(['Create', 'Update'] as const)('%s succeeds when no listed account holds an emitter', async (type) => {
-    ddb.on(QueryCommand).resolves({ Items: [emitter(ACCOUNT, 'C2')] });
+    ddb.on(QueryCommand).resolves({ Items: [emitter(ACCOUNT, 'E2')] });
     await expect(handler(event(type, [VENDOR_A]))).resolves.toEqual({ PhysicalResourceId: 'bus-share-guard' });
   });
 
   test('Delete reads nothing and succeeds', async () => {
-    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, 'C1')] });
+    ddb.on(QueryCommand).resolves({ Items: [emitter(VENDOR_A, 'E1')] });
     await expect(handler(event('Delete', [VENDOR_A]))).resolves.toEqual({ PhysicalResourceId: 'bus-share-guard' });
     expect(ddb.commandCalls(QueryCommand)).toHaveLength(0);
   });
