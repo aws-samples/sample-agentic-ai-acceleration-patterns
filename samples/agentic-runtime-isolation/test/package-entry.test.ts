@@ -31,8 +31,12 @@ describe('package entry', () => {
     expect(pkg.typesVersions['*'].tools).toEqual(['src/tools/context.ts']);
   });
 
-  it('points every export at a file that exists', () => {
-    for (const target of Object.values(pkg.exports)) {
+  it('exports exactly ".", "./tools" and "./package.json"', () => {
+    expect(Object.keys(pkg.exports).sort()).toEqual(['.', './package.json', './tools']);
+  });
+
+  it('points every export and the node10 types path at a file that exists', () => {
+    for (const target of [...Object.values(pkg.exports), ...pkg.typesVersions['*'].tools]) {
       expect(fs.existsSync(path.join(root, target))).toBe(true);
     }
   });

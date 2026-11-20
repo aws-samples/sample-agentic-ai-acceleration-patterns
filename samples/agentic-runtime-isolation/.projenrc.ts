@@ -139,7 +139,8 @@ integ.exec('scripts/integ.sh');
 // node_modules, so ts-node compiles it and the `__dirname` handler entries stay
 // valid. shortcut: a registry or tarball copy has no `src/` (see .npmignore)
 // and is not supported; add a `lib/` entry with a handler tree if that is needed.
-// `typesVersions` serves the `./tools` types to consumers on node10 resolution.
+// `typesVersions` serves the `./tools` types only, to consumers on node10
+// resolution; a runtime resolver that ignores `exports` cannot load `./tools`.
 // ---------------------------------------------------------------------------
 project.package.addField('main', 'src/index.ts');
 project.package.addField('types', 'src/index.ts');
