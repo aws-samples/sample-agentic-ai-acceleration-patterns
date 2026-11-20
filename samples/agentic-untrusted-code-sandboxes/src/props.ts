@@ -39,8 +39,9 @@ export interface UntrustedCodeSandboxesProps {
    * @remarks With it off, DNS is the one path out of a sandbox: code can send data out and read replies in
    * lookups on every backend, and on `agentcore` can send the runtime role's credentials that way (T-29, T-91).
    * The sandbox has no network access other than DNS. Turn it on to resolve only AWS names, plus `allowDomains`.
-   * `allowDomains` names must have two labels or more (`example.com`, `*.example.com`); each one is an exception
-   * to "no network access", so list only names you control (T-32).
+   * `allowDomains` names must have two labels or more (`example.com`, `*.example.com`). That refuses a bare
+   * top-level domain only: a public suffix (`*.co.uk`) or a shared zone (`*.s3.amazonaws.com`) passes. Each name is
+   * an exception to "no network access", so you are responsible for listing only names you control (T-32).
    * @default false
    */
   readonly dnsFirewall?: boolean | { readonly allowDomains?: string[] };
@@ -91,7 +92,11 @@ export const GATEWAY_BUDGET_CAP_SECONDS = 90;
 export const MAX_OUTPUT_BYTES_CAP = 4 * 1024 * 1024;
 export const MAX_INPUT_BYTES_CAP = MAX_INPUT_BYTES;
 
-/** A DNS Firewall domain: a name of at least two labels, or `*.` and such a name, so a whole top-level domain is never allowed (spec §3.9). */
+/**
+ * A DNS Firewall domain: a name of at least two labels, or `*.` and such a name (spec §3.9). Two labels refuse a bare
+ * top-level domain only: a public suffix such as `co.uk` or a shared AWS zone such as `s3.amazonaws.com` also has two
+ * labels and passes, so the vendor is responsible for listing only names it controls (T-32).
+ */
 const DOMAIN_PATTERN = /^(\*\.)?[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)+$/;
 
 function fail(message: string): never {

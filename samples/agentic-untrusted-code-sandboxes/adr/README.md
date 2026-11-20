@@ -2,6 +2,11 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Decisions
 
+Once a record is accepted, its decision text is not edited. A change is a
+new record with an `Amends` line; the amended record gets an `Amended by`
+line and a dated trailing note saying what changed
+([sample standard §2.2](../../../docs/sample-standard.md#22-architecture-decision-records-adr)).
+
 | Number | Title | Status | Date |
 | --- | --- | --- | --- |
 | [0001](0001-serve-every-boundary-behind-one-run-code-tool-target.md) | Serve every boundary behind one run_code tool target | Proposed | 2026-11-18 |

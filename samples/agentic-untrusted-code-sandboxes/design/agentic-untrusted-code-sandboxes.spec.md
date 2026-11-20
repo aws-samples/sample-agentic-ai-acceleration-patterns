@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Untrusted code sandboxes for agentic applications: specification
 
-Status: draft, not built. Spikes S-1 to S-20 ran from 2026-11-18 to 2026-11-20 (§7.1 to §7.7).
+Status: draft, not built. Spikes S-1 to S-21 ran from 2026-11-18 to 2026-11-20 (§7.1 to §7.8).
 
 ## 1. Problem statement
 
@@ -264,12 +264,12 @@ no unsigned entry.
 | `perTenantMetrics` | `boolean` | `false` | emit CloudWatch metrics with a `TenantId` dimension (ADR-0013) |
 | `vpc` | `ec2.IVpc` | created (§3.7) | must have subnets tagged for the tool and the sandboxes |
 | `s3PrefixListId` | `string` | none | id of the `com.amazonaws.<region>.s3` managed prefix list (`pl-` and hex). Required with a supplied `vpc` when the `agentcore` runtime's endpoints are created: its 443 egress to the S3 gateway endpoint names the list. With the created VPC the egress is any address on 443, which that VPC routes nowhere else (ADR-0028) |
-| `dnsFirewall` | `boolean \| { allowDomains?: string[] }` | `false` | associate a Route 53 Resolver DNS Firewall rule group with the VPC that allows only the §3.9 AWS names and blocks the rest with NXDOMAIN, plus VPC query logging; `allowDomains` adds names, each of two labels or more (`example.com`, `*.example.com`; a bare top-level domain is refused); refused with a supplied `vpc` (ADR-0016). With it off, DNS is the one path out of a sandbox (T-29) |
+| `dnsFirewall` | `boolean \| { allowDomains?: string[] }` | `false` | associate a Route 53 Resolver DNS Firewall rule group with the VPC that allows only the §3.9 AWS names and blocks the rest with NXDOMAIN, plus VPC query logging; `allowDomains` adds names, each of two labels or more (`example.com`, `*.example.com`; a bare top-level domain is refused, but a public suffix such as `*.co.uk` or a shared zone such as `*.s3.amazonaws.com` passes, so the vendor is responsible for listing only names it controls, T-32); refused with a supplied `vpc` (ADR-0016). With it off, DNS is the one path out of a sandbox (T-29) |
 | `createEndpoints` | `boolean` | `true` with the created VPC; required with a supplied `vpc` | create the §3.7 sandbox endpoints; `false` when a supplied `vpc` already has them, which then must meet §3.7. The interface endpoints use private DNS, which applies to the whole supplied VPC (T-92) |
 | `inputBucket` | `s3.IBucket` | created | the bucket with `inputs/<tenant>/` |
 | `microvm.memoryMiB` | `number` | 1024 | MicroVM image `MinimumMemoryInMiB`; the guest gets about four times this (S-15: 1024 gives 3998 MiB and 2 vCPUs, 2048 gives 8016 MiB and 4) |
 | `nitro.cpu`, `nitro.memoryMiB` | `number` | 512, 1024 | task size |
-| `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements, and the architecture of the `nitro` runner image. The default is the one type run end to end; `m7g.large` (Graviton, 2 vCPU) reports Nitro Enclaves support and is likely cheaper, but has not been run on ECS. Synth checks each type against a static table of types with Nitro Enclaves support (Intel types need 4 vCPU or more, so `m7i.large` is refused), and refuses a type whose architecture has no `nitro` job filter table (§3.5) |
+| `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements, and the architecture of the `nitro` runner image. The capacity provider's launch template enables Nitro Enclaves (`NitroEnclavesEnabled`), because an `ISOLATED_SANDBOX` task launches only on such a provider (ADR-0046), so every listed type must support Nitro Enclaves. The default is the one type run end to end; `m7g.large` (Graviton, 2 vCPU) reports Nitro Enclaves support and is likely cheaper, but has not been run on ECS. Synth checks each type against a static table of types with Nitro Enclaves support (Intel types need 4 vCPU or more, so `m7i.large` is refused), and refuses a type whose architecture has no `nitro` job filter table (§3.5) |
 | `agentcore.sessionFiles` | `boolean` | `false` | grant the runtime role `sessions/${aws:AgentCoreRuntimeSourceSid}/*` on the input bucket (ADR-0007) |
 
 Timing budget: the tool Lambda timeout is set to
@@ -349,7 +349,12 @@ architecture without emulation. The `nitro` runner makes its key and
 certificate with the `openssl` binary that the Python base image carries,
 so no compiled wheels are copied in. The
 AgentCore backend is a container runtime (ADR-0015). The runner process
-runs as root inside the VM; it never runs tenant code as root.
+runs as root inside the VM; it never runs tenant code as root. One program
+serves all three backends: the environment variable `RUNNER_BACKEND`
+(`microvm`, `nitro` or `agentcore`), which each backend's construct sets on
+the image, the task definition or the runtime, picks the setup and the
+listener, and a runner with a missing or unknown value exits at start
+(ADR-0037).
 
 Build-time egress. `AWS::Lambda::MicrovmImage` requires an egress
 connector for the image build, and the build runs with the Lambda-managed
@@ -483,8 +488,18 @@ with `busy`. The runner:
    If it is still not below 32 MiB, the runner starts no further job and refuses every
    later one with `dirty`, which the tool treats as a dead handle
    (§4.1 step 3), so the takeover stops the session and the next start
-   gets a fresh one under the same id. 32 MiB is a design value: no spike
-   has read the job group after a sweep. Files in `/work` stay (below).
+   gets a fresh one under the same id. 32 MiB is a design value; the one
+   spike result on it is §7 S-21 (a 2 GiB SysV fill drained below it inside
+   1 s; 420 000 empty files in `/work` kept it above, seen before the poll
+   existed). Files in `/work` stay (below).
+
+   After a job ends, the kill, the sweep and the thread joins of the runner
+   share one budget of 3 s, so the answer comes with 2 s to spare inside the
+   tool's `runTimeout` + 5 s wait (§4.1 step 5). A step the budget cuts
+   short, or a uid 1001 process that survives the kill, marks the runner
+   `dirty` on every backend, and a `dirty` runner refuses every later job.
+   On `agentcore` the job group read above polls every 0.05 s for up to 1 s
+   of that budget (ADR-0064, `runner/PROTOCOL.md`).
 4. Returns `exitCode`, `stdout`, `stderr` (together at most
    `maxOutputBytes`, stdout cut first, `truncated` flag), `durationMs`,
    `timedOut`, `memoryExceeded`, `bootId` and the nonce proof.
@@ -729,7 +744,7 @@ takeover, a crashed start, or a row TTL removed while the reaper was not
 running) gets its line from the stopper, marked `orphan` = true, with
 `tenantId` from the task's `TenantId` tag on `nitro`, or `unknown` on
 `microvm`, whose MicroVMs take no tags. An `agentcore` orphan session gets no stop
-line, because no API lists it; its cost still reaches the tenant through
+line, because no API lists it; its cost should reach the tenant through
 AgentCore's usage logs (table below), so the `sandboxSeconds` ranking is
 not complete for `agentcore`. On
 `microvm` the line also carries `runningSeconds` and `suspendedSeconds`.
@@ -745,7 +760,15 @@ monotonic condition, `lastUsedAt < :end`, and adds nothing. The stop adds
 the final gap up to `terminatedAt` (or the stop time on other backends).
 `runningSeconds` is the difference, clamped at 0. The line carries `estimated` = true,
 because the API reports no per-state times and the counter assumes the
-MicroVM suspends exactly at `sandboxIdle`.
+MicroVM suspends exactly at `sandboxIdle`. On `agentcore` the platform
+reports no session end, so a stop line written for a session the platform
+already ended at its idle timeout counts up to the stop (by the drain, the
+reaper or the tool) and over-counts idle time: §7.8 S-21 saw
+`sandboxSeconds` of 560 to 900 s for sessions the platform ended after
+60 s. For `agentcore` cost, use AgentCore's usage logs (table below), not
+`sandboxSeconds`; their record format and the join through
+`runtimeSessionId` are not yet verified (S-21 saw no usage record in 90
+minutes of calls and stops).
 Two Contributor Insights rules rank tenants by runs and by
 `sandboxSeconds`. With `perTenantMetrics`, the
 tool also emits EMF metrics `Runs`, `Errors`, `RunDuration`,
@@ -758,7 +781,7 @@ Cost attribution per backend:
 |---|---|---|---|
 | `microvm` | `sandboxSeconds` per tenant from the registry (MicroVMs take no tags) | baseline rate × seconds running + suspended storage rate × seconds suspended | the image build |
 | `nitro` | `TenantId` task tag with ECS split cost allocation data turned on (account setting) | Cost Explorer split of instance cost by task reservation | idle instance capacity, NAT and endpoints, apportioned by `sandboxSeconds` |
-| `agentcore` | AgentCore's session-level usage logs, joined to the tenant through `runtimeSessionId` in the tool line | per-second vCPU and memory rates × the session's reported usage (consumption billing, no configured baseline) | none beyond the shared endpoints and NAT |
+| `agentcore` | AgentCore's session-level usage logs, joined to the tenant through `runtimeSessionId` in the tool line (format not yet verified, §7.8) | per-second vCPU and memory rates × the session's reported usage (consumption billing, no configured baseline) | none beyond the shared endpoints and NAT |
 
 ### 3.9 DNS Firewall option (ADR-0016)
 
@@ -908,7 +931,13 @@ Reuse rule, per call (the tool):
 5. If the runner does not answer by `runTimeout` + 5 s, set `STOPPING`
    with the call's current version (re-reading once if another call moved
    it, and stopping anyway if the handle is unchanged), stop the sandbox, and return a result with
-   `timedOut` = true.
+   `timedOut` = true. A backend may report no answer sooner, and the call
+   ends the same way: on `nitro`, a connection lost, refused or cut after
+   the `/hello` check passed is no answer at once, even when no job byte
+   was sent (a keep-alive socket closed between `/hello` and `/run`, or the
+   reaper stopping the task in that gap), because the tool cannot tell
+   whether the runner read the job, and a rerun in a fresh sandbox would run
+   the code twice (ADR-0047).
 
 The reaper, every 5 minutes, writes the row before any stop with
 `version = :seen`, so a call that updated the row meanwhile wins: `FAILED`
@@ -1064,7 +1093,11 @@ two minutes after the last task (ADR-0020). The
 capacity provider has no minimum-instances setting, so the sample
 keeps no warm instance. The `synth` test checks that the drain role may
 deregister on the cluster and the reaper role may not, and that the
-offboard function runs as the reaper role. A
+offboard function runs as the reaper role. With sandboxes live, the whole
+stack delete takes 23 to 32 minutes (§7 S-21). In the `nitro` and
+`agentcore` runs most of it was the late release of the network interfaces
+of the VPC-attached drain and reaper functions; the `microvm` run's cause
+was not isolated. Plan 30 to 40 minutes for a destroy. A
 `StopTask` takes 45 to 78 s, so the runner
 exits at once on `SIGTERM`. AgentCore sessions in rows are stopped with
 `StopRuntimeSession`; sessions with no row end within about 20 s of the
@@ -1081,7 +1114,7 @@ own them. Instead a cleanup custom resource, on which the runtime depends,
 takes that prefix as a property (known at synth, no reference to the
 runtime), is deleted after the runtime, and then deletes every group under
 the prefix. The session usage logs that §3.8 uses for `agentcore`
-cost are delivered (`AWS::Logs::DeliverySource`, `DeliveryDestination`,
+cost (format not yet verified, §7.8) are delivered (`AWS::Logs::DeliverySource`, `DeliveryDestination`,
 `Delivery`) to a log group the construct owns. AgentCore names its groups
 `/aws/bedrock-agentcore/runtimes/<runtimeName>-<10-character id>-DEFAULT`,
 and code with the runtime role can add more under the same prefix; the
@@ -1216,6 +1249,7 @@ deploy and destroy time, and cleans up on exit.
 | S-18 | On `microvm`: ordinary job code under the full ADR-0020 setup, the `clone` entries, the child check, Unix sockets across N processes and in flight, every open route at once, and the free-memory floor against slow and fast fills. On `nitro` and `agentcore`: SysV and Unix socket memory against the task and job groups, and the SysV sweep | §3.5 job filters, floor, watchdog and step 3, ADR-0021 |
 | S-19 | The `nitro` watchdog on `memory.current` against every fill, and the runner's share of the group; the `nitro` filter on the x32 ABI; the 50 ms `microvm` floor against an unmapped fill the list misses; the loopback TCP accept queue at a backlog of 8 with every other open route; the blocked-call self-test | §3.5 watchdog, A on `nitro`, floor, `nitro` filter, ADR-0022 |
 | S-20 | On `nitro`, with a probe runner close to §3.5: the runner's share of the group; a single process at A = L − 64 MiB; `/work` file writes against the watchdog's `memory.current` less `file` plus `shmem`; the S-19 routes again; a job mixing files and anonymous memory | §3.5 watchdog, A on `nitro`, ADR-0022 |
+| S-21 | One deployment per backend of the built construct (three smoke runs) through the standalone entry: the steps that run on one backend, the `agentcore` job group after a sweep against the 32 MiB `dirty` threshold, and the stack delete with live sandboxes | §3.5 step 3, §3.8 stop line, §8 run budget |
 
 ### 7.1 Spike results, S-1 to S-12 (2026-11-18, a non-production test account, eu-central-1)
 
@@ -1420,6 +1454,22 @@ removed; one INACTIVE task definition revision was left.
 | 600 or 1500 MiB of files, then 800 MiB anonymous in two processes | watchdog kill at 771 to 835 MiB counted, 11 of 11 |
 | Watchdog marking order | marking after the kill missed `memoryExceeded` once; marking first, 12 of 12 right |
 | Deploy and teardown | stack 217 s, drain 19 s, delete 40 s |
+
+### 7.8 Spike results, S-21 (2026-11-20, a non-production test account, eu-west-1)
+
+Three single-backend deployments of the construct (`standalone` on,
+`sandboxIdle` 2 min, 1 min on `agentcore`, `runTimeout` 20 s; `dnsFirewall`
+off on `nitro` and `agentcore`), driven through `runCodeFunction` with the
+steps of §8 that need no gateway and no other backend. The `agentcore` run
+had two stacks, `sessionFiles` off and on, and ran its SysV case again
+after a redeploy on the build with the 1 s poll. Every stack was removed; no stack, runtime,
+task, function or log group of the runs was left.
+
+| Check | Result |
+|---|---|
+| `agentcore` job group after a sweep | 1000 SysV semaphore arrays (2 GiB) are swept and the group drains below 32 MiB inside the 1 s poll: no `dirty`; the 2 GiB case ran once, and five SysV jobs from 20 MiB to a fill-to-kill kept the session. 420 000 empty files in `/work` kept the group above 32 MiB (slab memory charged to it; seen before the poll existed, not run again with it), so the runner marked itself `dirty` and the next start gets a fresh session, which is the §3.5 rule |
+| `agentcore` stop line | for sessions the platform already ended at its idle timeout, the drain's stop lines carry `sandboxSeconds` of 560 to 900 s: the session's end is not known, so the line counts to the drain (§3.8). No AgentCore usage-log record arrived in 90 minutes of calls and stops, only the delivery's validation stream |
+| Stack delete with live sandboxes | `nitro` 27 min (the drain 80 s; the VPC-attached `RunCodeDrain` function 21 min, its network interfaces release late); `microvm` 23 min (cause not isolated); `agentcore`, two stacks, 31.7 min (the VPC-attached Reaper and Drain functions 19.5 min each). A delete of stacks that never ran a sandbox took 15 s |
 
 ## 8. Integration test outline
 

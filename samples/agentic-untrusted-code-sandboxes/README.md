@@ -11,8 +11,10 @@ DNS is the one exception. With `dnsFirewall` off, which is the default, code
 can look up any public name, so it can send data out and read replies in
 lookups, and on `agentcore` it can send the runtime role's credentials that
 way. Turn `dnsFirewall` on to resolve only AWS names plus the `allowDomains`
-you list (it needs the VPC the construct creates, not a supplied `vpc`), and
-list only names you control (threats T-29, T-32 and T-91).
+you list (it needs the VPC the construct creates, not a supplied `vpc`).
+Each listed name needs two labels; that refuses only a bare top-level domain,
+not a public suffix such as `co.uk` or a shared zone, so you are responsible
+for listing only names you control (threats T-29, T-32 and T-91).
 With a supplied `vpc`, set `createEndpoints` explicitly: the endpoints use
 private DNS that applies to the whole VPC (T-92).
 
