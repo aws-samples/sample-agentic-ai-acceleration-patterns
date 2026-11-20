@@ -64,3 +64,9 @@ Note 2026-11-19: amended by ADR-0019. An idle ECS managed instance blocks the ca
 Note 2026-11-19: amended by ADR-0020. S-16 measured the drain: a forced deregister ended each instance in 17 to 30 s, no replacement started, and the stack delete then succeeded first time in 38 s. The capacity provider has no minimum-instances setting, so the sample keeps no warm instance.
 
 Note 2026-11-20: `offboardTenant` runs as the reaper role, with stop actions only, not as the drain role. The drain role can deregister a `nitro` container instance with `force`, which ends every tenant's task on it; an offboard call needs only to stop one tenant's sandboxes (spec §3.1, §3.6, §5.2; threat model T-73).
+
+Note 2026-11-20: the reaper and the drain no longer share one role. Since
+ADR-0019 the drain role also holds `ecs:ListContainerInstances`,
+`ecs:DescribeContainerInstances`, `ecs:DeregisterContainerInstance` and
+`ec2:DescribeInstances` for the instance drain, which the reaper role
+must not hold (spec §3.6).

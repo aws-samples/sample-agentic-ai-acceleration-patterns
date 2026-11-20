@@ -664,6 +664,7 @@ One VPC in two AZs, created unless `vpc` is given.
 
 | Subnets | Route table | Used by |
 |---|---|---|
+| Public | default route to an internet gateway | the NAT gateway only; nothing else is placed there |
 | Tool | default route to one NAT gateway | the tool Lambda, the reaper, the drain, the offboard function; the ECS Managed Instances' primary ENIs |
 | Sandbox | local only, no default route | `nitro` task ENIs, the `agentcore` runtime ENIs, the `microvm` VPC egress connector |
 
