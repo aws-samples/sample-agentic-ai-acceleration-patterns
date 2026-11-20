@@ -200,7 +200,7 @@ report() {
   deploy="$(awk -F'\t' '$1 == "deploy" { s += $3 } END { print s + 0 }' "$RUN_DIR/times.tsv")"
   destroy="$(awk -F'\t' '$1 == "destroy" { s += $3 } END { print s + 0 }' "$RUN_DIR/times.tsv")"
   note "stack deploys ${deploy} s in all (parallel ones overlap), stack destroys ${destroy} s, run $(elapsed "$RUN_T0") s"
-  note "registrar 503 retries (control plane unreadable, spec §11 Q-6): $(registrar_retries)"
+  note "registrar 503 retries (control plane unreadable after the registrar's own retry, spec §3.4 step 2): $(registrar_retries)"
   echo "result: ${PASS} passed, ${FAILS} failed, ${SKIPS} skipped (run ${RUN_ID}, ${MODE}; logs in .integ/${RUN_ID})"
 }
 

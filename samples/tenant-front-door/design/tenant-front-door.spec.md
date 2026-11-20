@@ -506,6 +506,24 @@ given below):
      no name: a body from any global hook running during the
      deployment's create or update could otherwise set the one
      tenant-facing string in the route.
+
+   Each read is one unit with a time budget of 10 s, which covers its
+   Secrets Manager read, its token request and the GET. Each call has a
+   limit of 3 s, or what is left of the budget when that is less. A read
+   whose call times out, fails on the network or gets a 5xx is tried once
+   more from the start of the unit after a pause of 100 to 400 ms (random),
+   and only when at least 1 s is left after the pause. A 401 or 403 from the
+   control plane drops the cached token and repeats the GET once with a new
+   one, with no pause. A 404 `ResourceNotFoundError` is a missing record and
+   is not repeated, nor is any other 4xx, a body that is not JSON, or a
+   record that fails the shape checks. A read that still gives no usable
+   answer is 503, and the write is never made on an unchecked read. The
+   deployment and tenant reads of a tenant put run at once, so the reads
+   of a call end within 10 s, which leaves 19 s of API Gateway's 29 s and
+   20 s of the function's 30 s for the store write (step 5). The registrar
+   logs each failed call with its name (`GetSecretValue`, `FetchReaderToken`,
+   `GetCell`, `GetDeployment` or `GetTenant`) and the error class or HTTP
+   status, never a token, a secret or a URL.
 3. Refuse with 403 when the record is missing or belongs to another
    application. A put from the global hook role also needs the record in
    `CREATING` or `UPDATING`, the statuses in which the control plane runs
@@ -1793,7 +1811,8 @@ when a write would exceed the route table's 5 MB (ADR-0012); 429 with
 its quota (§4.1), which lasts until the deployer raises the quota or
 certificates are deleted, so the operator does not repeat the call until
 then; 503 when
-the control plane cannot be read or returns a `createdAt` that does not
+the control plane cannot be read, after the one retry of §3.4 step 2, or
+returns a `createdAt` that does not
 parse (the write is refused, never made unchecked), or when the store's
 ETag still conflicts after five
 attempts (§3.4 step 5).
@@ -3003,8 +3022,4 @@ commands.
 
 ## 11. Open questions
 
-- **Q-6. Registrar control-plane reads have no retry.** Each control-plane
-  read the registrar makes (§3.4 step 2) has a 3 s limit and no retry, so
-  the first operator read after a quiet period can answer 503 "control
-  plane cannot be read". Follow-up: retry each read once within the
-  function's 30 s budget, and log which call failed.
+None is open.

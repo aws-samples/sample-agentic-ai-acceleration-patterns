@@ -138,11 +138,12 @@ signed() {
 }
 # as ROLE_ARN METHOD PATH [JSON]: one registrar call as ROLE_ARN. A 503 whose
 # body says the control plane cannot be read is retried up to three times,
-# 5 s apart. The registrar's control-plane reads have a 3 s limit and no
-# retry, so the first operator read after a quiet period can answer it
-# (spec §11, Q-6). Each retry is noted on stderr and counted in
-# $TMP/registrar-retries for the run summary, so a run records how often it
-# happened. as runs in $(...), hence the file.
+# 5 s apart. The registrar already retries each control-plane read once
+# inside a 10 s budget (spec §3.4 step 2), so a 503 that reaches here is two
+# failed reads, as after a quiet period. The harness retry stays as a second
+# line. Each retry is noted on stderr and counted in $TMP/registrar-retries
+# for the run summary, so a run records how often it happened. as runs in
+# $(...), hence the file.
 as() {
   local st i
   assume "$1" || { echo 000; return; }
