@@ -239,8 +239,37 @@ tenant cost ≈ Σ hours [ share of accepted events × per-event cost
 Refused events and calls from unregistered roles carry no verified
 tenant. Refusals can be charged to the emitter's cell, which the `error/`
 objects and the access log name; the rest of them, and the cost of repair
-jobs (re-admission, redrives, recounts), is vendor overhead. Unit prices
-come from each service's pricing page.
+jobs (re-admission, redrives, recounts), is vendor overhead.
+
+**Cost estimate.** A rough estimate from the AWS Price List API, list
+prices for Europe (Frankfurt) on 2026-11-20, before free tiers. It assumes
+a 0.5 KB event, 100 events per ingest call, one Firehose record per event,
+one sink, and ingest calls of about 200 ms. Check it against your own
+traffic with the [AWS Pricing Calculator](https://calculator.aws/).
+
+| Cost | Unit | Estimate | Main parts |
+|---|---|---|---|
+| Per event | million events | about $0.37 | ingest bus in and out ($0.15), Firehose ingestion in 5 KB steps and dynamic partitioning ($0.17), API Gateway ($0.04), ingest Lambda ($0.02) |
+| Per event, one event per call | million events | about $4.50 | API Gateway ($3.70) and one ingest Lambda call per event take over |
+| Per record | million records | about $6 | transactional record writes and delivery updates in DynamoDB, usage bus, dispatcher queue and Lambda; each further sink adds about $2 |
+| Raw store | GB-month | $0.0245 | S3 Standard; 1 GB holds about two million events, kept for `rawRetentionDays` (400 by default) |
+| Fixed | month | about $5 | the two 5-minute schedules, the recounter, alarms, logs; $0.40 a month per `SECRET` sink |
+
+A record is one tenant, application and meter in one hour, so the record
+count depends on how many tenants are active each hour, not on how many
+events they send. For 10,000 tenants with one application and three
+meters, in the first month:
+
+| Traffic | Events a month | Records a month | Cost a month | Per tenant |
+|---|---|---|---|---|
+| 10,000 events per tenant, active eight hours on 22 working days | 100 million | 5.3 million | about $75 | under $0.01 |
+| 10,000 events per tenant, active every hour | 100 million | 21.9 million | about $175 | about $0.02 |
+| 100,000 events per tenant, active every hour | 1 billion | 21.9 million | about $520 | about $0.05 |
+| As above, one event per ingest call | 1 billion | 21.9 million | about $4,400 | about $0.44 |
+
+Batching is the largest lever: send many events per ingest call. Storage
+grows with retention: the raw store of the third row adds about 500 GB a
+month and reaches about 6.5 TB, about $160 a month, after 400 days.
 
 ## Security notes
 

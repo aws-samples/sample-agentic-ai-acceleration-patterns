@@ -316,8 +316,8 @@ tenant cost ≈ Σ over hours h:  share(t, h) × per-event cost(h)
   emitter's cell, which the `error/` objects and the access log name; the
   rest is vendor overhead.
 
-Unit prices come from each service's pricing page; the sample states no
-figures.
+Unit prices come from each service's pricing page; the README's cost
+estimate gives rough list-price figures and a 10,000-tenant example.
 
 ## 11. Deployment and teardown
 
