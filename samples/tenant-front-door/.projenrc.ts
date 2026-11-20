@@ -102,6 +102,8 @@ const buildOnlyPlaceholderContext = [
   '--context fleet=build-placeholder',
   '--context edgeOperatorRoleArn=arn:aws:iam::000000000000:role/build-placeholder-operator',
   '--context \'issuer={"clientId":"build-placeholder","scopes":"openid","cognitoDomain":"https://auth.build-placeholder.example.com"}\'',
+  // An API id no API has, so the RouteHookAccess stack synthesises under cdk-nag too.
+  '--context registrarUrl=https://0000000000.execute-api.eu-central-1.amazonaws.com/v1/',
 ].join(' ');
 // Only the build's quiet synth: `npx projen synth` stays a plain `cdk synth`,
 // so it reads a deployer's own cdk.json inputs.

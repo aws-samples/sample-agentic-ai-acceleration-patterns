@@ -45,7 +45,7 @@ function policyStatements(s: typeof single, roleLogicalIdPrefix: string): any[] 
     .flatMap(([, r]) => r.Properties.PolicyDocument.Statement);
 }
 
-describe('the four stacks of spec §3.1 (wave 1: three edge-account stacks)', () => {
+describe('the four stacks of spec §3.1', () => {
   it('puts the edge and edge logging stacks in us-east-1 and the main stack in the control plane\'s Region (ADR-0010)', () => {
     const { edgeStack, mainStack, edgeLoggingStack } = single.frontDoor;
     expect([edgeStack.stackName, mainStack.stackName, edgeLoggingStack.stackName]).toEqual(['Tfd-edge', 'Tfd-main', 'Tfd-edge-logging']);

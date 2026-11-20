@@ -8,7 +8,7 @@
  * normalised values the stacks use.
  */
 
-import { Addressing, MULTI_TENANT_CLAIM, TENANT_CLAIM } from '../shared/contracts';
+import { Addressing, MULTI_TENANT_CLAIM, REGISTRAR_URL, TENANT_CLAIM } from '../shared/contracts';
 import { SIGNIN_KID } from '../shared/route-table';
 
 /** The public Route 53 zone for `appDomain`, in the edge account (§3.6). */
@@ -92,6 +92,12 @@ export interface TenantFrontDoorInputs {
   readonly reportingEndpoint?: string;
   /** SNS topic in the main stack's account and Region, the ALARM action of every alarm. */
   readonly alarmTopicArn?: string;
+  /**
+   * The deployed registrar's stage URL, the edge parameter's `registrarUrl`
+   * (§6.4). Set, the construct adds the `RouteHookAccess` stack in the
+   * control plane's account and Region (§3.1).
+   */
+  readonly registrarUrl?: string;
 }
 
 /** An `https` origin and the full URL it came from. */
@@ -133,6 +139,7 @@ export interface ResolvedInputs {
   readonly ipRequestsPer5Min: number;
   readonly reportingEndpoint?: string;
   readonly alarmTopicArn?: string;
+  readonly registrarUrl?: string;
   /** Warnings the stacks add as annotations. */
   readonly warnings: readonly string[];
 }
@@ -155,7 +162,8 @@ const ACCOUNT = /^\d{12}$/;
 const REGION = /^[a-z]{2}(?:-[a-z]+)+-\d$/;
 const PARTITION = '(aws|aws-cn|aws-us-gov)';
 const APPLICATION_ID = /^[a-z0-9-]{1,32}$/;
-const FLEET = /^[a-z0-9-]{1,32}$/;
+/** The control plane's `fleetName` (control-plane §3.3): it names CodeBuild projects, which start with a letter or digit. */
+const FLEET = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const ZONE_ID = /^[A-Z0-9]{1,32}$/;
 const ROLE_ARN = new RegExp(`^arn:${PARTITION}:iam::(\\d{12}):role/[\\w+=,.@/-]{1,512}$`);
 const SECRET_ARN = new RegExp(`^arn:${PARTITION}:secretsmanager:([a-z0-9-]+):(\\d{12}):secret:[\\w/+=.@-]+-[A-Za-z0-9]{6}$`);
@@ -188,7 +196,7 @@ export function validateInputs(inputs: TenantFrontDoorInputs): ResolvedInputs {
   const hostedZone = validateHostedZone(inputs.hostedZone, appDomain, addressing);
 
   const applicationId = matching('applicationId', inputs.applicationId, APPLICATION_ID, '[a-z0-9-]{1,32}');
-  const fleet = matching('fleet', inputs.fleet, FLEET, '[a-z0-9-]{1,32}');
+  const fleet = matching('fleet', inputs.fleet, FLEET, '[a-z0-9][a-z0-9-]{0,31}');
 
   const roleMatch = ROLE_ARN.exec(requireString('edgeOperatorRoleArn', inputs.edgeOperatorRoleArn));
   if (roleMatch === null) {
@@ -257,6 +265,18 @@ export function validateInputs(inputs: TenantFrontDoorInputs): ResolvedInputs {
     alarmTopicArn = inputs.alarmTopicArn;
   }
 
+  let registrarUrl: string | undefined;
+  if (inputs.registrarUrl !== undefined) {
+    const url = REGISTRAR_URL.exec(requireString('registrarUrl', inputs.registrarUrl));
+    if (url === null) {
+      throw new InputError('registrarUrl', 'must be the registrar\'s stage URL, https://<api id>.execute-api.<region>.amazonaws.com/<stage>/, from the edge parameter');
+    }
+    if (url[2] !== controlPlane.region) {
+      throw new InputError('registrarUrl', 'must be in the control plane\'s Region, where the main stack deploys');
+    }
+    registrarUrl = inputs.registrarUrl;
+  }
+
   return {
     appDomain,
     hostedZone,
@@ -277,6 +297,7 @@ export function validateInputs(inputs: TenantFrontDoorInputs): ResolvedInputs {
     ipRequestsPer5Min,
     reportingEndpoint,
     alarmTopicArn,
+    registrarUrl,
     warnings,
   };
 }

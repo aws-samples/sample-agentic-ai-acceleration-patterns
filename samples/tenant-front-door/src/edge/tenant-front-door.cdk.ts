@@ -2,17 +2,23 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The `TenantFrontDoor` construct (spec §6.4): the front door's three edge
- * stacks, in their deploy order (spec §3.1, ADR-0010):
+ * The `TenantFrontDoor` construct (spec §6.4): the front door's stacks, in
+ * their deploy order (spec §3.1, ADR-0010):
  *
  * 1. `<prefix>-edge`, `us-east-1`: certificate and web ACL;
  * 2. `<prefix>-main`, the control plane's Region: distribution, router,
  *    route table, SPA bucket, registrar, published parameter;
- * 3. `<prefix>-edge-logging`, `us-east-1`: standard logging v2.
+ * 3. `<prefix>-edge-logging`, `us-east-1`: standard logging v2;
+ * 4. `<prefix>-route-hook-access`, in the control plane's account and
+ *    Region: the hook parameter and the hook policy, once `registrarUrl`
+ *    names the deployed registrar.
  *
- * All three are in the edge account, the account of `edgeOperatorRoleArn`.
- * The values cross Regions through CDK's cross-Region references. Place the
- * construct in an `App` or a `Stage`. It applies no cdk-nag aspect; its
+ * The first three are in the edge account, the account of
+ * `edgeOperatorRoleArn`. The values cross Regions through CDK's
+ * cross-Region references; nothing crosses to the control plane's account,
+ * so the fourth stack takes the registrar URL as an input, read from the
+ * edge parameter after the main stack is deployed. Place the construct in
+ * an `App` or a `Stage`. It applies no cdk-nag aspect; its
  * acknowledgements travel with it.
  */
 
@@ -21,7 +27,8 @@ import { Construct } from 'constructs';
 import { EdgeLoggingStack } from './edge-logging.cdk';
 import { EdgeStack } from './edge.cdk';
 import { TenantFrontDoorInputs, validateInputs } from './inputs';
-import { MainStack } from './main.cdk';
+import { MainStack, REGISTRAR_STAGE } from './main.cdk';
+import { parseRegistrarUrl, RouteHookAccessStack } from '../hooks/route-hook-access.cdk';
 import { Addressing } from '../shared/contracts';
 
 /** CloudFront takes certificates and web ACLs from here, and logging v2 runs here (ADR-0010). */
@@ -43,6 +50,8 @@ export class TenantFrontDoor extends Construct {
   public readonly edgeStack: EdgeStack;
   public readonly mainStack: MainStack;
   public readonly edgeLoggingStack: EdgeLoggingStack;
+  /** Present when `registrarUrl` is set. */
+  public readonly routeHookAccessStack?: RouteHookAccessStack;
 
   public readonly distributionId: string;
   public readonly distributionArn: string;
@@ -86,6 +95,22 @@ export class TenantFrontDoor extends Construct {
       crossRegionReferences: true,
       distributionArn: this.mainStack.distributionArn,
     });
+
+    if (inputs.registrarUrl !== undefined) {
+      if (parseRegistrarUrl(inputs.registrarUrl).stage !== REGISTRAR_STAGE) {
+        throw new Error(`tenant-front-door input registrarUrl must name the registrar's stage, /${REGISTRAR_STAGE}/ (spec §3.6)`);
+      }
+      this.routeHookAccessStack = new RouteHookAccessStack(this, 'RouteHookAccess', {
+        stackName: `${prefix}-route-hook-access`,
+        description: 'Tenant front door route hook access: the hook parameter and the hook policy, in the control plane\'s account (spec §3.1)',
+        env: { account: inputs.controlPlane.accountId, region: inputs.controlPlane.region },
+        applicationId: inputs.applicationId,
+        registrarUrl: inputs.registrarUrl,
+        appDomain: inputs.appDomain,
+        addressing: inputs.addressing,
+        edgeAccountId: account,
+      });
+    }
 
     this.distributionId = this.mainStack.distributionId;
     this.distributionArn = this.mainStack.distributionArn;

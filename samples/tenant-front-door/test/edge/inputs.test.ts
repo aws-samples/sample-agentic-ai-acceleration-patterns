@@ -68,6 +68,8 @@ describe('deployment inputs (spec §3.6)', () => {
     ['applicationId', 'a'.repeat(33)],
     ['fleet', 'Fleet'],
     ['fleet', ''],
+    ['fleet', '-fleet'],
+    ['fleet', 'a'.repeat(33)],
   ])('refuses %s %j (control-plane id patterns)', (key, value) => {
     expect(() => validateInputs({ ...base, [key]: value })).toThrow(new RegExp(key));
   });
