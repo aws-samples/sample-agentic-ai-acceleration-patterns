@@ -12,8 +12,10 @@
 # `stack=<name> destroy_seconds=<n>` line per stack. Stacks that are not
 # there are skipped, so a rerun after a partial teardown finishes the job.
 # After the destroy it removes the Runtime log groups a late line recreated
-# outside the stacks (ADR-0047) and fails if a stack, a Runtime log group or
-# a registry parameter with this prefix is still there.
+# outside the stacks (ADR-0047) and the log groups of the CDK provider
+# functions, which no stack owns (ADR-0052), and fails if a stack, a log group
+# the stacks owned, a Runtime log group or a registry parameter with this
+# prefix is still there.
 #
 # The seeded tenants are kept for the next run (§8.2: Cognito bills per
 # monthly active user). With --tenants, they are deleted first, at 2 a second
@@ -154,6 +156,97 @@ exists() { # STACK -> 0 when CloudFormation has it (not deleted)
 mapfile -t LIVE_AGENTS < <(aws cloudformation list-stacks --output text \
   --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED DELETE_FAILED UPDATE_ROLLBACK_FAILED ROLLBACK_FAILED \
   --query "StackSummaries[?starts_with(StackName, '${PREFIX}-agents-')].StackName" | tr '\t' '\n' | grep -v '^$' | sort -rV || true)
+
+# Log groups, collected before each destroy (the stack's resource list goes with it). ADR-0019
+# makes the construct own every log group on its path and drain late lines, so a log group a
+# stack owned that is still there after the destroy is a construct defect: the leftover check
+# reports it and nothing removes it. The one exception is a CDK provider function (the
+# driver's S3 auto-delete and default-security-group handlers, an AwsCustomResource or
+# LogRetention singleton, a provider framework's handlers): the CDK gives it no log group of
+# its own, so Lambda creates `/aws/lambda/<function>` outside the stack when it runs, on the
+# destroy too. Those groups, and only those, are removed (ADR-0052, "Teardown").
+OWNED_LOGS="${MAIN_TMP}/owned-log-groups"
+PROVIDER_LOGS="${MAIN_TMP}/provider-log-groups"
+: >"$OWNED_LOGS"
+: >"$PROVIDER_LOGS"
+PROVIDER_ID='CustomResourceProvider|^AWS679f53fac002430cb0da5b7982bd2287|^LogRetentionaae0aa3c5b4d4f87b02d85b201efdd8a|framework(onEvent|onTimeout|isComplete)'
+log_groups_of() { # STACK -> appends to OWNED_LOGS and PROVIDER_LOGS
+  aws cloudformation list-stack-resources --stack-name "$1" \
+    --query "StackResourceSummaries[?ResourceType=='AWS::Logs::LogGroup'].PhysicalResourceId" --output text 2>/dev/null \
+    | tr '\t' '\n' | grep -v -e '^$' -e '^None$' >>"$OWNED_LOGS" || true
+  aws cloudformation list-stack-resources --stack-name "$1" \
+    --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]" --output text 2>/dev/null \
+    | awk -F'\t' -v re="$PROVIDER_ID" '$1 ~ re && $2 != "" && $2 != "None" { print "/aws/lambda/" $2 }' >>"$PROVIDER_LOGS" || true
+}
+
+# leftovers: removes the provider functions' log groups and the Runtime log groups a late line
+# recreated (ADR-0047), then fails if a stack, a log group, an agent runtime or a registry
+# parameter of this slice is still there.
+leftovers() {
+  local removed=0 rt g lp left left_stacks left_params err LEFT=""
+  while read -r rt; do
+    [[ -n "$rt" && "$rt" != None ]] || continue
+    for g in $(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
+      [[ -n "$g" && "$g" != None ]] || continue
+      aws logs delete-log-group --log-group-name "$g" >/dev/null 2>&1 && removed=$((removed + 1))
+    done
+  done <"$RUNTIMES"
+  echo "runtime log groups: $(wc -l <"$RUNTIMES") runtimes, ${removed} leftover groups removed"
+  removed=0
+  while read -r g; do
+    [[ -n "$g" ]] || continue
+    if aws logs describe-log-groups --log-group-name-prefix "$g" --query "logGroups[?logGroupName=='${g}'].logGroupName" --output text 2>/dev/null | grep -q .; then
+      aws logs delete-log-group --log-group-name "$g" >/dev/null 2>&1 && removed=$((removed + 1))
+    fi
+  done <"$PROVIDER_LOGS"
+  echo "CDK provider function log groups: $(wc -l <"$PROVIDER_LOGS") functions, ${removed} groups removed"
+
+  left_stacks="$(aws cloudformation list-stacks --output text \
+    --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED DELETE_FAILED UPDATE_ROLLBACK_FAILED ROLLBACK_FAILED DELETE_IN_PROGRESS \
+    --query "StackSummaries[?StackName == '${PREFIX}-ingress' || StackName == '${PREFIX}-driver' || starts_with(StackName, '${PREFIX}-agents-')].StackName" 2>/dev/null | tr '\t' ' ' || true)"
+  [[ -z "$left_stacks" || "$left_stacks" == None ]] || LEFT="${LEFT}; stacks ${left_stacks}"
+  while read -r rt; do
+    [[ -n "$rt" && "$rt" != None ]] || continue
+    left="$(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null || true)"
+    [[ -z "$left" || "$left" == None ]] || LEFT="${LEFT}; runtime log groups ${left}"
+  done <"$RUNTIMES"
+  # The groups the stacks owned, by name; then by prefix, which also finds one a stack owned
+  # in an earlier, partial teardown. CloudFormation names an unnamed group
+  # `<stack>-<logical id>-<suffix>`; a function with no group of its own logs to
+  # `/aws/lambda/<stack>-...`; the stage's execution group is named after the REST API id.
+  # Only this slice's three stacks: the prefix is letters and digits, so `<prefix>-ingress-`
+  # cannot be another run's.
+  while read -r g; do
+    [[ -n "$g" ]] || continue
+    if aws logs describe-log-groups --log-group-name-prefix "$g" --query "logGroups[?logGroupName=='${g}'].logGroupName" --output text 2>/dev/null | grep -q .; then
+      LEFT="${LEFT}; log group ${g} (the stack owned it: a construct leak, ADR-0019)"
+    fi
+  done <"$OWNED_LOGS"
+  local prefixes=("${PREFIX}-ingress-" "${PREFIX}-agents-" "${PREFIX}-driver-"
+    "/aws/lambda/${PREFIX}-ingress-" "/aws/lambda/${PREFIX}-agents-" "/aws/lambda/${PREFIX}-driver-")
+  [[ -z "$REST_API_ID" ]] || prefixes+=("API-Gateway-Execution-Logs_${REST_API_ID}")
+  for lp in "${prefixes[@]}"; do
+    left="$(aws logs describe-log-groups --log-group-name-prefix "$lp" --query 'logGroups[].logGroupName' --output text 2>/dev/null | tr '\t' ' ' || true)"
+    [[ -z "$left" || "$left" == None ]] || LEFT="${LEFT}; log groups ${left}"
+  done
+  # A Runtime the stack created is gone when GetAgentRuntime says so; any other answer counts as left.
+  while read -r rt; do
+    [[ -n "$rt" && "$rt" != None ]] || continue
+    err="$(aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id "$rt" --query agentRuntimeId --output text 2>&1 >/dev/null || true)"
+    [[ -n "$err" && "$err" == *ResourceNotFoundException* ]] || LEFT="${LEFT}; agent runtime ${rt}"
+  done <"$RUNTIMES"
+  if [[ -n "$REGISTRY_PREFIX" ]]; then
+    left_params="$(aws ssm get-parameters-by-path --path "$REGISTRY_PREFIX" --recursive --query 'Parameters[].Name' --output text 2>/dev/null | tr '\t' ' ' || true)"
+    [[ -z "$left_params" || "$left_params" == None ]] || LEFT="${LEFT}; parameters ${left_params}"
+  fi
+  [[ -z "$LEFT" ]] || fail "leftovers after teardown${LEFT}"
+  echo "leftovers: none (stacks, log groups, agent runtimes, registry parameters)"
+}
+RUNTIME_LOG_PREFIX="/aws/bedrock-agentcore/runtimes/"
+RUNTIMES="${MAIN_TMP}/runtimes"
+: >"$RUNTIMES"
+REGISTRY_PREFIX=""
+REST_API_ID=""
 STACKS=()
 DRIVER=false
 exists "${PREFIX}-driver" && DRIVER=true
@@ -167,6 +260,7 @@ fi
 
 # The k6 host first: it is the shared driver's own app, not part of this one.
 if [[ "$DRIVER" == true ]]; then
+  log_groups_of "${PREFIX}-driver"
   echo "== destroy ${PREFIX}-driver (stress/driver/teardown.sh)"
   STRESS_PREFIX="$PREFIX" STRESS_TIER="$SCALE" "${SAMPLE_DIR}/../../stress/driver/teardown.sh" >"${MAIN_TMP}/driver.log" 2>&1 \
     || { tail -30 "${MAIN_TMP}/driver.log" >&2; fail "destroy ${PREFIX}-driver"; }
@@ -180,6 +274,7 @@ fi
 if (( ${#STACKS[@]} == 0 )); then
   rm -f "$OUTPUTS"
   echo "destroyed the driver in ${SECONDS}s; no other stack with prefix ${PREFIX}"
+  leftovers
   (( TENANTS_LEFT == 0 )) || fail "${TENANTS_LEFT} tenants were not deleted; they stay in the manifest, rerun with --tenants"
   exit 0
 fi
@@ -201,13 +296,10 @@ done
 # (the ids are gone after): the Runtime ids, whose log groups under
 # /aws/bedrock-agentcore/runtimes/<id>-* are owned by a custom resource that a
 # line written after its Delete recreates outside the stack (ADR-0047; what
-# scripts/integ.sh removes too), and the registry prefix the ingress published
-# under, to check no parameter stays behind.
-RUNTIME_LOG_PREFIX="/aws/bedrock-agentcore/runtimes/"
-RUNTIMES="${MAIN_TMP}/runtimes"
-: >"$RUNTIMES"
-REGISTRY_PREFIX=""
+# scripts/integ.sh removes too), the stacks' log groups (above), and the
+# registry prefix the ingress published under, to check no parameter stays behind.
 for s in "${STACKS[@]}"; do
+  log_groups_of "$s"
   aws cloudformation list-stack-resources --stack-name "$s" \
     --query "StackResourceSummaries[?ResourceType=='AWS::BedrockAgentCore::Runtime'].PhysicalResourceId" --output text 2>/dev/null \
     | tr '\t' '\n' | sed 's#.*/##' | grep -v '^$' >>"$RUNTIMES" || true
@@ -218,8 +310,7 @@ if exists "${PREFIX}-ingress"; then
   [[ "$REGISTRY_PREFIX" == None ]] && REGISTRY_PREFIX=""
 fi
 # The REST API id names the stage's execution log group (API-Gateway-Execution-Logs_<id>/<stage>),
-# which the stack owns and API Gateway can write to again after the delete.
-REST_API_ID=""
+# which the stack owns (ADR-0019); the leftover check looks for it by that prefix.
 if exists "${PREFIX}-ingress"; then
   REST_API_ID="$(aws cloudformation describe-stacks --stack-name "${PREFIX}-ingress" \
     --query "Stacks[0].Outputs[?OutputKey=='RestApiId'].OutputValue" --output text 2>/dev/null || true)"
@@ -237,54 +328,7 @@ for s in "${STACKS[@]}"; do
 done
 if ! exists "${PREFIX}-ingress"; then rm -f "$OUTPUTS"; fi
 
-# -- 3. what the destroy leaves: Runtime log groups removed, then a check -----
-REMOVED=0
-while read -r rt; do
-  [[ -n "$rt" && "$rt" != None ]] || continue
-  for g in $(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
-    [[ -n "$g" && "$g" != None ]] || continue
-    aws logs delete-log-group --log-group-name "$g" >/dev/null 2>&1 && REMOVED=$((REMOVED + 1))
-  done
-done <"$RUNTIMES"
-echo "runtime log groups: $(wc -l <"$RUNTIMES") runtimes, ${REMOVED} leftover groups removed"
-# The function and API log groups the stacks own (ADR-0019) can come back with a late line too.
-# Only this slice's three stacks: another run's prefix may start with `${PREFIX}-`.
-OWN_LOG_PREFIXES=("/aws/lambda/${PREFIX}-ingress-" "/aws/lambda/${PREFIX}-agents-" "/aws/lambda/${PREFIX}-driver-")
-[[ -z "$REST_API_ID" ]] || OWN_LOG_PREFIXES+=("API-Gateway-Execution-Logs_${REST_API_ID}")
-REMOVED=0
-for lp in "${OWN_LOG_PREFIXES[@]}"; do
-  for g in $(aws logs describe-log-groups --log-group-name-prefix "$lp" --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
-    [[ -n "$g" && "$g" != None ]] || continue
-    aws logs delete-log-group --log-group-name "$g" >/dev/null 2>&1 && REMOVED=$((REMOVED + 1))
-  done
-done
-echo "function and API log groups: ${REMOVED} leftover groups removed"
-
-LEFT=""
-left_stacks="$(aws cloudformation list-stacks --output text \
-  --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED DELETE_FAILED UPDATE_ROLLBACK_FAILED ROLLBACK_FAILED DELETE_IN_PROGRESS \
-  --query "StackSummaries[?StackName == '${PREFIX}-ingress' || StackName == '${PREFIX}-driver' || starts_with(StackName, '${PREFIX}-agents-')].StackName" 2>/dev/null | tr '\t' ' ' || true)"
-[[ -z "$left_stacks" || "$left_stacks" == None ]] || LEFT="${LEFT}; stacks ${left_stacks}"
-while read -r rt; do
-  [[ -n "$rt" && "$rt" != None ]] || continue
-  left="$(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null || true)"
-  [[ -z "$left" || "$left" == None ]] || LEFT="${LEFT}; runtime log groups ${left}"
-done <"$RUNTIMES"
-for lp in "${OWN_LOG_PREFIXES[@]}"; do
-  left="$(aws logs describe-log-groups --log-group-name-prefix "$lp" --query 'logGroups[].logGroupName' --output text 2>/dev/null || true)"
-  [[ -z "$left" || "$left" == None ]] || LEFT="${LEFT}; log groups ${left}"
-done
-# A Runtime the stack created is gone when GetAgentRuntime says so; any other answer counts as left.
-while read -r rt; do
-  [[ -n "$rt" && "$rt" != None ]] || continue
-  err="$(aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id "$rt" --query agentRuntimeId --output text 2>&1 >/dev/null || true)"
-  [[ -n "$err" && "$err" == *ResourceNotFoundException* ]] || LEFT="${LEFT}; agent runtime ${rt}"
-done <"$RUNTIMES"
-if [[ -n "$REGISTRY_PREFIX" ]]; then
-  left_params="$(aws ssm get-parameters-by-path --path "$REGISTRY_PREFIX" --recursive --query 'Parameters[].Name' --output text 2>/dev/null | tr '\t' ' ' || true)"
-  [[ -z "$left_params" || "$left_params" == None ]] || LEFT="${LEFT}; parameters ${left_params}"
-fi
-[[ -z "$LEFT" ]] || fail "leftovers after teardown${LEFT}"
-echo "leftovers: none (stacks, log groups, agent runtimes, registry parameters)"
+# -- 3. what the destroy leaves -------------------------------------------
+leftovers
 echo "destroyed $(( ${#STACKS[@]} + $([[ "$DRIVER" == true ]] && echo 1 || echo 0) )) stacks in ${SECONDS}s"
 (( TENANTS_LEFT == 0 )) || fail "${TENANTS_LEFT} tenants were not deleted; they stay in the manifest, rerun with --tenants"

@@ -125,8 +125,9 @@ function cleanId(raw) {
  * setup(): the shared token stage with this sample's entry fields. conversationId is per
  * tenant (`stress<run><tenant index>`), shared by the tenant's users: with session scope
  * `tenant` that is one Runtime session per tenant, which keeps a large run under the Runtime's
- * 2,500 active sessions. CONVERSATION_RUN_ID reuses an earlier run's conversations (S2: warm
- * microVMs behind a cold ingress).
+ * 2,500 active sessions. Every scenario of a run shares the run id, so S2 reuses the
+ * conversations S1 opened (warm microVMs behind a cold ingress); CONVERSATION_RUN_ID names
+ * another run's conversations instead.
  */
 export function setupTokens(manifest, tier, opts = {}) {
   const convRun = cleanId(env('CONVERSATION_RUN_ID', RUN_ID));

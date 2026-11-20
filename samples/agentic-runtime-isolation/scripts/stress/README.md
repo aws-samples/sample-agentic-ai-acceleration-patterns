@@ -27,7 +27,8 @@ STRESS_PREFIX=StressRi ./run.sh run --tier small --slices agentic-runtime-isolat
 The runner prints the verdict and writes
 `~/.aaa-stress/<prefix>/<run id>/results.md`; the verbs' output is in `run.log`
 beside it. Run `small` first, `medium` only when `small` passes, and `large`
-only when `medium` passes. `--scenarios S1,S3` runs some of the seven.
+only when `medium` passes. `--scenarios S1,S3` runs some of the seven; S2
+reuses the conversations S1 opens, so it runs only after S1 in the same run.
 
 ## Before you start
 
@@ -40,53 +41,58 @@ only when `medium` passes. `--scenarios S1,S3` runs some of the seven.
   `app/use` and `entitlements/admin` when they are missing and leaves them, and
   stops with a message if the deployment is missing.
 - `STRESS_PREFIX` of 1 to 40 letters and digits, not starting with
-  `TenantIdentity`. It names the stacks (`<prefix>-ingress`, `<prefix>-agents-<k>`,
-  `<prefix>-driver`).
+  `TenantIdentity`. It names the stacks (`<prefix>-ingress`,
+  `<prefix>-agents-<k>`, `<prefix>-driver`).
 - `--limits` with the account's real quotas when they are above the service
   defaults (`stress/README.md`). At `large` the Lambda concurrency quota must be
-  raised to about 2,500 first: the budget refuses the run otherwise.
+  raised to at least 1,900 first (both reserves plus the 100 Lambda keeps
+  unreserved, the budget's draw): the budget refuses the run otherwise.
 - Check the user pool's monthly active users for the month before seeding:
   every user that gets a token is one MAU (plan §10.2).
 - `bash`, the AWS CLI v2, `curl` 7.75 or later, `jq`, `node` and `npm` (the
-  slice runs `npm ci` and `smithy build` once on a fresh checkout), `git`.
+  slice runs `npm ci` and `smithy build` once on a fresh checkout), `git`, and
+  GNU `date` (teardown paces its deletes in milliseconds).
 
 ## The verbs
 
 `slice.sh` implements the six verbs of the contract. The runner calls them;
 each also runs by hand with the runner's `STRESS_*` variables set
-(`stress/README.md`).
+(`stress/README.md`). A verb refuses an argument it does not take, and a runner
+variable it needs that is not set, with exit code 2.
 
 | Verb | Does |
 |---|---|
 | `budget` | prints the tier's draws on six quotas, no credentials (`test/stress/slice-cli.ts`) |
 | `deploy` | `deploy.sh`: checks the identity deployment; deploys `<prefix>-ingress`, then the agents stacks one at a time, then `<prefix>-driver` through `stress/driver/deploy.sh`; prints `stack=<name> deploy_seconds=<n>` and the `PolicySecondsToActive*` outputs |
 | `seed` | `seed.sh`: reuses or creates the tier's tenants at 4 a second, subscribes the active ones to every agent and tool target, creates their users, writes one demo-table row per tenant; prints counts, wall seconds and the status histogram |
-| `run S1..S7` | `stress/driver/k6.sh` runs the scenario's k6 script on the driver host; the script writes `agentic-runtime-isolation.S<n>.json`; `S2` first retires every warm Lambda instance, flushes the authoriser cache and idles 60 s; every scenario starts at most 3 s into a minute and at least 3 s past the last recorded scenario's CloudWatch minutes (`window.sh`) |
+| `run S1..S7` | `stress/driver/k6.sh` runs the scenario's k6 script on the driver host; the script writes `agentic-runtime-isolation.S<n>.json`; `S2` refuses to start without S1's record in this run, then retires every warm Lambda instance, flushes the authoriser cache and idles 60 s; every scenario starts at most 3 s into a minute and at least 3 s past the last recorded scenario's CloudWatch minutes (`window.sh`); exits non-zero when a k6 threshold fails (isolation, positive control, S3 delivery) |
 | `collect` | `collect.sh`: for each record, Logs Insights and the k6 summary over the record's window, CloudWatch metrics over its whole minutes (start minute to one past the end minute; per-minute datapoints kept in `<scenario>/cloudwatch/`); fills `refusals` (P-7), `latency.ingress` and `quotas` in the record; appends the pass table to `design/stress-results/<YYYY-MM-DD>-<tier>.md` in this checkout (so a run leaves that file new or changed; commit it with the run, as earlier runs' files are; "Commit tested" is the runner's `STRESS_COMMIT`) after a redaction check that refuses any 12-digit number, any tenant id, tenant name or user name from the manifest, `eyJ` and `https://`; exits 1 on a failed row |
-| `teardown [--fixtures]` | `teardown.sh`: deletes the seeded tenants (at `small` and `medium`, or with `--fixtures`), destroys driver, agents and ingress stacks in that order, removes the Runtime, function and API log groups a late line recreated, and fails if a stack, a log group, an agent runtime or a registry parameter with the prefix is left |
+| `teardown [--fixtures]` | `teardown.sh`: deletes the seeded tenants (at `small` and `medium`, or with `--fixtures`), destroys driver, agents and ingress stacks in that order, removes the Runtime log groups a late line recreated and the log groups of the CDK provider functions, which no stack owns, and fails if a stack, a log group a stack owned, any other log group with the stacks' names, an agent runtime or a registry parameter with the prefix is left |
 
 `attribute.jq` is the P-7 step of `collect`: the refusals the hops log with a
 tenant, matched by count with the 4xx and 5xx the driver counted. Each tenant's
 429 lines count at most up to the driver's own 429 count for that tenant
-(`tenant_429{tenant:<id>}` in the k6 summary). What no line accounts for is
-`unattributed`, and one unattributed refusal fails the run. `noisy.jq` is S3's
-row: the noisy tenant (named by `s3-noisy.js` on k6's stderr) is refused, and
-every other tenant has 0 429. `delivered.jq` is S3's delivery row: the steady
-VUs sent at least 95 % of `steadyRps × seconds`. `window.sh` holds the window
-maths `slice.sh run` and `collect` share (ADR-0052, "CloudWatch windows").
+(`tenant_429{tenant:<id>}` in the k6 summary, read by `caps.jq`). What no line
+accounts for is `unattributed`, and one unattributed refusal fails the run.
+`noisy.jq` is S3's row: the noisy tenant (named by `s3-noisy.js` on k6's
+stderr) is refused, and every other tenant has 0 429. `delivered.jq` is S3's
+delivery row: the steady VUs sent at least 95 % of `steadyRps × seconds`.
+`window.sh` holds the window maths `slice.sh run` and `collect` share
+(ADR-0052, "CloudWatch windows").
 
-State lives in `$STRESS_HOME/$STRESS_PREFIX/agentic-runtime-isolation/` (default
-`~/.aaa-stress/<prefix>/agentic-runtime-isolation/`): `outputs.json` (stack
-outputs), `manifest.json` (tenant ids, names and user names; never a token or a
-password), `timings.txt` (deploy and destroy seconds, and the driver host's
-ready seconds) and `pending.jsonl`. Without `STRESS_STATE_DIR` the
+State lives in `$STRESS_HOME/$STRESS_PREFIX/agentic-runtime-isolation/`
+(default `~/.aaa-stress/<prefix>/agentic-runtime-isolation/`): `outputs.json`
+(stack outputs), `manifest.json` (tenant ids, names and user names; never a
+token or a password), `timings.txt` (deploy and destroy seconds, and the driver
+host's ready seconds) and `pending.jsonl`. Without `STRESS_STATE_DIR` the
 scripts use `~/.runtime-isolation-stress/<prefix>/` instead, for a run by hand.
 
 ## By hand, step by step
 
-For debugging one step, with the scripts directly. Set `STRESS_SCALE` (`small`,
-`medium` or `large`) and `STRESS_PREFIX` (default `RuntimeIsolationStress`); there
-is no runner, so no record is written and `run` and `collect` are not available.
+For debugging one step, with the scripts directly. Set `STRESS_SCALE`
+(`small`, `medium` or `large`) and `STRESS_PREFIX` (default
+`RuntimeIsolationStress`); there is no runner, so no record is written and
+`run` and `collect` are not available.
 
 ```bash
 export AWS_REGION=eu-central-1 STRESS_SCALE=small
@@ -122,13 +128,13 @@ functions to retire warm instances, and `run S2` does the same; the next
 
 ## Tenant reuse
 
-At `small` and `medium` every run seeds and deletes its tenants (stress ADR-0004).
-At `large` the seeded tenants and their users are a fixture: Cognito bills per
-monthly active user and each user counts once a month however often it signs in,
-so `seed.sh` reads the manifest, checks each listed tenant still exists, drops the
-ones that do not, and creates only what is missing. Teardown keeps them unless
-`--fixtures` is passed, and is idempotent from the manifest: a run that died is
-cleaned up by running it again.
+At `small` and `medium` every run seeds and deletes its tenants (stress
+ADR-0004). At `large` the seeded tenants and their users are a fixture: Cognito
+bills per monthly active user and each user counts once a month however often
+it signs in, so `seed.sh` reads the manifest, checks each listed tenant still
+exists, drops the ones that do not, and creates only what is missing. Teardown
+keeps them unless `--fixtures` is passed, and is idempotent from the manifest:
+a run that died is cleaned up by running it again.
 
 Wait for the Runtime's idle timeout after the last scenario before
 teardown, or the stack delete waits on the live sessions.
@@ -145,18 +151,19 @@ Estimates from the plan; the scripts print the measured figures.
 | `count.sh` | about 2 min | about 3 min | about 6 min |
 | `run`, each scenario | 1 min plus token set-up | 3 min plus token set-up | the plan's §5 figures, 5 to 10 min plus warm-up |
 | `collect` | 150 s settle plus about 1 min a scenario | the same | a few minutes a scenario |
-| `teardown` | about 15 min (832 s and 878 s measured 2026-11-19, tenants included) | about 15 min | about 30 min; the tenants add 21 min |
+| `teardown` | about 15 min, tenants included | about 15 min | about 30 min; the tenants add 21 min |
 | `cost.sh` | seconds, the next day | seconds, the next day | seconds, the next day |
 
 ## Also
 
 - The driver host and its helpers are shared and live in `stress/driver/`
-  (stress ADR-0007, ADR-0009): `deploy` and `teardown` call its `deploy.sh` and
-  `teardown.sh`, and `STRESS_PREFIX=<prefix> stress/driver/host.sh '<command>'` runs
-  one shell command on the host through Run Command and prints its output
-  (read back from the results bucket); a debugging aid, nothing listens on the host.
+  (stress ADR-0007, ADR-0009): `deploy` and `teardown` call its `deploy.sh`
+  and `teardown.sh`. `STRESS_PREFIX=<prefix> stress/driver/host.sh '<command>'`
+  runs one shell command on the host through Run Command and prints its output
+  (read back from the results bucket); a debugging aid, nothing listens on the
+  host.
 - `large` reserves 800 + 1,000 Lambda concurrency (ADR-0049): the account's
-  Lambda concurrency quota must be at least about 2,500 before `deploy` at that
+  Lambda concurrency quota must be at least 1,900 before `deploy` at that
   scale, or CloudFormation refuses the reserve.
 - In the platform run (`STRESS_MODE=platform`) every verb but `budget` refuses
   until the control plane deploys this sample as a cell (W-5).

@@ -9,23 +9,24 @@
 // tenant in a `noisy_tenant` line on k6's stderr for it.
 //
 // One timed scenario of VUS + NOISY_VUS VUs, each pacing itself. VU ids 1..VUS carry the
-// steady load, the rest the noisy load. Two concurrent arrival-rate scenarios (the first
-// version) draw their VUs from k6's one pool in no fixed order, so the steady VUs' ids were
-// not 1..VUS and adopt()'s `(id - 1) % slots` gave some tenants two owners and others none;
-// and with 19 tenants over 10 slots one slot held a single tenant, which got a whole VU's
-// rate. Both pushed a steady tenant to its limit (2026-11-19: 77 requests in a minute, 17
-// of them 429). Here the ids are fixed, and each steady VU's rate is its owned tenants'
-// share of the steady rate divided by the VUs sharing its slot, so every steady tenant gets
-// steadyRps / tenants.
+// steady load, the rest the noisy load. The ids must be fixed: adopt() gives the tenants to
+// VU slots by `(id - 1) % slots`, and k6 hands out VUs of concurrent scenarios from one pool
+// in no fixed order, so two arrival-rate scenarios would give some steady tenants two owners
+// and others none. And a slot can hold fewer tenants than another (19 tenants over 10 slots),
+// so a VU's rate is its owned tenants' share of the steady rate divided by the VUs sharing
+// its slot (noisy-pace.js), which gives every steady tenant steadyRps / tenants and keeps
+// each under its per-tenant limit (ADR-0052, "S3 delivery").
 //
 // A VU that falls behind its pace skips the requests it missed rather than bursting, and
 // counts them (`iteration_skipped{reason:behind}`). `steady_sent` counts the steady requests
-// sent and `steady_expected` holds steadyRps x seconds; collect.sh fails the scenario when the
-// steady VUs sent more than 5 % under it (delivered.jq).
+// sent and `steady_expected` holds steadyRps x seconds; a threshold fails the scenario when
+// the steady VUs sent more than 5 % under it, and collect.sh reports the same bound
+// (delivered.jq).
 
 import { sleep } from 'k6';
 import exec from 'k6/execution';
 import { Counter } from 'k6/metrics';
+import { minSteadySent, noisyIntervalMs, steadyPace } from './noisy-pace.js';
 import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds, adopt, iterationSkipped } from './probe.js';
 
 const tier = loadTier();
@@ -64,7 +65,7 @@ export const options = buildOptions(
   },
   p,
   mode,
-  { 'iteration_skipped{reason:behind}': ['count>=0'] },
+  { 'iteration_skipped{reason:behind}': ['count>=0'], steady_sent: [`count>=${minSteadySent(rate * seconds)}`] },
 );
 
 export function setup() {
@@ -84,19 +85,20 @@ export function warmup(data) {
   }
 }
 
-/** Milliseconds between two of this VU's requests (see the header). */
+/** Milliseconds between two of this VU's requests (see the header and noisy-pace.js). */
 function intervalMs(data) {
-  const id = exec.vu.idInTest;
   if (!isSteady()) {
-    return (60000 * noisyVus) / noisyPerMinute;
+    return noisyIntervalMs(noisyVus, noisyPerMinute);
   }
   const tenants = new Set(data.entries.filter(steadyOnly).map((e) => e.tenantIndex)).size;
+  const share = steadyPace(exec.vu.idInTest, { vus, slots, tenants, rate, seconds });
+  // noisy-pace.js mirrors adopt()'s split; a VU that owns other tenants than it computed for
+  // would send the wrong rate, so the scenario stops instead.
   const owned = new Set(adopt(data, 'steady', slots, steadyOnly).map((e) => e.tenantIndex)).size;
-  const s = Math.max(1, Math.min(slots, tenants));
-  const slot = (id - 1) % s;
-  const sharers = Math.floor((vus - 1 - slot) / s) + 1;
-  const perVuRps = ((rate / tenants) * owned) / sharers;
-  return perVuRps > 0 ? 1000 / perVuRps : 1000 * seconds;
+  if (owned !== share.owned) {
+    exec.test.abort(`s3-noisy: VU ${exec.vu.idInTest} owns ${owned} tenants, noisy-pace.js computed ${share.owned}`);
+  }
+  return share.intervalMs;
 }
 
 const pace = {};

@@ -16,7 +16,8 @@
 #     minute (joined against served per tenant-minute), 5xx refusals, and
 #     `sdk retried` sum(attempts - 1) by service (§7.1);
 #   - CloudWatch: API Gateway Count/4XXError/5XXError/Latency, Lambda
-#     Throttles/ConcurrentExecutions for the authoriser and the ingress function,
+#     Throttles/ConcurrentExecutions for the authoriser and the ingress function, the
+#     account-level Lambda ConcurrentExecutions (what the concurrency quota caps),
 #     DynamoDB ThrottledRequests on the entitlement store, over the scenario's own whole
 #     minutes (window.sh metric_window: its start minute to one past its end minute; slice.sh
 #     starts the next scenario after them), the per-minute datapoints kept in cloudwatch/;
@@ -24,15 +25,16 @@
 # It fills the record's late fields, only in records this run wrote and nobody else
 # changed (the runner checks): `refusals` (the driver's refusals matched with the
 # hops' lines, attribute.jq), `latency.ingress` and `latency.ingress-ttfb`, and the
-# Lambda concurrency in `quotas`. `cost` stays absent: Cost Explorer settles a day
-# later, cost.sh reads it then.
+# account's peak Lambda concurrency in `quotas`. `cost` stays absent: Cost Explorer
+# settles a day later, cost.sh reads it then.
 #
 # It also appends one section per scenario to design/stress-results/<YYYY-MM-DD>-<scale>.md
 # in this checkout (a run leaves that file changed or new, to commit with the run's result;
-# "Commit tested" is STRESS_COMMIT, the commit the runner tested) after a redaction check (no 12-digit number, no tenant id, tenant name or user name
-# from the manifest, no `eyJ`, no `https://`), prints the pass table, and exits 1 when
-# a row fails, so the run fails with it. Raw query results stay in the run folder
-# (`<run folder>/agentic-runtime-isolation/<scenario>/`). Conventions: scripts/CONVENTIONS.md.
+# "Commit tested" is STRESS_COMMIT, the commit the runner tested) after a redaction check
+# (no 12-digit number, no tenant id, tenant name or user name from the manifest, no `eyJ`,
+# no `https://`), prints the pass table, and exits 1 when a row fails, so the run fails
+# with it. Raw query results stay in `<run folder>/agentic-runtime-isolation/<scenario>/`.
+# Conventions: scripts/CONVENTIONS.md.
 
 # Functions run from the trap and through pf; the backticks in printf formats are literal Markdown.
 # shellcheck disable=SC2329,SC2016
@@ -87,8 +89,8 @@ mkdir -p -m 700 "$RAW_DIR"
 
 # shellcheck source=window.sh
 source "${SCRIPT_DIR}/window.sh"
-iso() { date -u -d "@$1" +%FT%TZ; }
-epoch() { date -u -d "$1" +%s; }
+iso() { epoch_iso "$1"; }
+epoch() { iso_epoch "$1" || fail "not a UTC ISO 8601 timestamp in a record: '$1'"; }
 
 # Log delivery and Logs Insights indexing lag the request by up to about two
 # minutes; a query run right after the run undercounts (seen 2026-11-09: 117
@@ -135,16 +137,17 @@ insights() {
   echo "  insights ${name}: $(jq length "${OUT}/insights-${name}.json") rows"
 }
 
-# metric KEY NAMESPACE NAME STAT DIMENSIONS... -> the sum (Sum) or the max (Maximum, Average)
+# metric KEY NAMESPACE NAME STAT [DIMENSIONS...] -> the sum (Sum) or the max (Maximum, Average)
 # over the scenario's metric minutes [MSTART, MEND); the per-minute datapoints go to
-# $OUT/cloudwatch/KEY.json.
+# $OUT/cloudwatch/KEY.json. No dimension is the account-level metric.
 metric() {
-  local key="$1" ns="$2" name="$3" stat="$4" agg raw
+  local key="$1" ns="$2" name="$3" stat="$4" agg raw dims=()
   shift 4
+  (( $# == 0 )) || dims=(--dimensions "$@")
   [[ "$stat" == Sum ]] && agg='add // 0' || agg='max // 0'
   raw="${OUT}/cloudwatch/${key}.json"
   aws cloudwatch get-metric-statistics --namespace "$ns" --metric-name "$name" --statistics "$stat" --period 60 \
-    --start-time "$(iso "$MSTART")" --end-time "$(iso "$MEND")" --dimensions "$@" --output json \
+    --start-time "$(iso "$MSTART")" --end-time "$(iso "$MEND")" ${dims[@]+"${dims[@]}"} --output json \
     | jq --arg s "$stat" '{label: .Label, stat: $s, datapoints: (.Datapoints | map({minute: .Timestamp, value: .[$s]}) | sort_by(.minute))}' >"$raw" \
     || fail "get-metric-statistics ${key}"
   jq "[.datapoints[].value] | ${agg}" "$raw"
@@ -193,7 +196,7 @@ collect_one() {
   insights refused_5xx 'filter message = "request refused" and status >= 500 | fields ispresent(tenantId) as withTenant | stats count(*) as n by status, reason, withTenant' "$LOG_GROUP"
   insights retried 'filter message = "sdk retried" | fields attempts - 1 as extra, ispresent(error) as failedAll | stats sum(extra) as retries, count(*) as lines, sum(failedAll) as exhausted by service' "$LOG_GROUP"
   # P-7: every refusal the driver saw is a `request refused` line with a tenant, from the
-  # authoriser (entitlement, grant, limit) or the ingress (limit, backend, mint). A refusal
+  # authoriser (backend, entitlement, grant) or the ingress (limit, backend, mint). A refusal
   # no line accounts for is unattributed (attribute.jq).
   insights refused_by_reason 'filter message = "request refused" | stats count(*) as n by tenantId, reason, status | limit 10000' "$LOG_GROUP" "$AUTHORIZER_LOG_GROUP"
   # Per-tenant cost attribution (P-10, plan §11.2): the figures the `request served` line
@@ -221,15 +224,19 @@ collect_one() {
     --argjson ingThr "$(metric ingress-throttles AWS/Lambda Throttles Sum Name=FunctionName,Value="$INGRESS_FN")" \
     --argjson authConc "$(metric authorizer-concurrency AWS/Lambda ConcurrentExecutions Maximum Name=FunctionName,Value="$AUTHORIZER_FN")" \
     --argjson ingConc "$(metric ingress-concurrency AWS/Lambda ConcurrentExecutions Maximum Name=FunctionName,Value="$INGRESS_FN")" \
+    --argjson acctConc "$(metric account-concurrency AWS/Lambda ConcurrentExecutions Maximum)" \
     --argjson ddb "$ddb" \
-    '{apiGateway: {count: $count, "4xx": $e4, "5xx": $e5, latencyMaxMs: $lat, latencyAvgMaxMs: $lat_avg},
-      lambda: {authorizerThrottles: $authThr, ingressThrottles: $ingThr, authorizerConcurrencyMax: $authConc, ingressConcurrencyMax: $ingConc},
+    '{apiGateway: {count: $count, "4xx": $e4, "5xx": $e5, latencyMaxMs: ($lat * 10 | round / 10), latencyAvgMaxMs: ($lat_avg * 10 | round / 10)},
+      lambda: {authorizerThrottles: $authThr, ingressThrottles: $ingThr, authorizerConcurrencyMax: $authConc, ingressConcurrencyMax: $ingConc,
+               accountConcurrencyMax: $acctConc},
       dynamodb: {entitlementsThrottledRequests: $ddb}}' >"${OUT}/metrics.json"
   echo "  $(jq -c . "${OUT}/metrics.json")"
 
   # The k6 summary `run` kept (SUMMARY_PATH, brought back by stress/driver/k6.sh).
   SUMMARY="${K6_DIR}/$(k6_name "$SCENARIO").summary.json"
+  local HAVE_SUMMARY=1
   if [[ ! -s "$SUMMARY" ]]; then
+    HAVE_SUMMARY=0
     echo '{"metrics": {}}' >"${LIB_TMP}/empty.json"
     SUMMARY="${LIB_TMP}/empty.json"
   fi
@@ -247,7 +254,8 @@ collect_one() {
     --argjson pcf "$(k6m positive_control_fail count)" \
     --argjson s429 "$(k6m status_429 count)" \
     --argjson seen "$(k6m refusals_seen count)" \
-    '{requests: $reqs, durationP90Ms: $p90, ttfbP90Ms: $wait90, failedRate: ($failed // $failedRate),
+    'def r($d): if . == null then null else (. * $d | round) / $d end;
+    {requests: $reqs, durationP90Ms: ($p90 | r(10)), ttfbP90Ms: ($wait90 | r(10)), failedRate: ($failed // $failedRate | r(10000)),
       isolationMismatch: $mismatch, positiveControlFail: $pcf, status429: $s429, refusalsSeen: $seen}')"
 
   # -- assemble -------------------------------------------------------------
@@ -259,9 +267,9 @@ collect_one() {
     def num: if . == null then 0 else tonumber end;
     ($sbm[0] | map({key: "\(.tenantId)|\(.minute)", value: (.n | num)}) | from_entries) as $servedAt
     | {window: $w, k6: $k6, metrics: $m,
-       served: ($served[0][0] // {} | map_values(tonumber? // .)),
+       served: ($served[0][0] // {} | map_values((tonumber? // .) | if type == "number" then (. * 10 | round) / 10 else . end)),
        mintHitRatio: (($mint[0] | map(select(.mint == "hit") | .n | num) | add // 0) as $h
-                      | ($mint[0] | map(.n | num) | add // 0) as $t | if $t == 0 then null else ($h / $t) end),
+                      | ($mint[0] | map(.n | num) | add // 0) as $t | if $t == 0 then null else ($h / $t * 1000 | round) / 1000 end),
        refused429: ($r429[0] | map(.n | num) | add // 0),
        refused429Untagged: ($r429[0] | map(select((.tenantId // "") == "") | .n | num) | add // 0),
        # A 429 in a minute where the tenant had under 60 served requests. The
@@ -292,29 +300,33 @@ collect_one() {
   v() { jq -r "$1" "$C"; }
 
   # -- the record's late fields (P-7, §6) -----------------------------------
-  # `seen` is every 4xx and 5xx the driver counted: the record's own `refusals.unattributed`
-  # as k6 wrote it, before this step. A collect run twice would read the first answer, so the
-  # k6 summary's own count wins when it is there.
-  local SEEN CAPS ATT LAT Q
-  SEEN="$(v '.k6.refusalsSeen // empty')"
-  [[ -n "$SEEN" ]] || SEEN="$(jq -r '.refusals.unattributed' "$record")"
+  # `seen` is every 4xx and 5xx the driver counted, from the k6 summary (k6 leaves out a
+  # counter nothing added to, so a summary without `refusals_seen` means 0). The record's own
+  # `refusals.unattributed` is no substitute: a first collect overwrites it with its residual,
+  # so a second collect would credit the logged lines against that. Without the summary the
+  # record's `refusals` stays as k6 wrote it and the P-7 row fails.
+  local SEEN="" CAPS ATT LAT Q
+  (( HAVE_SUMMARY == 0 )) || SEEN="$(v '.k6.refusalsSeen // 0')"
   # The driver's 429s per tenant (`tenant_429{tenant:<id>}`, one threshold per tenant in
   # probe.js buildOptions). A summary without them caps every tenant at 0: fail closed.
-  CAPS="$(jq -c '.metrics // {} | to_entries
-    | map(select(.key | test("^tenant_429\\{tenant:[^}]+\\}$"))
-          | {key: (.key | capture("^tenant_429\\{tenant:(?<t>[^}]+)\\}$").t), value: ((.value.values // .value).count // 0)})
-    | from_entries' "$SUMMARY")"
-  ATT="$(jq -n --argjson seen "$SEEN" --argjson caps "$CAPS" --slurpfile rows "${OUT}/insights-refused_by_reason.json" -f "${SCRIPT_DIR}/attribute.jq")"
+  CAPS="$(jq -c -f "${SCRIPT_DIR}/caps.jq" "$SUMMARY")"
+  if [[ -n "$SEEN" ]]; then
+    ATT="$(jq -n --argjson seen "$SEEN" --argjson caps "$CAPS" --slurpfile rows "${OUT}/insights-refused_by_reason.json" -f "${SCRIPT_DIR}/attribute.jq")"
+  else
+    ATT="$(jq -c '.refusals' "$record")"
+  fi
   LAT="$(jq -c '
     def sec: ((. // "0") | tonumber) / 1000;
     def ord($a; $b; $c): {p50: ($a | sec), p95: ([($b | sec), ($a | sec)] | max)} | . + {p99: ([($c | sec), .p95] | max)};
     (.served // {}) as $s
     | if ($s.served // 0 | tonumber) == 0 then {}
       else {ingress: ord($s.totalP50; $s.totalP95; $s.totalP99), "ingress-ttfb": ord($s.ttfbP50; $s.ttfbP95; $s.ttfbP99)} end' "$C")"
-  Q="$(jq -c '{"cell-account-1": {"lambda-concurrency": ((.metrics.lambda.authorizerConcurrencyMax // 0) + (.metrics.lambda.ingressConcurrencyMax // 0))}}' "$C")"
+  # The account's peak concurrency over the scenario's minutes: the figure the Lambda
+  # concurrency quota caps, every function in the account included.
+  Q="$(jq -c '{"cell-account-1": {"lambda-concurrency": (.metrics.lambda.accountConcurrencyMax // 0)}}' "$C")"
   jq --argjson att "$ATT" --argjson lat "$LAT" --argjson q "$Q" '.refusals = $att | .latency += $lat | .quotas = $q' "$record" >"${record}.new"
   mv "${record}.new" "$record"
-  echo "  record: refusals seen ${SEEN}, attributed $(jq '[.byTenantReason[].count] | add // 0' <<<"$ATT"), unattributed $(jq .unattributed <<<"$ATT")"
+  echo "  record: refusals seen ${SEEN:-unknown (no k6 summary)}, attributed $(jq '[.byTenantReason[].count] | add // 0' <<<"$ATT"), unattributed $(jq .unattributed <<<"$ATT")"
 
   # -- the pass table (§4) --------------------------------------------------
   ROWS="${LIB_TMP}/rows"
@@ -336,20 +348,22 @@ collect_one() {
     if zero "$MISMATCH" && awk -v a="$PCF" -v b="$PCF_LIMIT" 'BEGIN { exit !(a <= b) }'; then verdict=PASS; fi
     row "Cross-tenant mismatch (§6)" "mismatch ${MISMATCH}, positive-control failures ${PCF} (limit ${PCF_LIMIT})" "$verdict"
   fi
-  local E5 R5T LT
+  local E5 R5T LT REASONS
   E5="$(v '.metrics.apiGateway["5xx"]')"
   R5T="$(v .refused5xxWithTenant)"
   LT="$(v '(.metrics.lambda.authorizerThrottles // 0) + (.metrics.lambda.ingressThrottles // 0)')"
+  # The 5xx refusals by status and reason, as " (502 tvm_failed=3, ...)", or nothing when there are none.
+  REASONS="$(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ") | if . == "" then "" else " (\(.))" end')"
   if [[ "$SCENARIO" == S6 ]]; then
-    row "5xx from the ingress" "API Gateway 5xx ${E5}; refusals naming a tenant ${R5T} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")'))" \
+    row "5xx from the ingress" "API Gateway 5xx ${E5}; refusals naming a tenant ${R5T}${REASONS}" \
       "$(pf awk -v a="$E5" -v b="$R5T" 'BEGIN { exit !(a <= b) }')"
   elif [[ "$SCENARIO" == S2 ]]; then
     # The herd may throttle the ingress Lambda (finding F-1 in the plan); each throttle is an
     # API Gateway 500 with no log line. The P-7 row is the binding check: it fails on any 5xx
     # no line names a tenant for, so this row only reports the counts.
-    row "5xx from the ingress" "API Gateway 5xx ${E5}; refusals naming a tenant ${R5T}; Lambda throttles ${LT} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")')); P-7 is the check" INFO
+    row "5xx from the ingress" "API Gateway 5xx ${E5}; refusals naming a tenant ${R5T}; Lambda throttles ${LT}${REASONS}; P-7 is the check" INFO
   else
-    row "5xx from the ingress" "API Gateway 5xx ${E5} ($(v '.refused5xxReasons | to_entries | map("\(.key)=\(.value)") | join(", ")'))" "$(pf zero "$E5")"
+    row "5xx from the ingress" "API Gateway 5xx ${E5}${REASONS}" "$(pf zero "$E5")"
   fi
   local R429 K429
   R429="$(v .refused429)"; K429="$(v '.k6.status429 // "n/a"')"
@@ -361,20 +375,22 @@ collect_one() {
   row "429 attribution" "logged 429 ${R429} over $(v .tenants429) tenants, untagged $(v .refused429Untagged), tenant-minutes under the limit $(v .refused429UnderLimit), k6 429 ${K429}" "$verdict"
   if [[ "$SCENARIO" == S3 ]]; then
     # Plan §5: the noisy tenant is refused, every other tenant gets 0 429. setup() in
-    # s3-noisy.js names the noisy tenant on k6's stderr.
+    # s3-noisy.js names the noisy tenant in a console line; k6 writes that to stderr, and
+    # stress/driver/k6.sh keeps stdout and stderr together in <script>.k6-stdout.txt.
     local NOISY="" NOISY_OUT K6_OUT="${K6_DIR}/$(k6_name S3).k6-stdout.txt"
     if [[ -s "$K6_OUT" ]]; then
       NOISY="$(sed -n 's/.*msg="\(.*\)".*/\1/p' "$K6_OUT" | sed 's/\\"/"/g' \
         | jq -rR 'fromjson? | select(.kind? == "noisy_tenant") | .tenantId // empty' | awk 'NR == 1')"
     fi
     NOISY_OUT="$(jq -nc --arg noisy "$NOISY" --slurpfile rows "${I}/insights-refused_429.json" -f "${SCRIPT_DIR}/noisy.jq")"
-    row "429 only on the noisy tenant (S3)" "noisy tenant $([[ -n "$NOISY" ]] && echo named || echo 'not named by k6'), its 429 $(jq .noisy429 <<<"$NOISY_OUT"); 429 on other tenants $(jq .others429 <<<"$NOISY_OUT") over $(jq .otherTenants <<<"$NOISY_OUT") tenants" \
+    row "429 only on the noisy tenant (S3)" "noisy tenant $([[ -n "$NOISY" ]] && echo named || echo 'not named by k6'), its 429 $(jq .noisy429 <<<"$NOISY_OUT"); 429 on other tenants $(jq .others429 <<<"$NOISY_OUT") over $(jq .otherTenants <<<"$NOISY_OUT") tenants, of them on lines without a tenant $(jq .untagged429 <<<"$NOISY_OUT")" \
       "$([[ "$(jq .pass <<<"$NOISY_OUT")" == true ]] && echo PASS || echo FAIL)"
   fi
   if [[ "$SCENARIO" == S3 ]]; then
     # Plan §5: the steady tenants get steadyRps for the scenario. A self-paced VU that falls
     # behind skips the requests it missed (s3-noisy.js counts them); more than 5 % under the
-    # expected count fails (delivered.jq).
+    # expected count fails (delivered.jq). s3-noisy.js holds the same bound as a k6 threshold,
+    # so `run S3` fails on it too.
     local DEL
     DEL="$(jq -c -f "${SCRIPT_DIR}/delivered.jq" "$SUMMARY")"
     row "S3 steady load delivered (under 5 % short)" "sent $(jq .sent <<<"$DEL") of $(jq .expected <<<"$DEL") steady requests ($(jq .shortPct <<<"$DEL") % short); requests skipped behind pace, steady and noisy VUs, $(jq .behind <<<"$DEL")" \
@@ -387,8 +403,12 @@ collect_one() {
   else
     row "CloudWatch minutes this scenario's own" "$(iso "$MSTART") to $(iso "$MEND"), $(( (MEND - MSTART) / 60 )) minutes, none shared with another scenario" PASS
   fi
-  row "Refusals attributed to a tenant (P-7)" "driver saw ${SEEN}; logged with a tenant $(jq '[.byTenantReason[].count] | add // 0' <<<"$ATT") over $(jq '[.byTenantReason[].tenant] | unique | length' <<<"$ATT") tenants; unattributed $(jq .unattributed <<<"$ATT")" \
-    "$(pf zero "$(jq .unattributed <<<"$ATT")")"
+  if [[ -z "$SEEN" ]]; then
+    row "Refusals attributed to a tenant (P-7)" "no k6 summary for ${SCENARIO}: the driver's refusal count is unknown, nothing attributed" FAIL
+  else
+    row "Refusals attributed to a tenant (P-7)" "driver saw ${SEEN}; logged with a tenant $(jq '[.byTenantReason[].count] | add // 0' <<<"$ATT") over $(jq '[.byTenantReason[].tenant] | unique | length' <<<"$ATT") tenants; unattributed $(jq .unattributed <<<"$ATT")" \
+      "$(pf zero "$(jq .unattributed <<<"$ATT")")"
+  fi
   local STS KMS
   STS="$(v '.sdkRetried.sts.retries // 0')"; KMS="$(v '.sdkRetried.kms.retries // 0')"
   if [[ "$SCENARIO" == S2 ]]; then
@@ -399,9 +419,9 @@ collect_one() {
   row "KMS Sign throttles (sdk retried)" "retries ${KMS}" "$(pf zero "$KMS")"
   LT=$(( $(v .metrics.lambda.authorizerThrottles | cut -d. -f1) + $(v .metrics.lambda.ingressThrottles | cut -d. -f1) ))
   if [[ "$SCENARIO" == S2 ]]; then
-    row "Lambda Throttles" "${LT} (concurrency max authoriser $(v .metrics.lambda.authorizerConcurrencyMax), ingress $(v .metrics.lambda.ingressConcurrencyMax)); counted for the herd (F-1)" "INFO"
+    row "Lambda Throttles" "${LT} (concurrency max authoriser $(v .metrics.lambda.authorizerConcurrencyMax), ingress $(v .metrics.lambda.ingressConcurrencyMax), account $(v .metrics.lambda.accountConcurrencyMax)); counted for the herd (F-1)" "INFO"
   else
-    row "Lambda Throttles" "${LT} (concurrency max authoriser $(v .metrics.lambda.authorizerConcurrencyMax), ingress $(v .metrics.lambda.ingressConcurrencyMax))" "$(pf zero "$LT")"
+    row "Lambda Throttles" "${LT} (concurrency max authoriser $(v .metrics.lambda.authorizerConcurrencyMax), ingress $(v .metrics.lambda.ingressConcurrencyMax), account $(v .metrics.lambda.accountConcurrencyMax))" "$(pf zero "$LT")"
   fi
   local DDB TTFB90
   DDB="$(v .metrics.dynamodb.entitlementsThrottledRequests)"

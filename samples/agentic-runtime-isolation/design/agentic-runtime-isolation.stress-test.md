@@ -78,7 +78,8 @@ Pass criteria, every scenario:
 | Lambda `Throttles` | 0 |
 | DynamoDB `ThrottledRequests` (entitlement store, `TenantLimits`) | 0 |
 | CloudWatch minutes this scenario's own | the CloudWatch rows read the scenario's start minute to one minute past its end minute (API Gateway stamps a minute late); the next scenario starts after them (ADR-0052) |
-| S3 steady load delivered | the steady VUs sent at least 95 % of `steadyRps × seconds`; a VU that falls behind its pace skips and counts the requests it missed (`iteration_skipped{reason:behind}`) |
+| 429 only on the noisy tenant (S3) | the noisy tenant, named by `s3-noisy.js`, is refused at least once; every other tenant has 0 429, lines without a tenant included (§5) |
+| S3 steady load delivered | the steady VUs sent at least 95 % of `steadyRps × seconds`, a k6 threshold of `run S3` and a row of `collect`; a VU that falls behind its pace skips and counts the requests it missed (`iteration_skipped{reason:behind}`) |
 | p90 TTFB, `report` probe, warm | within 1.5x of the single-tenant `perf.sh` figure of the same day |
 | p90 TTFB flat | the 1,000-tenant steady run and a 100-tenant run differ by under 20 % |
 | Per-tenant cost attribution (P-10) | every `request served` line carries a `tenantId` and `backendInvokeSeconds`; 0 served lines without a tenant; the per-tenant sum equals the run's backend time, and the day's sum tracks the Runtime line in Cost Explorer (§11.2) |
@@ -123,7 +124,7 @@ to disk or to the k6 summary.
 | Scenario | Shape | What it stresses | Watch |
 |---|---|---|---|
 | S1 steady | 1,000 tenants, 4 users each, 500 rps, `report` probe, one warm conversation per VU (warmed at 20 new conversations a second, about 3.5 min, untimed), 10 min | the authoriser cache, the grant, the mint cache, the TVM cache | p50/p90 TTFB, 5xx, mint hit rate (`mint` on `request served`) |
-| S2 thundering herd | an instance-free ingress (the §13 question 2 recipe: new Lambda instances, the authoriser cache flushed, 60 s idle), then 0 to 800 rps in 5 s, 1,000 tenants, 2 min, on the warm conversations of the last S1 run (F-2) | cold-start fan-out: new instances × tenants each on STS; SSM cold reads; KMS `Sign` on first mint | STS throttles, Lambda cold starts, `registry_unavailable`, TTFB max |
+| S2 thundering herd | an instance-free ingress (the §13 question 2 recipe: new Lambda instances, the authoriser cache flushed, 60 s idle), then 0 to 800 rps in 5 s, 1,000 tenants, 2 min, on the warm conversations S1 opened in the same run (F-2) | cold-start fan-out: new instances × tenants each on STS; SSM cold reads; KMS `Sign` on first mint | STS throttles, Lambda cold starts, `registry_unavailable`, TTFB max |
 | S3 noisy neighbour | S1 plus one tenant at 600 rpm (10x its limit) for 5 min | the per-tenant limit as the fairness control; the stage throttle behind it | that tenant: 429 after 60 requests in each minute, 2x at a minute boundary at most (ADR-0020); every other tenant: 0 429, p90 unchanged against S1 |
 | S4 tool storm | 200 rps of `tool crm/get_account {}` across 1,000 tenants, 5 min | KMS `Sign` one per admitted `tools/call`; the gateway's 10 rps per tenant; the REQUEST interceptor's TVM | KMS throttles, gateway 429 per tenant, interceptor duration |
 | S5 long streams | `stream 60` at 12 rps across 500 tenants, 5 min | Lambda concurrency held for the whole stream (12 × 60 = 720 of the 800 reserved) | `ConcurrentExecutions`, `Throttles` as it approaches 800, stream breaks (`stream interrupted`) |
@@ -211,17 +212,26 @@ scripts/stress/
   seed.sh            Phase 1 steps 1.2 and 1.3; writes tenant ids and usernames to a local manifest (no tokens)
   count.sh           Phase 1 steps 1.4 to 1.7
   slice.json         the slice declaration: S1 to S7 and the quotas it draws on (ADR-0052)
-  slice.sh           the six verbs of the platform stress contract; run calls stress/driver/k6.sh
+  slice.sh           the six verbs of the platform stress contract; run calls stress/driver/k6.sh; the budget and the sample's tier come from test/stress/slice-cli.ts
+  window.sh          the window maths slice.sh run and collect.sh share: a scenario's CloudWatch minutes, the next scenario's start, ISO timestamps
   attribute.jq       P-7: the refusals the hops log with a tenant, matched with the driver's count
+  caps.jq            the driver's 429 count per tenant from the k6 summary, for attribute.jq
+  noisy.jq           S3: the noisy tenant is refused and no other tenant is
+  delivered.jq       S3: the steady VUs sent at least 95 % of steadyRps x seconds
   k6/
     probe.js         the ingress call, the probes and their isolation assertions, warm-up and step (token refresh, pacing and counters are in stress/k6/lib.js)
+    noisy-pace.js    S3's pacing arithmetic, no k6 import (test/stress/slice.test.ts checks it)
     s1-steady.js ... s7-eviction.js
   collect.sh         Section 7 for each record's window; fills the record's late fields; prints the pass table
   cost.sh            the next day: Cost Explorer cost by service, run day against a baseline day (§10.1)
-  teardown.sh        deletes the seeded tenants at 2 a second (4 in flight, up to three passes), then the stacks; prints the destroy times
+  teardown.sh        deletes the seeded tenants at 2 a second (4 in flight, up to three passes), then the stacks, then the log groups no stack owns; checks nothing is left; prints the destroy times
 ```
 
-Since W-3 the scripts run as a slice of the platform stress contract (ADR-0052): `stress/run.sh run --tier <tier> --slices agentic-runtime-isolation` calls `slice.sh` for `deploy`, `seed`, `run S1`..`S7`, `collect` and `teardown`, and `run.sh` is gone. `collect` writes each record's late fields; the pass table gains S3's `429 only on the noisy tenant` (plan §5: every other tenant 0 429) and `S3 steady load delivered` (at most 5 % under `steadyRps × seconds`), and every scenario's `CloudWatch minutes this scenario's own` (§4). The scenario ids are `S1` to `S7`.
+The scripts run as a slice of the platform stress contract (ADR-0052): the
+runner, `stress/run.sh run --tier <tier> --slices agentic-runtime-isolation`,
+calls `slice.sh` for `deploy`, `seed`, `run S1`..`S7`, `collect` and
+`teardown`. `run` fails on k6's thresholds; `collect` fills each record's late
+fields and decides the §4 pass table from the settled logs and metrics.
 
 The driver host and the shared k6 library are the repository's stress assets, `stress/driver/` and `stress/k6/` (stress ADR-0007, ADR-0008, ADR-0009). This slice deploys the host through `stress/driver/deploy.sh` and keeps only its own calls and assertions, in `k6/probe.js`.
 
@@ -273,7 +283,7 @@ the default.
 | Scenario length | 1 min | 3 min | 10 min |
 | `stageThrottle` | 100 / 50 | 300 / 150 | 1,200 / 600 |
 | `ingressReservedConcurrency` | 50 | 200 | 800 |
-| `authorizerReservedConcurrency` (ADR-0049) | 40 | 400 | 1,000 (F-17: the account's Lambda quota raised to about 2,500 first) |
+| `authorizerReservedConcurrency` (ADR-0049) | 40 | 400 | 1,000 (F-17: the account's Lambda quota raised to at least 1,900 first) |
 | Driver instance | `t3.large` | `c6i.xlarge` | `c6i.4xlarge` (F-14) |
 
 Every tier sets `stageThrottle.rateLimit` above at least one reserve, so
@@ -336,7 +346,7 @@ synthesised into `cdk.stress.out/` (gitignored), as `integ.sh` does.
 | `count.sh` | Phase 1 steps 1.4 to 1.7 at the tier's size | the step table |
 | `slice.sh run S1..S7` (`slice.sh`) | runs `stress/driver/k6.sh` on the scenario's script: it mirrors `k6/` and the shared `stress/k6/` on the host at their repository-relative paths, passes the seed manifest as an input file and the sample's tier as `STRESS_TIER_JSON`, runs k6 through Run Command and brings the records and the k6 summary back; `S2` first applies the §13 recipe (env marker on the authoriser, the ingress function and every interceptor; `flush-stage-authorizers-cache`; 60 s idle) | the scenario's record and its counters |
 | `slice.sh collect` (`collect.sh`) | for each record, over the window it names: Logs Insights on the ingress and authoriser log groups (`request served` percentiles, `request refused` by tenant, reason and status (each tenant's 429 lines credited up to the driver's `tenant_429` count for it), 429 by tenant and minute, `sdk retried` sums by service), CloudWatch metrics (API Gateway, Lambda, DynamoDB), the k6 summary; fills the record's `refusals` (P-7), `latency.ingress` and `quotas`; writes `design/stress-results/<YYYY-MM-DD>-<scale>.md` after a redaction check (`[0-9]{12}`, tenant ids and user names from the manifest, `eyJ`, `https://`) | the pass table |
-| `slice.sh teardown [--fixtures]` (`teardown.sh [--tenants]`) | destroys driver, agents, ingress stacks in that order (concurrency 1); with `--tenants`, first deletes the manifest's tenants at 2 a second, 4 in flight, in up to three passes | one line per stack: name, destroy seconds |
+| `slice.sh teardown [--fixtures]` (`teardown.sh [--tenants]`) | `slice.sh` passes `--tenants` when the tier onboards every run (`small`, `medium`) or on `--fixtures`, and keeps the seeded fleet at `large` (ADR-0052); destroys driver, agents, ingress stacks in that order (concurrency 1); with `--tenants`, first deletes the manifest's tenants at 2 a second, 4 in flight, in up to three passes; after the destroy removes the Runtime log groups a late line recreated (ADR-0047) and the CDK provider functions' log groups, which no stack owns, and fails on any stack, log group a stack owned (ADR-0019), other log group with the stacks' names, agent runtime or registry parameter left | one line per stack: name, destroy seconds; the leftover check |
 
 **k6** (`stress/k6/lib.js`, the shared library, and `scripts/stress/k6/probe.js`, this sample's probes). `lib.js` exports `setupTokens(manifest,
 tier)` (SigV4 `IssueToken` on the platform API with k6's `SignatureV4`,
@@ -349,7 +359,8 @@ assertions, and the counter `positive_control_fail`.
 `s1-steady.js`..`s7-eviction.js` read `__ENV.STRESS_TIER_JSON` (JSON) and `__ENV.MANIFEST`
 (path), apply the §5 shapes at the tier's rate and length, and write
 `summary.json` with `handleSummary`. The pass table is computed in
-`collect.sh`, not in k6.
+`collect.sh`; k6's thresholds also fail `run` on a mismatch, the positive
+control and S3's delivery (ADR-0052, "Pass criteria").
 
 **Order of work.** The three pieces (stacks, scripts, k6) are independent
 against this contract; each is built and unit-tested on its own, then
@@ -466,10 +477,10 @@ served. What the runs found beyond that:
 | F-11 | tenant-identity holds two Cognito groups per tenant (`t-<id>`, `admin-<id>`) and a user pool holds 10,000 groups, a hard quota: one pool caps at 5,000 tenants. Two seeds killed mid-run left 2,822 tenants' groups with no tenant row, which `DeleteTenant` cannot remove (404); they were removed with `DeleteGroup` by hand | the `tenant-identity` sample and `seed.sh` | the large tier seeds 4,000 tenants; `seed.sh` checks the pool's group headroom first and folds the manifest every 50 tenants; the spec's "10,000s of tenants" needs more than one pool (an issuer per pool on the ingress's `multiTenant` list), which the plan should say |
 | F-12 | `ingressReservedConcurrency` takes concurrency away from the authoriser. At `large` the integration Lambda held 800 of the account's 1,000; the REQUEST authoriser lived in the 194 left, shared with every other function in the account. S1 at 500 rps ran clean for ten minutes, then the 5-minute token refresh made 4,000 authoriser cache misses in one burst: 520 authoriser throttles, 520 bare 500s (no tenant, no reason), while the authoriser's own concurrency peaked at 30 and the ingress Lambda's at 338 of its 800 | the sample's `api-gateway` ingress | the construct should reserve for the authoriser too (or size the prop as a pair), and `architecture.md` Scale limits should say that the authoriser's peak is the token-refresh burst, about active users / cache TTL, not the request rate. Candidate for an ADR with F-1 |
 | F-13 | 4,000 live tokens on a 5-minute access-token life need 13.3 refreshes a second against tenant-identity's `/token` route at 20 rps, burst 40; with the issue traffic on the same family the driver saw 2,338 refresh failures and 1,255 issue failures in S1, and skipped 542,000 iterations for tenants whose token had lapsed. The sustained rate was well under the planned 500 rps for stretches of the run | the stress driver against the shared identity fixture | the large tier needs fewer live tokens (1,000 tenants x 1 user, refresh at 3.3 rps) or a longer access-token life on a dedicated pool; the plan's §5 refresh arithmetic assumed the throttle was the only bound and ignored the burst shape |
-| F-14 | k6 at the herd's 1,600 VUs (800 rps x 2) ran the `c6i.2xlarge` out of memory while initialising VUs ("1258/1600 VUs initialized" was its last line); the SSM agent died with it and the host was unreachable until a reboot. Each VU is a JavaScript runtime holding the k6 library and the token entries | the stress driver | fewer VUs per rps (`VU_PER_RPS` 0.5 for the herd), the token entries shared through k6's `SharedArray` instead of copied per VU, and a `c6i.4xlarge` or `r6i.2xlarge` for `large`; `run.sh` should fail the run when the SSM ping is lost instead of waiting |
+| F-14 | k6 at the herd's 1,600 VUs (800 rps x 2) ran the `c6i.2xlarge` out of memory while initialising VUs ("1258/1600 VUs initialized" was its last line); the SSM agent died with it and the host was unreachable until a reboot. Each VU is a JavaScript runtime holding the k6 library and the token entries | the stress driver | fewer VUs per rps (`VU_PER_RPS` 0.5 for the herd), the token entries shared through k6's `SharedArray` instead of copied per VU, and a `c6i.4xlarge` or `r6i.2xlarge` for `large`; `stress/driver/k6.sh` fails the run when the host's SSM ping stays lost for 3 minutes (`stress/driver/host.sh`) instead of waiting |
 | F-15 | The STS `AssumeRole` ceiling, measured. The herd (S2 large, 800 rps on cold instances, 1,000 tenants) made 14,349 STS retries the SDK absorbed and 1,336 it did not, each a 502 `tvm_failed` with the tenant and the reason; the peak (S6, 1,000 rps) 14,386 and 2,917. Steady state (S1, 500 rps) had none; eviction (S7, 2,000 tenants against the 1,000-entry TVM cache) three. The `sdk retried` line (§7.1) is what made the absorbed ones visible | the sample, the account's 600 rps STS quota | the ingress behaves as designed (refusals name the tenant and the reason); the plan's cold-start fan-out formula holds. The README's scale section should carry the measured figures and name the mitigations already listed (reserved concurrency to bound the fan-out, `tvm.includeUserIdTag` off, a quota increase) |
 | F-16 | At 1,000 rps (S6) the authoriser throttled again, 577 times, as F-12 predicted: with 800 reserved for the ingress function the authoriser shares 194 with the account. Bare 500s | the sample | the same fix as F-12 |
-| F-17 | The first ADR-0049 formula (live tokens / 60 x 2) undersized the authoriser reserve by a factor of 30: a refresh burst lands on cold instances at about 900 ms a call (p99 of the burst minute), not the warm 20 ms, so 1,000 misses in a few seconds need about 1,000 concurrent. The rerun with the reserve at 34 pinned the authoriser's concurrency at 34 and threw 40 (S1) and 369 (S6) throttles: the reserve had become the cap. Formula and warning amended; `large` now reserves 1,000 for the authoriser, which with the 800 for the integration Lambda exceeds the account's default pool, so the Lambda concurrency quota must be raised to about 2,500 before the tier deploys | the sample (ADR-0049, amended) and the test account's quota | the rerun needs the quota increase first |
+| F-17 | The first ADR-0049 formula (live tokens / 60 x 2) undersized the authoriser reserve by a factor of 30: a refresh burst lands on cold instances at about 900 ms a call (p99 of the burst minute), not the warm 20 ms, so 1,000 misses in a few seconds need about 1,000 concurrent. The rerun with the reserve at 34 pinned the authoriser's concurrency at 34 and threw 40 (S1) and 369 (S6) throttles: the reserve had become the cap. Formula and warning amended; `large` now reserves 1,000 for the authoriser, which with the 800 for the integration Lambda exceeds the account's default pool, so the Lambda concurrency quota must be raised to at least 1,900 (both reserves plus the 100 Lambda keeps unreserved, the slice's budget draw) before the tier deploys | the sample (ADR-0049, amended) and the test account's quota | the rerun needs the quota increase first |
 | F-8 | An integ run deletes the vendor scopes it registered on the shared identity deployment at its end, so a stress deploy after an integ run finds no `app/use` | shared fixture | `deploy.sh` registers the two vendor scopes when missing and leaves them |
 
 ## 11.2 Cost of a run, and cost per tenant
@@ -536,7 +547,7 @@ with the stacks), so the first per-tenant figures come from the next run.
    each interceptor retires every warm instance. The authoriser result cache
    lives in API Gateway, keyed on `Authorization` and the path, TTL at most
    60 s (ADR-0043): `aws apigateway flush-stage-authorizers-cache` empties
-   it at once. `slice.sh run S2` does both, then waits 60 s with no traffic (so
-   nothing re-warms an instance), then fires. Running S2 right after
+   it at once. `slice.sh run S2` does both, then waits 60 s with no traffic
+   (so nothing re-warms an instance), then fires. Running S2 right after
    `deploy.sh` is the same state with a longer wait; the recipe lets S2
    rerun without a deploy.

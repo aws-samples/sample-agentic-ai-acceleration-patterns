@@ -11,7 +11,7 @@
 #   slice.sh seed                    the tier's tenants, users, subscriptions and demo rows (seed.sh)
 #   slice.sh run <scenario>          S1 to S7: k6 on the driver host, one record per scenario
 #   slice.sh collect                 the late fields of this run's records, from the hops' logs (collect.sh)
-#   slice.sh teardown [--fixtures]   destroys the stacks; tenants go with them unless the tier keeps a fleet
+#   slice.sh teardown [--fixtures]   destroys the stacks, and the tenants at small and medium or on --fixtures
 #
 # In slice mode the slice deploys its own cell: one ingress with the tier's agents
 # and tool targets (the sample's tier table, test/stress/tiers.ts, which takes the
@@ -38,7 +38,7 @@ SAMPLE_REL="samples/agentic-runtime-isolation"
 verb="${1:-}"
 [[ $# -eq 0 ]] || shift
 
-for name in STRESS_TIER STRESS_TIER_JSON STRESS_PREFIX STRESS_HOME STRESS_MODE; do
+for name in STRESS_TIER STRESS_TIER_JSON STRESS_PREFIX STRESS_HOME STRESS_MODE STRESS_RUN_ID; do
   if [[ -z "${!name:-}" ]]; then
     echo "slice.sh: ${name} is not set" >&2
     exit 2
@@ -107,18 +107,39 @@ need_slice_mode() {
   fi
 }
 
+# no_args VERB ARG... -> exits 2 when the verb got an argument it does not take.
+no_args() {
+  local v="$1"
+  shift
+  if (( $# > 0 )); then
+    echo "slice.sh ${v}: unexpected argument '$1' (usage: slice.sh ${v})" >&2
+    exit 2
+  fi
+}
+
+# need_var VERB NAME... -> exits 2 when a runner variable the verb reads is not set.
+need_var() {
+  local v="$1" n
+  shift
+  for n in "$@"; do
+    [[ -n "${!n:-}" ]] || { echo "slice.sh ${v}: ${n} is not set" >&2; exit 2; }
+  done
+}
+
 # output KEY -> a stack output the deploy recorded.
 output() { jq -r --arg k "$1" '.[$k] // empty' "${STRESS_STATE_DIR}/outputs.json"; }
 need() { local v; v="$(output "$1")"; [[ -n "$v" ]] || { echo "slice.sh: output $1 missing from the deploy's outputs; run deploy first" >&2; exit 1; }; printf '%s' "$v"; }
 
 case "$verb" in
   budget)
+    no_args budget "$@"
     ensure_installed --no-install
     slice_cli budget
     ;;
 
   deploy)
     need_slice_mode
+    no_args deploy "$@"
     need_region
     ensure_installed
     ensure_built
@@ -128,6 +149,7 @@ case "$verb" in
 
   seed)
     need_slice_mode
+    no_args seed "$@"
     need_region
     ensure_installed
     mkdir -p -m 700 "$STRESS_STATE_DIR"
@@ -136,9 +158,11 @@ case "$verb" in
 
   run)
     need_slice_mode
-    need_region
-    ensure_installed
-    scenario="${1:?slice.sh run: a scenario id (S1 to S7)}"
+    if (( $# != 1 )); then
+      echo "slice.sh run: one scenario id (S1 to S7), got $#: usage slice.sh run <S1..S7>" >&2
+      exit 2
+    fi
+    scenario="$1"
     case "$scenario" in
       S1) k6_file=s1-steady.js ;;
       S2) k6_file=s2-herd.js ;;
@@ -149,7 +173,16 @@ case "$verb" in
       S7) k6_file=s7-eviction.js ;;
       *) echo "slice.sh run: unknown scenario ${scenario} (S1 to S7)" >&2; exit 2 ;;
     esac
-    : "${STRESS_RESULTS:?slice.sh run: STRESS_RESULTS is not set}"
+    need_var run STRESS_RESULTS
+    # S2 is a cold-ingress test on warm conversations: it reuses the ones S1 opened in this run
+    # (the run id names them). Without them every tenant opens a new Runtime session at the
+    # herd rate, which tests the Runtime's session-creation quota instead (plan F-2).
+    if [[ "$scenario" == S2 && ! -s "${STRESS_RESULTS}/agentic-runtime-isolation.S1.json" ]]; then
+      echo "slice.sh run S2: no agentic-runtime-isolation.S1.json in ${STRESS_RESULTS}; S2 reuses the conversations S1 opens in the same run, so run S1 first (--scenarios S1,S2)" >&2
+      exit 2
+    fi
+    need_region
+    ensure_installed
     manifest="${STRESS_STATE_DIR}/manifest.json"
     [[ -s "$manifest" ]] || { echo "slice.sh run: no ${manifest}; seed did not run" >&2; exit 1; }
 
@@ -178,8 +211,7 @@ case "$verb" in
     # S2 starts from an instance-free ingress (stress-test plan §13, question 2): a new
     # environment marker retires every warm Lambda instance, the authoriser cache is
     # flushed, and 60 s of no traffic lets the old instances go. The marker is put back
-    # when the scenario ends (a stack left with it drifts from its template). S2 reuses
-    # the conversations S1 opened: every scenario of a run shares the run id that names them.
+    # when the scenario ends (a stack left with it drifts from its template).
     # marker_restore holds FUNCTION|FILE, FILE the environment to put back (a mode-600 temp
     # file, passed as file:// so no value shows in the process list).
     marker_restore=()
@@ -220,20 +252,20 @@ case "$verb" in
       sleep 60
     fi
 
-    # The per-tenant limit is a fixed one-minute window (ADR-0020): a scenario that starts in
-    # the minute the previous one filled inherits its 429s (S4 after S3, 2026-11-09). And
-    # collect.sh reads CloudWatch by whole minutes, one past the scenario's last (API Gateway
-    # stamps a minute late): a scenario that starts inside the previous one's minutes mixes
-    # their metrics (S4 carried S3's 4XX, 2026-11-19). So start on a fresh minute, past the
-    # last recorded scenario's metric window (window.sh, ADR-0052).
+    # Two fixed-minute measures follow one scenario into the next: the per-tenant limit is a
+    # one-minute window (ADR-0020), so a scenario that starts in the minute the previous one
+    # filled inherits its 429s; and collect.sh reads CloudWatch by whole minutes, one past the
+    # scenario's last (API Gateway stamps a minute late), so a scenario that starts inside the
+    # previous one's minutes mixes their metrics. So start on a fresh minute, past the last
+    # recorded scenario's metric window (window.sh, ADR-0052).
     # shellcheck source=window.sh
     source "${here}/window.sh"
     prev_end=0
     shopt -s nullglob
     for r in "${STRESS_RESULTS}"/agentic-runtime-isolation.S[1-7].json; do
-      end_iso="$(jq -r '.window.end // empty' "$r" 2>/dev/null)" || continue
-      [[ -n "$end_iso" ]] || continue
-      e="$(date -u -d "$end_iso" +%s 2>/dev/null)" || continue
+      end_iso="$(jq -er '.window.end' "$r" 2>/dev/null)" \
+        || { echo "slice.sh run: ${r} has no window.end; cannot space ${scenario} after it" >&2; exit 1; }
+      e="$(iso_epoch "$end_iso")" || { echo "slice.sh run: ${r}: window.end is not a timestamp" >&2; exit 1; }
       if (( e > prev_end )); then prev_end=$e; fi
     done
     shopt -u nullglob
@@ -259,16 +291,22 @@ case "$verb" in
 
   collect)
     need_slice_mode
+    no_args collect "$@"
+    need_var collect STRESS_RESULTS STRESS_COMMIT
     need_region
     "${here}/collect.sh"
     ;;
 
   teardown)
     need_slice_mode
+    fixtures=0
+    case "$#:${1:-}" in
+      0:) ;;
+      1:--fixtures) fixtures=1 ;;
+      *) echo "slice.sh teardown: unexpected argument '$1' (usage: slice.sh teardown [--fixtures])" >&2; exit 2 ;;
+    esac
     need_region
     ensure_built
-    fixtures=0
-    [[ "${1:-}" != "--fixtures" ]] || fixtures=1
     # The run's tenants go with it when the tier onboards every run (small, medium: stress
     # ADR-0004) or on --fixtures; at `large` the seeded fleet stays, as the fixture it is.
     tenants=()

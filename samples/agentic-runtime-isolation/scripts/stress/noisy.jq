@@ -10,7 +10,8 @@
 # ingress's 429 lines. The answer holds counts only, never a tenant id:
 #   noisy429:     429s for the noisy tenant
 #   others429:    429s for any other tenant, untagged lines included
-#   otherTenants: how many other tenants got one
+#   otherTenants: how many other tenants, by id, got one
+#   untagged429:  429s on lines with no tenant id (part of others429)
 #   pass:         noisy tenant known, refused at least once, and others429 is 0
 
 def num: tonumber? // 0;
@@ -18,10 +19,12 @@ def num: tonumber? // 0;
 ($rows[0] // []) as $r
 | ($r | map(select($noisy != "" and .tenantId == $noisy))) as $hit
 | ($r | map(select($noisy == "" or .tenantId != $noisy))) as $rest
+| ($rest | map(select((.tenantId // "") == ""))) as $untagged
 | ($hit | map(.n | num) | add // 0) as $mine
 | {
     noisy429: $mine,
     others429: ($rest | map(.n | num) | add // 0),
-    otherTenants: ($rest | map(.tenantId // "") | unique | length),
+    otherTenants: ($rest | map(.tenantId // "" | select(. != "")) | unique | length),
+    untagged429: ($untagged | map(.n | num) | add // 0),
   }
 | .pass = ($noisy != "" and .noisy429 > 0 and .others429 == 0)

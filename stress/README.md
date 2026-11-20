@@ -95,9 +95,9 @@ the host through Run Command and reads its output from the results bucket.
 `driver/k6.sh <script> [NAME=value ...]` runs a k6 script on the host: it mirrors `stress/k6/` and
 the script's folder under `/opt/stress/repo/` at their repository paths, passes the `STRESS_*`
 variables, and brings the result records back to `$STRESS_RESULTS`. A slice's `run` verb calls it
-(the runtime-isolation slice's `run` verb does). The library, the
-record it writes and the correlation header are described in [`k6/README.md`](./k6/README.md);
-`k6/smoke.js` is the check that a deployed host runs k6 and writes a record `parseRecord` accepts.
+(the runtime-isolation slice's `run` verb does). The library, the record it writes and the
+correlation header are described in [`k6/README.md`](./k6/README.md); `k6/smoke.js` is the
+check that a deployed host runs k6 and writes a record `parseRecord` accepts.
 
 ## Run it
 

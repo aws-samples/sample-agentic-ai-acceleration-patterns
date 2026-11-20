@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as vm from 'node:vm';
 import { CELL_ACCOUNT, drawsOf } from './slice-cli';
 import { STRESS_TIERS } from './tiers';
 import { overdraws, parseDraws, sumDraws } from '../../../../stress/src/budget';
@@ -15,6 +16,15 @@ const STRESS_DIR = path.join(__dirname, '..', '..', 'scripts', 'stress');
 const SLICE_SH = path.join(STRESS_DIR, 'slice.sh');
 const declaration = parseDeclaration(fs.readFileSync(path.join(STRESS_DIR, 'slice.json'), 'utf8'), 'slice.json');
 const hasJq = spawnSync('jq', ['--version']).status === 0;
+
+type Pace = { owned: number; sharers: number; rps: number; intervalMs: number };
+/** k6/noisy-pace.js has no k6 import, so it runs here as it is, with its `export` keywords dropped. */
+const PACE: {
+  steadyPace?: (id: number, o: { vus: number; slots: number; tenants: number; rate: number; seconds: number }) => Pace;
+  noisyIntervalMs?: (vus: number, perMinute: number) => number;
+  minSteadySent?: (expected: number) => number;
+} = {};
+vm.runInNewContext(fs.readFileSync(path.join(STRESS_DIR, 'k6', 'noisy-pace.js'), 'utf8').replace(/^export /gm, ''), PACE);
 
 /** The environment the runner gives a verb (stress/README.md), for one tier. */
 function sliceEnv(tier: 'small' | 'medium' | 'large', extra: Record<string, string> = {}): NodeJS.ProcessEnv {
@@ -125,6 +135,166 @@ describe('slice.sh', () => {
     const unknown = spawnSync('bash', [SLICE_SH, 'restart'], { env: sliceEnv('small'), encoding: 'utf8' });
     expect(unknown.status).toBe(2);
   });
+
+  it('refuses a missing STRESS_RUN_ID, and the variables run and collect read', () => {
+    const noRunId = sliceEnv('small');
+    delete noRunId.STRESS_RUN_ID;
+    const r = spawnSync('bash', [SLICE_SH, 'budget'], { env: noRunId, encoding: 'utf8' });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('STRESS_RUN_ID is not set');
+    const run = spawnSync('bash', [SLICE_SH, 'run', 'S1'], { env: sliceEnv('small', { AWS_REGION: 'eu-central-1' }), encoding: 'utf8' });
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain('STRESS_RESULTS is not set');
+    const collect = spawnSync('bash', [SLICE_SH, 'collect'], { env: sliceEnv('small', { AWS_REGION: 'eu-central-1', STRESS_RESULTS: os.tmpdir() }), encoding: 'utf8' });
+    expect(collect.status).toBe(2);
+    expect(collect.stderr).toContain('STRESS_COMMIT is not set');
+  });
+
+  it.each([
+    ['budget', 'extra'],
+    ['deploy', 'extra'],
+    ['seed', '--tenants'],
+    ['collect', 'S1'],
+    ['run', 'S1', 'extra'],
+    ['run'],
+    ['teardown', '--fixture'],
+    ['teardown', '--fixtures', 'extra'],
+  ])('refuses an argument the verb does not take: %s %s', (...args) => {
+    const r = spawnSync('bash', [SLICE_SH, ...args], { env: sliceEnv('small', { AWS_REGION: 'eu-central-1' }), encoding: 'utf8' });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toMatch(/unexpected argument|one scenario id/);
+  });
+
+  it('refuses S2 when this run holds no S1 record (S2 reuses its conversations, F-2)', () => {
+    const results = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-s2-'));
+    try {
+      const r = spawnSync('bash', [SLICE_SH, 'run', 'S2'], {
+        env: sliceEnv('small', { AWS_REGION: 'eu-central-1', STRESS_RESULTS: results }),
+        encoding: 'utf8',
+      });
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('agentic-runtime-isolation.S1.json');
+      expect(r.stderr).toContain('run S1 first');
+    } finally {
+      fs.rmSync(results, { recursive: true, force: true });
+    }
+  });
+
+  describe('teardown flags', () => {
+    // A copy of slice.sh in a sample-shaped folder whose teardown.sh only prints its arguments.
+    let root: string;
+    beforeAll(() => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-teardown-'));
+      const scripts = path.join(root, 'scripts', 'stress');
+      fs.mkdirSync(scripts, { recursive: true });
+      fs.mkdirSync(path.join(root, 'src', 'smithy'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'package.json'), '{"name":"slice-teardown-test"}');
+      fs.copyFileSync(SLICE_SH, path.join(scripts, 'slice.sh'));
+      fs.copyFileSync(path.join(STRESS_DIR, 'window.sh'), path.join(scripts, 'window.sh'));
+      fs.writeFileSync(path.join(scripts, 'teardown.sh'), '#!/usr/bin/env bash\necho "teardown.sh [$*]"\n', { mode: 0o755 });
+    });
+    afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
+
+    function teardown(tier: 'small' | 'medium' | 'large', ...args: string[]): string {
+      const r = spawnSync('bash', [path.join(root, 'scripts', 'stress', 'slice.sh'), 'teardown', ...args], {
+        env: sliceEnv(tier, { AWS_REGION: 'eu-central-1' }),
+        encoding: 'utf8',
+      });
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      return r.stdout.trim();
+    }
+
+    it('deletes the tenants at the tiers that onboard every run', () => {
+      expect(teardown('small')).toBe('teardown.sh [--tenants]');
+      expect(teardown('medium')).toBe('teardown.sh [--tenants]');
+    });
+
+    it('keeps the fleet at large unless --fixtures is passed', () => {
+      expect(teardown('large')).toBe('teardown.sh []');
+      expect(teardown('large', '--fixtures')).toBe('teardown.sh [--tenants]');
+      expect(teardown('small', '--fixtures')).toBe('teardown.sh [--tenants]');
+    });
+  });
+});
+
+(hasJq ? describe : describe.skip)('caps.jq (the driver 429s per tenant)', () => {
+  function caps(summary: object): Record<string, number> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'caps-'));
+    try {
+      const file = path.join(dir, 'summary.json');
+      fs.writeFileSync(file, JSON.stringify(summary));
+      const r = spawnSync('jq', ['-c', '-f', path.join(STRESS_DIR, 'caps.jq'), file], { encoding: 'utf8' });
+      expect(r.status).toBe(0);
+      return JSON.parse(r.stdout);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('reads one count per tagged sub-metric in the handleSummary layout', () => {
+    expect(caps({
+      metrics: {
+        'tenant_429{tenant:8f14e45f-ea7b-4c1e-9d0a-1b2c3d4e5f60}': { type: 'counter', contains: 'default', values: { count: 17, rate: 0.28 }, thresholds: { 'count>=0': { ok: true } } },
+        'tenant_429{tenant:t2}': { type: 'counter', values: { count: 0, rate: 0 } },
+        'tenant_429': { type: 'counter', values: { count: 17, rate: 0.28 } },
+        'status_429': { type: 'counter', values: { count: 17, rate: 0.28 } },
+      },
+    })).toEqual({ '8f14e45f-ea7b-4c1e-9d0a-1b2c3d4e5f60': 17, 't2': 0 });
+  });
+
+  it('reads the summary-export layout too', () => {
+    expect(caps({ metrics: { 'tenant_429{tenant:a}': { count: 4, rate: 1 } } })).toEqual({ a: 4 });
+  });
+
+  it('is empty for a summary without them, which caps every tenant at 0', () => {
+    expect(caps({ metrics: {} })).toEqual({});
+    expect(caps({})).toEqual({});
+  });
+});
+
+describe('noisy-pace.js (S3 pacing)', () => {
+  const ctx = PACE;
+  const steadyPace = ctx.steadyPace!;
+
+  it.each([
+    [10, 19, 10], [10, 20, 10], [2, 1, 2], [5, 3, 1], [50, 199, 100], [10, 10, 10], [7, 100, 3], [500, 999, 500],
+  ])('splits steadyRps evenly over the steady tenants (%i VUs, %i tenants, %i rps)', (vus, tenants, rate) => {
+    const slots = Math.min(vus, tenants);
+    const s = Math.max(1, Math.min(slots, tenants));
+    const perTenant = new Array<number>(tenants).fill(0);
+    let total = 0;
+    for (let id = 1; id <= vus; id++) {
+      const p = steadyPace(id, { vus, slots, tenants, rate, seconds: 60 });
+      // The VU owns the tenants lib.js adopt() gives its slot: position i with i % s === slot.
+      const mine = [...perTenant.keys()].filter((i) => i % s === (id - 1) % s);
+      expect(p.owned).toBe(mine.length);
+      expect(p.intervalMs).toBeCloseTo(1000 / p.rps, 6);
+      for (const i of mine) perTenant[i] += p.rps / p.owned;
+      total += p.rps;
+    }
+    expect(total).toBeCloseTo(rate, 6);
+    for (const r of perTenant) expect(r).toBeCloseTo(rate / tenants, 6);
+  });
+
+  it('keeps every steady tenant under its 60-a-minute limit at the small tier shape', () => {
+    // small: 10 rps over 19 steady tenants, 10 VUs.
+    for (let id = 1; id <= 10; id++) {
+      const p = steadyPace(id, { vus: 10, slots: 10, tenants: 19, rate: 10, seconds: 60 });
+      expect((p.rps / p.owned) * 60).toBeLessThan(60);
+    }
+  });
+
+  it('paces the noisy VUs to the noisy rate', () => {
+    expect(ctx.noisyIntervalMs!(10, 600)).toBe(1000);
+    expect(ctx.noisyIntervalMs!(2, 600)).toBe(200);
+  });
+
+  it('is the threshold s3-noisy.js sets on steady_sent', () => {
+    expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', 's3-noisy.js'), 'utf8')).toContain('steady_sent: [`count>=${minSteadySent(rate * seconds)}`]');
+    expect(ctx.minSteadySent!(600)).toBe(570);
+    expect(ctx.minSteadySent!(157)).toBe(150);
+  });
 });
 
 (hasJq ? describe : describe.skip)('attribute.jq (P-7)', () => {
@@ -205,7 +375,8 @@ describe('slice.sh', () => {
 });
 
 (hasJq ? describe : describe.skip)('noisy.jq (S3 noisy neighbour)', () => {
-  function noisy(id: string, rows: object[]): { noisy429: number; others429: number; otherTenants: number; pass: boolean } {
+  type Noisy = { noisy429: number; others429: number; otherTenants: number; untagged429: number; pass: boolean };
+  function noisy(id: string, rows: object[]): Noisy {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'noisy-'));
     try {
       const file = path.join(dir, 'rows.json');
@@ -222,21 +393,22 @@ describe('slice.sh', () => {
 
   it('passes when only the noisy tenant is refused', () => {
     expect(noisy('n', [{ tenantId: 'n', minute: m1, n: '149' }, { tenantId: 'n', minute: m2, n: '323' }]))
-      .toEqual({ noisy429: 472, others429: 0, otherTenants: 0, pass: true });
+      .toEqual({ noisy429: 472, others429: 0, otherTenants: 0, untagged429: 0, pass: true });
   });
 
-  it('fails when any other tenant got a 429 (the 2026-11-19 run)', () => {
+  it('fails when any other tenant got a 429 (a steady tenant pushed to its limit)', () => {
     const out = noisy('n', [{ tenantId: 'n', minute: m1, n: '472' }, { tenantId: 's', minute: m2, n: '17' }]);
-    expect(out).toEqual({ noisy429: 472, others429: 17, otherTenants: 1, pass: false });
+    expect(out).toEqual({ noisy429: 472, others429: 17, otherTenants: 1, untagged429: 0, pass: false });
   });
 
-  it('counts untagged 429 lines against the others', () => {
-    expect(noisy('n', [{ tenantId: 'n', minute: m1, n: '5' }, { minute: m1, n: '1' }]).pass).toBe(false);
+  it('counts untagged 429 lines against the others, but not as a tenant', () => {
+    const out = noisy('n', [{ tenantId: 'n', minute: m1, n: '5' }, { minute: m1, n: '1' }, { tenantId: '', minute: m2, n: '2' }]);
+    expect(out).toEqual({ noisy429: 5, others429: 3, otherTenants: 0, untagged429: 3, pass: false });
   });
 
   it('fails when the noisy tenant is unknown or was never refused', () => {
     expect(noisy('', [{ tenantId: 'n', minute: m1, n: '5' }]).pass).toBe(false);
-    expect(noisy('', [{ minute: m1, n: '5' }])).toEqual({ noisy429: 0, others429: 5, otherTenants: 1, pass: false });
+    expect(noisy('', [{ minute: m1, n: '5' }])).toEqual({ noisy429: 0, others429: 5, otherTenants: 0, untagged429: 5, pass: false });
     expect(noisy('n', []).pass).toBe(false);
   });
 });
@@ -274,6 +446,21 @@ describe('window.sh (CloudWatch minutes, ADR-0052)', () => {
       const [mstart] = call('metric_window', next, next + 60);
       expect(mstart).toBeGreaterThanOrEqual(mend);
     }
+  });
+
+  (hasJq ? it : it.skip)('parses a record timestamp without GNU date, and fails loudly on a bad one', () => {
+    function sh(fn: string, arg: string) {
+      return spawnSync('bash', ['-c', `source "$0"; ${fn} "$1"`, WINDOW_SH, arg], { encoding: 'utf8' });
+    }
+    expect(sh('iso_epoch', '2026-11-19T18:06:42.123Z').stdout.trim()).toBe(String(at(18, 6, 42)));
+    expect(sh('iso_epoch', '2026-11-19T18:06:42Z').stdout.trim()).toBe(String(at(18, 6, 42)));
+    expect(sh('epoch_iso', String(at(18, 6, 42))).stdout.trim()).toBe('2026-11-19T18:06:42Z');
+    for (const bad of ['', 'yesterday', '2026-11-19 18:06:42']) {
+      const r = sh('iso_epoch', bad);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain('not a UTC ISO 8601 timestamp');
+    }
+    expect(sh('epoch_iso', 'soon').status).not.toBe(0);
   });
 });
 
@@ -314,5 +501,13 @@ describe('window.sh (CloudWatch minutes, ADR-0052)', () => {
   it('fails closed on a summary without the counters', () => {
     expect(delivered({ metrics: {} })).toEqual({ sent: 0, expected: 0, behind: 0, shortPct: 100, pass: false });
     expect(delivered({ error: 'file withheld' }).pass).toBe(false);
+  });
+
+  it("draws the line where s3-noisy.js's k6 threshold does", () => {
+    for (const expected of [20, 157, 600, 6000, 150000]) {
+      const min = PACE.minSteadySent!(expected);
+      expect(delivered(counters(expected, min)).pass).toBe(true);
+      expect(delivered(counters(expected, min - 1)).pass).toBe(false);
+    }
   });
 });

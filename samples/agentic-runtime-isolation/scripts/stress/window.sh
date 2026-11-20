@@ -6,9 +6,24 @@
 #
 # get-metric-statistics and get-metric-data at a 60 s period return the one-minute buckets in
 # [floor(start), floor(end)), and API Gateway stamps its datapoints about a minute after the
-# request (the 2026-11-19 run: S3's 429s logged at 18:05 and 18:06, counted at 18:06 and 18:07).
-# So a scenario's minutes run from the minute it starts in to one minute past the minute it
-# ends in, and the next scenario starts only after that.
+# request (a 429 logged at 18:05 is counted at 18:06). So a scenario's minutes run from the
+# minute it starts in to one minute past the minute it ends in, and the next scenario starts
+# only after that.
+#
+# Timestamps are parsed with jq, not GNU date, so the maths runs the same on any host.
+
+# iso_epoch ISO -> the epoch second of a UTC ISO 8601 timestamp (`2026-11-19T18:06:42.123Z`,
+# fractional seconds dropped). A value that is not one is an error with a message, never 0.
+iso_epoch() {
+  jq -nr --arg t "$1" '$t | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601' 2>/dev/null \
+    || { echo "window.sh: not a UTC ISO 8601 timestamp: '$1'" >&2; return 1; }
+}
+
+# epoch_iso EPOCH -> YYYY-MM-DDTHH:MM:SSZ.
+epoch_iso() {
+  jq -nr --argjson s "$1" '$s | todate' 2>/dev/null \
+    || { echo "window.sh: not an epoch second: '$1'" >&2; return 1; }
+}
 
 # metric_window START END -> "MSTART MEND", epoch seconds: the start minute, and the end of the
 # minute after the end minute (exclusive).
