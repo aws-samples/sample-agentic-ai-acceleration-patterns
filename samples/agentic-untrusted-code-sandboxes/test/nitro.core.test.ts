@@ -79,8 +79,19 @@ describe('nitro inside the core construct', () => {
   });
 
   test('the log cleanup resource is told to delete the task log group by name', () => {
-    const cleanup = cfnOf(sandboxes.node.findChild('LogCleanup'), 'AWS::CloudFormation::CustomResource');
-    expect(JSON.stringify(stack.resolve((cleanup as unknown as { _cfnProperties: unknown })._cfnProperties))).toContain(nitro.logGroupName);
+    const cleanupId = stack.getLogicalId(cfnOf(sandboxes.node.findChild('LogCleanup'), 'AWS::CloudFormation::CustomResource'));
+    const resource = t.toJSON().Resources[cleanupId] as Json;
+    expect(JSON.stringify(resource.Properties)).toContain(nitro.logGroupName);
+  });
+
+  test('the task definition waits for the runner image copy, so a start never pulls a tag that is not there yet', () => {
+    const tdId = idOf(nitro.taskDefinition, 'AWS::ECS::TaskDefinition');
+    const depends = (t.toJSON().Resources[tdId].DependsOn ?? []) as string[];
+    const copies = Object.entries(t.toJSON().Resources as Record<string, Json>)
+      .filter(([, r]) => /CDKECRDeployment/.test(String(r.Type)) || r.Type === 'Custom::CDKECRDeployment')
+      .map(([id]) => id);
+    expect(copies.length).toBeGreaterThan(0);
+    expect(depends.some((d) => copies.includes(d))).toBe(true);
   });
 
   test('the drain is deleted before the cluster, the capacity provider, the task definition and the groups the tasks hold', () => {
