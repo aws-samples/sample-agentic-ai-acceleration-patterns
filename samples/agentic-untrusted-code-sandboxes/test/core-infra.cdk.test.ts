@@ -182,7 +182,8 @@ describe('roles (spec 3.6)', () => {
   test('reaper role: reads, updates and deletes every row and holds no instance action and no bucket action', () => {
     const stmts = statementsOfRole(base.t, roleId(base.t, 'ReaperRole'));
     const actions = actionsOf(stmts);
-    expect(actions).toEqual(expect.arrayContaining(['dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'fake:Reapernitro']));
+    expect(actions).not.toContain('dynamodb:Query');
+    expect(actions).toEqual(expect.arrayContaining(['dynamodb:Scan', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'fake:Reapernitro']));
     expect(actions).not.toContain('ecs:DeregisterContainerInstance');
     expect(actions).not.toContain('ecs:ListContainerInstances');
     expect(actions).not.toContain('ec2:DescribeInstances');
@@ -194,7 +195,7 @@ describe('roles (spec 3.6)', () => {
     const stmts = statementsOfRole(base.t, roleId(base.t, 'DrainRole'));
     const actions = actionsOf(stmts);
     expect(actions).toEqual(expect.arrayContaining([
-      'dynamodb:Query', 'fake:Reapernitro', 'ecs:ListContainerInstances', 'ecs:DeregisterContainerInstance', 'ec2:DescribeInstances',
+      'fake:Reapernitro', 'ecs:ListContainerInstances', 'ecs:DeregisterContainerInstance', 'ec2:DescribeInstances',
     ]));
     for (const a of actions) expect(a).not.toMatch(/^s3:/);
     expect(actions.filter((a) => /^fake:Tool|^fake:Tenant/.test(a))).toEqual([]);
@@ -613,6 +614,22 @@ describe('network (spec 3.7, ADR-0012)', () => {
     expect(rules[agentcore].egress.filter((e) => e.peer !== 'icmp-placeholder').map((e) => e.peer).sort()).toEqual([ecrSg, logsSg, '0.0.0.0/0'].sort());
   });
 
+  test('a supplied vpc needs an explicit createEndpoints', () => {
+    const vpc = new ec2.Vpc(new Stack(), 'V');
+    expect(() => resolveProps({ vpc })).toThrow(/createEndpoints must be set with a supplied vpc/);
+    expect(() => resolveProps({ vpc, createEndpoints: true })).not.toThrow();
+    expect(() => resolveProps({ vpc, createEndpoints: false })).not.toThrow();
+    expect(() => resolveProps({})).not.toThrow();
+  });
+
+  test('the runner repository empties itself on delete, so a stack delete does not stop on images', () => {
+    const s = synth({ backends: ['nitro'] });
+    const repo = Object.values(s.t.toJSON().Resources as Record<string, Json>).filter((r) => r.Type === 'AWS::ECR::Repository');
+    expect(repo).toHaveLength(1);
+    expect(repo[0].Properties.EmptyOnDelete).toBe(true);
+    expect(repo[0].DeletionPolicy).toBe('Delete');
+  });
+
   test('createEndpoints false builds none, and is refused for a created vpc', () => {
     expect(() => synth({ createEndpoints: false })).toThrow(/createEndpoints false needs a supplied vpc/);
     const s = synth({ createEndpoints: false, backends: ['microvm'] });
@@ -637,7 +654,7 @@ describe('network (spec 3.7, ADR-0012)', () => {
       maxAzs: 2,
       subnetConfiguration: [{ name: 'Public', subnetType: ec2.SubnetType.PUBLIC }, { name: 'Tool', subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }],
     });
-    expect(() => new UntrustedCodeSandboxes(bad, 'Sandboxes', { standalone: true, vpc: noSandbox })).toThrow(/no sandbox subnets; name the subnet group Sandbox/);
+    expect(() => new UntrustedCodeSandboxes(bad, 'Sandboxes', { standalone: true, vpc: noSandbox, createEndpoints: true })).toThrow(/no sandbox subnets; name the subnet group Sandbox/);
   });
 });
 
@@ -730,6 +747,13 @@ describe('DNS Firewall (spec 3.9, ADR-0016)', () => {
     expect(() => resolveProps({ dnsFirewall: true, vpc: new ec2.Vpc(new Stack(), 'V') })).toThrow(/dnsFirewall/);
     expect(() => resolveProps({ dnsFirewall: { allowDomains: ['bad name'] } })).toThrow(/allowDomains/);
     expect(() => resolveProps({ dnsFirewall: { allowDomains: ['*.ok.example.com'] } })).not.toThrow();
+  });
+
+  test('a bare top-level domain is refused: a name needs two labels', () => {
+    for (const d of ['com', '*.com', '*.', 'example.', '.example.com']) {
+      expect(() => resolveProps({ dnsFirewall: { allowDomains: [d] } })).toThrow(/allowDomains/);
+    }
+    expect(() => resolveProps({ dnsFirewall: { allowDomains: ['example.com', '*.example.co.uk'] } })).not.toThrow();
   });
 });
 
@@ -1129,9 +1153,9 @@ describe('least privilege and teardown details', () => {
         { name: 'Sandbox', subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       ],
     });
-    expect(() => new UntrustedCodeSandboxes(stack, 'A', { standalone: true, vpc, backends: ['agentcore'] })).toThrow(/s3PrefixListId/);
-    expect(() => new UntrustedCodeSandboxes(stack, 'B', { standalone: true, vpc, backends: ['agentcore'], s3PrefixListId: 'pl-6ea54007' })).not.toThrow();
-    expect(() => new UntrustedCodeSandboxes(stack, 'C', { standalone: true, vpc, backends: ['nitro'] })).not.toThrow();
+    expect(() => new UntrustedCodeSandboxes(stack, 'A', { standalone: true, vpc, backends: ['agentcore'], createEndpoints: true })).toThrow(/s3PrefixListId/);
+    expect(() => new UntrustedCodeSandboxes(stack, 'B', { standalone: true, vpc, backends: ['agentcore'], createEndpoints: true, s3PrefixListId: 'pl-6ea54007' })).not.toThrow();
+    expect(() => new UntrustedCodeSandboxes(stack, 'C', { standalone: true, vpc, backends: ['nitro'], createEndpoints: true })).not.toThrow();
   });
 
   test('size limits and the prefix list id are validated', () => {

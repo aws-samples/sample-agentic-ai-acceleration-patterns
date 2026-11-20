@@ -4,7 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Amended by: ADR-0015
+- Amended by: ADR-0015, ADR-0065
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -50,3 +50,5 @@ outside bucket through the S3 endpoint. A vendor who supplies `vpc` must
 tag both tiers.
 
 Note 2026-11-18: amended by ADR-0015. ECR and S3 endpoints in the sandbox subnets serve `agentcore` only; the `nitro` task needs only the Logs endpoint, because the instance pulls the image.
+
+Note 2026-11-20: amended by ADR-0065. With a supplied `vpc`, `createEndpoints` has no default and must be set.

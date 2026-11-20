@@ -27,11 +27,11 @@ export const GATEWAY_ARGUMENTS = ['code', 'input', 'backend', 'saveOutput'] as c
 
 const DESCRIPTION = [
   'Runs a Python script in a sandbox that belongs to the calling tenant and returns its exit code, stdout, stderr and timing.',
-  'The sandbox has no internet access; do not call the internet or an AWS API from the script.',
+  'The sandbox has no network access except DNS lookups, unless the deployment turns the DNS firewall on; do not call the internet or an AWS API from the script.',
   'Files in /work persist between calls to the same tenant sandbox until it is stopped for being idle.',
   'To read a file, name its object under the tenant inputs/ prefix in "input"; the script reads its bytes from the file /work/input and cannot fetch anything itself.',
   'Limits depend on the backend. On microvm a process has 256 MiB of address space, threads and processes are capped,',
-  'multiprocessing locks and pools fail with PermissionError, and sockets, shared memory and io_uring are filtered.',
+  'a process has at most 64 open files, multiprocessing locks and pools fail with PermissionError, and sockets, shared memory and io_uring are filtered.',
   'On nitro and agentcore a process can use most of the sandbox memory.',
   'A script that times out, is killed or exits non-zero is not an error: the result says so.',
   'A call can return sandbox_starting or sandbox_failed with retryAfterSeconds; call again after that many seconds.',

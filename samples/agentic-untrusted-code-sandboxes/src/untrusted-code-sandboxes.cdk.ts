@@ -80,7 +80,7 @@ const autoDeleteGroups = new WeakMap<Stack, logs.LogGroup>();
 
 /** Registry actions: the tool tenant role writes its own rows; the reaper role reads, updates and deletes any row. */
 const TENANT_ROW_ACTIONS = ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'];
-const ALL_ROW_ACTIONS = ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'];
+const ALL_ROW_ACTIONS = ['dynamodb:GetItem', 'dynamodb:Scan', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem'];
 
 export class UntrustedCodeSandboxes extends Construct {
   public readonly config: ResolvedProps;

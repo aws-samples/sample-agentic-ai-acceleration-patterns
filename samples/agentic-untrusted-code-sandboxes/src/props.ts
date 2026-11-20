@@ -33,7 +33,16 @@ export interface UntrustedCodeSandboxesProps {
   readonly perTenantMetrics?: boolean;
   /** Must have subnets tagged for the tool and the sandboxes. @default created (spec §3.7) */
   readonly vpc?: ec2.IVpc;
-  /** Route 53 Resolver DNS Firewall (ADR-0016); refused with a supplied `vpc`. @default false */
+  /**
+   * Route 53 Resolver DNS Firewall (ADR-0016); refused with a supplied `vpc`.
+   *
+   * @remarks With it off, DNS is the one path out of a sandbox: code can send data out and read replies in
+   * lookups on every backend, and on `agentcore` can send the runtime role's credentials that way (T-29, T-91).
+   * The sandbox has no network access other than DNS. Turn it on to resolve only AWS names, plus `allowDomains`.
+   * `allowDomains` names must have two labels or more (`example.com`, `*.example.com`); each one is an exception
+   * to "no network access", so list only names you control (T-32).
+   * @default false
+   */
   readonly dnsFirewall?: boolean | { readonly allowDomains?: string[] };
   /**
    * Id of the `com.amazonaws.<region>.s3` managed prefix list, for the `agentcore` runtime's 443 egress to the S3
@@ -41,7 +50,12 @@ export interface UntrustedCodeSandboxesProps {
    * construct creates, the egress is any address on 443, which that VPC routes nowhere else (ADR-0028).
    */
   readonly s3PrefixListId?: string;
-  /** Create the §3.7 sandbox endpoints. @default true */
+  /**
+   * Create the §3.7 sandbox endpoints. With a supplied `vpc` it must be set. The endpoints use private DNS, which
+   * applies to the whole VPC: other workloads there then resolve `logs.<region>` and the ECR names to endpoints
+   * that admit only this sample (T-92). `false` needs a VPC that already has the §3.7 endpoints.
+   * @default true with the VPC the construct creates; required with a supplied `vpc`
+   */
   readonly createEndpoints?: boolean;
   /** The bucket with `inputs/<tenant>/`. @default created */
   readonly inputBucket?: s3.IBucket;
@@ -77,8 +91,8 @@ export const GATEWAY_BUDGET_CAP_SECONDS = 90;
 export const MAX_OUTPUT_BYTES_CAP = 4 * 1024 * 1024;
 export const MAX_INPUT_BYTES_CAP = MAX_INPUT_BYTES;
 
-/** A DNS Firewall domain: a name, or `*.` and a name (spec §3.9). */
-const DOMAIN_PATTERN = /^(\*\.)?[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
+/** A DNS Firewall domain: a name of at least two labels, or `*.` and such a name, so a whole top-level domain is never allowed (spec §3.9). */
+const DOMAIN_PATTERN = /^(\*\.)?[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)+$/;
 
 function fail(message: string): never {
   throw new Error(`UntrustedCodeSandboxes: ${message}`);
@@ -111,6 +125,9 @@ export function resolveProps(props: UntrustedCodeSandboxesProps): ResolvedProps 
   if (sandboxIdle.toMilliseconds() < Duration.minutes(1).toMilliseconds()) fail('sandboxIdle must be at least 1 min');
   if (sandboxIdle.toMilliseconds() >= sandboxMaxLife.toMilliseconds()) fail('sandboxIdle must be below sandboxMaxLife');
   if (props.dnsFirewall && props.vpc) fail('dnsFirewall cannot be used with a supplied vpc (ADR-0016)');
+  if (props.vpc !== undefined && props.createEndpoints === undefined) {
+    fail('createEndpoints must be set with a supplied vpc: true adds interface endpoints with private DNS that change how logs.<region> and the ECR names resolve for the whole VPC; false needs a vpc that already has the spec 3.7 endpoints');
+  }
 
   const positiveInt = (name: string, v: number) => {
     if (!Number.isInteger(v) || v <= 0) fail(`${name} must be a positive integer`);
@@ -130,7 +147,7 @@ export function resolveProps(props: UntrustedCodeSandboxesProps): ResolvedProps 
     : false as const;
   if (dnsFirewall) {
     for (const d of dnsFirewall.allowDomains) {
-      if (!DOMAIN_PATTERN.test(d) || d.length > 255) fail(`dnsFirewall.allowDomains has an invalid name "${d}"; use example.com or *.example.com`);
+      if (!DOMAIN_PATTERN.test(d) || d.length > 255) fail(`dnsFirewall.allowDomains has an invalid name "${d}"; use example.com or *.example.com, at least two labels`);
     }
   }
 
