@@ -13,7 +13,7 @@ export type RunnerArch = 'arm64' | 'amd64';
 /**
  * Copies the runner image into the construct-owned repository, once per
  * architecture, under the tag `runner-<arch>-<asset hash>` (ADR-0024,
- * ADR-0032). A backend asks for the tag with `BackendContext.runnerImageTag`;
+ * ADR-0029). A backend asks for the tag with `BackendContext.runnerImageTag`;
  * the first ask builds the image asset and the copy, so a deployment that
  * uses one architecture builds one. The core makes each container backend's
  * resources wait for the copies that backend asked for.

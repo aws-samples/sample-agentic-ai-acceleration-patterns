@@ -61,6 +61,14 @@ Option 1.
   not it creates `/aws/lambda/<function name>` (retention one month, deleted
   on destroy), outside the log drain (Option 3's cycle).
 - `reaper` and `offboard` share one role; the drain has its own.
+- The core copies the runner image (ADR-0024) for every container backend:
+  `BackendContext.runnerImageTag(arch)` builds the image asset and the copy
+  into the construct repository the first time an architecture is asked for,
+  and returns `runner-<arch>-<asset hash>`. The core makes each of that
+  backend's `drainOrder()` resources depend on the copies the backend asked
+  for, so the runtime or cluster is never created before its image exists and
+  is deleted before the copy, and the repository is emptied last. `microvm`
+  asks for no tag and waits for no copy.
 
 ## Consequences
 

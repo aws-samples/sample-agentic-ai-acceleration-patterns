@@ -174,7 +174,7 @@ const copyAcknowledged = new WeakSet<Stack>();
  * The image copy library puts one Lambda in the stack for every copy. Its
  * role holds the library's own policy: Lambda basic execution, and ECR and
  * S3 read actions on `*`. It runs at deploy time only and handles no
- * tenant data (ADR-0024, ADR-0032).
+ * tenant data (ADR-0024, ADR-0029).
  */
 export function acknowledgeImageCopy(stack: Stack): void {
   if (copyAcknowledged.has(stack)) return;
@@ -184,12 +184,12 @@ export function acknowledgeImageCopy(stack: Stack): void {
     acknowledgeGranularFinding(
       role,
       'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]',
-      'The managed policy is the logs-only execution policy of the copy function, which runs at deploy time (ADR-0024, ADR-0032).',
+      'The managed policy is the logs-only execution policy of the copy function, which runs at deploy time (ADR-0024, ADR-0029).',
     );
     acknowledgeGranularFinding(
       role,
       'AwsSolutions-IAM5[Resource::*]',
-      'The copy library asks for ECR and S3 read actions on every resource, because the source image and its layers are in the CDK asset repository and bucket; the function runs at deploy time only and handles no tenant data (ADR-0024, ADR-0032).',
+      'The copy library asks for ECR and S3 read actions on every resource, because the source image and its layers are in the CDK asset repository and bucket; the function runs at deploy time only and handles no tenant data (ADR-0024, ADR-0029).',
     );
   }
 }

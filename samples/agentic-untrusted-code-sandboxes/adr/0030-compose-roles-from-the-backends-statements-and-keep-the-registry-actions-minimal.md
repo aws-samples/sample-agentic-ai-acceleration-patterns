@@ -49,6 +49,15 @@ Option 1.
   `ec2:DescribeInstances`); those arrive only through `drainStatements()`.
   Offboard runs as the reaper role.
 
+- cdk-nag's IAM5 findings on the roles are acknowledged from one table in
+  `src/core/nag.ts` (`KNOWN_WILDCARDS`), each entry naming the resource shape
+  (a cluster's task or container instance id, a runtime endpoint, a log group
+  name or prefix, a network interface, the tenant's own prefix, or a resource
+  the action cannot name), the actions it may carry, and the reason. A
+  wildcard with a wider action, or a shape not in the table, stays a finding.
+  The same module acknowledges the ECS-required managed policy, the cluster
+  insights rule (ADR-0013) and the image copy library's role (ADR-0029).
+
 ## Consequences
 
 A handler that needs `Query` on the tenant role (for example to read a
