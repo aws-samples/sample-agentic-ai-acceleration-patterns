@@ -59,7 +59,7 @@ export class InsightRules extends Construct {
     this.dnsBlocked = new cloudwatch.CfnInsightRule(this, 'DnsBlocked', {
       ruleName: this.nameFor('contributor-insights-rule', 'dns-blocked-by-source'),
       ruleState: 'ENABLED',
-      ruleBody: ruleBody([queryLogGroup], '$.srcaddr', 'Count', [{ Match: '$.firewall_rule_action', EqualTo: 'BLOCK' }]),
+      ruleBody: ruleBody([queryLogGroup], '$.srcaddr', 'Count', [{ Match: '$.firewall_rule_action', In: ['BLOCK'] }]),
     });
   }
 }
@@ -67,7 +67,8 @@ export class InsightRules extends Construct {
 interface RuleFilter {
   readonly Match: string;
   readonly IsPresent?: boolean;
-  readonly EqualTo?: string;
+  /** Strings go in `In`; `EqualTo` takes a number only, and CloudWatch refuses a string there (INVALID_RULE_BODY). */
+  readonly In?: string[];
 }
 
 /** The rule body JSON of a CloudWatchLogRule, version 1. Exported for the unit test. */

@@ -749,6 +749,9 @@ describe('DNS Firewall (spec 3.9, ADR-0016)', () => {
     const body = Object.values(s.t.findResources('AWS::CloudWatch::InsightRule')).map((r) => JSON.stringify((r as Json).Properties.RuleBody)).find((b) => b.includes('srcaddr')) as string;
     expect(body).toContain('$.firewall_rule_action');
     expect(body).toContain('BLOCK');
+    // a string goes in `In`; `EqualTo` takes a number and CloudWatch refuses it (INVALID_RULE_BODY)
+    expect(body).toContain('\\"Filters\\":[{\\"Match\\":\\"$.firewall_rule_action\\",\\"In\\":[\\"BLOCK\\"]}]');
+    expect(body).not.toContain('EqualTo');
   });
 
   test('refused with a supplied vpc and with a bad domain', () => {
