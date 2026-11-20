@@ -120,6 +120,19 @@ class AgentcoreTest(unittest.TestCase):
         self.assertTrue(sb.boot_failed.is_set())  # the runner exits and the MicroVM start fails at once
         self.assertEqual(run(sb, signed(NONCE))[1]["error"], "tool_failed")
 
+    def test_the_polled_group_read_decides_dirty(self):
+        sb, fake = make("agentcore")
+        fake.left_dirty = True  # a single read says dirty; the executor's polled read in the result wins
+        original = fake.run
+
+        def run_with_result(job):
+            result = original(job)
+            result["dirty"] = False
+            return result
+        fake.run = run_with_result
+        self.assertEqual(run(sb, signed(NONCE), SESSION)[0], 200)
+        self.assertFalse(sb.dirty)
+
     def test_dirty_after_a_job_that_did_not_drain(self):
         sb, fake = make("agentcore")
         fake.left_dirty = True

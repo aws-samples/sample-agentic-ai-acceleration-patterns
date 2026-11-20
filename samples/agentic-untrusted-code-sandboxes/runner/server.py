@@ -163,15 +163,17 @@ class Sandbox:
                 return self._refuse("dirty")
             if self.executor is None:
                 return self._refuse("tool_failed")
+            drained_dirty = None  # the executor's own read of the job group, polled while it drains
             swept = False  # anything but a result or a ToolFailed leaves the sweep unproven
             try:
                 result = self.executor.run(job)
                 swept = result["clean"]
+                drained_dirty = result.get("dirty")
             except ToolFailed as e:
                 swept = e.clean
                 return self._refuse("tool_failed")
             finally:
-                self._after_job(swept)
+                self._after_job(swept, drained_dirty)
         finally:
             self._job.release()
         stdout, stderr, truncated = wire.cut_output(result["stdout"], result["stderr"], job.max_output, result["cut"])
@@ -181,10 +183,13 @@ class Sandbox:
                      "memoryExceeded": result["memoryExceeded"], "bootId": self.boot_id,
                      "proof": wire.result_proof(nonce, job.run_id)}
 
-    def _after_job(self, swept: bool) -> None:
-        """Dirty when the sweep left uid 1001 processes, or the agentcore job group did not drain."""
+    def _after_job(self, swept: bool, group_dirty: Optional[bool] = None) -> None:
+        """Dirty when the sweep left uid 1001 processes, or the agentcore job group did not drain.
+
+        group_dirty is the executor's polled read; without one (a job that failed) the group is read once.
+        """
         try:
-            if not swept or self.executor.dirty():
+            if not swept or (self.executor.dirty() if group_dirty is None else group_dirty):
                 self.dirty = True
                 log("dirty")
         except (OSError, ValueError) as e:

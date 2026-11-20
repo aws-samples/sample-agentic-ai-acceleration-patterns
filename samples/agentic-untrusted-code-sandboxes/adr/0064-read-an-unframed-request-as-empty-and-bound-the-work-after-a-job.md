@@ -54,3 +54,5 @@ A runaway job that is slow to reap now returns its result with `dirty` set,
 and the tool replaces the sandbox, instead of returning `no_answer`. A sweep
 that needs more than 3 s is reported dirty, not waited for. Raising the
 budget needs the tool's 5 s margin raised with it.
+
+Note 2026-11-20: on `agentcore` the runner reads the job group's memory again, for up to 1 s of the 3 s budget, before it calls the group not drained, because memory the sweep freed takes a moment to show.
