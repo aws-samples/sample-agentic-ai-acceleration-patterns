@@ -173,8 +173,10 @@ multi_tenant_token() {
   [[ "$api" == */ ]] || api="$api/"
   if [[ -z "${MT_TENANT:-}" ]]; then
     MT_TENANT="$(ulid)"
+    # Saved before the create, so a create that times out is still removed.
+    state_set MT_TENANT "$MT_TENANT"; state_set MT_API "$api"
     ti_tenant "$api" "$MT_TENANT" "tfd-integ-mt-${RUN_ID}"
-    state_set MT_TENANT "$MT_TENANT"; state_set MT_USER "$TI_ADMIN"; state_set MT_API "$api"
+    state_set MT_USER "$TI_ADMIN"
   fi
   ti_token "$api" "$MT_TENANT" "$MT_USER" "$1"
 }

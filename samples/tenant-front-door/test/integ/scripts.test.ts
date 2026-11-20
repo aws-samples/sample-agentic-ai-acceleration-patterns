@@ -364,6 +364,7 @@ exit 1
     expect(r.output).toContain(`kept TfdInteg-${RUN}-cp-setup and TfdInteg-${RUN}-support`);
     expect(r.output).toContain(`scripts/integ.sh teardown ${RUN} single`);
     expect(r.output).toContain('NOT READ the stacks in eu-central-1');
+    expect(r.output).toContain('NOT READ the control plane\'s account');
     expect(r.output).toContain('FAIL teardown parts');
     expect(r.output).not.toMatch(/: done$/m);
     expect(r.output).not.toContain('PASS teardown parts');

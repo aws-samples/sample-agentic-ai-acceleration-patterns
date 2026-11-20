@@ -325,23 +325,23 @@ edge_stacks_part() {
 }
 # The control plane's records, then the tenants in tenant-identity.
 cp_records_part() {
-  local rc=0 st id app account failed=0
+  local rc=0 st id app account failed=0 acted=0
   cp_api_ready || rc=$?
   (( rc == 0 )) || return "$rc"
   for id in "${TENANT_A:-}" "${TENANT_B:-}" "${TENANT_C:-}"; do
     [[ -n "$id" ]] || continue
-    st="$(api DELETE "tenants/${id}")"; api_accepted "$st" || { note "DeleteTenant ${id}: HTTP ${st}"; failed=1; }
+    st="$(api DELETE "tenants/${id}")"; api_accepted "$st" || { note "DeleteTenant ${id}: HTTP ${st}"; failed=1; }; [[ "$st" =~ ^2 ]] && acted=1
     api_gone "tenants/${id}" 600 || { note "tenant ${id} not gone"; failed=1; }
   done
   for app in "$APP" "$PLAIN_APP"; do
-    st="$(api DELETE "applications/${app}")"; api_accepted "$st" || { note "DeleteApplication ${app}: HTTP ${st}"; failed=1; }
+    st="$(api DELETE "applications/${app}")"; api_accepted "$st" || { note "DeleteApplication ${app}: HTTP ${st}"; failed=1; }; [[ "$st" =~ ^2 ]] && acted=1
     api_gone "applications/${app}" 600 || { note "application ${app} not gone"; failed=1; }
   done
   for account in "$EDGE_ACCOUNT" "$CP_ACCOUNT"; do
-    st="$(api DELETE "accounts/${account}")"; api_accepted "$st" || { note "DeleteAccount ${account}: HTTP ${st}"; failed=1; }
+    st="$(api DELETE "accounts/${account}")"; api_accepted "$st" || { note "DeleteAccount ${account}: HTTP ${st}"; failed=1; }; [[ "$st" =~ ^2 ]] && acted=1
     api_gone "accounts/${account}" 600 || { note "account ${account} not gone"; failed=1; }
   done
-  part_rc "$failed" 1
+  part_rc "$failed" "$acted"
 }
 # This run's tenants in the two tenant-identity deployments; nothing else there is touched.
 identity_part() {
@@ -484,7 +484,7 @@ leftovers_cp() {
   case "$rc" in
     3) note "the control plane's account: nothing to check (${CP_ACCESS_WHY})"; return 3 ;;
     0) ;;
-    *) note "NOT CHECKED: the control plane's account (${CP_ACCESS_WHY}); check it by hand (integration-test.md, After an interruption)"
+    *) unread "the control plane's account (${CP_ACCESS_WHY}); check it by hand (integration-test.md, After an interruption)"
        return 1 ;;
   esac
   local before=$LEFT ubefore=$UNREAD s n name id count
