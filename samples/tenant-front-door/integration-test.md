@@ -64,7 +64,9 @@ npx projen integ
 ```
 
 `npx projen integ:host` runs the `host` mode steps. A run takes hours;
-start it from a shell that outlives it (`nohup`, `tmux`).
+start it from a shell that outlives it (`nohup`, `tmux`). The driver
+needs bash 4 or later and GNU coreutils (`date +%s%3N` for millisecond
+log windows); on macOS, install them and put them first on `PATH`.
 
 | Knob | Default | Effect |
 |---|---|---|
