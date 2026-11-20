@@ -37,8 +37,13 @@ export function maxLifeOverrideMs(event: unknown, env: Readonly<Record<string, s
   return typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
 }
 
+/** The deps of one pass: a copy with the overridden life when the hook applies, the shared deps untouched otherwise. */
+export function passDeps(base: ReaperDeps, event: unknown, env: Readonly<Record<string, string | undefined>> = process.env): ReaperDeps {
+  const override = maxLifeOverrideMs(event, env);
+  return override === undefined ? base : { ...base, config: { ...base.config, sandboxMaxLifeMs: override } };
+}
+
 export async function handler(event?: unknown): Promise<ReaperSummary> {
   deps ??= build();
-  const override = maxLifeOverrideMs(event);
-  return reapOnce(override === undefined ? deps : { ...deps, config: { ...deps.config, sandboxMaxLifeMs: override } });
+  return reapOnce(passDeps(deps, event));
 }
