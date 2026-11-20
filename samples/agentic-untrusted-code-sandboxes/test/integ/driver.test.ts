@@ -7,7 +7,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix } from './common';
-import { Ctx } from './ctx';
+import { Ctx, TOKEN_REUSE_MS } from './ctx';
 import { HOSTILE_DIR, MAX_CODE_BYTES, PROBES, probeCode } from './hostile';
 import { checkLeftovers, namesLogGroup, newPolicyFindings, policyFindings } from './leftovers';
 import { claimsFor, mint, signJws } from './mint.function';
@@ -125,6 +125,20 @@ describe('the context', () => {
     c.revoke('C');
     await expect(c.token('run-code', 'C')).rejects.toThrow(/no longer mints/);
     expect(await c.token('run-code', 'B')).toBe('a.b.c');
+  });
+
+  test('a call that retries a starting sandbox takes a fresh token once the reused one is too old', async () => {
+    let n = 0;
+    const send = jest.fn(async () => ({ Payload: Buffer.from(JSON.stringify({ token: `t.${++n}.x` })) }));
+    const c = new Ctx({ lambda: { send } } as never, new Recorder('r', () => 0, () => undefined), 'S', { MintFunction: 'm', ToolsGatewayUrl: 'https://gw.invalid/' }, 'run');
+    let now = 1_000_000;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    expect(await c.token('run-code', 'A')).toBe('t.1.x');
+    now += TOKEN_REUSE_MS - 1;
+    expect(await c.token('run-code', 'A')).toBe('t.1.x');
+    now += 2;
+    expect(await c.token('run-code', 'A')).toBe('t.2.x');
+    clock.mockRestore();
   });
 
   test('a leftover check of a run that stopped before its resources were recorded reports the new policy', async () => {

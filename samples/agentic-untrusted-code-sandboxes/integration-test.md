@@ -181,7 +181,7 @@ does instead:
 | Shortcut | What a consumer does instead |
 |---|---|
 | The test mint signs a token for any tenant id with the ingress's key (S-12, ADR-0060) | gets a token from the ingress by presenting an identity token; `parse` does that once through the sample agent |
-| `RC_INTEG_OVERRIDES=1`, set through a raw property override on the `run-code` reaper and tool functions: the reaper honours `maxLifeSeconds`, the tool starts tenant `E`'s sandbox with an exit-at-boot flag (`RC_INTEG_FAIL_START_TENANT`) (ADR-0059, T-88) | has no such switch; a unit test proves a normal deployment cannot get one |
+| `RC_INTEG_OVERRIDES=1`, set through a raw property override on the `run-code` reaper, gateway tool function and standalone function: the reaper honours `maxLifeSeconds`, the tool starts tenant `E`'s sandbox with an exit-at-boot flag (`RC_INTEG_FAIL_START_TENANT`) (ADR-0059, T-88) | has no such switch; a unit test proves a normal deployment cannot get one |
 | The reaper's 5-minute schedule rule (the one schedule rule under each instance) is turned off in the template, so the driver is its only caller | keeps the schedule |
 | `recycled-address` writes A's row with another task's address | an address ECS reassigned |
 | `forged` invokes the gateway tool function directly with the driver's own credentials | only the gateway role may invoke it |

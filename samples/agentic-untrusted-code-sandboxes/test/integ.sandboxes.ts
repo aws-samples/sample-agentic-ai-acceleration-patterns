@@ -24,7 +24,7 @@
  *    without) and a bucket outside the endpoint policies for no-egress.
  *
  * Test-only changes to the instances, each listed in integration-test.md:
- * `RC_INTEG_OVERRIDES=1` on the `run-code` reaper and tool functions through
+ * `RC_INTEG_OVERRIDES=1` on the `run-code` reaper, gateway tool and standalone functions through
  * a raw property override (test/integ/overrides.ts), and the reaper's
  * 5-minute schedule turned off so the driver is its only caller. Nothing in
  * `src/` reads a prop for either.
@@ -177,7 +177,7 @@ export function createIntegApp(options: IntegAppOptions): App {
 
   const runCode = instances['run-code'];
   out(outputKey('run-code', 'RunCodeFunction'), required(runCode.runCodeFunction, 'runCodeFunction (standalone)').functionName);
-  // TEST ONLY: the two switches of threat T-88, on the run-code instance's reaper and tool functions only.
+  // TEST ONLY: the two switches of threat T-88, on the run-code instance's reaper, gateway tool and standalone functions only.
   enableIntegOverrides(findFunction(instances['run-code'], /reaper/i, 'reaper'));
   enableIntegOverrides(targets['run-code'].function, { failStartTenant: TENANT.e });
   enableIntegOverrides(required(runCode.runCodeFunction, 'runCodeFunction') as lambda.Function, { failStartTenant: TENANT.e });

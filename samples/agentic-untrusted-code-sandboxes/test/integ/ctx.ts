@@ -54,6 +54,9 @@ export interface CallOptions {
 /** Start caps of spec §3.4, in ms, for the retry bound. */
 export const START_CAP_MS: Readonly<Record<Backend, number>> = { microvm: 20_000, nitro: 300_000, agentcore: 30_000 };
 
+/** How long a minted token is handed out again (spec §8: the gateway refuses a token with 60 s or less left). */
+export const TOKEN_REUSE_MS = 180_000;
+
 export class Ctx {
   private readonly tokens = new Map<string, { token: string; at: number }>();
   /** Names the probes looked up that the DNS Firewall may log as BLOCK (dns-platform). */
@@ -107,7 +110,8 @@ export class Ctx {
     if (this.revoked.has(tenant)) throw new Error(`the driver no longer mints tokens for tenant ${tenant}`);
     const key = `${instance}|${tenant}`;
     const hit = this.tokens.get(key);
-    if (hit && Date.now() - hit.at < 240_000) return hit.token;
+    // A token lasts 300 s and the gateway refuses one with 60 s or less left: reuse one for at most 180 s.
+    if (hit && Date.now() - hit.at < TOKEN_REUSE_MS) return hit.token;
     const r = await this.aws.lambda.send(new InvokeCommand({
       FunctionName: this.out.MintFunction,
       Payload: Buffer.from(JSON.stringify({
@@ -144,13 +148,14 @@ export class Ctx {
 
   /** One `run_code` call through the gateway entry, retrying a starting or busy sandbox. */
   public async call(instance: Instance, tenant: string, args: CallArgs, options: CallOptions = {}): Promise<CallResult> {
-    const token = await this.token(instance, tenant);
     const backend = args.backend ?? 'microvm';
     const bound = options.retryMs ?? START_CAP_MS[backend] + 60_000;
     const t0 = Date.now();
     let starting = 0;
     for (;;) {
       if (this.aborted) throw new Error('the run was stopped');
+      // Inside the loop: a start can retry for minutes, and the token it began with may be about to expire.
+      const token = await this.token(instance, tenant);
       const r = await callGateway(this.out.ToolsGatewayUrl, token, `${TOOL_TARGET[instance]}___${TOOL_NAME}`, { ...args });
       const o = r.outcome;
       const retry = o.kind === 'error' && (o.code === 'sandbox_starting' || o.code === 'sandbox_busy');

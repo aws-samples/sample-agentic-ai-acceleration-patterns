@@ -212,7 +212,7 @@ async function main(): Promise<void> {
     },
   };
   const fn = commands[command];
-  if (!fn) throw new Error(`unknown command ${command}; use run, destroy, leftovers or synth`);
+  if (!fn) throw new Error(`unknown command ${command}; use run, destroy, cleanup, leftovers or synth`);
   process.exitCode = await fn();
 }
 

@@ -62,9 +62,8 @@ functions through a raw property override. The names are in `src/env.ts`
 
 ## Consequences
 
-The `integ` task and its script land with the integration test's own pull
-request; until then `npx projen integ` has no script to run. The integration
-test document will give the one line a person runs to destroy a stack by hand.
+The `integ` task runs `scripts/integ.sh`. The integration test document
+gives the one line a person runs to destroy a stack by hand.
 A change of the deploy mechanism (for example the CDK toolkit library)
 touches `test/integ/deploy.ts` only. The tool and the reaper read the two
 hooks and nothing else does. Revisit if the deploy takes the driver past its
