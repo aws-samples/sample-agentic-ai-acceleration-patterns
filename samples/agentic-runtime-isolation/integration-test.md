@@ -76,6 +76,7 @@ target per agent, which the agent added after the deploy does not get.
 | 4b | session `tenant` scope: B1 with A1's conversation lands in B's unit; A2 sharing it shares A1's |
 | 5 | A1 resumes its conversation on the same microVM |
 | 6 | no token, tampered token, ID token, malformed `conversationId`: refused |
+| 6c | client correlation id (ADR-0053): a well-formed `x-correlation-id` is logged as `correlationId` on `request served` (`api-gateway`) or `request admitted` (`agentcore-gateway`); a malformed one is absent from that function's log group and the request is still served; on `api-gateway` the authoriser's `token refused` line carries it too |
 | 7 | grants: `scope`, `tenant_id`, `agent`, `aud` and `act.sub` per caller |
 | 8a | TVM: own tenant item read, other tenant's denied in IAM; the runner cannot assume the tenant role |
 | 8b | a model prompt ends with `event: usage` |
@@ -108,18 +109,21 @@ target per agent, which the agent added after the deploy does not get.
 | 8b-metrics | per-tenant `ModelOutputTokens` for tenant A on `api-gateway`; none on `agentcore-gateway` |
 | 10 | destroy from the exit trap (also on failure) and verify nothing is left |
 
-That is 36 rows; the 22 per-ingress rows run on both all-on stacks, so the
-table the script prints holds 58 steps.
+That is 38 rows; the 24 per-ingress rows run on both all-on stacks, so the
+table the script prints holds 62 steps.
 
 ## Runtime and cost
 
-A run takes **about 45 minutes** and costs **about $3 per run** at on-demand
-rates, mostly AgentCore Runtime session time and the Gateways across six
-stacks. The deploy takes about 8 minutes: each Runtime runs on platform
+A run takes **about 45 minutes** at the default deploy concurrency of 6 and
+about an hour at 2, and costs **about $3 per run** at on-demand rates,
+mostly AgentCore Runtime session time and the Gateways across six stacks.
+The deploy takes about 8 minutes at 6 and about 21 minutes at 2
+(`INTEG_DEPLOY_CONCURRENCY=2`); use 2 where six REST APIs created at once
+trip the API Gateway control-plane throttle. Each Runtime runs on platform
 version V2 (ADR-0050), which builds a snapshot at create, about 3.5 minutes
-per Runtime. The teardown takes about 7 minutes, and the service keeps each
-V2 snapshot for up to 8 hours after it. Last green integration run: run 20,
-2026-11-13, eu-central-1, 60/60 steps (step 25 SKIP on `agentcore-gateway`
+per Runtime. The teardown takes 7 to 16 minutes, and the service keeps each
+V2 snapshot for up to 8 hours after it. Last green integration run: run 21,
+2026-11-20, eu-central-1, 62/62 steps (step 25 SKIP on `agentcore-gateway`
 by design); timings and coverage are in the
 [`architecture.md` status block](./architecture.md).
 

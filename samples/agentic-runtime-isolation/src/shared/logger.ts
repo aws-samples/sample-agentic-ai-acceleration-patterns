@@ -6,7 +6,9 @@
  * the verified tenantId, the session prefix, the ingress, a status code and
  * the rule that refused a request. Fields whose names look like secrets are
  * dropped before writing, so a mistake in a caller cannot put a token, a
- * credential or a header value in the logs.
+ * credential or a header value in the logs. The one client value logged on
+ * purpose is the shape-checked `correlationId` (ADR-0053, `correlationIdOf`
+ * in src/shared/headers.ts).
  *
  * Each record is one JSON line written straight to stdout, like the EMF
  * records (src/shared/metrics.ts). Under the Lambda JSON log format a

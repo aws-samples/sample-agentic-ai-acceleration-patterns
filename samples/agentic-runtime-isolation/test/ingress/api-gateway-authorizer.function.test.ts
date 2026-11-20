@@ -226,6 +226,20 @@ describe('authorize', () => {
     release();
     expect(effectOf(await run)).toBe('Allow');
   });
+
+  it('logs the client correlation id on the authorised and refused lines, and drops a malformed one (ADR-0053)', async () => {
+    const token = `Bearer ${await issuer.mint()}`;
+    await authorizer.authorize(event({ 'Authorization': token, 'x-correlation-id': 'run1-3-b1' }), deps());
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request authorised')).toMatchObject({ correlationId: 'run1-3-b1' });
+    logs = [];
+    await authorizer.authorize(event({ 'Authorization': 'Bearer nope', 'X-Correlation-Id': 'run1-3-b2' }), deps());
+    expect(refusal()).toMatchObject({ correlationId: 'run1-3-b2' });
+    logs = [];
+    const result = await authorizer.authorize(event({ 'Authorization': token, 'x-correlation-id': 'bad id' }), deps());
+    expect(effectOf(result)).toBe('Allow');
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request authorised').correlationId).toBeUndefined();
+    expect(logs.join('\n')).not.toContain('bad id');
+  });
 });
 
 describe('handler', () => {
@@ -325,6 +339,18 @@ describe('authorize on /{backend}/delegations (ADR-0048)', () => {
       expect(result.context).toBeUndefined();
     }
     expect(logs.filter((l) => l.includes('delegation refused') && l.includes('token_invalid'))).toHaveLength(3);
+  });
+
+  it('the delegation refused and admitted lines carry the client correlation id (ADR-0053)', async () => {
+    const withId = (authorization: string, id: string) => {
+      const e = event(authorization);
+      return { ...e, headers: { ...e.headers, 'x-correlation-id': id } };
+    };
+    await authorizer.authorize(withId('Bearer an-identity-token', 'run1-9-d1'), deps());
+    expect(JSON.parse(logs.find((l) => l.includes('delegation refused'))!)).toMatchObject({ correlationId: 'run1-9-d1' });
+    logs = [];
+    await authorizer.authorize(withId('Bearer caller-token', 'run1-9-d2'), deps());
+    expect(JSON.parse(logs.find((l) => l.includes('delegation admitted'))!)).toMatchObject({ correlationId: 'run1-9-d2' });
   });
 
   it('an undeclared target is delegation_not_declared before any lookup; a declared target without an entry is Deny (404 in the log); the three delegation refusals carry their public reason', async () => {

@@ -51,3 +51,8 @@ global_settings:
     - rule_id: SECRET-SECRET-KEYWORD
       path: threat-model.md
       reason: Prose in mitigation M-12 names the access-log fields; no value is present.
+    - rule_id: SECRET-BASE64-HIGH-ENTROPY-STRING
+      path: scripts/stress/k6/probe.js
+      line_start: 217
+      line_end: 217
+      reason: The RFC 4648 base32 alphabet the stress probe uses to rebuild unit ids (ADR-0052); a constant, not a secret.

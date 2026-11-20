@@ -589,9 +589,11 @@ tag and no other tag key, and scopes data by `${aws:PrincipalTag/TenantId}`
 AWS_PROFILE=<profile> AWS_REGION=eu-central-1 npx projen integ
 ```
 
-A run takes about 45 minutes and costs about $3 at on-demand rates;
-[integration-test.md](./integration-test.md) describes what it stands up,
-its steps and its knobs.
+A run takes about 45 minutes where the Region's quota allows the default
+deploy concurrency of 6, and about an hour at `INTEG_DEPLOY_CONCURRENCY=2`,
+which eu-central-1 needed on 2026-11-20. It costs about $3 at on-demand
+rates; [integration-test.md](./integration-test.md) describes what it
+stands up, its steps and its knobs.
 
 ## End-to-end demo
 
@@ -717,7 +719,7 @@ replaced the Runtime: the old Runtime's group is deleted while it drains.
 
 | Route | Auth | What |
 |---|---|---|
-| `POST <baseUrl>/<backend>/invocations` | `Authorization: Bearer <identity token>`; `X-Tenant-Id` when the token carries `tenants` | Invoke an agent; `text/event-stream`, last event `event: usage` |
+| `POST <baseUrl>/<backend>/invocations` | `Authorization: Bearer <identity token>`; `X-Tenant-Id` when the token carries `tenants` | Invoke an agent; `text/event-stream`, last event `event: usage`. An optional `x-correlation-id` of 1 to 64 characters of `[A-Za-z0-9-]` is logged as `correlationId`; any other value is ignored, not refused (ADR-0053) |
 | `POST <baseUrl>/invocations` | same | The `defaultBackend` (`api-gateway`; on `agentcore-gateway` the name is always in the path) |
 | `POST <baseUrl>/<backend>/delegations` | `Authorization: Bearer <transaction token of the calling agent>` | (ADR-0048, `api-gateway` with `agentDelegation`) Hand the transaction to `<backend>`: a replacement token for it, its Runtime invoked, the stream relayed. 403 `delegation_not_declared`, `delegation_depth`, `delegation_loop`, `agent_not_subscribed`; an identity token is refused |
 | `GET <baseUrl>/.well-known/openid-configuration` | none | `{ issuer, jwks_uri, ... }`; `issuer` = `<baseUrl>` |

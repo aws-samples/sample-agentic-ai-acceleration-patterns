@@ -178,14 +178,15 @@ issue_token() {
 
 urlencode() { jq -sRr @uri; }
 
-# tamper TOKEN_VAR -> the token with one signature character changed (never printed by callers).
-# A middle character: the last base64url character of an RS256 signature
-# carries padding bits, so changing it may leave the signature bytes intact.
+# tamper TOKEN_VAR [POS] -> the token with the signature character at POS
+# (default 5) changed; callers never print it. A middle character: the last
+# base64url character of an RS256 signature carries padding bits, so
+# changing it may leave the signature bytes intact.
 tamper() {
-  local t="${!1}" head sig c
-  head="${t%.*}"; sig="${t##*.}"; c="${sig:5:1}"
+  local t="${!1}" pos="${2:-5}" head sig c
+  head="${t%.*}"; sig="${t##*.}"; c="${sig:pos:1}"
   if [[ "$c" == A ]]; then c=B; else c=A; fi
-  printf '%s.%s%s%s' "$head" "${sig:0:5}" "$c" "${sig:6}"
+  printf '%s.%s%s%s' "$head" "${sig:0:pos}" "$c" "${sig:pos+1}"
 }
 
 # narrow REFRESH_VAR TENANT_ID SCOPE OUT_VAR -> sets NARROW_STATUS, and OUT_VAR on 200 (RFC 8693, tenant-identity ADR-0009).
@@ -239,15 +240,17 @@ LAST_TTFB=""
 LAST_TOTAL=""
 : >"${LIB_TMP}/timing"
 
-# invoke ENDPOINT TOKEN_VAR JSON [SESSION_HEADER_VALUE] [X_TENANT_ID] -> HTTP status; body in $BODY.
+# invoke ENDPOINT TOKEN_VAR JSON [SESSION_HEADER_VALUE] [X_TENANT_ID] [CORRELATION_ID] -> HTTP status; body in $BODY.
 # TOKEN_VAR is a variable NAME (empty name: no Authorization header).
 # X_TENANT_ID selects one tenant of a token that carries `tenants` (ADR-0038).
+# CORRELATION_ID is sent as `x-correlation-id` (ADR-0053); it must hold no `"`, `\` or newline.
 # Writes TTFB and total seconds for timing().
 invoke() {
-  local endpoint="$1" token_var="$2" json="$3" fake_session="${4:-}" tenant_header="${5:-}" config="" out status ttfb total
+  local endpoint="$1" token_var="$2" json="$3" fake_session="${4:-}" tenant_header="${5:-}" correlation="${6:-}" config="" out status ttfb total
   [[ -n "$token_var" ]] && config="header = \"Authorization: Bearer ${!token_var}\""
   [[ -n "$fake_session" ]] && config+=$'\n'"header = \"${SESSION_HEADER}: ${fake_session}\""
   [[ -n "$tenant_header" ]] && config+=$'\n'"header = \"X-Tenant-Id: ${tenant_header}\""
+  [[ -n "$correlation" ]] && config+=$'\n'"header = \"x-correlation-id: ${correlation}\""
   printf '%s' "$json" >"$REQ"
   out="$(curl -s -N --max-time 180 -o "$BODY" -w '%{http_code} %{time_starttransfer} %{time_total}' -X POST "$endpoint" \
     -H 'Content-Type: application/json' -H 'Accept: text/event-stream' --data-binary "@$REQ" --config - <<<"$config")"

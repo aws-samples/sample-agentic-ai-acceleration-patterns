@@ -23,8 +23,10 @@
  * fault (a target not named after its backend), so this module warns once
  * per cold start to make it visible in the logs.
  *
- * Logs carry header NAMES never, and values never: only the verified
- * tenantId, the session prefix, a status and a reason (P-9, spike V-7).
+ * Logs carry header NAMES never, and header values never with one exception:
+ * the client's `x-correlation-id`, logged as `correlationId` only in its
+ * accepted shape (ADR-0053). Otherwise only the verified tenantId, the
+ * session prefix, a status and a reason (P-9, spike V-7).
  *
  * Cost metering (P-10, ADR-0017) on this ingress is request-side only. A
  * REQUEST interceptor returns before the Gateway invokes the Runtime and
@@ -39,7 +41,7 @@
 import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport';
 import type { HeaderTransportBackend } from '../backend/backend';
 import { isLambdaRuntime, readIngressConfig } from '../shared/config';
-import { headerValue } from '../shared/headers';
+import { correlationIdOf, headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics } from '../shared/metrics';
 import { backendFromPath } from '../shared/registry';
@@ -147,6 +149,8 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
   // and never from the default backend (`requireBackendInPath`).
   const path = gatewayRequest?.path;
   const backend = backendFromPath(path);
+  // ADR-0053: logged only, never used for a decision.
+  const correlationId = correlationIdOf(gatewayRequest?.headers);
   let request;
   try {
     request = await deps.pipeline.validate({
@@ -162,13 +166,20 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
         // The event named no backend: the target is not named after its
         // backend, or the Gateway handed a path this module does not read.
         warnedPathLacksBackend = true;
-        log.warn('interceptor path lacks backend', { ingress: 'agentcore-gateway', pathPresent: path !== undefined });
+        log.warn('interceptor path lacks backend', { ingress: 'agentcore-gateway', pathPresent: path !== undefined, correlationId });
       }
-      log.warn('request refused', { ingress: 'agentcore-gateway', status: error.status, reason: error.reason, tenantId: error.tenantId, backend });
+      log.warn('request refused', {
+        ingress: 'agentcore-gateway',
+        status: error.status,
+        reason: error.reason,
+        tenantId: error.tenantId,
+        backend,
+        correlationId,
+      });
       metrics(error.status, error.tenantId, backend);
       return deny(error.status, error.reason);
     }
-    log.error('pipeline failed', { ingress: 'agentcore-gateway', error: errorName(error) });
+    log.error('pipeline failed', { ingress: 'agentcore-gateway', error: errorName(error), correlationId });
     metrics(502);
     return deny(502);
   }
@@ -184,6 +195,7 @@ export async function intercept(event: InterceptorEvent, deps: InterceptorDepend
     noToolsGranted: request.noToolsGranted,
     sessionPrefix: prefixOf(request.unitId),
     status: 200,
+    correlationId,
   });
   metrics(200, request.tenantId, request.backend);
   // The body passes through unchanged; the agent reads `prompt` and ignores

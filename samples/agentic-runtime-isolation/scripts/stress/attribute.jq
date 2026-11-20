@@ -18,9 +18,10 @@
 #   byTenantReason: the logged refusals by tenant and reason, as logged
 #   unattributed:   what the driver saw beyond the credited lines, never below 0
 #
-# The match is by count, not per request (the ingress does not log the correlation
-# id yet, ADR-0052). A log can hold more lines than the driver saw: the query window
-# is wider than the scenario's, so a request at its edge is logged and not counted.
+# The match is by count, not per request: the slice does not yet join on the
+# correlationId the ingress logs (ADR-0053, ADR-0052's revisit trigger). A log can
+# hold more lines than the driver saw: the query window is wider than the
+# scenario's, so a request at its edge is logged and not counted.
 # Excess lines could offset a refusal no line explains. Each tenant's 429 lines are
 # therefore credited at most up to the driver's 429 count for that tenant, so one
 # tenant's excess 429 lines cannot hide another tenant's unattributed refusal. Lines
