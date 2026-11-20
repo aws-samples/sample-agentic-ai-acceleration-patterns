@@ -188,7 +188,8 @@ and the records in
    then makes one `/api/*` call through the edge to the cell API, whose
    answer carries the route hint (§5.3). The run's first tenant is the
    warm-up tenant of §3.5: its deployment builds the cell, and
-   `/agents/*` answers 404 until front-door phase two, so it is not
+   `/agents/*` is refused at the edge (404, or CloudFront's own 403 for
+   a `POST`) until front-door phase two, so it is not
    timed in PS-1.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
@@ -297,9 +298,9 @@ hook with 409 until an operator backfills the route (front-door spec
 | # | Step | Owned by |
 |---|---|---|
 | 1 | control plane deployed | `control-plane` `deploy` |
-| 2 | front-door phase one, first deploy: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `agentIngress` unset, so `/agents/*` answers 404 (front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
+| 2 | front-door phase one, first deploy: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `agentIngress` unset, so the edge refuses `/agents/*` (404, or CloudFront's own 403 for a `POST`, front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
 | 3 | front-door phase one, second deploy: the same app with `registrarUrl`, read from the edge parameter, which adds the `RouteHookAccess` stack in the control plane's account (front-door ADR-0027); then the control plane's `globalHookManagedPolicyArns` update and the global hooks registered with `register-hooks.sh` | `tenant-front-door` `deploy`, with a second `control-plane` update |
-| 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); then the cell account registered for it, with `maxCells` 1 at `small`. The cell app passes the ARN to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7 | `control-plane` (application and account registration) |
+| 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); then the cell account registered for it, with `maxCells` 1 at `small`. The cell app passes the ARN to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7. Both answer 202, so the runner waits until the application and the account are `ACTIVE` | `control-plane` (application and account registration) |
 | 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the runner waits for the cell to be `ACTIVE`; the tenant's users and readiness poll (§3.3 step 4) run after step 6 | `control-plane`, not timed in PS-1 |
 | 6 | front-door phase two: a main-stack update with `agentIngress` set to that cell's ingress, `registrarUrl` kept | `tenant-front-door` |
 | 7 | the rest of the tier's onboarding (PS-1 at `buildLimit`), then the other scenarios | §5.1 |
@@ -316,8 +317,9 @@ and the slices' `needs`. Phase two takes the origin's domain and its
 path, the ingress stage, from the ingress's published parameter,
 `/application-plane/shared/agent-runtime/ingress` (`baseUrl`,
 front-door spec §6.3), which the `tenant-front-door` slice reads with
-`ssm:GetParameter` on that one parameter, through a read-only role in
-the cell account's account base (§3.7, W-11).
+`ssm:GetParameter` on that one parameter. It assumes the ingress reader
+role (§3.6), a read-only role in the cell account's account base (§3.7,
+W-11), with the platform account credentials it deploys with.
 Phase two is a CloudFront distribution change in the main stack, on
 every run at `small`. Its time is part of the front-door slice's
 `deploySeconds` (P-6), and the slice logs it on a line of its own.

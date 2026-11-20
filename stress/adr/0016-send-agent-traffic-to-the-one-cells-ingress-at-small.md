@@ -144,6 +144,7 @@ takes the distribution ARN from a cell parameter, and writes that output
 (spec §3.3 step 2, §3.5); a tenant is routed on `/agents/*` only once
 this holds. Phase two reads the ingress's `baseUrl` from its published
 parameter in the cell account (front-door spec §6.3) through a read-only
-role in the account base that allows `ssm:GetParameter` on that one
-parameter (spec §3.6, §3.7). Revisit when Q-7
-is decided, or if the front door gains per-cell agent origins.
+role that allows `ssm:GetParameter` on that one parameter (spec §3.6,
+§3.7). The role adds one item to the account base that ADR-0006 lists.
+Revisit when Q-7 is decided, or if the front door gains per-cell agent
+origins.
