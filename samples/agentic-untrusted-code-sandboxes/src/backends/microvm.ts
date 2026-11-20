@@ -21,11 +21,11 @@ import {
 } from '@aws-sdk/client-lambda-microvms';
 import type { GetMicrovmCommandOutput } from '@aws-sdk/client-lambda-microvms';
 import type {
-  ReadyResult, RegistryRow, RunJob, RunOutcome, SandboxBackend, SandboxHandle, SandboxSummary,
+  ReadyResult, RegistryRow, RunJob, RunOutcome, SandboxBackend, SandboxHandle, SandboxSummary, StartOptions,
   StopFacts, TenantCredentials,
 } from '../backend';
 import { NO_ANSWER_MARGIN_MS } from '../backend';
-import { BACKEND_ENV, ENV } from '../env';
+import { BACKEND_ENV, ENV, TEST_HOOK_ENV, TEST_HOOK_FIELDS } from '../env';
 import type { Refusal, RefusalCode, RunHookPayload, RunResult } from '../protocol';
 import {
   PROTOCOL_VERSION, RUNNER_PORTS, TENANT_ID_PATTERN, nonceHash, proofMatches, resultProof, startToken,
@@ -203,12 +203,19 @@ export class MicrovmBackend implements SandboxBackend {
     };
   }
 
-  public async start(tenantId: string, nonce: string, creds: TenantCredentials): Promise<SandboxHandle> {
+  public async start(tenantId: string, nonce: string, creds: TenantCredentials, options: StartOptions = {}): Promise<SandboxHandle> {
     if (!TENANT_ID_PATTERN.test(tenantId)) throw new Error('microvm backend: tenant id is not valid');
     if (creds.tenantId !== tenantId) throw new Error('microvm backend: credentials of another tenant');
     const s = this.settings();
     // Only the hash travels in the start call; CloudTrail and GetMicrovm never see the nonce (ADR-0018).
-    const payload: RunHookPayload = { nonceHash: nonceHash(nonce), tenant: tenantId };
+    // Test hook of the integration test (spec §8 `failed-start`, runner/PROTOCOL.md): sent only when the tool asks and this function
+    // honours the hooks (`RC_INTEG_OVERRIDES` = `1`), so a production deployment never sends it.
+    const failAtBoot = options.failAtBoot === true && this.env[TEST_HOOK_ENV.RC_INTEG_OVERRIDES] === '1';
+    const payload: RunHookPayload & { readonly [TEST_HOOK_FIELDS.RUN_HOOK_FAIL_AT_BOOT]?: true } = {
+      nonceHash: nonceHash(nonce),
+      tenant: tenantId,
+      ...(failAtBoot ? { [TEST_HOOK_FIELDS.RUN_HOOK_FAIL_AT_BOOT]: true as const } : {}),
+    };
     const runHookPayload = JSON.stringify(payload);
     if (runHookPayload.length > RUN_HOOK_PAYLOAD_MAX) throw new Error('microvm backend: run hook payload is too long');
     let out;
