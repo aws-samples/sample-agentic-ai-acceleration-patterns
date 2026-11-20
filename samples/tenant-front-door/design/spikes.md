@@ -303,3 +303,47 @@ distribution tenant's tags with `ListTagsForResource` (spec §3.4 step 5).
 
 **Deploy.** Front door stacks 384 s (a fresh main stack after a failed
 first attempt; the edge stack had deployed), demo cell 66 s, support 59 s.
+
+## Dedicated-domain run, 2026-11-20
+
+`scripts/smoke-domains.sh` against the smoke deployment with
+`dedicatedDomains` on and a stand-in control plane (`test/smoke/smoke.app.ts`:
+API Gateway with a Cognito authorizer, the registrar's client-credentials
+reader token, fixture records). The registrar read the stand-in for every
+hook and operator write.
+
+**Found and fixed.** With an IAM `Null` condition on
+`aws:ResourceTag/tenant-front-door:distribution`, `RequestCertificate` was
+refused: ACM authorises the request's tags as `acm:AddTagsToCertificate` on
+`certificate/*`, and CloudTrail named that action. With the condition
+written as `aws:ResourceTag/tenant-front-door:distribution` equal to the
+distribution's id, both `RequestCertificate` and `CreateDistributionTenant`
+with tags passed, so both services present a create's tags as the
+resource's (spec §3.4, threat model AR-33).
+
+**Result.** 38 of 38 checks passed: the hook role's cell and tenant puts
+while the records were `UPDATING` (200, `dt` equal to the record's
+`createdAt`), its `customDomain` 403 and its put on an `ACTIVE` record 409;
+the challenge (202 `domain-challenge` with the record and `expiresAt`,
+`missing` or `mismatch` before publishing, a pass 68 to 111 s after the
+record's stack update); the certificate with its three tags, issued and
+routed 4 to 5 s after the validation record; the distribution tenant on the
+distribution, in the stack's connection group, with the certificate, a
+36-character name and both tags; the SPA, `/config.json` (tenant id,
+sign-in on the shared host) and the cell API on the domain through the
+routing endpoint 16 to 31 s after the 200; the daily re-check recording a
+pass; the drop disabling the distribution tenant; and the removal job
+deleting the distribution tenant and the certificate within 68 s. The
+whole run took 333 to 391 s. The base smoke run then passed 40 of 40 with
+`dedicatedDomains` on. Deploy with `dedicatedDomains` turned on: front door
+stacks 227 s, stand-in control plane and support 81 s.
+
+**Guard.** With `SMOKE_GUARD=1` the run sets a domain (202, `d` written)
+and deploys with `dedicatedDomains` off: the guard refused, the deploy
+failed after 140 s and the main stack rolled back to
+`UPDATE_ROLLBACK_COMPLETE` with the guard's reason in its events; the
+registrar then still answered the domain flow, and the drop answered 200.
+
+**Not run live.** The guard's pass when nothing is held, the teardown
+(stack delete), the refusal of the tag grants on a resource without this
+distribution's tag, and two front doors in one account.
