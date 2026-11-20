@@ -8,7 +8,7 @@
 // other tenant sees a 429 (tenant_429 is tagged by tenant; collect.sh joins the
 // `tenant_minute` lines against the ingress log).
 
-import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './lib.js';
+import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './probe.js';
 
 const tier = loadTier();
 const manifest = loadManifest();
@@ -62,5 +62,5 @@ export function noisy(data) {
 }
 
 export function handleSummary(data) {
-  return summarize(data);
+  return summarize(data, 'S3');
 }

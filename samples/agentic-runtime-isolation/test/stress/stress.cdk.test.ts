@@ -6,10 +6,10 @@ import { App, Stack, Validations } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { StressAgentsStack } from './stress-agents.cdk';
-import { StressDriverStack } from './stress-driver.cdk';
 import { StressIngressStack, stressRegistryPrefix } from './stress-ingress.cdk';
 import { stressTools, stressToolWith } from './stress-tool.function';
 import { agentNames, agentsOfStack, gatewayOf, STRESS_TIERS, targetNames, tierOf } from './tiers';
+import { TIERS } from '../../../../stress/src/tiers';
 import type { ToolContext } from '../../src/tools/context';
 import { publishedIngress, seedPublishedIngress, TEST_ENV } from '../published-ingress';
 
@@ -38,6 +38,31 @@ describe('tiers (stress-test plan §8.2)', () => {
     expect(tierOf('')).toBe(STRESS_TIERS.small);
     expect(tierOf('large')).toBe(STRESS_TIERS.large);
     expect(() => tierOf('huge')).toThrow(/STRESS_SCALE must be one of small, medium, large/);
+  });
+
+  it('takes the figures it shares with every slice from stress/src/tiers.ts', () => {
+    for (const [name, tier] of Object.entries(STRESS_TIERS)) {
+      const shared = TIERS[name as keyof typeof TIERS];
+      expect({
+        name: tier.name,
+        tenantsSeeded: tier.tenantsSeeded,
+        tenantsActive: tier.tenantsActive,
+        usersPerActiveTenant: tier.usersPerActiveTenant,
+        steadyRps: tier.steadyRps,
+        peakRps: tier.peakRps,
+        scenarioSeconds: tier.scenarioSeconds,
+        driverInstanceType: tier.driverInstanceType,
+      }).toEqual({
+        name: shared.name,
+        tenantsSeeded: shared.tenantsSeeded,
+        tenantsActive: shared.tenantsActive,
+        usersPerActiveTenant: shared.usersPerActiveTenant,
+        steadyRps: shared.steadyRps,
+        peakRps: shared.peakRps,
+        scenarioSeconds: shared.scenarioSeconds,
+        driverInstanceType: shared.driverInstanceType,
+      });
+    }
   });
 
   it('names the agents and targets', () => {
@@ -203,59 +228,5 @@ describe('StressAgentsStack', () => {
     expect(stack.agents.map((b) => b.name)).toEqual(agentNames(STRESS_TIERS.medium).slice(1));
     expect(stack.agents.every((b) => b.tools.join() === 't01/*')).toBe(true);
     expect(outputKeys(stack)).toContain('AgentNames');
-  });
-});
-
-describe('StressDriverStack at small', () => {
-  const stack = new StressDriverStack(app(), 'RuntimeIsolationStress-driver', { tier: STRESS_TIERS.small, registryPrefix: REGISTRY_PREFIX, env: TEST_ENV });
-  const template = Template.fromStack(stack);
-  const json = template.toJSON();
-
-  it('passes cdk-nag, stays under the ceiling, has the outputs', () => {
-    expect(() => template.toJSON()).not.toThrow();
-    expect(resourceCount(stack)).toBeLessThan(MAX_RESOURCES);
-    expect(outputKeys(stack)).toEqual(expect.arrayContaining(['InstanceId', 'ResultsBucketName']));
-  });
-
-  it('has no inbound rule and outbound 443 only', () => {
-    template.resourceCountIs('AWS::EC2::SecurityGroupIngress', 0);
-    const groups = template.findResources('AWS::EC2::SecurityGroup', { Properties: { GroupDescription: Match.stringLikeRegexp('Stress driver host') } });
-    expect(Object.keys(groups)).toHaveLength(1);
-    const sg = Object.values(groups)[0] as any;
-    expect(sg.Properties.SecurityGroupIngress).toBeUndefined();
-    expect(sg.Properties.SecurityGroupEgress).toEqual([expect.objectContaining({ CidrIp: '0.0.0.0/0', IpProtocol: 'tcp', FromPort: 443, ToPort: 443 })]);
-  });
-
-  it('runs the host with no public IP, IMDSv2 required, a 30 GB encrypted gp3 root and no key pair', () => {
-    const instance = Object.values(template.findResources('AWS::EC2::Instance'))[0] as any;
-    expect(instance.Properties.KeyName).toBeUndefined();
-    expect(instance.Properties.InstanceType).toBe('t3.large');
-    expect(instance.Properties.NetworkInterfaces?.[0]?.AssociatePublicIpAddress ?? false).toBe(false);
-    expect(instance.Properties.BlockDeviceMappings).toEqual([
-      { DeviceName: '/dev/xvda', Ebs: { VolumeSize: 30, VolumeType: 'gp3', Encrypted: true, DeleteOnTermination: true } },
-    ]);
-    template.hasResourceProperties('AWS::EC2::LaunchTemplate', { LaunchTemplateData: { MetadataOptions: { HttpTokens: 'required' } } });
-  });
-
-  it('has one NAT gateway, the S3 gateway endpoint only, and a private results bucket', () => {
-    template.resourceCountIs('AWS::EC2::NatGateway', 1);
-    template.resourceCountIs('AWS::EC2::VPCEndpoint', 1);
-    template.hasResourceProperties('AWS::EC2::VPCEndpoint', { VpcEndpointType: 'Gateway' });
-    template.hasResourceProperties('AWS::S3::Bucket', {
-      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true },
-      BucketEncryption: { ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }] },
-      LifecycleConfiguration: { Rules: [Match.objectLike({ ExpirationInDays: 30, Status: 'Enabled' })] },
-    });
-  });
-
-  it('grants the host exactly the §8.3 actions', () => {
-    const policies = Object.values(json.Resources).filter(
-      (r: any) => r.Type === 'AWS::IAM::Policy' && JSON.stringify(r.Properties.Roles).includes('HostRole'),
-    ) as any[];
-    const actions = policies.flatMap((p) => p.Properties.PolicyDocument.Statement.flatMap((s: any) => [s.Action].flat()));
-    expect(new Set(actions)).toEqual(new Set(['execute-api:Invoke', 'ssm:GetParameter', 's3:GetObject', 's3:PutObject', 's3:ListBucket']));
-    template.hasResourceProperties('AWS::IAM::Role', {
-      ManagedPolicyArns: [{ 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':iam::aws:policy/AmazonSSMManagedInstanceCore']] }],
-    });
   });
 });

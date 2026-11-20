@@ -9,19 +9,20 @@
  * |-----------------------|----------------------------------------------------------|------|
  * | `<prefix>-ingress`    | `StressIngressStack`: the ingress, the default agent, the tool targets | always |
  * | `<prefix>-agents-<k>` | `StressAgentsStack`: a slice of the agents, from the published document | medium (k = 1), large (k = 1..5); not with `STRESS_AGENTS=false` |
- * | `<prefix>-driver`     | `StressDriverStack`: the k6 host and the results bucket | not with `STRESS_DRIVER=false` |
+ *
+ * The k6 host, `<prefix>-driver`, is not in this app: it is the shared driver in
+ * `stress/driver/` (stress ADR-0007, ADR-0009), which deploy.sh and teardown.sh call.
  *
  * Environment: `STRESS_PREFIX` (default `RuntimeIsolationStress`),
  * `STRESS_SCALE` (`small`, `medium`, `large`; default `small`),
- * `STRESS_DRIVER` and `STRESS_AGENTS` (`false` leaves those stacks out; the
- * first deploy runs with `STRESS_AGENTS=false`, before the published
- * document the agents stacks read exists).
+ * `STRESS_AGENTS` (`false` leaves the agents stacks out; the first deploy runs
+ * with `STRESS_AGENTS=false`, before the published document the agents stacks
+ * read exists).
  */
 
 import { App, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { StressAgentsStack } from './stress/stress-agents.cdk';
-import { StressDriverStack } from './stress/stress-driver.cdk';
 import { StressIngressStack, stressRegistryPrefix } from './stress/stress-ingress.cdk';
 import { tierOf } from './stress/tiers';
 import { bundleAgent } from '../src/agent/bundle';
@@ -44,7 +45,6 @@ function enabled(name: string): boolean {
 }
 
 const tier = tierOf(process.env.STRESS_SCALE);
-const withDriver = enabled('STRESS_DRIVER');
 const withAgents = enabled('STRESS_AGENTS');
 
 const app = new App();
@@ -61,10 +61,6 @@ if (withAgents) {
   for (let index = 1; index <= tier.agentStacks; index++) {
     new StressAgentsStack(app, `${STRESS_PREFIX}-agents-${index}`, { tier, index, agentCodePath, registryPrefix, env });
   }
-}
-
-if (withDriver) {
-  new StressDriverStack(app, `${STRESS_PREFIX}-driver`, { tier, registryPrefix, env });
 }
 
 app.synth();

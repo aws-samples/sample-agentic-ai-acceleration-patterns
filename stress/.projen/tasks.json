@@ -130,6 +130,7 @@
             "src",
             "test",
             "build-tools",
+            "driver",
             "projenrc",
             ".projenrc.ts"
           ],
@@ -231,6 +232,7 @@
             "@types/node",
             "@typescript-eslint/eslint-plugin",
             "@typescript-eslint/parser",
+            "aws-cdk",
             "constructs",
             "eslint-import-resolver-typescript",
             "eslint-plugin-import",
@@ -240,7 +242,9 @@
             "projen",
             "ts-jest",
             "ts-node",
-            "typescript"
+            "typescript",
+            "aws-cdk-lib",
+            "cdk-nag"
           ]
         },
         {

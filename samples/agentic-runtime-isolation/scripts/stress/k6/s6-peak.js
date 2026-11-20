@@ -5,7 +5,7 @@
 // Runtime data plane runs at its quota: throttles are expected and must surface as a 429 or
 // 503 naming the right tenant, never a 500 (status_<code> counters, collect.sh).
 
-import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './lib.js';
+import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './probe.js';
 
 const tier = loadTier();
 const manifest = loadManifest();
@@ -43,5 +43,5 @@ export function main(data) {
 }
 
 export function handleSummary(data) {
-  return summarize(data);
+  return summarize(data, 'S6');
 }
