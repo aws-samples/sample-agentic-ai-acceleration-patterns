@@ -1136,8 +1136,8 @@ describe('least privilege and teardown details', () => {
 
   test('size limits and the prefix list id are validated', () => {
     expect(() => resolveProps({ maxOutputBytes: 4 * 1024 * 1024 + 1 })).toThrow(/maxOutputBytes must be at most/);
-    expect(() => resolveProps({ maxInputBytes: 50 * 1024 * 1024 + 1 })).toThrow(/maxInputBytes must be at most/);
-    expect(() => resolveProps({ maxInputBytes: 50 * 1024 * 1024, maxOutputBytes: 4 * 1024 * 1024 })).not.toThrow();
+    expect(() => resolveProps({ maxInputBytes: 6 * 1024 * 1024 + 1 })).toThrow(/maxInputBytes must be at most 6291456/);
+    expect(() => resolveProps({ maxInputBytes: 6 * 1024 * 1024, maxOutputBytes: 4 * 1024 * 1024 })).not.toThrow();
     expect(() => resolveProps({ s3PrefixListId: 'nope' })).toThrow(/prefix list id/);
   });
 });

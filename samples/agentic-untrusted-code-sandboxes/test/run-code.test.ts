@@ -8,7 +8,7 @@
 import { harness, maintenanceDeps, rowItem, signedResult, type Harness } from './harness';
 import { jobAuth } from '../src/protocol';
 import { reapOnce } from '../src/reaper/reaper';
-import { runCode } from '../src/tool/run-code';
+import { capOutput, runCode } from '../src/tool/run-code';
 import type { RunCodeRequest, RunCodeResult } from '../src/tool/types';
 
 const A = 'tenant-a';
@@ -275,13 +275,19 @@ describe('what the runner returns', () => {
     expect(out).toMatchObject({ exitCode: -9, memoryExceeded: true, timedOut: true, truncated: true, durationMs: 777 });
   });
 
-  test('output above maxOutputBytes is cut, stdout first, and marked truncated', async () => {
-    const h = harness({ maxOutputBytes: 10 });
-    await runCode(req(), h.deps);
-    const row = await rowA(h);
-    h.backends.get('microvm')!.script.nextRun = signedResult(row?.nonce ?? '', 'run-2', { stdout: 'o'.repeat(20), stderr: 'e'.repeat(4) });
-    const out = ok(await runCode(req(), h.deps));
-    expect(out).toMatchObject({ stdout: 'o'.repeat(6), stderr: 'eeee', truncated: true });
+  test('output the runner cut is returned whole and truncated stays as the runner set it', async () => {
+    const { out } = await withResult({ stdout: '\ufffd'.repeat(10), stderr: 'e', truncated: false });
+    expect(out).toMatchObject({ stdout: '\ufffd'.repeat(10), stderr: 'e', truncated: false });
+  });
+
+  test('output whose JSON form is above the response budget is cut, stdout first, and marked truncated', async () => {
+    // 0x01 is one raw byte and six JSON bytes: a 4 MiB output at the cap would be 24 MiB on the wire.
+    const cap = 4 * 1024 * 1024;
+    const { out } = await withResult({ stdout: '\u0001'.repeat(cap - 10), stderr: 'e'.repeat(10) });
+    expect(out.truncated).toBe(true);
+    expect(out.stderr).toBe('e'.repeat(10));
+    expect(JSON.stringify(out).length).toBeLessThan(5 * 1024 * 1024 + 4096);
+    expect(out.stdout.length).toBeGreaterThan(800_000);
   });
 
   test('a result with a wrong proof is a dead handle: the sandbox is replaced once', async () => {
@@ -378,25 +384,21 @@ describe('a sandbox that is not the one the call read', () => {
     expect(b.stops).toEqual([]);
   });
 
-  test('a runner bootId that is not alphanumeric and short is a dead handle, never written to the row', async () => {
+  test.each(['x'.repeat(2000), 'x'.repeat(32), 'A'.repeat(32), 'a'.repeat(31)])('a runner bootId that is not 32 lowercase hex (%#) is a dead handle, never written to the row', async (bootId) => {
     const h = harness();
     await runCode(req(), h.deps);
     const row = await rowA(h);
-    h.backends.get('microvm')!.script.nextRun = signedResult(row?.nonce ?? '', 'run-2', { bootId: 'x'.repeat(2000) });
+    h.backends.get('microvm')!.script.nextRun = signedResult(row?.nonce ?? '', 'run-2', { bootId });
     ok(await runCode(req(), h.deps));
     expect(h.backends.get('microvm')!.sandboxes.size).toBe(2);
-    expect((await rowA(h))?.bootId?.length).toBeLessThan(65);
+    expect((await rowA(h))?.bootId).not.toBe(bootId);
   });
 
-  test('output cut inside a multi-byte character stays within maxOutputBytes and adds no replacement character', async () => {
-    const h = harness({ maxOutputBytes: 5 });
-    await runCode(req(), h.deps);
-    const row = await rowA(h);
-    h.backends.get('microvm')!.script.nextRun = signedResult(row?.nonce ?? '', 'run-2', { stdout: 'ab\u00e9\u00e9\u00e9', stderr: '' });
-    const out = ok(await runCode(req(), h.deps));
-    expect(out.stdout).toBe('ab\u00e9');
-    expect(Buffer.byteLength(out.stdout)).toBeLessThanOrEqual(5);
-    expect(out.truncated).toBe(true);
+  test('capOutput cuts between characters and counts JSON bytes', () => {
+    const [stdout, stderr, cut] = capOutput('a\u00e9\u00e9\u00e9', '\n\n', 7);
+    expect([stdout, stderr, cut]).toEqual(['a\u00e9', '\n\n', true]);
+    expect(capOutput('ab', 'cd', 4)).toEqual(['ab', 'cd', false]);
+    expect(capOutput('\ud83d\ude00\ud83d\ude00', '', 5)[0]).toBe('\ud83d\ude00');
   });
 
   test('a second sandbox is not started when too little of the function\'s time is left: the dead handle is failed, not kept', async () => {

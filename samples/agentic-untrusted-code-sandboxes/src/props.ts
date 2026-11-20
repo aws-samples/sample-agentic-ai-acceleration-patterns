@@ -8,6 +8,7 @@ import type * as ec2 from 'aws-cdk-lib/aws-ec2';
 import type * as s3 from 'aws-cdk-lib/aws-s3';
 import { BACKEND_NAMES, type BackendName } from './backend';
 import type { BackendSettings } from './backend-construct';
+import { MAX_INPUT_BYTES } from './protocol';
 
 export interface UntrustedCodeSandboxesProps {
   /** Deploy `runCodeFunction` for the vendor's own API (ADR-0017). @default false */
@@ -68,9 +69,13 @@ export interface ResolvedProps {
 export const CORE_BUDGET_CAP_SECONDS = 120;
 export const GATEWAY_BUDGET_CAP_SECONDS = 90;
 
-/** Largest `maxOutputBytes` (4 MiB) and `maxInputBytes` (50 MiB) the tool function can carry. */
+/**
+ * Largest `maxOutputBytes` (4 MiB) and `maxInputBytes` (6 MiB, what the runner accepts)
+ * the sample takes. The input travels in one job body, so the runner's own limit is the cap.
+ * The output cap counts raw bytes; the tool also bounds the JSON-encoded answer (run-code.ts).
+ */
 export const MAX_OUTPUT_BYTES_CAP = 4 * 1024 * 1024;
-export const MAX_INPUT_BYTES_CAP = 50 * 1024 * 1024;
+export const MAX_INPUT_BYTES_CAP = MAX_INPUT_BYTES;
 
 /** A DNS Firewall domain: a name, or `*.` and a name (spec §3.9). */
 const DOMAIN_PATTERN = /^(\*\.)?[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
@@ -113,7 +118,7 @@ export function resolveProps(props: UntrustedCodeSandboxesProps): ResolvedProps 
   };
   const maxOutputBytes = positiveInt('maxOutputBytes', props.maxOutputBytes ?? 262144);
   const maxInputBytes = positiveInt('maxInputBytes', props.maxInputBytes ?? 5242880);
-  // The reply goes back through a synchronous Lambda response (6 MB, with JSON and base64 growth); the input is held in memory twice.
+  // The input is one job body the runner reads whole (ADR-0039); the reply is bounded again as JSON before it leaves the tool.
   if (maxOutputBytes > MAX_OUTPUT_BYTES_CAP) fail(`maxOutputBytes must be at most ${MAX_OUTPUT_BYTES_CAP}`);
   if (maxInputBytes > MAX_INPUT_BYTES_CAP) fail(`maxInputBytes must be at most ${MAX_INPUT_BYTES_CAP}`);
   if (props.s3PrefixListId !== undefined && !/^pl-[0-9a-f]{8,17}$/.test(props.s3PrefixListId)) {

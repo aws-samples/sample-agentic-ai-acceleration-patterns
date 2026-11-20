@@ -257,8 +257,8 @@ no unsigned entry.
 | `defaultBackend` | one of `backends` | first entry | used when the call names none |
 | `runTimeout` | `Duration` | 30 s | runner kill time; 1 s to 60 s |
 | `startWait` | `Duration` | 15 s | how long one call waits for a starting sandbox before `sandbox_starting` |
-| `maxOutputBytes` | `number` | 262144 | stdout and stderr together; stdout is cut first |
-| `maxInputBytes` | `number` | 5242880 | refuse larger inputs before any sandbox starts |
+| `maxOutputBytes` | `number` | 262144 | stdout and stderr together, at most 4 MiB; stdout is cut first. The tool also bounds the JSON-encoded answer at 5 MiB (a control byte is six bytes of JSON), so an answer fits the 6 MB Lambda response limit |
+| `maxInputBytes` | `number` | 5242880 | refuse larger inputs before any sandbox starts; at most 6 MiB, the largest input the runner takes |
 | `sandboxIdle` | `Duration` | 15 min | idle time before a sandbox is stopped or suspended |
 | `sandboxMaxLife` | `Duration` | 8 h | hard life cap on every backend |
 | `perTenantMetrics` | `boolean` | `false` | emit CloudWatch metrics with a `TenantId` dimension (ADR-0013) |

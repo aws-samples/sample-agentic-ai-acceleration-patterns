@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-20
+- Amended by: ADR-0063
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -102,3 +103,5 @@ The gateway entry wraps `runCode` and returns its result unchanged. A
 vendor's own tool calls it and checks `isRunCodeError`. A caller that gets
 `tool_failed` learns nothing about why; the reason is in the log line.
 Changing the signature later is a breaking change for the gateway entry.
+
+Note 2026-11-20: amended by ADR-0063. The tool does not cut output again; it bounds the JSON size of the answer. A `bootId` is 32 lowercase hex characters, not 1 to 64 letters or digits.

@@ -19,7 +19,7 @@
 
 import { type BackendName, BACKEND_NAMES, type RegistryRow, type SandboxBackend, type StartOptions, type TenantCredentials } from '../backend';
 import { TEST_HOOK_ENV } from '../env';
-import { buildJob, proofMatches, resultProof, TENANT_ID_PATTERN } from '../protocol';
+import { BOOT_ID_PATTERN, buildJob, proofMatches, resultProof, TENANT_ID_PATTERN } from '../protocol';
 import { handleLessStaleMs } from './config';
 import { defaultDeps, type RunCodeDeps } from './deps';
 import { errorName, Logger, type RunLine } from './log';
@@ -36,8 +36,11 @@ const FAIL_BACKOFF_MS = 30_000;
 const STARTING_RETRY_SECONDS = 5;
 /** Exit code of a job the tool ended by stopping its sandbox: the runner never answered, so it was killed (signal 9). */
 const OVERRUN_EXIT_CODE = -9;
-/** What a runner's `bootId` looks like on the wire (hex in the protocol); the tool bounds it before it writes it to the row. */
-const BOOT_ID_PATTERN = /^[A-Za-z0-9]{1,64}$/;
+/**
+ * Most JSON-encoded bytes of stdout and stderr together that one answer carries: 5 MiB leaves
+ * room under the 6 MB synchronous Lambda response limit for the other fields (ADR-0063).
+ */
+const OUTPUT_JSON_BUDGET = 5 * 1024 * 1024;
 /** `code` limit in UTF-8 bytes (spec §5.1). */
 const MAX_CODE_BYTES = 65536;
 
@@ -441,7 +444,8 @@ async function runJob(call: Call, row: ReadyRow): Promise<Ran> {
         await call.registry.update(row, { bootId: res.bootId });
       }
       await call.registry.touch(call.tenantId, call.backendName, row.handle, deps.now());
-      const [stdout, stderr, cut] = capOutput(res.stdout, res.stderr, config.maxOutputBytes);
+      // shortcut: the tool trusts the runner's cut to maxOutputBytes (the proof above covers the runner); it bounds only the JSON size.
+      const [stdout, stderr, cut] = capOutput(res.stdout, res.stderr);
       return {
         kind: 'done',
         output: {
@@ -533,20 +537,42 @@ async function retireDead(call: Call, row: ReadyRow): Promise<Next> {
   return startNew(call, row, 'dead');
 }
 
-/** Cuts stdout first, then stderr, to `max` bytes together. The runner already does; this is the tool's own cap on what it returns. */
-function capOutput(stdout: string, stderr: string, max: number): [string, string, boolean] {
-  const out = Buffer.from(stdout, 'utf8');
-  const err = Buffer.from(stderr, 'utf8');
-  if (out.length + err.length <= max) return [stdout, stderr, false];
-  const errKept = Math.min(err.length, max);
-  const outKept = Math.max(0, max - errKept);
-  return [cutUtf8(out, outKept), cutUtf8(err, errKept), true];
+/**
+ * Bounds the JSON-encoded size of stdout and stderr together, stdout cut first.
+ * The runner already cut the raw bytes to `maxOutputBytes` and its cut is trusted (PROTOCOL.md);
+ * this guard is for the Lambda response limit, which counts the JSON text, where one control byte is six.
+ */
+export function capOutput(stdout: string, stderr: string, budget: number = OUTPUT_JSON_BUDGET): [string, string, boolean] {
+  const errSize = jsonSize(stderr);
+  const outSize = jsonSize(stdout);
+  if (outSize + errSize <= budget) return [stdout, stderr, false];
+  const errKept = Math.min(errSize, budget);
+  return [cutJson(stdout, budget - errKept), cutJson(stderr, errKept), true];
 }
 
-/** The first `max` bytes of `buf`, ending on a character boundary so the cut never adds a replacement character. */
-function cutUtf8(buf: Buffer, max: number): string {
-  if (buf.length <= max) return buf.toString('utf8');
-  let end = max;
-  while (end > 0 && buf[end] >= 0x80 && buf[end] < 0xc0) end--;
-  return buf.subarray(0, end).toString('utf8');
+/** Bytes `s` takes inside a JSON string (without the quotes), as `JSON.stringify` writes it in UTF-8. */
+function jsonSize(s: string): number {
+  let size = 0;
+  for (const ch of s) size += charSize(ch);
+  return size;
+}
+
+/** The longest prefix of `s` that takes at most `budget` bytes inside a JSON string, cut between characters. */
+function cutJson(s: string, budget: number): string {
+  let size = 0;
+  let end = 0;
+  for (const ch of s) {
+    size += charSize(ch);
+    if (size > budget) break;
+    end += ch.length;
+  }
+  return s.slice(0, end);
+}
+
+function charSize(ch: string): number {
+  const cp = ch.codePointAt(0)!;
+  if (cp === 0x22 || cp === 0x5c || cp === 0x08 || cp === 0x09 || cp === 0x0a || cp === 0x0c || cp === 0x0d) return 2;
+  if (cp < 0x20 || (cp >= 0xd800 && cp <= 0xdfff)) return 6;
+  if (cp < 0x80) return 1;
+  return cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
 }

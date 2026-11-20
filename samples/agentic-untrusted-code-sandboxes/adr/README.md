@@ -66,3 +66,4 @@
 | [0060](0060-sign-test-tokens-with-a-mint-that-exists-only-in-the-integration-app.md) | Sign test tokens with a mint that exists only in the integration app | Proposed | 2026-11-20 |
 | [0061](0061-write-down-the-run-order-and-the-step-by-instance-by-backend-matrix.md) | Write down the run order and the step by instance by backend matrix | Proposed | 2026-11-20 |
 | [0062](0062-check-leftovers-read-only-against-what-the-run-owned.md) | Check leftovers read-only against what the run owned | Proposed | 2026-11-20 |
+| [0063](0063-bound-the-answer-by-its-json-size-and-the-input-by-the-runner-limit.md) | Bound the answer by its JSON size and the input by the runner's limit | Proposed | 2026-11-20 |
