@@ -98,6 +98,12 @@ describe('readRate', () => {
     expect(s.rec.findings).toContain('UpdateTenant: HTTP 409 (ConflictError), expected 202');
   });
 
+  it('makes a finding for a ConflictError that does not say to retry', async () => {
+    const { s } = fakeEnv(() => ok(409, { message: 'Tenant T1 is locked' }, 'ConflictError'));
+    await readRate(s);
+    expect(s.rec.findings).toContain('UpdateTenant: HTTP 409 (ConflictError), expected 202');
+  });
+
   it('makes a finding for a refused write, and one when no write was accepted', async () => {
     const { s, updates } = fakeEnv(() => ok(400, { message: 'name is required' }, 'ValidationError'));
     await readRate(s);

@@ -200,15 +200,16 @@ export async function placementRace(s: ScenarioEnv): Promise<void> {
 }
 
 /**
- * Whether an UpdateTenant answer is a 409 a retry can clear: the tenant is still in flight
- * (`CREATING` or `UPDATING`, usually from the scenario's last write), or another write was
- * accepted between this request's read and its own write (`staleUpdateFailure`). The
- * control plane's 409 for `CREATE_FAILED`, `DELETING` or `DELETE_FAILED` (`updateConflict`,
- * src/tenant/tenant.ts) says a retry cannot succeed: the tenant is broken and is a finding.
+ * Whether an UpdateTenant answer is a 409 a retry can clear. The control plane marks those
+ * by `retry the request` in the message (R-14, `RETRY_HINT`, src/tenant/tenant.ts): the
+ * tenant is still in flight (`CREATING` or `UPDATING`, usually from the scenario's last
+ * write), or another write was accepted between this request's read and its own write
+ * (`staleUpdateFailure`). Any other 409, such as the one for `CREATE_FAILED`, `DELETING` or
+ * `DELETE_FAILED` (`updateConflict`), is a finding.
  */
 const retryableConflict = (r: CallResult): boolean =>
   r.status === 409 && r.errorType === 'ConflictError' &&
-  !String(r.body?.message ?? '').includes('a retry cannot succeed');
+  String(r.body?.message ?? '').includes('retry the request');
 
 /**
  * Read rate under writes (spec §5.2): ListDeployments by tenant, GetDeployment and ListCells
