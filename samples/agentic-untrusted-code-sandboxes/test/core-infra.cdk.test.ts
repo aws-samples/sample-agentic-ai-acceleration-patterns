@@ -447,10 +447,10 @@ describe('network (spec 3.7, ADR-0012)', () => {
     }
     const logsEndpoint = endpoints.find((e) => /logs/.test(JSON.stringify(e.Properties.ServiceName))) as Json;
     const sids = (logsEndpoint.Properties.PolicyDocument.Statement as Json[]).map((s) => s.Sid).sort();
-    expect(sids).toEqual(['Logsagentcore Prefixes'.replace(' ', ''), 'Logsnitro Groups'.replace(' ', '')].sort());
-    const s3 = endpoints.find((e) => e.Properties.VpcEndpointType === 'Gateway') as Json;
-    expect(s3.Properties.PolicyDocument.Statement).toHaveLength(1);
-    expect(JSON.stringify(s3.Properties.PolicyDocument.Statement[0].Resource)).toContain('starport-layer-bucket');
+    expect(sids).toEqual(['LogsagentcorePrefixes', 'LogsnitroGroups']);
+    const gateway = endpoints.find((e) => e.Properties.VpcEndpointType === 'Gateway') as Json;
+    expect(gateway.Properties.PolicyDocument.Statement).toHaveLength(1);
+    expect(JSON.stringify(gateway.Properties.PolicyDocument.Statement[0].Resource)).toContain('starport-layer-bucket');
   });
 
   test('sessionFiles adds the sessions prefix to the S3 endpoint policy only when on', () => {
