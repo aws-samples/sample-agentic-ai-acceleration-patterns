@@ -72,7 +72,7 @@ async function tokensFor(ctx: Ctx, tenants: readonly TenantEntry[]): Promise<Map
     issue().then(
       () => { setTimeout(refresh, TOKEN_REFRESH_MS).unref(); },
       (e: unknown) => {
-        console.error(`tokens: refresh failed (${e instanceof Error ? e.message : String(e)}); trying again in 20 s, the tokens in hand are at most ${300 - TOKEN_REFRESH_MS / 1000} s from expiring`);
+        console.error(`tokens: refresh failed (${e instanceof Error ? e.message : String(e)}); trying again in 20 s, the tokens in hand had about ${300 - TOKEN_REFRESH_MS / 1000} s left when this refresh began`);
         setTimeout(refresh, 20_000).unref();
       },
     );
@@ -158,15 +158,15 @@ export interface WriteAnswer {
   readonly written: boolean;
   /** Worth another attempt: the route table was busy. */
   readonly retry: boolean;
-  /** For a refusal: the reason it is counted under. */
-  readonly reason?: string;
+  /** For a refusal: the reason it is counted under; empty for a write. */
+  readonly reason: string;
   /** A refusal the registrar is not documented to give a hook-role write; the scenario fails. */
   readonly violation?: string;
 }
 
 export function writeAnswer(r: { status: number; body: string }): WriteAnswer {
-  if (r.status === 200) return { written: true, retry: false };
-  if (r.status === 503) return { written: false, retry: true, reason: `registrar-${registrarCause({ status: 503, headers: {}, body: r.body, ttfb: 0, total: 0 })}` };
+  if (r.status === 200) return { written: true, retry: false, reason: '' };
+  if (r.status === 503) return { written: false, retry: true, reason: `registrar-${registrarCause(r)}` };
   return {
     written: false,
     retry: false,
@@ -256,7 +256,7 @@ export async function routeWrite(ctx: Ctx): Promise<Outcome> {
         );
         return;
       }
-      rec.request(r.status === 0 ? 599 : r.status, { tenant: t.tenantId, reason: a.reason as string });
+      rec.request(r.status === 0 ? 599 : r.status, { tenant: t.tenantId, reason: a.reason });
       rec.hop('registrar-write-failed', r.total);
       if (a.violation !== undefined) sink.violate(a.violation);
       if (!a.retry) break;

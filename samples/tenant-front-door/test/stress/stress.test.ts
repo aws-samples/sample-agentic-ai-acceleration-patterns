@@ -300,7 +300,7 @@ describe('watching a written route', () => {
 
 describe('the registrar answer to a write', () => {
   it('writes on 200, tries again on 503 and names its cause, and calls anything else a finding', () => {
-    expect(writeAnswer({ status: 200, body: '{}' })).toEqual({ written: true, retry: false });
+    expect(writeAnswer({ status: 200, body: '{}' })).toEqual({ written: true, retry: false, reason: '' });
     expect(writeAnswer({ status: 503, body: '{"message":"the route table is busy; retry"}' })).toEqual({ written: false, retry: true, reason: 'registrar-route-table-busy' });
     expect(writeAnswer({ status: 503, body: '{"message":"the control plane could not be read"}' }).reason).toBe('registrar-control-plane-unreadable');
     expect(writeAnswer({ status: 403, body: '{}' })).toMatchObject({ written: false, retry: false, reason: 'registrar-refused', violation: expect.stringContaining('HTTP 403') });

@@ -149,10 +149,12 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
       await loadEdgeRows(edgeLogs, out.edgeLogGroup, first - 5_000, last + 60_000, chunk, rows, skipped);
     }
     const join = joinEdge(lines, rows);
-    if (skipped.size > 0) failures.push(`${scenario}: ${skipped.size} edge log rows have a status or a time-taken that is not a number`);
+    const own = new Set(lines.map((l) => l.id));
+    const badRows = [...skipped].filter((id) => own.has(id)).length;
+    if (badRows > 0) failures.push(`${scenario}: ${badRows} of this scenario's edge log rows have a status or a time-taken that is not a number`);
     joinedAll += join.matched;
     expectedAll += join.expected;
-    const absent = join.missing - skipped.size;
+    const absent = missingLines().length;
     if (absent > 0) failures.push(`${scenario}: ${absent} of ${join.expected} requests have no edge log line for their x-amz-cf-id`);
     for (const m of [...join.statusMismatches, ...join.tenantMismatches]) failures.push(`${scenario}: ${m}`);
     if (join.generatedByFunction !== join.routerRefusals) failures.push(`${scenario}: ${join.routerRefusals - join.generatedByFunction} router refusals are not marked FunctionGeneratedResponse in the edge log`);
@@ -162,8 +164,8 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
     let diff: string[] = [];
     let quietSince = Date.now();
     let previous = '';
-    // The cell check has a deadline of its own, long enough for a minute of quiet and a few queries.
-    const cellDeadline = Date.now() + Math.max(DEADLINE_MS, 150_000);
+    // The cell check has a deadline of its own, after the edge wait.
+    const cellDeadline = Date.now() + DEADLINE_MS;
     for (;;) {
       const got = await cellCounts(cellLogs, out.cellLogGroup, fromMs - 2000, toMs + 2000);
       diff = compareCell(want, got);

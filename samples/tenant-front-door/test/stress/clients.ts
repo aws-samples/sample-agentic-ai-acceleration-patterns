@@ -155,7 +155,7 @@ export class Registrar {
 }
 
 /** Why a 503 from the registrar: the route table kept conflicting, or the control plane could not be read. */
-export function registrarCause(r: HttpResult): string {
+export function registrarCause(r: { readonly body: string }): string {
   const text = r.body.toLowerCase();
   if (text.includes('route table is busy')) return 'route-table-busy';
   if (text.includes('control plane')) return 'control-plane-unreadable';

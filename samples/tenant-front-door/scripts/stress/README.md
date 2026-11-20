@@ -114,8 +114,10 @@ contract: it adds the `edge` hop to `latency`, and the router's highest
 compute utilization of the scenario's minutes to `quotas.platform` under
 `cloudfront-function-compute-utilization-pct`, a key that is not a budgeted
 quota. The runner accepts both because it re-hashes the slice's own records
-after `collect`. Each scenario waits up to 5 minutes for its own logs. A
-router error metric with no datapoint is reported as not checked.
+after `collect`. Each scenario waits up to 5 minutes for its own edge logs and
+up to 5 for the cell's. A router error metric with no datapoint counts as zero
+errors when the router's invocations were counted for the same minutes, and is
+reported as not checked when they were not.
 
 ## Measured (small tier)
 
