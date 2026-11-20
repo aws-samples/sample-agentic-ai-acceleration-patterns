@@ -34,7 +34,7 @@ Option 1.
 |---|---|---|
 | Tool role | `sts:AssumeRole` and `sts:TagSession` on the tool tenant role | `toolStatements()` |
 | Tool tenant role | `s3:GetObject` on `inputs/${aws:PrincipalTag/TenantId}/*`, `s3:PutObject` on `outputs/${aws:PrincipalTag/TenantId}/*`, `dynamodb:GetItem`, `PutItem`, `UpdateItem` on the table with `ForAllValues:StringEquals` `dynamodb:LeadingKeys` = `TENANT#${aws:PrincipalTag/TenantId}` | `tenantStatements()` |
-| Reaper role (reaper and offboard) | `dynamodb:GetItem`, `Query`, `Scan`, `UpdateItem`, `DeleteItem` on the table | `reaperStatements()` |
+| Reaper role (reaper and offboard) | `dynamodb:GetItem`, `Scan`, `UpdateItem`, `DeleteItem` on the table | `reaperStatements()` |
 | Drain role | the reaper role's | `reaperStatements()` and `drainStatements()` |
 
 - The tenant role trusts the tool roles by ARN, with `sts:TagSession`, and

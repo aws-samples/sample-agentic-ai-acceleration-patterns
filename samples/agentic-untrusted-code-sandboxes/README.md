@@ -4,8 +4,16 @@
 
 One `run_code` tool that runs model-written Python for one tenant at a time
 in a per-tenant sandbox: Lambda MicroVMs, Nitro Sandboxes on ECS Managed
-Instances, or AgentCore Runtime. The sandboxed code has no internet and no
-tenant credentials.
+Instances, or AgentCore Runtime. The sandboxed code has no internet access
+and no tenant credentials.
+
+DNS is the one exception. With `dnsFirewall` off, which is the default, code
+can look up any public name, so it can send data out and read replies in
+lookups, and on `agentcore` it can send the runtime role's credentials that
+way. Turn `dnsFirewall` on to resolve only AWS names plus the `allowDomains`
+you list, and list only names you control (threats T-29, T-32 and T-91).
+With a supplied `vpc`, set `createEndpoints` explicitly: the endpoints use
+private DNS that applies to the whole VPC (T-92).
 
 This sample is being built. The design is the contract:
 

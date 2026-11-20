@@ -263,8 +263,9 @@ no unsigned entry.
 | `sandboxMaxLife` | `Duration` | 8 h | hard life cap on every backend |
 | `perTenantMetrics` | `boolean` | `false` | emit CloudWatch metrics with a `TenantId` dimension (ADR-0013) |
 | `vpc` | `ec2.IVpc` | created (§3.7) | must have subnets tagged for the tool and the sandboxes |
-| `dnsFirewall` | `boolean \| { allowDomains?: string[] }` | `false` | associate a Route 53 Resolver DNS Firewall rule group with the VPC that allows only the §3.9 AWS names and blocks the rest with NXDOMAIN, plus VPC query logging; `allowDomains` adds names; refused with a supplied `vpc` (ADR-0016) |
-| `createEndpoints` | `boolean` | `true` | create the §3.7 sandbox endpoints; `false` when a supplied `vpc` already has them, which then must meet §3.7 |
+| `s3PrefixListId` | `string` | none | id of the `com.amazonaws.<region>.s3` managed prefix list (`pl-` and hex). Required with a supplied `vpc` when the `agentcore` runtime's endpoints are created: its 443 egress to the S3 gateway endpoint names the list. With the created VPC the egress is any address on 443, which that VPC routes nowhere else (ADR-0028) |
+| `dnsFirewall` | `boolean \| { allowDomains?: string[] }` | `false` | associate a Route 53 Resolver DNS Firewall rule group with the VPC that allows only the §3.9 AWS names and blocks the rest with NXDOMAIN, plus VPC query logging; `allowDomains` adds names, each of two labels or more (`example.com`, `*.example.com`; a bare top-level domain is refused); refused with a supplied `vpc` (ADR-0016). With it off, DNS is the one path out of a sandbox (T-29) |
+| `createEndpoints` | `boolean` | `true` with the created VPC; required with a supplied `vpc` | create the §3.7 sandbox endpoints; `false` when a supplied `vpc` already has them, which then must meet §3.7. The interface endpoints use private DNS, which applies to the whole supplied VPC (T-92) |
 | `inputBucket` | `s3.IBucket` | created | the bucket with `inputs/<tenant>/` |
 | `microvm.memoryMiB` | `number` | 1024 | MicroVM image `MinimumMemoryInMiB`; the guest gets about four times this (S-15: 1024 gives 3998 MiB and 2 vCPUs, 2048 gives 8016 MiB and 4) |
 | `nitro.cpu`, `nitro.memoryMiB` | `number` | 512, 1024 | task size |
@@ -695,7 +696,9 @@ Security groups:
 | `microvm` connector | none | none |
 | Endpoints | 443 from the sandbox groups and the ECS instance group | none |
 
-Tasks cannot reach each other: no task group admits another. The tool
+The VPC the construct creates has flow logs for rejected traffic only, in a log
+group with one month of retention that is deleted on destroy; it is how a
+blocked path shows up. Tasks cannot reach each other: no task group admits another. The tool
 reaches MicroVM endpoints, AWS APIs and the AgentCore data plane through
 the NAT. The integration test tries a presigned PUT to a bucket outside
 these policies through the S3 endpoint, and expects a refusal.
@@ -764,6 +767,9 @@ also carries the ECS Managed Instances' names.
 | 100 | ALLOW | `amazonaws.com`, `*.amazonaws.com`, `*.on.aws` (MicroVM endpoints), `*.api.aws` (ECS Managed Instances), `time.aws.com`, `*.compute.internal`, plus `allowDomains` |
 | 200 | BLOCK, `NXDOMAIN` | `*` |
 
+The rule group is associated with the VPC at priority 101, the first free
+slot of a VPC that holds only this construct's resources.
+
 Resolver query logging for the VPC goes to a log group the construct owns
 (retention set, deleted on destroy). Every blocked lookup is logged with
 `srcaddr`, `query_name` and `firewall_rule_action` = `BLOCK`; allowed
@@ -780,6 +786,11 @@ left blocked: its servers would see every label. S-13 saw no failure with
 it blocked over 15 minutes; clock behaviour over hours is unverified.
 Names a vendor adds in `allowDomains` are the vendor's own exception to
 C-3.
+
+Each instance with `dnsFirewall` on, and each `agentcore` backend, adds one
+account-level CloudWatch Logs resource policy of its own. The per-Region
+quota for these policies is 10 (check the current quota before deploying
+more instances into one Region and account).
 
 Scope. The association covers the whole VPC. The construct creates its
 own VPC, so nothing else is affected. With a supplied `vpc`, BLOCK `*`
