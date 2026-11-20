@@ -43,4 +43,9 @@
 | [0037](0037-name-the-backend-in-the-runner-environment-and-pin-the-runner-images.md) | Name the backend in the runner environment, and pin the runner images | Proposed | 2026-11-20 |
 | [0038](0038-prepare-the-job-child-as-uid-1001-and-set-the-address-space-cap-last.md) | Prepare the job child as uid 1001, and set the address space cap last | Proposed | 2026-11-20 |
 | [0039](0039-read-the-open-points-of-the-runner-protocol-one-way.md) | Read the open points of the runner protocol one way | Proposed | 2026-11-20 |
+| [0050](0050-scope-the-tool-rights-to-the-runtime-and-derive-the-session-id-in-code.md) | Scope the tool's AgentCore rights to the runtime and derive the session id in code | Proposed | 2026-11-20 |
+| [0051](0051-keep-the-runtime-role-to-logs-and-the-image-and-let-the-core-open-the-network.md) | Keep the runtime role to logs and the image, and let the core open the network | Proposed | 2026-11-20 |
+| [0052](0052-treat-the-session-as-always-ready-and-read-every-answer-as-a-result-a-refusal-or-a-dead-handle.md) | Treat the session as always ready, and read every answer as a result, a refusal or a dead handle | Proposed | 2026-11-20 |
+| [0053](0053-run-the-runtime-from-the-construct-repository-and-never-from-a-code-zip.md) | Run the runtime from the construct's repository and never from a code zip | Proposed | 2026-11-20 |
+| [0054](0054-deliver-the-usage-logs-with-resources-the-construct-owns.md) | Deliver the usage logs with resources the construct owns | Proposed | 2026-11-20 |
 | [0058](0058-delete-the-integration-stack-through-the-api-from-the-driver-and-give-the-test-two-hooks.md) | Delete the integration stack through the API from the driver, and give the test two hooks | Proposed | 2026-11-20 |
