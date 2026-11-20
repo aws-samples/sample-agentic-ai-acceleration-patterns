@@ -66,7 +66,7 @@ integ_cdk() {
   local label="$1"
   shift
   npx cdk "$@" --app "npx ts-node -P test/tsconfig.json --prefer-ts-exts test/integ.${MODE}.ts" \
-    --output "$RUN_DIR/cdk.out.${label}" --context integ="$(cat "$RUN_DIR/context.json")" \
+    --output "$RUN_DIR/cdk.out.${label}" --context integ="$(jq -c . "$RUN_DIR/context.json")" \
     >"$RUN_DIR/logs/${label}.log" 2>&1
 }
 # deploy_one STACK-SELECTOR LABEL: one stack of the test app, timed.
