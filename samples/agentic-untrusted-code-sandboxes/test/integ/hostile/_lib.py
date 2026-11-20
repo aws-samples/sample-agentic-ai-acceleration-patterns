@@ -16,6 +16,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -42,14 +43,42 @@ def llink():
     return ".".join(["169", "254", "169", "254"])
 
 
-def http(method, url, headers=None, body=None, timeout=3):
-    """One HTTP request; returns (status, bytes). A refusal status is data, not an error."""
+PROBE_TIMEOUT = 2
+
+
+def _request(method, url, headers, body, timeout):
     req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read(65536)
     except urllib.error.HTTPError as e:
         return e.code, e.read(4096)
+
+
+def http(method, url, headers=None, body=None, timeout=PROBE_TIMEOUT):
+    """One HTTP request; returns (status, bytes). A refusal status is data, not an error.
+
+    The whole request gets at most PROBE_TIMEOUT seconds, however many addresses the name has
+    (urllib's timeout is per address). A request still open then is a timeout, which a blocked
+    path must give: the probes stay well inside the run timeout on a sandbox with no route.
+    """
+    timeout = min(timeout, PROBE_TIMEOUT)
+    box = []
+
+    def go():
+        try:
+            box.append(_request(method, url, headers, body, timeout))
+        except BaseException as e:  # noqa: BLE001 - handed to the caller
+            box.append(e)
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout)
+    if not box:
+        raise socket.timeout("probe deadline")
+    if isinstance(box[0], BaseException):
+        raise box[0]
+    return box[0]
 
 
 def imds_credentials():
@@ -105,10 +134,10 @@ def s3_request(method, key, creds, body=b""):
     host = CONFIG["bucket"] + ".s3." + CONFIG["region"] + ".amazonaws.com"
     path = "/" + "/".join(urllib.parse.quote(p, safe="") for p in key.split("/"))
     h = sigv4(method, host, path, CONFIG["region"], "s3", creds, body)
-    return http(method, "https://" + host + path, h, body or None, timeout=5)
+    return http(method, "https://" + host + path, h, body or None)
 
 
-def tcp_connect(host, port, timeout=5):
+def tcp_connect(host, port, timeout=PROBE_TIMEOUT):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:

@@ -5,7 +5,7 @@
 # with no name lookup (so the route and the security group are tested even
 # when the firewall answers the name first), TCP to tenant B's sandbox
 # address, and a presigned PUT to a bucket outside the endpoint policy. Every
-# probe must fail within 5 s, and the IP-literal connect must not complete.
+# probe must fail within 2 s, and the IP-literal connect must not complete.
 import threading
 
 
@@ -23,7 +23,7 @@ def probe(name, fn):
 
 
 def https_name():
-    return http("GET", "https://example.com/", timeout=5)[0]
+    return http("GET", "https://example.com/")[0]
 
 
 def tcp_public():
@@ -35,11 +35,11 @@ def tcp_peer():
 
 
 def put_presigned():
-    return http("PUT", CONFIG["presigned"], {}, b"x", timeout=5)[0]
+    return http("PUT", CONFIG["presigned"], {}, b"x")[0]
 
 
 def https_peer():
-    return http("GET", CONFIG["peer_url"], timeout=5)[0]
+    return http("GET", CONFIG["peer_url"])[0]
 
 
 ts = [probe("https_name", https_name), probe("tcp_public_ip", tcp_public), probe("put_presigned", put_presigned)]
@@ -48,5 +48,5 @@ if CONFIG.get("peer_ip"):
 if CONFIG.get("peer_url"):
     ts.append(probe("https_peer", https_peer))
 for t in ts:
-    t.join(8)
+    t.join(4)
 done()

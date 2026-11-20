@@ -53,7 +53,7 @@ def load():
 
 early = [probe("imds_role_path", role_path), probe("ecs_credentials_path", ecs_path), probe("imds_credentials_loaded", load)]
 for t in early:
-    t.join(10)
+    t.join(6)
 R["credentials_loaded"] = creds[0] is not None
 
 
@@ -61,7 +61,7 @@ def get_b():
     key = "inputs/" + CONFIG["other"] + "/invoice.csv"
     if creds[0]:
         return s3_request("GET", key, creds[0])[0]
-    return http("GET", "https://" + CONFIG["bucket"] + ".s3." + CONFIG["region"] + ".amazonaws.com/" + key, timeout=5)[0]
+    return http("GET", "https://" + CONFIG["bucket"] + ".s3." + CONFIG["region"] + ".amazonaws.com/" + key)[0]
 
 
 def get_row_b():
@@ -69,10 +69,10 @@ def get_row_b():
     body = json.dumps({"TableName": CONFIG["table"], "Key": {"PK": {"S": "TENANT#" + CONFIG["other"]}, "SK": {"S": "SANDBOX#" + CONFIG["backend"]}}}).encode()
     c = creds[0] or {"ak": "AKIAIOSFODNN7EXAMPLE", "sk": "x", "st": ""}
     h = sigv4("POST", host, "/", CONFIG["region"], "dynamodb", c, body, extra={"Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "DynamoDB_20120810.GetItem"})
-    return http("POST", "https://" + host + "/", h, body, timeout=5)[0]
+    return http("POST", "https://" + host + "/", h, body)[0]
 
 
 late = [probe("get_object_b", get_b), probe("get_row_b", get_row_b)]
 for t in late:
-    t.join(10)
+    t.join(6)
 done()

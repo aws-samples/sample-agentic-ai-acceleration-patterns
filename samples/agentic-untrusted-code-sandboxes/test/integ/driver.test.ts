@@ -352,6 +352,21 @@ describe('the hostile probes', () => {
     expect(run('print(CONFIG["on"], CONFIG["off"], CONFIG["none"])')).toBe('True False None');
   });
 
+  test('the no-credentials and no-egress probes stay well inside the 20 s run timeout when every request hangs', () => {
+    // A sandbox with no route: urlopen never answers. Each request is cut at 2 s and the requests run side by side.
+    const hang = 'import time, urllib.request\nurllib.request.urlopen = lambda *a, **k: time.sleep(60)\n';
+    const config = { region: 'r', bucket: 'b', table: 't', backend: 'nitro', tenant: 'A', other: 'B', presigned: 'https://example.com/x', public_ip: '192.0.2.1' };
+    for (const [probe, field] of [['nocreds', 'get_object_b'], ['noegress', 'https_name']] as const) {
+      const t0 = Date.now();
+      const out = execFileSync('python3', ['-I', '-S', '-B', '-c', hang + probeCode(probe, config)], { encoding: 'utf8', timeout: 15_000 });
+      expect(Date.now() - t0).toBeLessThan(9_000);
+      const seen = lastJsonLine(out) as Record<string, { error?: string; status?: unknown; outcome?: unknown; ms?: number }>;
+      expect(seen[field].error).toBeDefined();
+      expect(seen[field].status ?? seen[field].outcome).toBeUndefined();
+      for (const v of Object.values(seen)) if (typeof v === 'object' && v !== null && v.ms !== undefined) expect(v.ms).toBeLessThan(2_600);
+    }
+  });
+
   test('the probes build the metadata address from parts and print no secret', () => {
     for (const p of [...PROBES, '_lib']) {
       const text = readFileSync(path.join(HOSTILE_DIR, `${p}.py`), 'utf8');
