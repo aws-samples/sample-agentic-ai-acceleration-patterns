@@ -192,18 +192,17 @@ and the records in
    the control-plane tenant id, which creates the first admin, then
    `CreateUser` for each further user the tier lists (§4.1; users per active
    tenant count the admin, so only active tenants get further users). It
-   does this for each tenant PS-1 onboards, the warm-up tenant included,
-   and for the `large` fleet's seed; a churn create (PS-5) gets identity
-   calls only where PS-1 is timed on it (`large`), because PS-5's own
-   probes need no token (§5.1). The
-   driver then polls through the edge until the first `report` is served.
-   It then makes one `/api/*` call through the edge to the cell API, whose
-   answer carries the route hint (§5.3). The identity calls and the polling
-   are part of PS-1's time to the first
-   served request (§5.1). The run's first tenant is the warm-up tenant of
-   §3.5: its deployment builds the cell, and `/agents/*` is refused at the
-   edge (404, or CloudFront's own 403 for a `POST`) until front-door phase
-   two, so it is not timed in PS-1.
+   does this for each tenant PS-1 onboards, for the warm-up tenant (after
+   front-door phase two, §3.5) and for the `large` fleet's seed; a churn
+   create (PS-5) gets identity calls only where PS-1 is timed on it
+   (`large`), because PS-5's own probes need no token (§5.1). The driver
+   then polls through the edge until the first `report` is served. It then
+   makes one `/api/*` call through the edge to the cell API, whose answer
+   carries the route hint (§5.3). The identity calls and the polling are
+   part of PS-1's time to the first served request (§5.1). The run's first
+   tenant is the warm-up tenant of §3.5: its deployment builds the cell,
+   and `/agents/*` is refused at the edge (404, or CloudFront's own 403 for
+   a `POST`) until front-door phase two, so it is not timed in PS-1.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -367,8 +366,8 @@ is refused, so `small` keeps one cell and one `agentIngress`. Steps 2
 to 6 alternate between two slices' verbs, which a runner that runs one
 slice's `deploy` and `seed` before the next slice starts (item 3 of the
 list in this section) does not express; the first platform run (W-9) adds
-the interleaved order to the runner. Phase two takes the origin's domain and its
-path, the ingress stage, from the ingress's published parameter,
+the interleaved order to the runner. Phase two takes the origin's domain and
+its path, the ingress stage, from the ingress's published parameter,
 `/application-plane/shared/agent-runtime/ingress` (`baseUrl`,
 front-door spec §6.3), which the `tenant-front-door` slice reads with
 `ssm:GetParameter` on that one parameter. It assumes the ingress reader
@@ -545,11 +544,10 @@ Each slice's `budget` fills its column; the runner sums per account.
 
 Run in this order in `platform` mode; a platform run runs these `PS-<n>`
 scenarios by default (§3.5). The runner runs scenarios one after another,
-so PS-5 runs on its own after PS-4 and PS-7 on its own after PS-6, with
-no PS-2 load beside them.
-Agent calls go from the edge straight to the ingress; at `small` that is
-the one cell's ingress (§3.3, stress ADR-0016). Scenarios above `small`
-wait for Q-7.
+so PS-5 runs on its own after PS-4 and PS-7 on its own after PS-6, with no
+PS-2 load beside them. Agent calls go from the edge straight to the
+ingress; at `small` that is the one cell's ingress (§3.3, stress
+ADR-0016). Scenarios above `small` wait for Q-7.
 
 | Id | Shape | What it stresses | Watch |
 |---|---|---|---|
@@ -562,7 +560,8 @@ wait for Q-7.
 | PS-7 cross-cell probes | after PS-6: a token whose payload names another tenant (in another cell when the tier has more than one), a client route header, a direct `/api/*` call to a cell origin, a direct call to the ingress with a token whose payload names another tenant, and a direct call to the ingress with the tenant's own token | the router, the route hint check, origin access control, the ingress's own token check | every probe but the last refused at the edge, the cell, the origin or the ingress, never served; the last is served, because the ingress is public by design (front-door spec §1.2) |
 | PS-8 peak | S6 shape at the tier's peak for 60 s | the shared quotas at their limit | the first quota that gives out, per account; every refusal attributed |
 
-Each platform scenario has one owner slice, which declares it in its `slice.json` and writes its record:
+Each platform scenario has one owner slice, which declares it in its
+`slice.json` and writes its record:
 
 | Scenarios | Owner slice | In `platformOnly` |
 |---|---|---|

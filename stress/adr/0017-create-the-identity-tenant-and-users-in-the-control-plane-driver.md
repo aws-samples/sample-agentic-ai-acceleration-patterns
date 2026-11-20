@@ -31,11 +31,12 @@ control plane's tenants refuses every tenant (`no-identity-tenant`).
 control-plane tenant id (tenant-identity ADR-0028, ADR-0029). A reader of
 the spec might expect the stress application's tenant script to make that
 call; spec §3.3 step 3 says it does not. The mount assumes the tenant build
-runs in the identity's own account: the platform API
-admits the account root, and the tenant build role gets its permission from
+runs in the identity's own account: the platform API admits the account
+root, and the tenant build role gets its permission from
 `PlatformInvokePolicy` (tenant-identity ADR-0030), so both sides allow the
-call only in the same account (tenant-identity `design/control-plane-mounting.spec.md`
-§3.3). The stress application's tenant script runs under the role pair's
+call only in the same account (tenant-identity
+`design/control-plane-mounting.spec.md` §3.3). The stress application's
+tenant script runs under the role pair's
 tenant role in a cell account (control-plane ADR-0025), which is a different
 account from the stress identity (spec §3.1).
 
@@ -68,8 +69,8 @@ which the platform API admits, and not from a build role, so the cell
 account's tenant role gains no reach into the platform account and a
 compromised tenant build cannot create identities; the driver already knows
 each tenant's id, the tier's user count and when the deployment is `ACTIVE`;
-the calls fall
-inside PS-1's timing without a new component; the `tenant-identity` slice
+the calls fall inside PS-1's timing without a new component; the
+`tenant-identity` slice
 already has the call code, with its retry on throttling, to copy; no change
 to another sample.
 
@@ -120,9 +121,10 @@ tenant's deployment is `ACTIVE`, calls tenant-identity `CreateTenant` with
 the control-plane tenant id, then `CreateUser` for each further user the
 tier lists (spec §4.1, which counts the admin among the users), through the
 IAM-signed platform API at the `apiUrl` of `identity.json`. It does this for
-each tenant PS-1 onboards, the warm-up tenant included, and for the `large`
-fleet's seed, as spec §3.3 step 4 says. The tenant script keeps only the entitlement call. The calls are
-part of PS-1's time to the first served request. The driver never writes a
+each tenant PS-1 onboards, for the warm-up tenant (after front-door phase
+two) and for the `large` fleet's seed, as spec §3.3 step 4 says. The tenant
+script keeps only the entitlement call. The calls are part of PS-1's time to
+the first served request. The driver never writes a
 temporary password or a token to disk (spec §4.2).
 
 The driver records the admin and users it creates in `identity[]` of
@@ -149,9 +151,8 @@ together finish close together, so the driver can have up to 20
 `CreateTenant` calls (40 `CreateGroup` calls) to make within seconds.
 Against 15 requests a second that can throttle. The driver retries a
 throttled call with backoff, as the `tenant-identity` slice's calls do, and a
-throttle shows in PS-1's
-time, which is a result, not an error. Spec §4.4 lists the draw in the
-`control-plane` column.
+throttle shows in PS-1's time, which is a result, not an error. Spec §4.4
+lists the draw in the `control-plane` column.
 
 The stress test no longer exercises the sample's own mount, so a defect in
 `create.sh` or in `PlatformInvokePolicy` is not found by it. The sample's
@@ -174,7 +175,6 @@ tenants of every deployment of the run, the seeded tenants of `small` and
 `medium` and the churn tenants that PS-5 deleted included (the `large`
 fleet's stay with the fixture), in the `control-plane` `teardown`, because
 the control plane's `DeleteDeployment` no longer removes them and the
-`tenant-identity`
-`teardown` knows only the tenants it seeded. Revisit if the tenant-identity
-sample gains a control-plane hook, or if the platform API admits
-cell-account roles.
+`tenant-identity` `teardown` knows only the tenants it seeded. Revisit if
+the tenant-identity sample gains a control-plane hook, or if the platform
+API admits cell-account roles.
