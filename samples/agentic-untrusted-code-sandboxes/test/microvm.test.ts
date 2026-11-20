@@ -17,7 +17,7 @@ import {
 import type { MicrovmState } from '@aws-sdk/client-lambda-microvms';
 import { mockClient } from 'aws-sdk-client-mock';
 import type { RegistryRow, RunJob, SandboxHandle, TenantCredentials } from '../src/backend';
-import { MICROVM_START_CAP_MS, MicrovmBackend, MicrovmStartError, endpointOrigin, httpIngressConnectorArn } from '../src/backends/microvm';
+import { MICROVM_START_CAP_MS, MicrovmBackend, MicrovmStartError, endpointOrigin, httpIngressConnectorArn, stopReasonOf, terminatedReason } from '../src/backends/microvm';
 import { BACKEND_ENV, ENV, TEST_HOOK_ENV } from '../src/env';
 import { buildJob, newNonce, nonceHash, resultProof, startToken } from '../src/protocol';
 import type { RunResult } from '../src/protocol';
@@ -543,10 +543,29 @@ describe('run', () => {
     test('a proxy 502 from a MicroVM that ended well before the call is a dead handle', async () => {
       aws.on(GetMicrovmCommand).resolves(ended({ terminatedAt: longAgo(), stateReason: 'terminated by caller' }));
       fetchMock.mockResolvedValueOnce(reply(502, ''));
-      expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'dead', reason: 'terminated by caller' });
+      expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'dead', reason: 'terminated: terminated_by_caller' });
       aws.on(GetMicrovmCommand).resolves(ended({ terminatedAt: longAgo() }));
       fetchMock.mockResolvedValueOnce(reply(502, ''));
       expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'dead', reason: 'terminated_before_call' });
+    });
+
+    test('the platform reason becomes a short code: lowercase, underscores, at most 48 characters', () => {
+      expect(terminatedReason('Terminated by caller')).toBe('terminated: terminated_by_caller');
+      expect(terminatedReason(' --Max  duration!! ')).toBe('terminated: max_duration');
+      expect(terminatedReason(`${'x'.repeat(47)} yz ${'q'.repeat(500)}`)).toBe(`terminated: ${'x'.repeat(47)}`);
+      expect(terminatedReason('')).toBe('terminated_before_call');
+      expect(terminatedReason(undefined)).toBe('terminated_before_call');
+      expect(terminatedReason('\u00e9\u00e9')).toBe('terminated_before_call');
+    });
+
+    test('the stop line gets a reason only for an ended MicroVM with a usable platform reason', () => {
+      expect(stopReasonOf('TERMINATED', 'Max duration')).toBe('terminated: max_duration');
+      expect(stopReasonOf('TERMINATING', 'by caller')).toBe('terminated: by_caller');
+      expect(stopReasonOf('TERMINATED', '')).toBeUndefined();
+      expect(stopReasonOf('TERMINATED', '!!')).toBeUndefined();
+      expect(stopReasonOf('TERMINATED', undefined)).toBeUndefined();
+      expect(stopReasonOf('RUNNING', 'max duration')).toBeUndefined();
+      expect(stopReasonOf(undefined, 'max duration')).toBeUndefined();
     });
 
     test('a connection lost after the request left is dead only for the same finding', async () => {
@@ -710,7 +729,7 @@ describe('stop, list, isAlive and stopReason', () => {
 
   test('stopReason reports the platform times and reason, and nothing for an unknown MicroVM', async () => {
     aws.on(GetMicrovmCommand).resolves(microvm('TERMINATED', { terminatedAt: new Date(5000), stateReason: 'max duration' }));
-    expect(await backend().stopReason(handleOf(nonce))).toEqual({ startedAt: 1000, stoppedAt: 5000, reason: 'max duration' });
+    expect(await backend().stopReason(handleOf(nonce))).toEqual({ startedAt: 1000, stoppedAt: 5000, reason: 'terminated: max_duration' });
     aws.on(GetMicrovmCommand).resolves(microvm('RUNNING'));
     expect(await backend().stopReason(handleOf(nonce))).toEqual({ startedAt: 1000, stoppedAt: undefined, reason: undefined });
     aws.on(GetMicrovmCommand).rejects(new ResourceNotFoundException({ message: 'x', $metadata: {} } as never));

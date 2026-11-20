@@ -28,7 +28,7 @@ import { NO_ANSWER_MARGIN_MS } from '../backend';
 import { BACKEND_ENV, ENV, TEST_HOOK_ENV, TEST_HOOK_FIELDS } from '../env';
 import type { Refusal, RefusalCode, RunHookPayload, RunResult } from '../protocol';
 import {
-  PROTOCOL_VERSION, RUNNER_PORTS, TENANT_ID_PATTERN, nonceHash, proofMatches, resultProof, startToken,
+  BOOT_ID_PATTERN, PROTOCOL_VERSION, RUNNER_PORTS, TENANT_ID_PATTERN, nonceHash, proofMatches, resultProof, startToken,
 } from '../protocol';
 
 /** Start cap in ms (spec §3.4: measured P90 2.8 s). */
@@ -52,7 +52,6 @@ const PING_TIMEOUT_MS = 5000;
 /** The auth token header (platform contract). */
 const AUTH_HEADER = 'X-aws-proxy-auth';
 
-const BOOT_ID = /^[0-9a-f]{32}$/;
 const REFUSALS: readonly RefusalCode[] = ['wrong_sandbox', 'busy', 'dirty', 'tool_failed'];
 
 /** `arn:<partition>:lambda:<region>:<account>:microvm-image:<name>`. */
@@ -75,11 +74,33 @@ const NOT_SENT: readonly string[] = ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH'
 /** A MicroVM that ended this long before the request left cannot have run the job; the margin covers clock skew with the platform. */
 const TERMINATED_BEFORE_CALL_MS = 2000;
 
-/** The state lookup behind a no-answer must not hold the call past the tool's own deadline. */
-const NO_ANSWER_LOOKUP_MS = 3000;
+/** The state lookup behind a no-answer must not hold the call past the tool's own deadline (counted in the budget test). */
+export const NO_ANSWER_LOOKUP_MS = 3000;
 
 /** States in which a MicroVM is gone or going. */
 const ENDED_STATES: readonly string[] = ['TERMINATING', 'TERMINATED'];
+
+/** The platform's free-text `stateReason` as a code of lowercase letters, digits and `_`, at most 48 characters; '' when none is left. */
+function reasonCode(stateReason: string | undefined): string {
+  return (stateReason ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48).replace(/_+$/, '');
+}
+
+/**
+ * The reason of a `dead` handle, which the stop line carries as a Contributor Insights key: `terminated: ` followed by
+ * the platform's `stateReason` as a code (lowercase letters, digits and `_`, at most 48 characters), like nitro's
+ * connection reasons; `terminated_before_call` when the platform gives no usable reason.
+ */
+export function terminatedReason(stateReason: string | undefined): string {
+  const code = reasonCode(stateReason);
+  return code === '' ? 'terminated_before_call' : `terminated: ${code}`;
+}
+
+/** The stop line's reason for a MicroVM the platform ended, or undefined: a running MicroVM or one with no usable reason has none. */
+export function stopReasonOf(state: string | undefined, stateReason: string | undefined): string | undefined {
+  const code = reasonCode(stateReason);
+  return state !== undefined && ENDED_STATES.includes(state) && code !== '' ? `terminated: ${code}` : undefined;
+}
+
 
 /** Why a start failed, for the tool line and for a vendor reading the log. */
 export type MicrovmStartFailure = 'quota' | 'throttled' | 'capacity' | 'failed';
@@ -302,7 +323,7 @@ export class MicrovmBackend implements SandboxBackend {
       });
       if (!res.ok) return undefined;
       const body: unknown = JSON.parse(await res.text());
-      return isRecord(body) && body.status === 'Healthy' && typeof body.bootId === 'string' && BOOT_ID.test(body.bootId)
+      return isRecord(body) && body.status === 'Healthy' && typeof body.bootId === 'string' && BOOT_ID_PATTERN.test(body.bootId)
         ? body.bootId
         : undefined;
     } catch {
@@ -381,7 +402,7 @@ export class MicrovmBackend implements SandboxBackend {
       const info = await Promise.race([this.get(handle.handle), lookup]);
       const endedAt = toMs(info.terminatedAt);
       if (info.state === 'TERMINATED' && endedAt !== undefined && endedAt + TERMINATED_BEFORE_CALL_MS < sentAt) {
-        return { kind: 'dead', reason: info.stateReason ?? 'terminated_before_call' };
+        return { kind: 'dead', reason: terminatedReason(info.stateReason) };
       }
     } catch {
       // Unreadable or slow: keep no_answer.
@@ -434,7 +455,7 @@ export class MicrovmBackend implements SandboxBackend {
   public async stopReason(handle: SandboxHandle): Promise<StopFacts> {
     try {
       const info = await this.get(handle.handle);
-      return { startedAt: toMs(info.startedAt), stoppedAt: toMs(info.terminatedAt), reason: info.stateReason };
+      return { startedAt: toMs(info.startedAt), stoppedAt: toMs(info.terminatedAt), reason: stopReasonOf(info.state, info.stateReason) };
     } catch (e) {
       if (isNotFound(e)) return {};
       throw e;
@@ -498,7 +519,7 @@ function interpret(status: number, text: string, job: RunJob): RunOutcome {
     const refusal: Refusal = {
       v: PROTOCOL_VERSION,
       error: body.error as RefusalCode,
-      ...(typeof body.bootId === 'string' && BOOT_ID.test(body.bootId) ? { bootId: body.bootId } : {}),
+      ...(typeof body.bootId === 'string' && BOOT_ID_PATTERN.test(body.bootId) ? { bootId: body.bootId } : {}),
     };
     return { kind: 'refused', refusal };
   }
@@ -519,7 +540,7 @@ function parseResult(body: Record<string, unknown>, job: RunJob): RunResult {
   if (typeof body.durationMs !== 'number' || !(body.durationMs >= 0)) bad('durationMs');
   if (typeof body.timedOut !== 'boolean') bad('timedOut');
   if (typeof body.memoryExceeded !== 'boolean') bad('memoryExceeded');
-  if (typeof body.bootId !== 'string' || !BOOT_ID.test(body.bootId)) bad('bootId');
+  if (typeof body.bootId !== 'string' || !BOOT_ID_PATTERN.test(body.bootId)) bad('bootId');
   if (typeof body.proof !== 'string') bad('proof');
   return body as unknown as RunResult;
 }

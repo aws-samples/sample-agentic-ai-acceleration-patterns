@@ -28,9 +28,12 @@ allowed='customer ENI|customer-owned'
 
 files=$(git ls-files --cached --others --exclude-standard -- . \
   ':!:package-lock.json' ':!:package.json' ':!:.projen/**' ':!:node_modules/**' ':!:lib/**' ':!:cdk.out/**' \
-  ':!:scripts/check-terms.sh')
+  ':!:scripts/check-terms.sh' ':!:test/check-terms.test.ts')
 
-hits=$(printf '%s\n' "$files" | xargs -r grep -n -i -E "$banned" -- 2>/dev/null | grep -v -i -E "$allowed" || true)
+# The allowed phrases are cut out of each matching line before it is checked again, so a banned word on the
+# same line as an allowed phrase is still found. The line is lowercased first, so plain POSIX sed does the cut.
+allowed_lc=$(printf '%s' "$allowed" | tr '[:upper:]' '[:lower:]')
+hits=$(printf '%s\n' "$files" | xargs -r grep -n -i -E "$banned" -- 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed -E "s/${allowed_lc}//g" | grep -i -E "$banned" || true)
 if [[ -n "$hits" ]]; then
   echo "check-terms: banned terms, account ids or aliases found:"
   echo "$hits"

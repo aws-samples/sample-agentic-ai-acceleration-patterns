@@ -70,3 +70,4 @@
 | [0064](0064-read-an-unframed-request-as-empty-and-bound-the-work-after-a-job.md) | Read an unframed request as empty and bound the work after a job | Proposed | 2026-11-20 |
 | [0065](0065-require-an-explicit-endpoint-choice-with-a-supplied-vpc.md) | Require an explicit endpoint choice with a supplied VPC | Proposed | 2026-11-20 |
 | [0066](0066-mark-the-integration-app-in-module-state-not-in-context.md) | Mark the integration app in module state, not in context | Proposed | 2026-11-20 |
+| [0067](0067-let-the-core-write-every-endpoint-policy-from-log-cleanup.md) | Let the core write every endpoint policy from its own resources and `logCleanup()` | Proposed | 2026-11-20 |
