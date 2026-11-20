@@ -48,7 +48,8 @@ export class AgentcoreBackend implements SandboxBackend {
   public readonly name = 'agentcore' as const;
   public readonly startCapMs = AGENTCORE_START_CAP_MS;
 
-  private client?: BedrockAgentCoreClient;
+  private stopClient?: BedrockAgentCoreClient;
+  private invokeClient?: BedrockAgentCoreClient;
 
   /** Reads its settings from the function environment the construct sets (BackendConstruct.environment). */
   public constructor(public readonly env: Readonly<Record<string, string | undefined>> = process.env) {}
@@ -110,7 +111,7 @@ export class AgentcoreBackend implements SandboxBackend {
   public async stop(handle: SandboxHandle, _creds?: TenantCredentials): Promise<void> {
     this.checkHandle(handle);
     try {
-      await this.sdk().send(new StopRuntimeSessionCommand({
+      await this.stopper().send(new StopRuntimeSessionCommand({
         agentRuntimeArn: this.runtimeArn(),
         runtimeSessionId: handle.handle,
       }));
@@ -152,9 +153,20 @@ export class AgentcoreBackend implements SandboxBackend {
     return arn;
   }
 
-  private sdk(): BedrockAgentCoreClient {
-    this.client ??= new BedrockAgentCoreClient({});
-    return this.client;
+  /** Stopping is idempotent, so the SDK's default retries stay. */
+  private stopper(): BedrockAgentCoreClient {
+    this.stopClient ??= new BedrockAgentCoreClient({});
+    return this.stopClient;
+  }
+
+  /**
+   * One attempt only. The SDK retries a throttle, a 5xx answer and a dropped connection, and a retried
+   * invoke can run the tenant's code twice: the first attempt may have reached the runner before the
+   * connection broke. A failed attempt reaches the caller as an error and the tool decides (ADR-0052).
+   */
+  private invoker(): BedrockAgentCoreClient {
+    this.invokeClient ??= new BedrockAgentCoreClient({ maxAttempts: 1 });
+    return this.invokeClient;
   }
 
   /** The session id is derived by code (S-8), so a handle that names another session is a caller fault, never sent. */
@@ -167,7 +179,7 @@ export class AgentcoreBackend implements SandboxBackend {
   private async invoke(handle: SandboxHandle, job: RunJob, signal: AbortSignal): Promise<RunOutcome> {
     let text: string;
     try {
-      const out = await this.sdk().send(new InvokeAgentRuntimeCommand({
+      const out = await this.invoker().send(new InvokeAgentRuntimeCommand({
         agentRuntimeArn: this.runtimeArn(),
         runtimeSessionId: handle.handle,
         contentType: 'application/json',

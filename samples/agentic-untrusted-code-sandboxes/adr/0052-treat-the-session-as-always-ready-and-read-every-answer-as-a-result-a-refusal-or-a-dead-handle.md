@@ -44,9 +44,12 @@ no call, so the start cap of 30 s is only the budget the caller allows for
 the first job. `ready` returns `ready` with an empty patch, because the row
 already holds the address and the `bootId` arrives with each result.
 
-`run` sends the job as the `InvokeAgentRuntime` payload and waits at most
-`timeoutMs` + 5 s for the answer and its body together, then aborts the call
-and returns `no_answer`. It returns:
+`run` sends the job as the `InvokeAgentRuntime` payload with a client that
+makes one attempt: the SDK would retry a throttle, a 5xx answer or a dropped
+connection, and a retry after the first attempt reached the runner could run
+the tenant's code twice. A failed attempt is an error for the caller (the
+last row of the table). It waits at most `timeoutMs` + 5 s for the answer and
+its body together, then aborts the call and returns `no_answer`. It returns:
 
 | Answer | Outcome |
 |---|---|
@@ -69,7 +72,9 @@ The reaper's orphan sweep finds nothing on this backend, the drain stops only
 sessions that have a row, and an `agentcore` orphan gets no stop line
 (spec §3.8). The unit tests script each answer in the table, the deadline
 with fake timers (no answer, a body that stops mid-stream, a late failure
-after the deadline), and the guards of ADR-0050. What stays unproven until
+after the deadline), and the guards of ADR-0050; a test against a local HTTP
+server and the real SDK client shows one attempt on a 5xx and on a throttle,
+and that the answer body is read from the stream. What stays unproven until
 the integration test: that a stopped session started again under the same id
 gets a new `bootId`, and the exact error AgentCore returns for a container
 that exited.
