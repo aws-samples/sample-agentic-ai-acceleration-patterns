@@ -34,6 +34,12 @@ export interface UntrustedCodeSandboxesProps {
   readonly vpc?: ec2.IVpc;
   /** Route 53 Resolver DNS Firewall (ADR-0016); refused with a supplied `vpc`. @default false */
   readonly dnsFirewall?: boolean | { readonly allowDomains?: string[] };
+  /**
+   * Id of the `com.amazonaws.<region>.s3` managed prefix list, for the `agentcore` runtime's 443 egress to the S3
+   * gateway endpoint (spec §3.7). Required with a supplied `vpc` when the endpoint is created; with the VPC the
+   * construct creates, the egress is any address on 443, which that VPC routes nowhere else (ADR-0028).
+   */
+  readonly s3PrefixListId?: string;
   /** Create the §3.7 sandbox endpoints. @default true */
   readonly createEndpoints?: boolean;
   /** The bucket with `inputs/<tenant>/`. @default created */
@@ -52,6 +58,7 @@ export interface ResolvedProps {
   readonly perTenantMetrics: boolean;
   readonly dnsFirewall: false | { readonly allowDomains: readonly string[] };
   readonly createEndpoints: boolean;
+  readonly s3PrefixListId?: string;
   /** Tool Lambda timeout: 5 s + startWait + runTimeout + 10 s (spec §3.3). */
   readonly toolBudget: Duration;
   readonly settings: BackendSettings;
@@ -60,6 +67,13 @@ export interface ResolvedProps {
 /** The core function's budget cap; the gateway entry checks its own 90 s cap (spec §3.3). */
 export const CORE_BUDGET_CAP_SECONDS = 120;
 export const GATEWAY_BUDGET_CAP_SECONDS = 90;
+
+/** Largest `maxOutputBytes` (4 MiB) and `maxInputBytes` (50 MiB) the tool function can carry. */
+export const MAX_OUTPUT_BYTES_CAP = 4 * 1024 * 1024;
+export const MAX_INPUT_BYTES_CAP = 50 * 1024 * 1024;
+
+/** A DNS Firewall domain: a name, or `*.` and a name (spec §3.9). */
+const DOMAIN_PATTERN = /^(\*\.)?[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 
 function fail(message: string): never {
   throw new Error(`UntrustedCodeSandboxes: ${message}`);
@@ -99,10 +113,21 @@ export function resolveProps(props: UntrustedCodeSandboxesProps): ResolvedProps 
   };
   const maxOutputBytes = positiveInt('maxOutputBytes', props.maxOutputBytes ?? 262144);
   const maxInputBytes = positiveInt('maxInputBytes', props.maxInputBytes ?? 5242880);
+  // The reply goes back through a synchronous Lambda response (6 MB, with JSON and base64 growth); the input is held in memory twice.
+  if (maxOutputBytes > MAX_OUTPUT_BYTES_CAP) fail(`maxOutputBytes must be at most ${MAX_OUTPUT_BYTES_CAP}`);
+  if (maxInputBytes > MAX_INPUT_BYTES_CAP) fail(`maxInputBytes must be at most ${MAX_INPUT_BYTES_CAP}`);
+  if (props.s3PrefixListId !== undefined && !/^pl-[0-9a-f]{8,17}$/.test(props.s3PrefixListId)) {
+    fail(`s3PrefixListId "${props.s3PrefixListId}" is not a prefix list id (pl-...)`);
+  }
 
   const dnsFirewall = props.dnsFirewall
     ? { allowDomains: typeof props.dnsFirewall === 'object' ? [...(props.dnsFirewall.allowDomains ?? [])] : [] }
     : false as const;
+  if (dnsFirewall) {
+    for (const d of dnsFirewall.allowDomains) {
+      if (!DOMAIN_PATTERN.test(d) || d.length > 255) fail(`dnsFirewall.allowDomains has an invalid name "${d}"; use example.com or *.example.com`);
+    }
+  }
 
   return {
     standalone: props.standalone ?? false,
@@ -112,6 +137,7 @@ export function resolveProps(props: UntrustedCodeSandboxesProps): ResolvedProps 
     perTenantMetrics: props.perTenantMetrics ?? false,
     dnsFirewall,
     createEndpoints: props.createEndpoints ?? true,
+    s3PrefixListId: props.s3PrefixListId,
     toolBudget: Duration.seconds(budget),
     settings: {
       runTimeout,
