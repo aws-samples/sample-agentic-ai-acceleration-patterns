@@ -38,7 +38,7 @@ const STARTING_RETRY_SECONDS = 5;
 const OVERRUN_EXIT_CODE = -9;
 /**
  * Most JSON-encoded bytes of stdout and stderr together that one answer carries: 5 MiB leaves
- * room under the 6 MB synchronous Lambda response limit for the other fields (H-2).
+ * room under the 6 MB synchronous Lambda response limit for the other fields (ADR-0063).
  */
 const OUTPUT_JSON_BUDGET = 5 * 1024 * 1024;
 /** `code` limit in UTF-8 bytes (spec §5.1). */
@@ -444,6 +444,7 @@ async function runJob(call: Call, row: ReadyRow): Promise<Ran> {
         await call.registry.update(row, { bootId: res.bootId });
       }
       await call.registry.touch(call.tenantId, call.backendName, row.handle, deps.now());
+      // shortcut: the tool trusts the runner's cut to maxOutputBytes (the proof above covers the runner); it bounds only the JSON size.
       const [stdout, stderr, cut] = capOutput(res.stdout, res.stderr);
       return {
         kind: 'done',

@@ -384,14 +384,14 @@ describe('a sandbox that is not the one the call read', () => {
     expect(b.stops).toEqual([]);
   });
 
-  test('a runner bootId that is not alphanumeric and short is a dead handle, never written to the row', async () => {
+  test.each(['x'.repeat(2000), 'x'.repeat(32), 'A'.repeat(32), 'a'.repeat(31)])('a runner bootId that is not 32 lowercase hex (%#) is a dead handle, never written to the row', async (bootId) => {
     const h = harness();
     await runCode(req(), h.deps);
     const row = await rowA(h);
-    h.backends.get('microvm')!.script.nextRun = signedResult(row?.nonce ?? '', 'run-2', { bootId: 'x'.repeat(2000) });
+    h.backends.get('microvm')!.script.nextRun = signedResult(row?.nonce ?? '', 'run-2', { bootId });
     ok(await runCode(req(), h.deps));
     expect(h.backends.get('microvm')!.sandboxes.size).toBe(2);
-    expect((await rowA(h))?.bootId?.length).toBeLessThan(65);
+    expect((await rowA(h))?.bootId).not.toBe(bootId);
   });
 
   test('capOutput cuts between characters and counts JSON bytes', () => {
