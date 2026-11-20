@@ -19,6 +19,7 @@ const SAVED = { ...process.env };
 interface Seen { readonly method?: string; readonly url?: string; readonly headers: http.IncomingHttpHeaders; readonly body: string }
 
 let server: http.Server;
+let connections = 0;
 let seen: Seen[];
 let answer: (req: Seen, res: http.ServerResponse) => void;
 
@@ -32,6 +33,7 @@ beforeAll(async () => {
       answer(s, res);
     });
   });
+  server.on('connection', () => { connections += 1; });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   process.env.AWS_ENDPOINT_URL_BEDROCK_AGENTCORE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   process.env.AWS_REGION = 'eu-west-1';
@@ -51,6 +53,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   seen = [];
+  connections = 0;
 });
 
 async function started() {
@@ -125,3 +128,30 @@ test('stopping the session is one call that names the runtime and the tenant\'s 
   expect(decodeURIComponent(seen[0].url ?? '')).toContain(RUNTIME_ARN);
   expect(seen[0].headers['x-amzn-bedrock-agentcore-runtime-session-id']).toBe(sessionIdFor('tenant-a'));
 });
+
+test('two jobs open two connections: nothing is kept alive between calls', async () => {
+  const { backend, handle, job } = await started();
+  answer = (_req, res) => json(res, 200, { v: 1, error: 'busy' });
+  await backend.run(handle, job);
+  await backend.run(handle, job);
+  expect(seen).toHaveLength(2);
+  expect(connections).toBe(2);
+});
+
+test('an answer that stalls mid-body ends as no_answer and the connection is closed', async () => {
+  const { backend, handle } = await started();
+  const stalled = buildJob({
+    runId: 'run-2', tenantId: 'tenant-a', nonce: handle.nonce, code: '', timeoutMs: 1000, maxOutputBytes: 10,
+  });
+  let closed = false;
+  answer = (_req, res) => {
+    res.on('close', () => { closed = true; });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write('{"v":1,');
+  };
+  const started_ = Date.now();
+  expect(await backend.run(handle, stalled)).toEqual({ kind: 'no_answer' });
+  expect(Date.now() - started_).toBeGreaterThanOrEqual(5900);
+  await new Promise((r) => setTimeout(r, 100));
+  expect(closed).toBe(true);
+}, 15000);

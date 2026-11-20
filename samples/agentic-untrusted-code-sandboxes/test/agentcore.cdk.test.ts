@@ -158,8 +158,50 @@ describe('the runtime (spec §3.3, §3.4, ADR-0015)', () => {
   test('the runtime waits for its role, its policy and the image copy', () => {
     const [runtime] = Object.values(t.findResources('AWS::BedrockAgentCore::Runtime'));
     const deps = (runtime as { DependsOn: string[] }).DependsOn.join(' ');
-    expect(deps).toContain('RuntimeRole');
+    expect(deps).toMatch(/RuntimeRole[0-9A-F]{8}\b/);
+    expect(deps).toContain('RuntimeRoleDefaultPolicy');
     expect(deps).toContain('RunnerImageCopy');
+  });
+
+  test('a runtime name the service refuses fails synth, so the log patterns cannot match another runtime', () => {
+    for (const bad of ['has-hyphen', '1starts_with_digit', 'a'.repeat(49), '']) {
+      const stack = new Stack(new App(), 'S');
+      const vpc = new ec2.Vpc(stack, 'Vpc', { subnetConfiguration: [{ name: 'Sandbox', subnetType: ec2.SubnetType.PRIVATE_ISOLATED }] });
+      expect(() => new AgentcoreBackendResources(stack, 'B', {
+        vpc,
+        sandboxSubnets: { subnetGroupName: 'Sandbox' },
+        toolSubnets: { subnetGroupName: 'Sandbox' },
+        toolSecurityGroup: new ec2.SecurityGroup(stack, 'T', { vpc }),
+        inputBucket: new s3.Bucket(stack, 'Bk'),
+        runnerRepository: new ecr.Repository(stack, 'R'),
+        runnerDir: runnerPath(),
+        nameFor: () => bad,
+        settings: settings(),
+      })).toThrow(/runtime name must match/);
+    }
+  });
+
+  test('two instances in one stack share no name and no construct id', () => {
+    const stack = new Stack(new App(), 'S');
+    const vpc = new ec2.Vpc(stack, 'Vpc', { subnetConfiguration: [{ name: 'Sandbox', subnetType: ec2.SubnetType.PRIVATE_ISOLATED }] });
+    const repository = new ecr.Repository(stack, 'R');
+    const bucket = new s3.Bucket(stack, 'Bk');
+    const make = (id: string) => new AgentcoreBackendResources(stack, id, {
+      vpc,
+      sandboxSubnets: { subnetGroupName: 'Sandbox' },
+      toolSubnets: { subnetGroupName: 'Sandbox' },
+      toolSecurityGroup: new ec2.SecurityGroup(stack, `T${id}`, { vpc }),
+      inputBucket: bucket,
+      runnerRepository: repository,
+      runnerDir: runnerPath(),
+      nameFor: (service, suffix) => (service === 'agentcore-runtime' ? `Rt_${id}` : `${service}-${suffix}-${id}`.replace(/^log-group/, '/lg')),
+      settings: settings(),
+    });
+    const a = make('a1');
+    const b = make('b2');
+    expect(a.runtimeName).not.toBe(b.runtimeName);
+    const names = Object.values(Template.fromStack(stack).findResources('AWS::Logs::DeliverySource')).map((r) => (r as { Properties: { Name: string } }).Properties.Name);
+    expect(new Set(names).size).toBe(2);
   });
 
   test('a core-made image copy is used as is, and this backend makes none', () => {
@@ -341,11 +383,12 @@ describe('usage logs (spec §3.8, §5.3)', () => {
     t.hasResourceProperties('AWS::Logs::DeliverySource', {
       Name: 'log-delivery-agentcore-usage-source',
       LogType: 'USAGE_LOGS',
-      ResourceArn: Match.anyValue(),
+      ResourceArn: { 'Fn::GetAtt': [Match.stringLikeRegexp('Runtime'), 'AgentRuntimeArn'] },
     });
     t.hasResourceProperties('AWS::Logs::DeliveryDestination', {
       Name: 'log-delivery-agentcore-usage-destination',
       DeliveryDestinationType: 'CWL',
+      DestinationResourceArn: { 'Fn::GetAtt': [Match.stringLikeRegexp('UsageLogs'), 'Arn'] },
     });
     t.resourceCountIs('AWS::Logs::Delivery', 1);
     t.hasResourceProperties('AWS::Logs::LogGroup', { LogGroupName: '/stub/agentcore-usage', RetentionInDays: 30 });
@@ -355,6 +398,20 @@ describe('usage logs (spec §3.8, §5.3)', () => {
 
   test('the resource policy is this instance\'s own, under the sanitiser\'s name, and the destination waits for it', () => {
     t.hasResourceProperties('AWS::Logs::ResourcePolicy', { PolicyName: 'logs-resource-policy-agentcore-usage' });
+    const [policy] = Object.values(t.findResources('AWS::Logs::ResourcePolicy'));
+    const text = render((policy as { Properties: { PolicyDocument: unknown } }).Properties.PolicyDocument) as string;
+    const [statement] = (JSON.parse(text) as { Statement: Array<Record<string, unknown>> }).Statement;
+    expect(statement).toMatchObject({
+      Effect: 'Allow',
+      Principal: { Service: 'delivery.logs.amazonaws.com' },
+      Action: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      Condition: {
+        StringEquals: { 'aws:SourceAccount': 'ACCOUNT' },
+        ArnLike: { 'aws:SourceArn': 'arn:aws:logs:REGION:ACCOUNT:*' },
+      },
+    });
+    // The stream ARN of the usage group: `<group>:log-stream:*`, never `<group-arn-with-:*>:log-stream:*`.
+    expect(statement.Resource).toMatch(/^arn:aws:logs:REGION:ACCOUNT:log-group:<Ref:[A-Za-z0-9]*UsageLogs[A-Za-z0-9]*>:log-stream:\*$/);
     const [destination] = Object.values(t.findResources('AWS::Logs::DeliveryDestination'));
     expect(flat((destination as { DependsOn: string[] }).DependsOn)).toContain('UsageLogsPolicy');
   });

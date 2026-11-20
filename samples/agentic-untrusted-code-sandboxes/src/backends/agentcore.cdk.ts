@@ -9,7 +9,7 @@
  * ADR-0050 to ADR-0054.
  */
 
-import { Aws, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aws, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as bedrockagentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
@@ -57,6 +57,10 @@ export class AgentcoreBackendResources extends Construct implements BackendConst
     }
     const { settings } = ctx;
     this.runtimeName = ctx.nameFor('agentcore-runtime', 'agentcore');
+    // The trust pattern and the log grants read `<name>-*`; a `-` in the name would let them match another runtime's groups.
+    if (!/^[a-zA-Z][a-zA-Z0-9_]{0,47}$/.test(this.runtimeName)) {
+      throw new Error('agentcore backend: the runtime name must match [a-zA-Z][a-zA-Z0-9_]{0,47} (spec 5.3)');
+    }
 
     // Image: the runner repository holds an arm64 copy under runner-arm64-<hash> (ADR-0024).
     // The core may do the copy for every container backend (ctx.runnerImageTag); otherwise this backend does.
@@ -133,7 +137,12 @@ export class AgentcoreBackendResources extends Construct implements BackendConst
       policyStatements: [new iam.PolicyStatement({
         principals: [new iam.ServicePrincipal('delivery.logs.amazonaws.com')],
         actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
-        resources: [`${this.usageLogGroup.logGroupArn}:log-stream:*`],
+        resources: [stack.formatArn({
+          service: 'logs',
+          resource: 'log-group',
+          resourceName: `${this.usageLogGroup.logGroupName}:log-stream:*`,
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+        })],
         conditions: {
           StringEquals: { 'aws:SourceAccount': stack.account },
           ArnLike: { 'aws:SourceArn': stack.formatArn({ service: 'logs', resource: '*' }) },

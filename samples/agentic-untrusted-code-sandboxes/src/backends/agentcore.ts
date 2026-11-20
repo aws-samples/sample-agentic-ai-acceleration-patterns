@@ -15,10 +15,15 @@
  * The tool's `InvokeAgentRuntime` and `StopRuntimeSession` rights are scoped
  * to the runtime, not to a session, because neither action supports a
  * session-id condition (S-8). The session id is therefore derived by code,
- * and `run` and `stop` refuse a handle whose id is not the one this tenant
- * maps to (ADR-0050).
+ * and `run` and `stop` refuse a handle whose session id is not derived from
+ * its own tenant id (ADR-0050). The class cannot know who its caller is, so
+ * that check keeps a handle consistent; it does not stop a caller that
+ * builds a handle for another tenant. `run` is then protected by the nonce,
+ * `stop` is not.
  */
 
+import * as http from 'node:http';
+import * as https from 'node:https';
 import {
   BedrockAgentCoreClient,
   InvokeAgentRuntimeCommand,
@@ -87,6 +92,8 @@ export class AgentcoreBackend implements SandboxBackend {
     if (job.tenantId !== handle.tenantId || job.nonce !== handle.nonce) {
       throw new Error('agentcore backend: the job does not belong to this handle');
     }
+    // Before the send: the proof of the answer needs a well-formed nonce.
+    decodeNonce(handle.nonce);
     const waitMs = job.timeoutMs + NO_ANSWER_MARGIN_MS;
     const abort = new AbortController();
     let timer: NodeJS.Timeout | undefined;
@@ -96,9 +103,8 @@ export class AgentcoreBackend implements SandboxBackend {
         resolve('no_answer');
       }, waitMs);
     });
+    // The race subscribes to `call`, so a failure after the deadline is handled and not an unhandled rejection.
     const call = this.invoke(handle, job, abort.signal);
-    // The race loser must not become an unhandled rejection.
-    call.catch(() => undefined);
     try {
       const outcome = await Promise.race([call, noAnswer]);
       return outcome === 'no_answer' ? { kind: 'no_answer' } : outcome;
@@ -165,7 +171,12 @@ export class AgentcoreBackend implements SandboxBackend {
    * connection broke. A failed attempt reaches the caller as an error and the tool decides (ADR-0052).
    */
   private invoker(): BedrockAgentCoreClient {
-    this.invokeClient ??= new BedrockAgentCoreClient({ maxAttempts: 1 });
+    this.invokeClient ??= new BedrockAgentCoreClient({
+      maxAttempts: 1,
+      // No pooled sockets: with no retry, a socket the service closed while the function was frozen would fail the first call.
+      // The http agent only matters for an endpoint override (the wire test's local server).
+      requestHandler: { httpsAgent: new https.Agent({ keepAlive: false }), httpAgent: new http.Agent({ keepAlive: false }) },
+    });
     return this.invokeClient;
   }
 

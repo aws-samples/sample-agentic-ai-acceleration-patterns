@@ -29,8 +29,8 @@ name any session.
 
 ### Option 2: One runtime per tenant, scoped by `aws:ResourceTag`
 Pros: enforced by IAM. Cons: a runtime takes about 200 to 550 s to create
-(spec §5.3), costs a runtime per tenant, and breaks the single registry row
-per tenant on a shared runtime.
+(spec §5.3) and each tenant needs its own, which adds to deploy time and
+cost for every tenant.
 
 ### Option 3: A proxy that holds the grant and checks the tenant
 Pros: the check sits in one place. Cons: one more component to build, secure
@@ -49,15 +49,25 @@ the grants carries a condition, because no condition key helps.
 
 The run-time class refuses, with an error and before any call, a handle
 whose `backend` is not `agentcore` or whose session id is not
-`rc-` + SHA-256(tenant id), and a job whose tenant id or nonce differs from
-the handle's. The runner adds the second check: it adopts a nonce only when
+`rc-` + SHA-256(its own tenant id), a handle or job with a malformed nonce,
+and a job whose tenant id or nonce differs from the handle's. That keeps a
+handle consistent with itself; the class does not know its caller, so it
+cannot stop a caller that builds a handle for another tenant. The runner
+adds the second check: it adopts a nonce only when
 the session id header equals the id derived from the job's tenant id, and
 `jobAuth` covers that tenant id (ADR-0018).
 
 ## Consequences
 
 The enforcement is filtered, not enforced, and the spec's per-backend table
-says so. The unit tests cover the guard (a handle of another tenant, of
+says so. `run` against a forged handle is stopped by the nonce, because the
+other tenant's runner refuses a job it cannot authenticate (a session that
+holds no nonce yet can be claimed, which is a denial of service, threat T-43);
+`stop` has no such check. That `StopRuntimeSession` authorizes against the
+endpoint ARN as well as the runtime is not measured by a spike: both ARNs are
+granted so that either shape works, and the integration test must invoke and
+stop under the tool role and stop under the reaper role with exactly these
+resources. The unit tests cover the guard (a handle of another tenant, of
 another backend, a job for another tenant, a job signed with another nonce)
 and the synth tests assert the grants, their resources and the absence of a
 condition. If AgentCore adds a session-id condition key, the tool's invoke

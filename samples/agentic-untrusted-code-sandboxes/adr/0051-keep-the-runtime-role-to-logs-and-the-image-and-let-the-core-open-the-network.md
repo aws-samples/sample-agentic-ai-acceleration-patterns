@@ -66,15 +66,20 @@ on `*` (the action takes no resource), `ecr:BatchGetImage` and
 role and its policy.
 
 The security group has no ingress and no egress of its own and is returned
-by `endpointClients()`. The core's egress for it is 443 to the ECR and Logs
-endpoint groups and, for the S3 gateway endpoint, to any address on 443; the
-sandbox subnets have no route to anything else (the core records that
-shortcut in its own decision record).
+by `endpointClients()`. Spec §3.7 states what the core must open for it: 443
+to the ECR and Logs endpoint groups and to the S3 prefix list.
 
 ## Consequences
+
+The trust condition names `runtime/<runtimeName>-*`, the shape the CDK
+`Runtime` construct writes for the role it creates; AWS documents the wider
+`<account>:*` form, and no spike ran either. If a runtime fails to start with
+the narrow form, the fallback is the documented form with the account
+condition kept, and this record is superseded. The runtime name is checked
+at synth against the service's pattern, so a `-` cannot widen the log and
+trust patterns.
 
 A synth test asserts the exact set of statements on the role, that none of
 the L2's grants is present, and that the only wildcard resource is the ECR
 token action. The integration test's `no-egress` step proves the network
-side. Narrowing the S3 egress to the gateway endpoint's prefix list waits for
-CloudFormation to expose its id; the change is in the core, not here.
+side.

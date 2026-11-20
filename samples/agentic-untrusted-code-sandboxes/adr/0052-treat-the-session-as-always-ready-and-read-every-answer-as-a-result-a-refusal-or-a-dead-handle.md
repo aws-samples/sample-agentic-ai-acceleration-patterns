@@ -48,7 +48,9 @@ already holds the address and the `bootId` arrives with each result.
 makes one attempt: the SDK would retry a throttle, a 5xx answer or a dropped
 connection, and a retry after the first attempt reached the runner could run
 the tenant's code twice. A failed attempt is an error for the caller (the
-last row of the table). It waits at most `timeoutMs` + 5 s for the answer and
+last row of the table). The client keeps no pooled connection, because with no
+retry a socket the service closed while the function was frozen would fail the
+first call after a thaw; it costs one TLS handshake per job. It waits at most `timeoutMs` + 5 s for the answer and
 its body together, then aborts the call and returns `no_answer`. It returns:
 
 | Answer | Outcome |
@@ -76,5 +78,8 @@ after the deadline), and the guards of ADR-0050; a test against a local HTTP
 server and the real SDK client shows one attempt on a 5xx and on a throttle,
 and that the answer body is read from the stream. What stays unproven until
 the integration test: that a stopped session started again under the same id
-gets a new `bootId`, and the exact error AgentCore returns for a container
-that exited.
+gets a new `bootId`, the exact error AgentCore returns for a container that
+exited, and whether a call made while the session is still tearing down is
+answered with a conflict error (the `StopRuntimeSession` documentation lists
+one) or a throttle on session creation, both of which reach the caller as
+errors and are not retried.

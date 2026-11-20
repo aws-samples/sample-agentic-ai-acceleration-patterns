@@ -156,16 +156,66 @@ describe('run', () => {
     expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'refused', refusal: { v: 1, error: 'dirty' } });
   });
 
-  test('a dirty session is a refusal the tool turns into a takeover, and the next start reuses the same session id', async () => {
+  test('a dirty session is a refusal; stopping it and starting again gives the same session id and a new nonce', async () => {
     const { backend, handle } = await started();
     mock.on(InvokeAgentRuntimeCommand).resolves(body('{"v":1,"error":"dirty"}'));
-    const out = await backend.run(handle, jobFor(handle));
-    expect(out).toMatchObject({ kind: 'refused', refusal: { error: 'dirty' } });
+    expect(await backend.run(handle, jobFor(handle))).toMatchObject({ kind: 'refused', refusal: { error: 'dirty' } });
     mock.on(StopRuntimeSessionCommand).resolves({});
     await backend.stop(handle);
     const fresh = await backend.start('tenant-a', newNonce(), creds('tenant-a'));
     expect(fresh.handle).toBe(handle.handle);
     expect(fresh.nonce).not.toBe(handle.nonce);
+    expect(mock).toHaveReceivedCommandTimes(StopRuntimeSessionCommand, 1);
+  });
+
+  const okResult = { v: 1, runId: 'run-1', exitCode: 0, stdout: '', stderr: '', truncated: false, durationMs: 1, timedOut: false, memoryExceeded: false, bootId: BOOT_ID, proof: 'p' };
+  test.each([
+    ['stdout not a string', { stdout: 1 }],
+    ['stderr not a string', { stderr: null }],
+    ['truncated not a boolean', { truncated: 'no' }],
+    ['timedOut not a boolean', { timedOut: 0 }],
+    ['memoryExceeded not a boolean', { memoryExceeded: undefined }],
+    ['durationMs a string', { durationMs: '5' }],
+    ['durationMs not finite', { durationMs: null }],
+    ['no bootId', { bootId: undefined }],
+    ['runId not a string', { runId: 5 }],
+    ['version 2', { v: 2 }],
+  ])('a result with %s is a dead handle', async (_name, patch) => {
+    const { backend, handle } = await started();
+    mock.on(InvokeAgentRuntimeCommand).resolves(body(JSON.stringify({ ...okResult, ...patch })));
+    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'bad_response' });
+  });
+
+  test('a refusal with a malformed bootId is a dead handle', async () => {
+    const { backend, handle } = await started();
+    mock.on(InvokeAgentRuntimeCommand).resolves(body('{"v":1,"error":"busy","bootId":"nope"}'));
+    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'bad_response' });
+  });
+
+  test('a throw names neither the nonce nor the code, the input or the output', async () => {
+    const { backend, handle } = await started();
+    const job = jobFor(handle, { code: 'secret_code_marker = 1', input: Buffer.from('secret_input_marker') });
+    const errors: Error[] = [];
+    const attempt = async (fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+      } catch (e) {
+        errors.push(e as Error);
+      }
+    };
+    mock.on(InvokeAgentRuntimeCommand).rejects(new ThrottlingException({ message: 'slow down', $metadata: {} }));
+    await attempt(() => backend.run(handle, job));
+    await attempt(() => backend.run({ ...handle, handle: sessionIdFor('tenant-b') }, job));
+    await attempt(() => backend.run(handle, { ...job, tenantId: 'tenant-b' }));
+    await attempt(() => new AgentcoreBackend({}).run(handle, job));
+    await attempt(() => new AgentcoreBackend({}).stop(handle));
+    expect(errors).toHaveLength(5);
+    for (const e of errors) {
+      const text = `${e.message}\n${e.stack ?? ''}`;
+      expect(text).not.toContain(handle.nonce);
+      expect(text).not.toContain('secret_code_marker');
+      expect(text).not.toContain('secret_input_marker');
+    }
   });
 
   test.each([
@@ -229,9 +279,19 @@ describe('run', () => {
     beforeEach(() => jest.useFakeTimers());
     afterEach(() => jest.useRealTimers());
 
+    test('a result leaves no timer behind', async () => {
+      const { backend, handle } = await started();
+      const job = jobFor(handle);
+      mock.on(InvokeAgentRuntimeCommand).resolves(body(JSON.stringify(resultFor(job, handle.nonce))));
+      expect((await backend.run(handle, job)).kind).toBe('result');
+      expect(jest.getTimerCount()).toBe(0);
+      mock.on(InvokeAgentRuntimeCommand).rejects(new ThrottlingException({ message: 'x', $metadata: {} }));
+      await expect(backend.run(handle, job)).rejects.toThrow();
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
     test('no answer by timeoutMs + 5 s is no_answer, and the call is aborted', async () => {
       const { backend, handle } = await started();
-      let signal: AbortSignal | undefined;
       mock.on(InvokeAgentRuntimeCommand).callsFake(() => new Promise(() => undefined));
       const spy = jest.spyOn(BedrockAgentCoreClient.prototype, 'send');
       const pending: Promise<RunOutcome> = backend.run(handle, jobFor(handle, { timeoutMs: 2000 }));
@@ -242,8 +302,9 @@ describe('run', () => {
       expect(settled).toBe(false);
       await jest.advanceTimersByTimeAsync(1);
       expect(await pending).toEqual({ kind: 'no_answer' });
-      signal = (spy.mock.calls[0][1] as { abortSignal: AbortSignal }).abortSignal;
+      const signal = (spy.mock.calls[0][1] as { abortSignal: AbortSignal }).abortSignal;
       expect(signal.aborted).toBe(true);
+      spy.mockRestore();
     });
 
     test('a body that stops mid-stream is no_answer too', async () => {
@@ -280,6 +341,15 @@ describe('run', () => {
     test('a handle of another backend is never sent', async () => {
       const { backend, handle } = await started();
       await expect(backend.run({ ...handle, backend: 'nitro' }, jobFor(handle))).rejects.toThrow(/not this tenant's session/);
+      await expect(backend.stop({ ...handle, backend: 'nitro' })).rejects.toThrow(/not this tenant's session/);
+      expect(mock.calls()).toHaveLength(0);
+    });
+
+    test('a handle whose nonce is malformed is never sent', async () => {
+      const { backend, handle } = await started();
+      const bad = { ...handle, nonce: 'AAAA' };
+      const job = { ...jobFor(handle), nonce: 'AAAA' };
+      await expect(backend.run(bad, job)).rejects.toThrow(/32 bytes/);
       expect(mock.calls()).toHaveLength(0);
     });
 
@@ -295,6 +365,14 @@ describe('run', () => {
 });
 
 describe('stop', () => {
+  test('without the runtime ARN, run and stop name the variable and call nothing', async () => {
+    const { handle } = await started();
+    const bare = new AgentcoreBackend({});
+    await expect(bare.run(handle, jobFor(handle))).rejects.toThrow(/AGENTCORE_RUNTIME_ARN/);
+    await expect(bare.stop(handle)).rejects.toThrow(/AGENTCORE_RUNTIME_ARN/);
+    expect(mock.calls()).toHaveLength(0);
+  });
+
   test('stops the tenant\'s session on the runtime', async () => {
     const { backend, handle } = await started();
     mock.on(StopRuntimeSessionCommand).resolves({});
