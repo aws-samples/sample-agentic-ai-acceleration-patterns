@@ -178,7 +178,7 @@ claim in the README without a test row behind it is a defect.
 | `microvm` backend | Lambda MicroVMs | VM per tenant, no execution role, VPC egress connector into a dead-end subnet | a MicroVM image, a network connector |
 | `nitro` backend | ECS Managed Instances, `ISOLATED_SANDBOX` | VM per task, no task role | a cluster, a capacity provider, a task definition |
 | `agentcore` backend | AgentCore Runtime V2, VPC network mode | Session per tenant on a narrow runtime | a runtime, its role, its log group |
-| Network | VPC, two AZs (§3.7) | Dead-end sandbox subnets, endpoint policies | tool subnets with NAT, sandbox subnets with no route out, scoped endpoints |
+| Network | VPC, two AZs (§3.7) | Dead-end sandbox subnets, endpoint policies | a public subnet with the NAT, tool subnets routed through it, sandbox subnets with no route out, scoped endpoints |
 | DNS Firewall (optional) | Route 53 Resolver DNS Firewall | AWS-names-only DNS, blocked-lookup log | one rule group on the VPC, a query-log group (§3.9) |
 | Reaper | Lambda on a 5-minute schedule | Idle stop, orphan sweep | the reaper role (§3.6) |
 | Drain | CloudFormation custom resource | Stop everything on delete | the drain role (§3.6) |
