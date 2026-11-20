@@ -16,8 +16,8 @@ runner answers when it cannot become one tenant's.
 ## Options considered
 
 ### Option 1: Decide each point in the runner and write it down here
-Pros: no protocol change; the tool already decides on `error`. Cons: a
-second reader must find this record.
+Pros: no protocol change beyond the hook paths below; the tool already
+decides on `error`. Cons: a second reader must find this record.
 
 ### Option 2: Change `runner/PROTOCOL.md`
 Pros: one document. Cons: a protocol change needs a maintainer decision
@@ -35,13 +35,15 @@ Option 1.
   decoding, or `maxOutputBytes` outside 0 to 16 MiB is a malformed job
   (HTTP 400, `tool_failed`). The tool's own input limit is lower. A body
   may come with `Content-Length` or chunked (chunk sizes 1 to 8 hex
-  digits, nothing else), and must arrive within 30 s in all, each read
-  bounded by what is left of that time; each read of the request line and
-  headers waits at most 10 s. The hook port takes
-  bodies up to 16 KiB. Each listener serves at most 4 connections at once
-  and closes a fifth before it reads a byte, which bounds the runner's
-  threads and the memory a peer, tenant code on the loopback included, can
-  make it hold before authentication.
+  digits, nothing else). The request line and the headers must arrive
+  within 10 s, and the body, framing lines included, within 30 s; every
+  socket read waits only for what is left of that time, so a peer that
+  sends one byte at a time is cut off on time. An idle keep-alive
+  connection is closed after 10 s. The hook port takes bodies up to
+  16 KiB. Each listener serves at most 4 connections at once and closes
+  a fifth before it reads a byte, which bounds the runner's threads and
+  the memory a peer, tenant code on the loopback included, can make it
+  hold before authentication.
 - `microvm` hook: a first `/run` hook whose `nonceHash` is not 64
   lowercase hex characters or whose `tenant` breaks the tenant id rule
   answers HTTP 400 and is not taken as the first hook. Once a hook is

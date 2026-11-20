@@ -63,7 +63,8 @@ A job ended by `SIGKILL` or `SIGXCPU`, with `memoryExceeded` false, at
 A runner fault after the job started (a thread that does not start, for
 example) kills the job's process group, sweeps, and answers `tool_failed`.
 After every job, a sweep that cannot clear uid 1001 within 5 s, or cannot
-walk `/tmp` and `/dev/shm` within one further 5 s, marks the runner `dirty` on every backend,
+walk `/tmp` and `/dev/shm` within one further 5 s, marks the runner
+`dirty` on every backend,
 not only on `agentcore`, so the tool takes over instead of running the
 next job beside a survivor. So does a fault whose sweep result is unknown.
 The runner sets itself as a child subreaper, so orphans of a job come back

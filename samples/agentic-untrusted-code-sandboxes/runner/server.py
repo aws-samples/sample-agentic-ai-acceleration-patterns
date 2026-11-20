@@ -13,6 +13,7 @@ import hmac
 import json
 import os
 import re
+import socket
 import ssl
 import threading
 import time
@@ -199,6 +200,7 @@ class Sandbox:
 CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,8}\Z")
 CONTENT_LENGTH = re.compile(r"[0-9]{1,10}\Z")
 BODY_DEADLINE_S = 30.0
+HEADER_DEADLINE_S = 10.0  # the request line and every header, from the first byte the handler waits for
 MAX_HOOK_BODY_BYTES = 16 * 1024  # runHookPayload is at most 4096 characters
 MAX_CONNECTIONS = 4  # jobs run one at a time; this bounds threads and pre-auth memory
 
@@ -213,6 +215,24 @@ def _timed(handler, deadline: float, read):
         return read()
     except OSError:
         return None
+
+
+def _read_line(handler, limit: int, deadline: float) -> Optional[bytes]:
+    """One framing line of at most limit bytes, one byte per read, so every read sees the deadline.
+
+    Returns what was read at EOF (b"" at once), None past the deadline.
+    """
+    line = bytearray()
+    while len(line) < limit:
+        byte = _timed(handler, deadline, lambda: handler.rfile.read1(1))
+        if byte is None:
+            return None
+        if not byte:
+            break
+        line += byte
+        if byte == b"\n":
+            break
+    return bytes(line)
 
 
 def _read_exact(handler, size: int, deadline: float) -> Optional[bytes]:
@@ -243,7 +263,7 @@ def _read_body(handler, limit: int, deadline: float) -> Optional[bytes]:
     if handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
         data = bytearray()
         while True:
-            line = _timed(handler, deadline, lambda: handler.rfile.readline(64))
+            line = _read_line(handler, 64, deadline)
             if line is None:
                 return None
             token = line.split(b";")[0].strip()
@@ -252,7 +272,7 @@ def _read_body(handler, limit: int, deadline: float) -> Optional[bytes]:
             size = int(token, 16)
             if size == 0:
                 for _ in range(8):  # trailer lines, then the blank line
-                    end = _timed(handler, deadline, lambda: handler.rfile.readline(1024))
+                    end = _read_line(handler, 1024, deadline)
                     if end is None:
                         return None
                     if end in (b"\r\n", b"\n", b""):
@@ -264,7 +284,7 @@ def _read_body(handler, limit: int, deadline: float) -> Optional[bytes]:
             if chunk is None:
                 return None
             data += chunk
-            if _timed(handler, deadline, lambda: handler.rfile.readline(4)) not in (b"\r\n", b"\n"):
+            if _read_line(handler, 4, deadline) not in (b"\r\n", b"\n"):
                 return None
     text = handler.headers.get("Content-Length", "")
     if not CONTENT_LENGTH.match(text):
@@ -281,7 +301,30 @@ def make_handler(sandbox: Sandbox, port_role: str):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
-        timeout = 10  # each read of the request line and headers; the body has BODY_DEADLINE_S in all
+        timeout = 10  # one socket read; HEADER_DEADLINE_S and BODY_DEADLINE_S bound each phase in all
+
+        def handle_one_request(self):
+            # The request line and the headers must arrive within HEADER_DEADLINE_S
+            # (an idle keep-alive connection is closed then too); parse_request
+            # stops the clock, and the body has its own deadline.
+            self._header_clock = threading.Timer(HEADER_DEADLINE_S, self._cut)
+            self._header_clock.daemon = True
+            self._header_clock.start()
+            try:
+                super().handle_one_request()
+            finally:
+                self._header_clock.cancel()
+
+        def parse_request(self):
+            ok = super().parse_request()
+            self._header_clock.cancel()
+            return ok
+
+        def _cut(self):
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         server_version = "runner"
         sys_version = ""
 

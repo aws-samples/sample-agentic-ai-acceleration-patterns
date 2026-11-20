@@ -5,6 +5,7 @@
 import base64
 import hashlib
 import http.client
+import io
 import json
 import os
 import socket
@@ -399,6 +400,64 @@ class LimitsTest(unittest.TestCase):
             self.assertIsNone(sb.nonce_hash)
         finally:
             stop(srv)
+
+    def test_trickled_framing_and_headers_are_cut(self):
+        sb, _ = make("microvm")
+        port = free_port()
+        srv = server.serve(sb, port, "hooks", host="127.0.0.1")
+        head = b"POST /run HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        cases = (head,  # then a chunk-size line, one byte at a time
+                 head + b"2\r\n{}\r\n0\r\n",  # then a trailer line
+                 b"POST /run HTTP/1.1\r\nX-Slow: ")  # a header line
+        try:
+            with mock.patch.object(server, "BODY_DEADLINE_S", 0.5), mock.patch.object(server, "HEADER_DEADLINE_S", 0.5):
+                for start in cases:
+                    with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                        started = time.monotonic()
+                        s.sendall(start)
+                        ended = False
+                        while time.monotonic() - started < 3:
+                            try:
+                                s.sendall(b"a")
+                            except OSError:
+                                ended = True
+                                break
+                            s.settimeout(0.2)
+                            try:
+                                s.recv(4096)
+                                ended = True  # an answer, or the close (b"")
+                                break
+                            except socket.timeout:
+                                pass
+                            except OSError:
+                                ended = True
+                                break
+                        self.assertTrue(ended, start)
+                        self.assertLess(time.monotonic() - started, 1.5, start)
+            self.assertIsNone(sb.nonce_hash)
+        finally:
+            stop(srv)
+
+    def test_read_body_restores_the_handler_timeout(self):
+        class Conn:
+            def __init__(self):
+                self.timeouts = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+        class Fake:
+            timeout = 10
+            headers = {"Content-Length": "3"}
+
+            def __init__(self):
+                self.rfile = io.BufferedReader(io.BytesIO(b"abc"))
+                self.connection = Conn()
+
+        fake = Fake()
+        self.assertEqual(server.read_body(fake), b"abc")
+        self.assertLess(fake.connection.timeouts[0], server.BODY_DEADLINE_S + 0.01)
+        self.assertEqual(fake.connection.timeouts[-1], 10)
 
     def test_hook_body_cap(self):
         sb, _ = make("microvm")
