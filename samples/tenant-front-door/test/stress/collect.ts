@@ -151,7 +151,7 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
     }
     const join = joinEdge(lines, rows);
     const own = new Set(lines.map((l) => l.id));
-    const badRows = [...skipped].filter((id) => own.has(id)).length;
+    const badRows = [...skipped].filter((id) => own.has(id) && !rows.has(id)).length;
     if (badRows > 0) failures.push(`${scenario}: ${badRows} of this scenario's edge log rows have a status or a time-taken that is not a number`);
     joinedAll += join.matched;
     expectedAll += join.expected;
