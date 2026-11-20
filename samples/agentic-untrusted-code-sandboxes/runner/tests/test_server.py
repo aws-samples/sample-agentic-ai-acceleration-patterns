@@ -438,6 +438,47 @@ class LimitsTest(unittest.TestCase):
         finally:
             stop(srv)
 
+    def test_slow_body_outlives_the_header_clock(self):
+        sb, _ = make("microvm")
+        port = free_port()
+        srv = server.serve(sb, port, "hooks", host="127.0.0.1")
+        body = json.dumps({"nonceHash": wire.nonce_hash(NONCE), "tenant": JOB["tenantId"]}).encode()
+        try:
+            with mock.patch.object(server, "HEADER_DEADLINE_S", 0.3):
+                with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                    s.sendall(b"POST /run HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body))
+                    time.sleep(0.8)  # past the header clock: the body has its own deadline
+                    s.sendall(body)
+                    self.assertTrue(s.recv(4096).startswith(b"HTTP/1.1 200"))
+            self.assertEqual(sb.nonce_hash, wire.nonce_hash(NONCE))
+        finally:
+            stop(srv)
+
+    def test_trickled_chunk_crlf_is_cut(self):
+        sb, _ = make("microvm")
+        port = free_port()
+        srv = server.serve(sb, port, "hooks", host="127.0.0.1")
+        try:
+            with mock.patch.object(server, "BODY_DEADLINE_S", 0.3):
+                with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                    s.sendall(b"POST /run HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}")
+                    start = time.monotonic()
+                    s.settimeout(0.2)
+                    got = None
+                    while time.monotonic() - start < 3 and got is None:
+                        try:
+                            s.sendall(b"\r")  # one byte per 0.2 s: four of them would outlast the deadline
+                            got = s.recv(4096)
+                        except socket.timeout:
+                            pass
+                        except OSError:
+                            got = b""
+                    self.assertIsNotNone(got)
+                    self.assertLess(time.monotonic() - start, 0.75)
+            self.assertIsNone(sb.nonce_hash)
+        finally:
+            stop(srv)
+
     def test_read_body_restores_the_handler_timeout(self):
         class Conn:
             def __init__(self):

@@ -302,6 +302,8 @@ def make_handler(sandbox: Sandbox, port_role: str):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         timeout = 10  # one socket read; HEADER_DEADLINE_S and BODY_DEADLINE_S bound each phase in all
+        server_version = "runner"
+        sys_version = ""
 
         def handle_one_request(self):
             # The request line and the headers must arrive within HEADER_DEADLINE_S
@@ -325,8 +327,6 @@ def make_handler(sandbox: Sandbox, port_role: str):
                 self.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-        server_version = "runner"
-        sys_version = ""
 
         def log_message(self, format, *args):  # noqa: A002 - the base class names it so
             return
