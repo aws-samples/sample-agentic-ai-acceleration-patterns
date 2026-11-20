@@ -17,6 +17,7 @@ cell app that deploys runtime-isolation, are work item W-5. They build on
 what is here: the `/cell/` path aspect and the cell synth context.
 
 | File | What it is |
+|---|---|
 | [`cell-policies.ts`](./cell-policies.ts) | the four cell policies as typed policy documents, and their names |
 | [`cell-account.cdk.ts`](./cell-account.cdk.ts) | the owner stacks: `CellPolicies` and `CellAccountBase` |
 | [`cell-path.ts`](./cell-path.ts) | `CellRolePath`, the aspect that puts every role on `/cell/`, and `cellSynthContext`, the context a cell app synthesises with |
@@ -31,7 +32,7 @@ what is here: the `/cell/` path aspect and the cell synth context.
 |---|---|---|
 | `cell-execution-policy` | the cell bootstrap's CloudFormation execution role | the services a cell deploys (API Gateway, Application Auto Scaling, AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM), IAM read, read of the `cdk-cell-assets-*` bucket, IAM role writes on `role/cell/*`, `iam:CreateRole` and `iam:PutRolePermissionsBoundary` there only with the workload boundary, `iam:PassRole` of `role/cell/*` to Lambda and AgentCore only, and the two service-linked roles (`ops.apigateway.amazonaws.com`, `runtime-identity.bedrock-agentcore.amazonaws.com`) |
 | `cell-permissions-boundary` | the same execution role, as its boundary | the same deploy-time services and IAM role writes; it assumes no role and holds none of the run-time calls. It denies a role without the workload boundary, any IAM role write, `iam:PassRole` or `sts:AssumeRole` outside `role/cell/*`, `iam:PassRole` to any other service, other service-linked roles, boundary removal, users, access keys, policy writes, Lambda function URLs with `AuthType NONE`, SSM writes to `/application-plane/shared/identity/*` and `/cdk-bootstrap/cell/*`, and changes to the API Gateway account setting |
-| `cell-workload-boundary` | every role a cell creates (ADR-0011) | the run-time services, read of the cell asset bucket, `sts:AssumeRole` on `role/cell/*` only; denies every IAM action, `sts:AssumeRole` outside `role/cell/*`, resource-policy and sharing writes (Lambda permissions and function URLs, KMS key policies and grants, CloudWatch Logs resource policies, subscription filters, destinations, log deliveries and export tasks, DynamoDB resource policies and table exports, SSM and AgentCore resource policies), Lambda function URLs with `AuthType NONE`, the owner's parameters and the API Gateway account setting |
+| `cell-workload-boundary` | every role a cell creates (ADR-0011) | the run-time services, read of the cell asset bucket, `sts:AssumeRole` on `role/cell/*` only; denies every IAM action, `sts:AssumeRole` outside `role/cell/*`, resource-policy and sharing writes (Lambda permissions and function URLs, KMS key policies and grants, CloudWatch Logs resource policies, subscription filters, destinations, account policies, log deliveries and export tasks, DynamoDB resource policies and table exports, SSM, AgentCore and X-Ray resource policies), Lambda function URLs with `AuthType NONE`, the owner's parameters and the API Gateway account setting |
 | `cell-build-policy` | the role pair's cell role, through control-plane's `cellBuildManagedPolicyArns` (control-plane ADR-0047) | `sts:AssumeRole` on `cdk-cell-deploy-role-*`, `cdk-cell-file-publishing-role-*` and `cdk-cell-image-publishing-role-*` of the account and Region; not the lookup role |
 
 The tests in [`../test/cell-policies.test.ts`](../test/cell-policies.test.ts)
@@ -116,6 +117,8 @@ the cell synth context then need the same suffix, and step 2 must run again.
 `probe-deploy.sh` deploys `CellBoundaryProbe`, an owner stack with one role,
 `cell/cell-policy-probe`, under the cell permissions boundary: it stands in
 for the execution role, which cannot create a role under its own boundary.
+Its trust refuses every `/cell/` principal, so only the account owner can
+assume it.
 The same stack holds the decoys: `cell-policy-probe-decoy`, a role on `/`
 with no policy that only the probe roles may assume, and a managed policy of
 the same name, attached to nothing. It then deploys `CellWorkloadProbe`
@@ -129,12 +132,15 @@ account setting set to the value it already has. A probe that names a
 `cdk-cell-*` bootstrap role only tries to assume it. So a probe that a
 regressed policy lets through changes nothing that matters, and
 `probe-remove.sh` lists what it left (users, policies, roles, functions,
-parameters, log resource policies and destinations) and exits 1. Look at
-the policy before you remove those by hand.
+parameters, log resource policies and destinations, and the Elastic Load
+Balancing service-linked role, which a cell account never uses) and exits 1.
+Look at the policy before you remove those by hand.
 
 `probes.sh` assumes each probe role, checks that the CLI really runs as it
 and stops otherwise, and counts a deny probe as passed only when the error
-names an explicit deny in a permissions boundary. It retries a throttled
+names an explicit deny in a permissions boundary. The one exception is the
+workload probe's attempt to assume the stand-in, which the stand-in's trust
+refuses. It retries a throttled
 call. `probe-remove.sh` removes the two probe stacks, and only stacks tagged
 `stress:part=cell-policy-probe`.
 
@@ -154,6 +160,7 @@ call. `probe-remove.sh` removes the two probe stacks, and only stacks tagged
 | workload boundary | `iam:UpdateRoleDescription`, `iam:PutRolePolicy` on a `/cell/` role; `iam:CreateRole` on `/cell/` with the workload boundary | denied |
 | workload boundary | `iam:PassRole` of a `/cell/` role to Lambda; `iam:CreateServiceLinkedRole` for API Gateway; `iam:DeleteRolePermissionsBoundary` on itself | denied |
 | workload boundary | `sts:AssumeRole` of `cdk-cell-deploy-role` and of the decoy role | denied |
+| workload boundary | `sts:AssumeRole` of the execution role's stand-in, `cell/cell-policy-probe` | refused by its trust |
 | workload boundary | `ssm:PutParameter` under `/application-plane/shared/identity/` and `/cdk-bootstrap/cell/`; `apigateway:PATCH` `/account` | denied |
 | workload boundary | `lambda:AddPermission` on a cell function; `lambda:CreateFunctionUrlConfig` with `AuthType NONE`; `logs:PutResourcePolicy`; `dynamodb:PutResourcePolicy`; `kms:PutKeyPolicy` | denied |
 | workload boundary | `sts:AssumeRole` of a `/cell/` tenant role, as the TVM does | allowed |
@@ -164,30 +171,28 @@ Run 2026-11-20, `eu-central-1`, in the two standalone non-production cell
 accounts (A and B) the path spike used, with `CELL_POLICY_SUFFIX=-w10`,
 because the spike's policies already held the default names there.
 `CDKToolkit-cell` in both accounts was bootstrapped against the `-w10`
-policies by `bootstrap-cell.sh` (39 s each) on the first run; the policy
-names have not changed since, so it was not run again.
+policies by `bootstrap-cell.sh` (39 s each). It names the policies, not
+their versions, so a policy change needs no new bootstrap.
 
 | Step | Account A | Account B |
 |---|---|---|
-| `deploy-owner.sh` (`CellPolicies`, `CellAccountBase`, no identity parameters: the spike's base stack holds them); updates the policies in place | 37 s | 37 s |
-| `probe-deploy.sh` (`CellBoundaryProbe`, `CellWorkloadProbe`) | 50 s and 52 s | 50 s and 50 s |
-| `probes.sh` | 49 of 49 pass: 24 deny and 8 allowed as the cell boundary probe, 16 deny and 1 allowed as the workload probe | 49 of 49 pass, the same |
-| `probe-remove.sh` | 31 s and 31 s; no probe leftovers | 31 s and 32 s; no probe leftovers |
-| runtime-isolation cell (`api-gateway`, `tvm=true`, `publishParameters=false`) through the cell bootstrap, with `CellRolePath` and `cellSynthContext`, under the boundaries as shipped | `CREATE_COMPLETE` in 417 s; 27 of 27 roles on `/cell/` under the workload boundary; destroyed in 527 s, nothing left | not deployed |
+| `deploy-owner.sh` (`CellPolicies`, `CellAccountBase`, no identity parameters: the spike's base stack holds them); updates the policies in place | 32 s | 31 s |
+| `probe-deploy.sh` (`CellBoundaryProbe`, `CellWorkloadProbe`) | 56 s and 50 s | 55 s and 51 s |
+| `probes.sh` | 50 of 50 pass: 24 deny and 8 allowed as the cell boundary probe; 16 deny, 1 refused by the stand-in's trust and 1 allowed as the workload probe | 50 of 50 pass, the same |
+| `probe-remove.sh` | 32 s and 32 s; no probe leftovers | 32 s and 32 s; no probe leftovers |
+| runtime-isolation cell (`api-gateway`, `tvm=true`, `publishParameters=false`) through the cell bootstrap, with `CellRolePath` and `cellSynthContext` | `CREATE_COMPLETE` in 417 s; 27 of 27 roles on `/cell/` under the workload boundary; destroyed in 527 s, nothing left | not deployed |
 
-The runtime-isolation cell needed no change to deploy under the workload
-boundary: its 27 roles call no IAM action, pass no role, write no resource
-policy, and assume only `/cell/` roles. The cell app must load one copy of
-the CDK: the aspect and the synth context register on the app's own
-`aws-cdk-lib`, so W-5's cell app compiles these files against the sample's
-CDK (the check above resolved them through the sample's `node_modules`).
-
-Earlier runs of the same day, before the review fixes (decoys, the
-resource-policy and function URL denies, the narrower cell permissions
-boundary), passed 38 of 38 probes in both accounts, and a cell deployed in
-407 s and was destroyed in 527 s. One first run hit
-`TooManyRequestsException` on the API Gateway account setting; `probes.sh`
-now retries throttled calls.
+The cell deploy ran once, on commit `d6dcf8e`. The workload boundary has
+since gained only deny actions (log deliveries, export tasks, table
+exports, X-Ray resource policies) that no role of the cell calls, and the
+execution policy and the cell permissions boundary are the same, so the
+cell was not deployed again. It needed no change to deploy under the
+workload boundary: its 27 roles call no IAM action, pass no role, write no
+resource policy, and assume only `/cell/` roles. The cell app must load one
+copy of the CDK: the aspect and the synth context register on the app's
+own `aws-cdk-lib`, so W-5's cell app compiles these files against the
+sample's CDK (the cell deploy resolved them through the sample's
+`node_modules`).
 
 ## Security scan
 
@@ -203,7 +208,7 @@ license headers: 0. IAM least privilege: 0 critical, 6 high, 3 medium,
 | `iam:Get*` and `iam:List*` on `*` in the execution policy and the cell permissions boundary (medium, 2) | Accepted: CloudFormation reads roles and policies while it creates and updates the cell's roles, and IAM reads expose no data in a cell-only account. The workload boundary has none |
 | `s3:ListBucket` on the cell asset bucket (low) | Accepted: the CDK lists the bucket when it publishes and reads assets; the bucket holds only cell assets |
 | The same wildcards and IAM reads in `spikes/*/cell-policies.yaml` (high, 2; medium, 1) | Accepted as before: the spike files are the record of their runs and are not deployed; the shipped policies replace them |
-| SSM Agent actions on `*` and `execute-api:Invoke` on the account's APIs in `driver/stress-driver.cdk.ts` (high, 1; low, 1) | Not this folder: the driver host role, unchanged by W-10 and acknowledged in its own code (stress ADR-0009) |
+| SSM Agent actions on `*` and `execute-api:Invoke` on the account's APIs in `driver/stress-driver.cdk.ts` (high, 1; low, 1) | Not this folder: the driver host role, acknowledged in its own code (stress ADR-0009) |
 
 ## Known limitations
 

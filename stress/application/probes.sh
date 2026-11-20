@@ -2,9 +2,9 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# Probes the shipped cell policies (README, "Probe the policies"; ported from the path spike's
-# probes.sh). It assumes each probe role in turn, whose own policy allows every escalation on
-# `*`, and checks that its boundary refuses each one while the controls still work:
+# Probes the shipped cell policies (README, "Probe the policies"). It assumes each probe role in
+# turn, whose own policy allows every escalation on `*`, and checks that its boundary refuses
+# each one while the controls still work:
 #
 # - as cell/cell-policy-probe, under the cell permissions boundary (the execution role's cap);
 # - as cell/cell-policy-probe-workload, under the cell workload boundary (every role a cell
@@ -17,9 +17,10 @@
 # cdk-cell bootstrap role only tries to assume it. probe-remove.sh lists anything a
 # let-through probe left behind.
 #
-# A deny probe passes only when the error names an explicit deny in a permissions boundary.
-# Before the first probe of each role it checks that the CLI runs as that role, and stops
-# with exit 2 when it does not. Exit code: the number of failed probes.
+# A deny probe passes only when the error names an explicit deny in a permissions boundary,
+# except the one probe that the stand-in's trust policy refuses, which passes on AccessDenied
+# without a boundary deny. Before the first probe of each role it checks that the CLI runs as
+# that role, and stops with exit 2 when it does not. Exit code: the number of failed probes.
 #
 #   AWS_REGION=eu-central-1 [CELL_POLICY_SUFFIX=-v2] stress/application/probes.sh
 set -uo pipefail
@@ -104,8 +105,21 @@ expect_allowed() {
   if call "$who" "$@"; then echo "PASS  [${who}] ${name}: allowed"; passes=$((passes + 1))
   else echo "FAIL  [${who}] ${name}: $(tr -s "\n" " " <<<"$OUT" | head -c 400)"; fails=$((fails + 1)); fi
 }
+# Refused by a trust policy, not a boundary: AccessDenied that names no boundary deny.
+expect_trust_refused() {
+  local who="$1" name="$2"; shift 2
+  local rc out
+  call "$who" "$@"; rc=$?; out="$OUT"
+  if [[ $rc -eq 0 ]]; then
+    echo "FAIL  [${who}] ${name}: allowed"; fails=$((fails + 1))
+  elif grep -q 'AccessDenied' <<<"$out" && ! grep -qi 'permissions boundary' <<<"$out"; then
+    echo "PASS  [${who}] ${name}: refused by the trust policy"; passes=$((passes + 1))
+  else
+    echo "FAIL  [${who}] ${name}: unexpected error: $(tr -s "\n" " " <<<"$out" | head -c 400)"; fails=$((fails + 1))
+  fi
+}
 
-trust='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:root"},"Action":"sts:AssumeRole"}]}'
+trust="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:${partition}:iam::111122223333:root\"},\"Action\":\"sts:AssumeRole\"}]}"
 admin='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'
 nothing='{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"*","Resource":"*"}]}'
 lambda_trust='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
@@ -178,6 +192,7 @@ expect_denied workload "CreateServiceLinkedRole for API Gateway" iam create-serv
 expect_denied workload "DeleteRolePermissionsBoundary on itself" iam delete-role-permissions-boundary --role-name cell-policy-probe-workload
 expect_denied workload "AssumeRole of the cdk-cell deploy role" sts assume-role --role-arn "$(iam_arn "role/${deploy}")" --role-session-name cell-probe
 expect_denied workload "AssumeRole of a role on / (decoy)" sts assume-role --role-arn "$decoy_arn" --role-session-name cell-probe
+expect_trust_refused workload "AssumeRole of the execution role's stand-in (cell/cell-policy-probe)" sts assume-role --role-arn "$(iam_arn "role/cell/cell-policy-probe")" --role-session-name cell-probe
 expect_denied workload "PutParameter under the identity path" ssm put-parameter --name /application-plane/shared/identity/cell-policy-probe --type String --value cell-probe
 expect_denied workload "PutParameter under the cell bootstrap path" ssm put-parameter --name /cdk-bootstrap/cell/cell-policy-probe --type String --value cell-probe
 expect_denied workload "UpdateAccount: the API Gateway logs role (to its current value)" apigateway update-account --patch-operations "op=replace,path=/cloudwatchRoleArn,value=${logs_role}"

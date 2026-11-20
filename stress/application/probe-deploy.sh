@@ -12,11 +12,15 @@ set -euo pipefail
 
 : "${AWS_REGION:?Set AWS_REGION to the cell account Region}"
 export AWS_DEFAULT_REGION="$AWS_REGION"
+for tool in aws npx; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${HERE}/.."
 [[ -d node_modules ]] || npm ci --silent
 
 account="$(aws sts get-caller-identity --query Account --output text)"
+[[ "$account" =~ ^[0-9]{12}$ ]] || { echo "no caller account" >&2; exit 1; }
 echo "account=${account} region=${AWS_REGION}"
 
 start=$SECONDS

@@ -19,11 +19,9 @@ import { CELL_QUALIFIER, CELL_ROLE_PATH, type CellPolicyNames } from './cell-pol
  * name (`Role.fromRoleName`) must add the path.
  */
 export class CellRolePath implements IAspect {
-  constructor(private readonly path: string = CELL_ROLE_PATH) {}
-
   visit(node: IConstruct): void {
     if (CfnResource.isCfnResource(node) && node.cfnResourceType === 'AWS::IAM::Role') {
-      node.addPropertyOverride('Path', this.path);
+      node.addPropertyOverride('Path', CELL_ROLE_PATH);
     }
   }
 }

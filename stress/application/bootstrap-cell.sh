@@ -22,6 +22,7 @@ set -euo pipefail
 export AWS_DEFAULT_REGION="$AWS_REGION"
 suffix="${CELL_POLICY_SUFFIX:-}"
 [[ "$suffix" =~ ^(-[a-z0-9]{1,16})?$ ]] || { echo "CELL_POLICY_SUFFIX must be empty or - and 1 to 16 lower-case letters or digits" >&2; exit 1; }
+command -v aws >/dev/null 2>&1 || { echo "Missing required tool: aws" >&2; exit 1; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRESS="$(cd "${HERE}/.." && pwd)"

@@ -7,9 +7,9 @@ SPDX-License-Identifier: MIT-0
 The code every sample's stress slice plugs into, so the samples can be
 stress-tested alone or together as one agent platform. The design is
 [`docs/stress-test.spec.md`](../docs/stress-test.spec.md); the decisions are
-in [`adr/`](./adr/README.md). It is a test asset: the only thing it deploys is the driver
-host, for the length of a run, and the cell account owner's stacks in
-`application/`, which live in the standalone cell accounts.
+in [`adr/`](./adr/README.md). It is a test asset that deploys two things:
+the driver host, for the length of a run, and the account owner's stacks in
+`application/`, which stay in each standalone cell account.
 
 | Part | File | What it holds |
 |---|---|---|

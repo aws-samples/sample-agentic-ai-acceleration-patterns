@@ -15,7 +15,9 @@ set -euo pipefail
 
 : "${AWS_REGION:?Set AWS_REGION to the cell account Region}"
 export AWS_DEFAULT_REGION="$AWS_REGION"
+command -v aws >/dev/null 2>&1 || { echo "Missing required tool: aws" >&2; exit 1; }
 account="$(aws sts get-caller-identity --query Account --output text)"
+[[ "$account" =~ ^[0-9]{12}$ ]] || { echo "no caller account" >&2; exit 1; }
 echo "account=${account} region=${AWS_REGION}"
 
 if aws lambda get-function --function-name cell-policy-probe-fn >/dev/null 2>&1; then
@@ -25,11 +27,15 @@ fi
 
 failed=0
 for stack in CellWorkloadProbe CellBoundaryProbe; do
-  tag="$(aws cloudformation describe-stacks --stack-name "$stack" --query "Stacks[0].Tags[?Key=='stress:part'].Value | [0]" --output text 2>/dev/null || true)"
-  if [[ -z "$tag" || "$tag" == None ]]; then
-    echo "stack=${stack} absent"
-    continue
+  if ! out="$(aws cloudformation describe-stacks --stack-name "$stack" --query "Stacks[0].Tags[?Key=='stress:part'].Value | [0]" --output text 2>&1)"; then
+    if grep -q 'does not exist' <<<"$out"; then
+      echo "stack=${stack} absent"
+      continue
+    fi
+    echo "could not read ${stack}: ${out}" >&2
+    exit 1
   fi
+  tag="$out"
   [[ "$tag" == cell-policy-probe ]] || { echo "${stack} is not a probe stack (stress:part=${tag}); left alone" >&2; exit 1; }
   start=$SECONDS
   # A failed delete still runs the leftover listing below, so nothing a probe left goes unseen.
@@ -51,6 +57,9 @@ add functions "$(aws lambda list-functions --query "Functions[?starts_with(Funct
 add parameters "$(aws ssm get-parameters --names /application-plane/shared/identity/cell-policy-probe /cdk-bootstrap/cell/cell-policy-probe --query 'Parameters[].Name' --output text)"
 add "logs resource policies" "$(aws logs describe-resource-policies --query "resourcePolicies[?policyName=='cell-policy-probe'].policyName" --output text)"
 add "logs destinations" "$(aws logs describe-destinations --destination-name-prefix cell-policy-probe --query 'destinations[].destinationName' --output text)"
+# The other-service-linked-role probe aims at Elastic Load Balancing, which a cell account
+# never uses, so its service-linked role there can only come from a let-through probe.
+add "service-linked roles" "$(aws iam list-roles --path-prefix /aws-service-role/elasticloadbalancing.amazonaws.com/ --query 'Roles[].RoleName' --output text)"
 if (( ${#left[@]} > 0 )); then
   printf 'left by a probe a policy let through:\n' >&2
   printf '  %s\n' "${left[@]}" >&2

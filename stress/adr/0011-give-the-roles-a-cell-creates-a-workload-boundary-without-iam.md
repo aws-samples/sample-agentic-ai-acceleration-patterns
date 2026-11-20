@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Proposed
 - Date: 2026-11-20
+- Amends: ADR-0006
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -19,13 +20,13 @@ either. In the synthesised runtime-isolation cell, CloudFormation creates
 every Lambda permission and resource policy, and no workload role calls
 `lambda:AddPermission`, `kms:PutKeyPolicy`, `kms:CreateGrant` or a
 `PutResourcePolicy`. All 27 of its roles also call no IAM action, pass no
-role, and use `sts:AssumeRole` only on `/cell/` roles (the TVM and the Entitlements
-API assume the cell's tenant roles). Under the one boundary, each of them
-still holds IAM write, `iam:PassRole` and `sts:AssumeRole` headroom on
-`role/cell/*` that it never uses (path spike finding CP-9). A mistake in a
-workload role's own policy, such as `iam:*` on `*` in a sample construct,
-would then let a compromised function rewrite every cell role in the
-account.
+role, and use `sts:AssumeRole` only on `/cell/` roles (the TVM and the
+Entitlements API assume the cell's tenant roles). Under the one boundary,
+each of them still holds IAM write, `iam:PassRole` and `sts:AssumeRole`
+headroom on `role/cell/*` that it never uses (path spike finding CP-9). A
+mistake in a workload role's own policy, such as `iam:*` on `*` in a
+sample construct, would then let a compromised function rewrite every cell
+role in the account.
 
 The CDK applies one boundary to every role in an app
 (`@aws-cdk/core:permissionsBoundary`); the cell bootstrap's execution role
@@ -61,8 +62,8 @@ under its own boundary.
 ## Decision
 Option 3. `stress/application/` ships `cell-workload-boundary` beside the
 cell execution policy and the cell permissions boundary. The cell synth
-context names it (`cellSynthContext`), the cell bootstrap still names the
-cell permissions boundary. The same change scopes `iam:PassRole` in the
+context names it (`cellSynthContext`), and the cell bootstrap names the
+cell permissions boundary. It also scopes `iam:PassRole` in the
 execution policy and the cell permissions boundary to the services the
 cell passes roles to, Lambda and AgentCore (`iam:PassedToService`), and the
 cell permissions boundary denies a pass to any other service. The workload
@@ -71,7 +72,7 @@ the execution role uses, and denies the writes that share a resource
 outside the account without IAM: Lambda permissions and function URLs, KMS
 key policies and grants, CloudWatch Logs resource policies, subscription
 filters, destinations, account policies, log deliveries and export tasks,
-DynamoDB resource policies and table exports, and SSM and AgentCore
+DynamoDB resource policies and table exports, and SSM, AgentCore and X-Ray
 resource policies. Both boundaries deny a Lambda function URL, or an invoke
 permission for one, with `AuthType NONE` (`lambda:FunctionUrlAuthType`); a
 cell serves its traffic through its ingress. The cell permissions boundary
@@ -85,7 +86,9 @@ execution policy repeats the workload-boundary condition on
 ## Consequences
 Easier: a workload role's policy can be wrong about IAM without reaching any
 role, and wrong about a resource policy without sharing anything; a
-compromised function can assume only `/cell/` roles, as the TVM does. Harder: a new service that receives a passed role (a Step Functions
+compromised function can assume only `/cell/` roles, as the TVM does.
+
+Harder: a new service that receives a passed role (a Step Functions
 state machine, an EventBridge target) needs both policies changed; a cell
 that needs IAM or a resource-policy write at run time needs a new decision.
 The workload boundary has no `secretsmanager:GetSecretValue` and reads only
@@ -101,7 +104,10 @@ policies. A compromised cell role still reaches every cell's data in the
 account, which is ADR-0006's accepted scope. The probes in
 `stress/application/probes.sh` run as two roles: an owner-made `/cell/`
 role under the cell permissions boundary (the execution role's cap) and a
-cell-made role under the workload boundary. The request path under the
+cell-made role under the workload boundary. The owner-made stand-in exists
+only for a probe run, and its trust refuses every `/cell/` principal, so a
+workload role cannot assume it to reach the IAM headroom of the cell
+permissions boundary; a probe checks that refusal. The request path under the
 workload boundary (spec Q-5) is not yet proven; the first platform run at
 `small` checks it. The deploy of a runtime-isolation cell is recorded in
 `stress/application/README.md`. Revisit if the CDK gains per-role

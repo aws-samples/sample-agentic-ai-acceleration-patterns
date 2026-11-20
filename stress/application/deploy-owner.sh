@@ -25,6 +25,7 @@ cd "${HERE}/.."
 [[ -d node_modules ]] || npm ci --silent
 
 account="$(aws sts get-caller-identity --query Account --output text)"
+[[ "$account" =~ ^[0-9]{12}$ ]] || { echo "no caller account" >&2; exit 1; }
 echo "account=${account} region=${AWS_REGION}"
 
 start=$SECONDS

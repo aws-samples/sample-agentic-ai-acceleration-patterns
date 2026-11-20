@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { App, CfnResource, Stack, Validations } from 'aws-cdk-lib';
+import { App, Aspects, CfnResource, Stack, Validations } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { AwsSolutionsChecks } from 'cdk-nag';
@@ -270,7 +270,7 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
       expect(st.Effect).toBe('Deny');
       expect(st.Resource).toBe('*');
       expect(list(st.Action)).toEqual([...RESOURCE_POLICY_WRITE_ACTIONS]);
-      for (const a of ['lambda:AddPermission', 'lambda:CreateFunctionUrlConfig', 'kms:PutKeyPolicy', 'kms:CreateGrant', 'logs:PutResourcePolicy', 'logs:PutSubscriptionFilter', 'dynamodb:PutResourcePolicy', 'bedrock-agentcore:PutResourcePolicy', 'logs:PutDeliverySource', 'logs:CreateDelivery', 'logs:UpdateDeliveryConfiguration', 'logs:CreateExportTask', 'dynamodb:ExportTableToPointInTime']) {
+      for (const a of ['lambda:AddPermission', 'lambda:CreateFunctionUrlConfig', 'kms:PutKeyPolicy', 'kms:CreateGrant', 'logs:PutResourcePolicy', 'logs:PutSubscriptionFilter', 'dynamodb:PutResourcePolicy', 'bedrock-agentcore:PutResourcePolicy', 'logs:PutDeliverySource', 'logs:CreateDelivery', 'logs:UpdateDeliveryConfiguration', 'logs:CreateExportTask', 'dynamodb:ExportTableToPointInTime', 'xray:PutResourcePolicy', 'xray:DeleteResourcePolicy']) {
         expect(list(st.Action)).toContain(a);
       }
       expect(p.sid('DenyPublicFunctionUrls')).toEqual(PUBLIC_URL_DENY);
@@ -358,7 +358,14 @@ describe('the /cell/ path aspect and the cell synth context', () => {
       ['AWS::IAM::Role', '/cell/'],
       ['AWS::SNS::Topic', undefined],
     ]);
-    expect(new CellRolePath('/x/')).toBeInstanceOf(CellRolePath);
+  });
+
+  it('applies the same way as an aspect added by hand', () => {
+    const stack = new Stack(new App(), 'S');
+    new iam.Role(stack, 'A', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
+    Aspects.of(stack).add(new CellRolePath());
+    const roles = Object.values(Template.fromStack(stack).toJSON().Resources) as any[];
+    expect(roles.map((r) => r.Properties.Path)).toEqual(['/cell/']);
   });
 
   it('gives the qualifier and the workload boundary as an object', () => {
@@ -395,6 +402,15 @@ describe('the probe stacks', () => {
       Path: '/cell/',
       PermissionsBoundary: 'arn:<AWS::Partition>:iam::<AWS::AccountId>:policy/cell-permissions-boundary',
     });
+    // The stand-in holds the cell permissions boundary's IAM headroom: no /cell/ role may assume it.
+    expect(probe.Properties.AssumeRolePolicyDocument.Statement).toEqual([
+      {
+        Effect: 'Allow',
+        Action: 'sts:AssumeRole',
+        Principal: { AWS: 'arn:<AWS::Partition>:iam::<AWS::AccountId>:root' },
+        Condition: { ArnNotLike: { 'aws:PrincipalArn': 'arn:<AWS::Partition>:iam::<AWS::AccountId>:role/cell/*' } },
+      },
+    ]);
     const decoy = roles.find((r) => r.Properties.RoleName === PROBE_ROLES.decoy);
     expect(decoy.Properties.Path).toBeUndefined();
     expect(decoy.Properties.PermissionsBoundary).toBeUndefined();

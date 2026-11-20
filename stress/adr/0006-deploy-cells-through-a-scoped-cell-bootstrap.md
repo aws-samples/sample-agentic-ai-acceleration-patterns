@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0011
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -50,18 +51,16 @@ Option 3.
 
 | Wall | Holds |
 |---|---|
-| Standalone cell account | only `CDKToolkit-cell`, the role pair and the account base (plain CloudFormation by the account owner with the CDK's legacy synthesizer, on `/`, no cell boundary; the base is one or more owner stacks tagged `stress:part=account-base`, holding the cell policies, the API Gateway logs role and the identity parameters) and cells; no default CDK bootstrap; the `control-plane` slice refuses an account with any other stack, a stack with a service role other than the cell execution role, a `cdk-hnb659fds-*` role, a role pair on `/cell/` or under either cell boundary (the cell permissions boundary or, ADR-0011, the workload boundary), or a `/cell/` role trusted from outside, before every run |
+| Standalone cell account | only `CDKToolkit-cell`, the role pair and the account base (plain CloudFormation by the account owner with the CDK's legacy synthesizer, on `/`, no cell boundary; the base is one or more owner stacks tagged `stress:part=account-base`, holding the cell policies, the API Gateway logs role and the identity parameters) and cells; no default CDK bootstrap; the `control-plane` slice refuses an account with any other stack, a stack with a service role other than the cell execution role, a `cdk-hnb659fds-*` role, a role pair on `/cell/` or under the cell boundary, or a `/cell/` role trusted from outside, before every run |
 | Cell bootstrap | `cdk bootstrap --qualifier cell --toolkit-stack-name CDKToolkit-cell --cloudformation-execution-policies <cell execution policy> --custom-permissions-boundary cell-permissions-boundary` |
 | `/cell/` path | every role a cell creates is on `/cell/`, set by a CDK aspect in the stress cell app that matches every `AWS::IAM::Role` resource; IAM role writes, `iam:PassRole` and `sts:AssumeRole` are allowed on `role/cell/*` only; `iam:CreateServiceLinkedRole` only on `role/aws-service-role/*` and for `ops.apigateway.amazonaws.com` and `runtime-identity.bedrock-agentcore.amazonaws.com` |
-| Boundary | on the execution role (and, until ADR-0011, every cell role; ADR-0011 gives cell roles a workload boundary without IAM): the cell's services and the same service-linked-role allow, and denies on `iam:CreateRole` without the boundary (ADR-0011: the workload boundary) or outside `/cell/`, any other IAM write or `iam:PassRole` on a role outside `/cell/` (`NotResource` `role/cell/*`), `iam:CreateServiceLinkedRole` for any other service, boundary removal, users, access keys, policy writes, SSM writes to the owner's parameters (`/application-plane/shared/identity/*`, `/cdk-bootstrap/cell/*`), and changes to the API Gateway account setting |
+| Boundary | on the execution role and every cell role: the cell's services and the same service-linked-role allow, and denies on `iam:CreateRole` without the boundary or outside `/cell/`, any other IAM write or `iam:PassRole` on a role outside `/cell/` (`NotResource` `role/cell/*`), `iam:CreateServiceLinkedRole` for any other service, boundary removal, users, access keys, policy writes, SSM writes to the owner's parameters (`/application-plane/shared/identity/*`, `/cdk-bootstrap/cell/*`), and changes to the API Gateway account setting |
 
 The cell synth sets `@aws-cdk/core:bootstrapQualifier` and
 `@aws-cdk/core:permissionsBoundary` as object context (a CLI `--context`
 passes the boundary as a string, which the CDK ignores). The role pair gets
 `sts:AssumeRole` on the deploy and asset-publishing `cdk-cell-*` roles
-(not the lookup role) through control-plane ADR-0047. The policies, the
-`/cell/` aspect, the cell bootstrap script and the probes ship in
-[`stress/application/`](../application/README.md).
+(not the lookup role) through control-plane ADR-0047. The policies ship in `stress/application/`.
 
 ## Consequences
 Proven so far: the boundary spike (`stress/spikes/cell-boundary/`, 2026-11-18), in a shared
@@ -82,11 +81,9 @@ and the bootstrap roles, a role on `/`, a role without the boundary,
 another service-linked role, removing or swapping a boundary, new
 versions of the cell policies, overwriting the owner's identity and
 bootstrap parameters, and repointing the API Gateway account's logs
-role) while a write to another `/cell/` role worked. On 2026-11-20 the
-shipped policies in `stress/application/`, with the ADR-0011 workload
-boundary, passed the ported probes in both cell accounts (see its README).
-Still to prove before this record is accepted (spec Q-5): the request path
-in a cell account.
+role) while a write to another `/cell/` role worked. Still to
+prove before this record is accepted (spec Q-5): the request path in a
+cell account.
 
 Easier: a cell build cannot create, change, pass or assume a role outside
 the cell, apart from the two service-linked roles above, whose trust IAM
@@ -96,9 +93,23 @@ only cells; a compromised cell build can give a cell role a trust to
 another account, which the boundary still caps and a redeploy does not
 undo, so the pre-run check refuses a `/cell/` role trusted from outside;
 a new service in a cell needs both policies updated before its first
-deploy, and an integration run under the boundary is the check; the one
-boundary left a workload role IAM write, `iam:PassRole` and `sts:AssumeRole` headroom on `role/cell/*` it never uses, which ADR-0011
-removes with a second boundary for the roles a cell creates. Unchanged:
+deploy, and an integration run under the boundary is the check; one
+boundary caps both the execution role and every role a cell creates, so
+a workload role holds IAM write, `iam:PassRole` and `sts:AssumeRole`
+headroom on `role/cell/*` it never uses, and W-10 decides whether cell
+roles get a second boundary without IAM writes (TVM roles still need
+`sts:AssumeRole` on `/cell/` tenant roles). Unchanged:
 a compromised cell build can change any cell in its account, which is the
 role pair's scope. Revisit if the CDK bootstrap gains per-stack execution
 roles, or if cells move to a deploy path without the CDK.
+
+Note 2026-11-20: ADR-0011 keeps the cell permissions boundary on the
+execution role only and gives every role a cell creates the cell workload
+boundary, which allows no IAM action and `sts:AssumeRole` on `role/cell/*`
+only. The execution role may create or re-bound a role only with the
+workload boundary, assumes no role, and passes `/cell/` roles to Lambda and
+AgentCore only. The pre-run check refuses a role pair under either
+boundary. The shipped policies, the `/cell/` aspect, the cell bootstrap
+script and the probes are in
+[`stress/application/`](../application/README.md), whose README records
+their probe runs in both cell accounts.

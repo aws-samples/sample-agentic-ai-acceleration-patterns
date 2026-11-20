@@ -154,8 +154,8 @@ export class CellAccountBaseStack extends Stack {
       'AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs]',
       'The AWS managed policy API Gateway documents for its account CloudWatch Logs role.',
     );
-    const account = new apigateway.CfnAccount(this, 'ApiGatewayAccount', { cloudWatchRoleArn: this.apiGatewayLogsRole.roleArn });
-    account.node.addDependency(this.apiGatewayLogsRole);
+    // The role ARN reference orders the setting after the role.
+    new apigateway.CfnAccount(this, 'ApiGatewayAccount', { cloudWatchRoleArn: this.apiGatewayLogsRole.roleArn });
 
     if (props.userPoolId !== undefined && props.appClientId !== undefined) {
       new ssm.StringParameter(this, 'UserPoolId', { parameterName: IDENTITY_PARAMETERS.userPoolId, stringValue: props.userPoolId });

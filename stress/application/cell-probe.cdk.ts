@@ -7,7 +7,8 @@
  *
  * - `CellBoundaryProbeStack`, an owner stack (legacy synthesizer, owner credentials):
  *   `cell/cell-policy-probe`, under the cell permissions boundary, standing in for the
- *   execution role. The execution role cannot create it: a role it creates must carry
+ *   execution role, with a trust that refuses every `/cell/` principal. The execution
+ *   role cannot create it: a role it creates must carry
  *   the workload boundary (ADR-0011). The stack also holds the decoys every escalation
  *   outside `/cell/` aims at, so a probe that a regressed policy lets through changes
  *   nothing the account uses: `cell-policy-probe-decoy`, a role on `/` with no policy that
@@ -68,8 +69,14 @@ export const PROBE_ACTIONS = [
   'apigateway:PATCH',
 ] as const;
 
-function probeRole(scope: Construct, id: string, roleName: string, description: string): iam.Role {
-  const role = new iam.Role(scope, id, { roleName, assumedBy: new iam.AccountRootPrincipal(), description });
+function probeRole(
+  scope: Construct,
+  id: string,
+  roleName: string,
+  description: string,
+  trust: iam.IPrincipal = new iam.AccountRootPrincipal(),
+): iam.Role {
+  const role = new iam.Role(scope, id, { roleName, assumedBy: trust, description });
   role.addToPolicy(new iam.PolicyStatement({ sid: 'EveryEscalation', actions: [...PROBE_ACTIONS], resources: ['*'] }));
   const reason = 'A probe role: its identity policy allows every escalation on purpose, so the probes show that the boundary alone refuses each one.';
   for (const finding of ['AwsSolutions-IAM5[Resource::*]', ...PROBE_ACTIONS.filter((a) => a.includes('*')).map((a) => `AwsSolutions-IAM5[Action::${a}]`)]) {
@@ -86,7 +93,13 @@ export interface CellBoundaryProbeStackProps extends Omit<StackProps, 'synthesiz
 export class CellBoundaryProbeStack extends Stack {
   constructor(scope: Construct, id: string, props: CellBoundaryProbeStackProps) {
     super(scope, id, { ...props, synthesizer: new LegacyStackSynthesizer(), tags: { ...props.tags, [PROBE_TAG.key]: PROBE_TAG.value } });
-    const role = probeRole(this, 'BoundaryProbeRole', PROBE_ROLES.boundary, 'Stands in for the cell execution role; only the cell permissions boundary may refuse');
+    // The stand-in holds the cell permissions boundary's IAM headroom, and the workload
+    // boundary allows sts:AssumeRole on role/cell/*: its trust refuses every /cell/
+    // principal, so only the account owner can assume it (ADR-0011).
+    const ownerOnly = new iam.AccountRootPrincipal().withConditions({
+      ArnNotLike: { 'aws:PrincipalArn': `arn:${this.partition}:iam::${this.account}:role/cell/*` },
+    });
+    const role = probeRole(this, 'BoundaryProbeRole', PROBE_ROLES.boundary, 'Stands in for the cell execution role; only the cell permissions boundary may refuse', ownerOnly);
     iam.PermissionsBoundary.of(role).apply(iam.ManagedPolicy.fromManagedPolicyName(this, 'Boundary', props.names.boundary));
     // Only the probe role goes on /cell/; the decoy stays on /.
     applyCellRolePath(role);

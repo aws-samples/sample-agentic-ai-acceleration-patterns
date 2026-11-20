@@ -95,12 +95,12 @@ export const API_GATEWAY_ACCOUNT_WRITE_ACTIONS = ['apigateway:PATCH', 'apigatewa
 
 /**
  * Public Lambda function URLs: a function URL or an invoke permission with `AuthType NONE`.
- * Denied in both boundaries; a cell serves its traffic through its ingress (review of W-10).
+ * Denied in both boundaries; a cell serves its traffic through its ingress.
  */
 export const PUBLIC_FUNCTION_URL_ACTIONS = ['lambda:CreateFunctionUrlConfig', 'lambda:UpdateFunctionUrlConfig', 'lambda:AddPermission'] as const;
 
 /**
- * Resource-policy and sharing writes no role a cell creates calls (ADR-0011): they share a
+ * Resource-policy and sharing writes no role a cell creates calls (ADR-0011): most share a
  * resource outside the account without IAM. The execution role keeps them, since
  * CloudFormation creates the cell's Lambda permissions and resource policies.
  */
@@ -112,6 +112,7 @@ export const RESOURCE_POLICY_WRITE_ACTIONS = [
   'lambda:CreateFunctionUrlConfig',
   'lambda:UpdateFunctionUrlConfig',
   'lambda:DeleteFunctionUrlConfig',
+  // Not a share: it turns off Lambda's recursive loop detection, which no cell role needs.
   'lambda:PutFunctionRecursionConfig',
   'kms:PutKeyPolicy',
   'kms:CreateGrant',
@@ -139,6 +140,8 @@ export const RESOURCE_POLICY_WRITE_ACTIONS = [
   'ssm:DeleteResourcePolicy',
   'bedrock-agentcore:PutResourcePolicy',
   'bedrock-agentcore:DeleteResourcePolicy',
+  'xray:PutResourcePolicy',
+  'xray:DeleteResourcePolicy',
 ] as const;
 
 /** What cell roles call at run time, besides the deploy-time services. */
