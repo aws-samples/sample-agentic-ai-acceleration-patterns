@@ -189,9 +189,11 @@ and the records in
 4. When the deployment is `ACTIVE`, the driver of the `control-plane`
    slice creates the tenant's identity with the IAM-signed admin API of the
    stress identity (stress ADR-0017): tenant-identity `CreateTenant` with
-   the control-plane tenant id, which creates the first admin, then
-   `CreateUser` for each further user the tier lists (§4.1; users per active
-   tenant count the admin, so only active tenants get further users). It
+   the control-plane tenant id, `scopes` `["app/use"]` (the scope floor the
+   ingress requires on every token) and an admin e-mail address, which
+   creates the first admin, then `CreateUser` for each further user the tier
+   lists (§4.1; users per active tenant count the admin, so only active
+   tenants get further users). It
    does this for each tenant PS-1 onboards, for the warm-up tenant (after
    front-door phase two, §3.5) and for the `large` fleet's seed; a churn
    create (PS-5) gets identity calls only where PS-1 is timed on it
@@ -335,7 +337,10 @@ and cells with no call to a registrar that is gone. The control plane is
 still deployed at that point. Front-door spec §6.2 removes the routes
 through the hooks first and unregisters the hooks last; here the registrar
 and the route table are destroyed in the same teardown, so no route needs
-removing.
+removing. The rest of front-door spec §6.2's order follows: the policy out
+of `globalHookManagedPolicyArns` with a control-plane update, then
+`RouteHookAccess` and its parameter, then the stacks; the slice's
+`teardown` verifies that none is left (§3.4).
 
 In the platform run the front door deploys in two phases, because its
 `agentIngress` input is the first cell's ingress, which exists only
@@ -457,6 +462,11 @@ Each cell's `maxTenants` is its seeded share plus its share of the churn
 count, so a churn create (PS-5) lands in a free slot of an existing cell and
 times a tenant build, not a cell build.
 
+Users per active tenant counts the admin that `CreateTenant` creates
+(tenant-identity ADR-0042). In slice mode the runtime-isolation slice's own
+`seed` adds that many users beyond its admin; the platform run follows this
+count.
+
 The `large` row splits the runtime-isolation `large` tier over four cells:
 100 agents in total, the same as the runtime-isolation `large` tier, so
 the Runtime count does not grow. Per cell
@@ -494,8 +504,9 @@ creates (§3.3 step 4) are not in `tenant-identity.json`, which only that
 slice's `seed` writes; the driver records them in `identity[]` (stress
 ADR-0017, W-9), and a control-plane tenant with no entry is refused
 (`no-identity-tenant`). The `control-plane` `teardown` deletes the identity
-tenants of every deployment of the run, the seeded tenants of `small` and
-`medium` and the churn tenants that PS-5 deleted included, and removes their
+tenants of every deployment of the run that has one: the seeded tenants of
+`small` and `medium` and, at `large`, the churn tenants PS-1 is timed on,
+which PS-5 deleted; it removes their
 `identity[]` entries, because the control plane's `DeleteDeployment` does
 not and the `tenant-identity` `teardown` removes only the tenants it
 seeded; the reverse order of §3.4 runs it before `tenant-identity`'s. The
