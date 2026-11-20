@@ -289,11 +289,12 @@ In the platform run the front door deploys in two phases, because its
 `agentIngress` input is the first cell's ingress, which exists only
 after the control plane builds that cell (stress ADR-0016). Phase one
 is two deploys of the front-door app, the second with `registrarUrl`,
-which adds the `RouteHookAccess` stack (front-door ADR-0027), and puts
-the route hook in place before that build: a cell built with no hook
-has no cell route, and every deployment placed in it fails its hook
-with 409 until an operator backfills the route (front-door spec §3.2,
-§3.4). The platform run's set-up order:
+which adds the `RouteHookAccess` stack (front-door ADR-0027); the
+control plane's `globalHookManagedPolicyArns` update and the hook
+registration then put the route hook in place before that build: a
+cell built with no hook has no cell route, and every deployment placed
+in it fails its hook with 409 until an operator backfills the route
+(front-door spec §3.2, §3.4). The platform run's set-up order:
 
 | # | Step | Owned by |
 |---|---|---|
