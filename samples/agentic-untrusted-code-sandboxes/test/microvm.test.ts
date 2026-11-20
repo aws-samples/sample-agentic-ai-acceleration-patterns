@@ -18,7 +18,7 @@ import type { MicrovmState } from '@aws-sdk/client-lambda-microvms';
 import { mockClient } from 'aws-sdk-client-mock';
 import type { RegistryRow, RunJob, SandboxHandle, TenantCredentials } from '../src/backend';
 import { MICROVM_START_CAP_MS, MicrovmBackend, MicrovmStartError, endpointOrigin, httpIngressConnectorArn } from '../src/backends/microvm';
-import { BACKEND_ENV, ENV } from '../src/env';
+import { BACKEND_ENV, ENV, TEST_HOOK_ENV } from '../src/env';
 import { buildJob, newNonce, nonceHash, resultProof, startToken } from '../src/protocol';
 import type { RunResult } from '../src/protocol';
 
@@ -107,6 +107,29 @@ afterEach(() => {
 });
 
 describe('start', () => {
+  test('failAtBoot reaches the run hook payload only when the tool asks and the function honours the test hooks', async () => {
+    aws.on(RunMicrovmCommand).resolves(microvm('PENDING'));
+    const hooks = { ...ENV_OK, [TEST_HOOK_ENV.RC_INTEG_OVERRIDES]: '1' };
+    const cases: [string, Record<string, string | undefined>, { failAtBoot?: boolean } | undefined, boolean][] = [
+      ['asked, hooks on', hooks, { failAtBoot: true }, true],
+      ['asked, hooks off', ENV_OK, { failAtBoot: true }, false],
+      ['asked, hooks set to another value', { ...ENV_OK, [TEST_HOOK_ENV.RC_INTEG_OVERRIDES]: 'true' }, { failAtBoot: true }, false],
+      ['not asked, hooks on', hooks, {}, false],
+      ['no options, hooks on', hooks, undefined, false],
+      ['false, hooks on', hooks, { failAtBoot: false }, false],
+      ['the string true, hooks on', hooks, { failAtBoot: 'true' as unknown as boolean }, false],
+      ['the number 1, hooks on', hooks, { failAtBoot: 1 as unknown as boolean }, false],
+    ];
+    for (const [name, env, options, sent] of cases) {
+      aws.resetHistory();
+      const nonce = newNonce();
+      await backend(env).start('tenant-a', nonce, creds('tenant-a'), options);
+      const payload = JSON.parse(aws.commandCalls(RunMicrovmCommand)[0].args[0].input.runHookPayload as string);
+      expect([name, 'failAtBoot' in payload]).toEqual([name, sent]);
+      expect(payload).toEqual({ nonceHash: nonceHash(nonce), tenant: 'tenant-a', ...(sent ? { failAtBoot: true } : {}) });
+    }
+  });
+
   test('runs the image with only the sample connector and only the nonce hash', async () => {
     const nonce = newNonce();
     aws.on(RunMicrovmCommand).resolves(microvm('PENDING'));
