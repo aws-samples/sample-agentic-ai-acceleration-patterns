@@ -263,8 +263,8 @@ export async function readRate(s: ScenarioEnv): Promise<void> {
       })(),
     );
     // A record write every tenth tick: UpdateTenant runs the record event (no build). A
-    // ConflictError (409) a retry can clear is expected, no refusal; a 409 that says a retry
-    // cannot succeed is a finding below (retryableConflict).
+    // ConflictError (409) whose message says to retry the request (R-14) is expected, no
+    // refusal; any other 409 is a finding below (retryableConflict).
     if (i % 10 === 0) {
       const w = tenants[writeIndex % tenants.length];
       writeIndex += 1;
