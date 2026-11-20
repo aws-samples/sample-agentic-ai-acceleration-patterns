@@ -307,7 +307,9 @@ case "$1 $2" in
 esac
 `;
   // npx fails every call and logs it; with `deploy` in its arguments it can also take the credentials away.
+  // The SPA build answers 0, so the driver's preflight passes on a tree with no build/spa.
   const npxStub = (dropCredentials: boolean) => `#!/usr/bin/env bash
+[[ "$*" == "projen spa:build" ]] && exit 0
 echo "npx $*" >> "$STUB_DIR/npx.log"
 ${dropCredentials ? '[[ "$*" == *" deploy "* ]] && touch "$STUB_DIR/creds-gone"' : ''}
 exit 1
@@ -523,6 +525,12 @@ check "as: 200" 200 "$(as arn:aws:iam::111111111111:role/op GET tenants/T1)"`);
     expect(r.stdout).not.toContain('earlier answer');
   });
 
+  it('state_load: reads only the run-state names, so a hand-edited state.env cannot set PATH', () => {
+    const r = lib(`RUN_DIR="$TMP"; printf 'CELL_A=c1\\nPATH=/nowhere\\nIFS=x\\n' >"$TMP/state.env"
+state_load; echo "cell:$CELL_A path-kept:$([[ "$PATH" != /nowhere ]] && echo yes)"`);
+    expect(r.stdout).toContain('cell:c1 path-kept:yes');
+  });
+
   it('http_status: a curl that fails prints 000 once, whatever its -w wrote', () => {
     const r = lib(`curl() { printf 000; return 7; }
 echo "[$(http_status -s -o /dev/null -w '%{http_code}' https://cell.example.com/)]"
@@ -530,5 +538,15 @@ curl() { printf 403; }
 echo "[$(http_status -s -o /dev/null -w '%{http_code}' https://cell.example.com/)]"`);
     expect(r.stdout).toContain('[000]');
     expect(r.stdout).toContain('[403]');
+  });
+
+  it('api: the operator token signed in inside $(...) is kept in a 0600 file and reused by later calls', () => {
+    const r = lib(`REQ="$TMP/req"; CP_API=https://cp.example.com/; REGION=eu-central-1; VENDOR_POOL=p; VENDOR_OPERATOR_CLIENT=c; OPERATOR_PASSWORD=pw
+aws() { echo x >>"$TMP/signins"; echo "id-token-$(wc -l <"$TMP/signins" | tr -d ' ')"; }
+curl() { echo 200; }
+a="$(api GET cells)"; b="$(api GET cells)"; c="$(api_status cells .x)"
+echo "signins:$(wc -l <"$TMP/signins" | tr -d ' ')"`);
+    expect(r.stdout).toContain('signins:1');
+    expect((fs.statSync(path.join(tmp, 'cp-token')).mode % 0o1000).toString(8)).toBe('600');
   });
 });

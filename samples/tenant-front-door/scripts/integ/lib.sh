@@ -49,15 +49,18 @@ timed() {
 
 # -- Run state ------------------------------------------------------------------
 # state.env holds the run's ids (tenants, cells, applications), never a secret;
-# teardown reads it after an interruption.
+# teardown reads it after an interruption. Only the names below are written
+# or read, so a hand-edited file cannot set PATH, IFS or another shell
+# variable.
+STATE_NAMES='^(APP_REGISTERED|A_SUSPENDED|B_DEPLOYMENT_DELETED|CELL_[AB]|CP_SETUP_REMOVED|DEPLOY_PHASE|FIXTURE_WRITTEN|HOOKS_REGISTERED|HOOK_PARAMETER_BROKEN|HOOK_POLICY_ATTACHED|MT_API|MT_TENANT|MT_USER|PLAIN_CELL|PLAIN_REGISTERED|PROBE_HOOK|TENANT_[A-Z]|TI_USER_[A-Z]|TXT_PUBLISHED)$'
 state_set() { # NAME VALUE
-  [[ "$1" =~ ^[A-Z_][A-Z0-9_]*$ && "$2" =~ ^[A-Za-z0-9._:/@+=-]*$ ]] || { die "state value for $1 has unexpected characters"; return 1; }
+  [[ "$1" =~ $STATE_NAMES && "$2" =~ ^[A-Za-z0-9._:/@+=-]*$ ]] || { die "state value for $1 has an unknown name or unexpected characters"; return 1; }
   printf -v "$1" '%s' "$2"
   grep -v "^$1=" "$RUN_DIR/state.env" >"$RUN_DIR/state.env.new" 2>/dev/null || true
   printf '%s=%s\n' "$1" "$2" >>"$RUN_DIR/state.env.new"
   mv "$RUN_DIR/state.env.new" "$RUN_DIR/state.env"
 }
-state_load() { [[ -f "$RUN_DIR/state.env" ]] || return 0; while IFS='=' read -r k v; do if [[ "$k" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then printf -v "$k" '%s' "$v"; fi; done <"$RUN_DIR/state.env"; }
+state_load() { [[ -f "$RUN_DIR/state.env" ]] || return 0; while IFS='=' read -r k v; do if [[ "$k" =~ $STATE_NAMES ]]; then printf -v "$k" '%s' "$v"; fi; done <"$RUN_DIR/state.env"; }
 
 # ctx_set KEY JSON: adds a value to the integ context the CDK app reads.
 ctx_set() {
@@ -215,13 +218,19 @@ set_operator_password() {
     --message-action SUPPRESS >/dev/null 2>&1 || true
   printf '%s' "$OPERATOR_PASSWORD" | jq -Rc --arg p "$VENDOR_POOL" '{UserPoolId: $p, Username: "integ-operator", Password: ., Permanent: true}' >"$TMP/password.json"
   chmod 600 "$TMP/password.json"
-  CP_TOKEN=""; CP_TOKEN_AT=0
+  CP_TOKEN=""; CP_TOKEN_AT=0; : >"$TMP/cp-token"
   aws cognito-idp admin-set-user-password --region "$REGION" --cli-input-json "file://$TMP/password.json" >/dev/null \
     || { : >"$TMP/password.json"; OPERATOR_PASSWORD=""; return 1; }
   : >"$TMP/password.json"
 }
 api_token() {
   (( $(date +%s) - CP_TOKEN_AT < 2400 )) && [[ -n "$CP_TOKEN" ]] && return 0
+  # api runs inside $(...), so a token signed in there is kept in a 0600
+  # file (time, token) for the calls after it, as token_for does.
+  if [[ -s "$TMP/cp-token" ]]; then
+    { read -r CP_TOKEN_AT; read -r CP_TOKEN; } <"$TMP/cp-token"
+    (( $(date +%s) - CP_TOKEN_AT < 2400 )) && [[ -n "$CP_TOKEN" ]] && return 0
+  fi
   # The password reaches the CLI in a 0600 input file, never on its command line.
   printf '%s' "$OPERATOR_PASSWORD" | jq -Rc --arg p "$VENDOR_POOL" --arg c "$VENDOR_OPERATOR_CLIENT" \
     '{UserPoolId: $p, ClientId: $c, AuthFlow: "ADMIN_USER_PASSWORD_AUTH", AuthParameters: {USERNAME: "integ-operator", PASSWORD: .}}' >"$TMP/auth.json"
@@ -230,6 +239,7 @@ api_token() {
     --query AuthenticationResult.IdToken --output text)" || { : >"$TMP/auth.json"; CP_TOKEN=""; die "the operator could not sign in to the vendor IdP"; return 1; }
   : >"$TMP/auth.json"
   CP_TOKEN_AT=$(date +%s)
+  ( umask 077; printf '%s\n%s\n' "$CP_TOKEN_AT" "$CP_TOKEN" >"$TMP/cp-token" )
 }
 # api METHOD PATH [JSON] -> status; body in $BODY. 000 when the operator cannot sign in.
 # $BODY is emptied first: inside $(...) a failed sign-in ends the subshell

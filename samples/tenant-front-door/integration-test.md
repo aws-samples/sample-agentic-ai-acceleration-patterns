@@ -69,7 +69,8 @@ npx projen integ
 `npx projen integ:host` runs the `host` mode steps. A run takes hours;
 start it from a shell that outlives it (`nohup`, `tmux`). The driver
 needs bash 4.4 or later, GNU coreutils (`date +%s%3N` for millisecond
-log windows), curl 7.75 or later (`--aws-sigv4`) and AWS CLI v2
+log windows), curl 7.75 or later (`--aws-sigv4`), jq 1.6 or later, the
+Smithy CLI (the preflight builds the control plane's model) and AWS CLI v2
 (`aws configure export-credentials`); on macOS, install them and put
 them first on `PATH`.
 

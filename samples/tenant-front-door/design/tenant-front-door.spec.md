@@ -1078,8 +1078,7 @@ given below):
    two minutes. A larger burst leaves creates in `CREATE_FAILED`,
    which the operator deletes and creates again (route hook, after
    step 4). Sharding by distribution, each shard with its own store
-   and ETag (ADR-0012), is the way past the ceiling. The build
-   measures the cycle and replaces the estimates.
+   and ETag (ADR-0012), is the way past the ceiling.
 6. Log the caller role, key and outcome, never the body.
 
 Deletes run steps 1 and 2, the write of step 5 with its ETag and its
@@ -2444,8 +2443,8 @@ ordered teardown from an `EXIT` trap, so a run that fails or stops still
 removes what it made. `npx projen integ` and `npx projen integ:host`
 start it.
 
-It runs in one Region, `AWS_REGION`, the control plane's (eu-central-1
-in the reference runs), with the edge stacks in `us-east-1` (ADR-0010),
+It runs in one Region, `AWS_REGION`, the control plane's (for example
+`eu-central-1`), with the edge stacks in `us-east-1` (ADR-0010),
 in two accounts. The edge account is the one the driver's credentials
 point at, because the test's hosted zone is there. The control plane's
 account, `TFD_INTEG_ACCOUNT_B`, is CDK-bootstrapped to trust it, so the

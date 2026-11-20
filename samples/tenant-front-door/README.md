@@ -447,20 +447,15 @@ time.
 ## Deployment integration test
 
 ```bash
-export AWS_REGION=<REGION>
-export TFD_INTEG_ACCOUNT_B=<CONTROL_PLANE_ACCOUNT_ID>
-export TFD_APP_DOMAIN=<NAME_BELOW_THE_ZONE_APEX>
-export TFD_HOSTED_ZONE_ID=<ZONE_ID>
-export TFD_DEDICATED_DOMAIN=<SECOND_NAME_IN_THE_ZONE>
 npx projen integ
 ```
 
-This deploys the front door, its own control plane, two cells and the test's
-roles in two accounts, drives the steps of `single` mode (1 to 16 and 19 to
-24), and tears everything down in the order of the Teardown section. A `single`
-run takes about four and a half hours and a `host` run (`npx projen
-integ:host`) about two and a half, for a few dollars; both are estimates. What the test stands up, its steps, knobs and shortcuts
-are in [integration-test.md](./integration-test.md).
+It deploys the front door, its own control plane and two cells in two
+accounts, runs the steps of `single` mode (1 to 16 and 19 to 24) and tears
+everything down; a `single` run takes about four and a half hours, a `host`
+run (`npx projen integ:host`) about two and a half, for a few dollars, both
+estimates. Its inputs, steps and shortcuts are in
+[integration-test.md](./integration-test.md).
 
 ## Tests
 
@@ -604,8 +599,8 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
 - **Scans.** The ProtoShield scan in the threat model's security review
   covers the sample; the integration test's own roles and stacks
   (`test/integ/`) are outside it. Rescan after your own changes.
-- **The integration driver needs bash 4.4, GNU coreutils, curl 7.75 and AWS
-  CLI v2** or later, and a unit test of the driver needs `npm ci` in
+- **The integration driver needs bash 4.4, GNU coreutils, curl 7.75, jq 1.6
+  and AWS CLI v2** or later, and a unit test of the driver needs `npm ci` in
   `../control-plane`.
 
 ## Design trail
