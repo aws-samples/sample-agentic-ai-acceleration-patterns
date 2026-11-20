@@ -260,6 +260,9 @@ def read_body(handler: BaseHTTPRequestHandler, limit: int = wire.MAX_BODY_BYTES)
 
 
 def _read_body(handler, limit: int, deadline: float) -> Optional[bytes]:
+    encoding = handler.headers.get("Transfer-Encoding")
+    if encoding is not None and encoding.lower() != "chunked":
+        return None  # RFC 9112 section 6.3: any other framing is refused, so the bytes after it are never read as a request
     if handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
         data = bytearray()
         while True:
@@ -286,7 +289,9 @@ def _read_body(handler, limit: int, deadline: float) -> Optional[bytes]:
             data += chunk
             if _read_line(handler, 4, deadline) not in (b"\r\n", b"\n"):
                 return None
-    text = handler.headers.get("Content-Length", "")
+    text = handler.headers.get("Content-Length")
+    if text is None:
+        return b""  # RFC 9112 section 6.3: a request with no framing has a body of length zero
     if not CONTENT_LENGTH.match(text):
         return None
     length = int(text)
@@ -348,7 +353,7 @@ def make_handler(sandbox: Sandbox, port_role: str):
         def do_POST(self):
             path = self.path
             body = read_body(self, MAX_HOOK_BODY_BYTES if port_role == "hooks" else wire.MAX_BODY_BYTES)
-            if body is None:
+            if body is None or (port_role == "jobs" and not body):  # a job always has a body
                 self.close_connection = True
                 if port_role == "jobs":
                     status, answer = sandbox._refuse("tool_failed", wire.MALFORMED_JOB_STATUS)
