@@ -664,20 +664,24 @@ None. Spec §11 has no open question.
 
 ## Security review
 
-ProtoShield scanned the sample on 2026-11-20 (semgrep, cdk-nag on the
+ProtoShield scanned the sample twice on 2026-11-20 (semgrep, cdk-nag on the
 synthesized templates, checkov, gitleaks, CVE, IAM least privilege, licence
-headers; bandit and cfn-nag had no Python or `.template` file to run on): 0
-critical, 2 high, 7 medium, 2 low. Each finding:
+headers; bandit and cfn-nag had no Python or `.template` file to run on).
+The last scan found 0 critical, 6 high, 6 medium and 0 low. The IAM least
+privilege check is model-based and groups and grades the same statements
+differently from one run to the next, so the table holds every finding of
+both scans. Each finding:
 
 | Finding | Severity | Outcome |
 |---|---|---|
 | IAM: `cloudfront:ListDistributionTenants` on `*` (sweeper, teardown, guard) and `acm:ListCertificates` on `*` (in `us-east-1` only) | high | Accepted. Neither action supports a resource type or a condition key in the service authorisation reference, so `*` is the only resource. Both actions only read; every update and delete these roles make is scoped by the distribution tag (AR-33). |
 | IAM: `logs:DescribeLogGroups` and `cloudwatch:GetMetricData` on `*` in the integration test's access role (`test/integ/stacks.ts`) | high | Accepted. Neither action takes a resource ARN. Both are reads; the role trusts only the driver's principal and exists for one run (`integration-test.md`). |
+| IAM: `acm:RequestCertificate` and `cloudfront:CreateDistributionTenant` on `*` | medium | Accepted. Neither action supports a resource type. Both require the request tags to name this distribution and allow only the front door's tag keys (spec §3.4, AR-33), so a created resource is always one this front door's scoped delete reaches. |
 | IAM: `ssm:GetParametersByPath` on `/application-plane/tenants/*/<applicationId>` in the demo cell | medium | Accepted. Tenant ids are minted at run time, so the path names the application and leaves the tenant open; the cell reads only its own application's namespaces and builds the path from the verified claim (M-2). |
-| IAM: the integration test's access role reads `/application-plane/tenants/*/<applicationId>` and describes the stacks named `<prefix>-*` and `<fleet>-*` | medium (2) | Accepted. The run's tenant ids are minted during the run, and the prefix and fleet carry the run id, so these are the run's own namespaces and stacks; the role exists for one run. |
+| IAM: the integration test's access role reads `/application-plane/tenants/*/<applicationId>` and describes the stacks named `<prefix>-*` and `<fleet>-*` | medium | Accepted. The run's tenant ids are minted during the run, and the prefix and fleet carry the run id, so these are the run's own namespaces and stacks; the role exists for one run. |
 | semgrep `unknown-value-with-script-tag` in `spa/build.ts` | medium (2) | False positive. The build fills its own `index.html` with constants and digests at build time; no request value reaches it. |
 | CVE: `minimatch` 10.2.6 in `aws-cdk-lib`, `glob` 10.5.0 in `ts-jest` | medium (2) | Accepted. Build and test time only; neither is in a Lambda bundle or the SPA. They clear with the next `aws-cdk-lib` and Jest upgrades. |
-| IAM: the sweeper's table actions and its fan-out Lambda invoke; the scheduler role's invoke on the sweeper's versions | low (2) | Accepted. One table and one function each, and the re-check uses each of the four table actions (`src/sweeper/recheck.ts`); the schedules invoke the unqualified function only (M-16, M-24). |
+| IAM: the sweeper's table actions and its fan-out Lambda invoke; the scheduler role's invoke on the sweeper's versions | low | Accepted. One table and one function each, and the re-check uses each of the four table actions (`src/sweeper/recheck.ts`); the schedules invoke the unqualified function only (M-16, M-24). |
 
 cdk-nag suppressions (47) were all reviewed as info; each cites its reason
 in the code. The `control-plane` files this sample's integration test needs
