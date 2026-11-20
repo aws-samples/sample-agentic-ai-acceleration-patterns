@@ -5,7 +5,7 @@
 - Status: Proposed
 - Date: 2026-11-19
 - Amends: ADR-0010, ADR-0011, ADR-0016, ADR-0018
-- Amended by: ADR-0020, ADR-0021
+- Amended by: ADR-0020, ADR-0021, ADR-0022
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -108,3 +108,5 @@ platform grants `CAP_SYS_RESOURCE`.
 Note 2026-11-19: amended by ADR-0020. On `microvm` the rlimits do not count an unmapped `memfd`, socket buffers, SysV objects, `vmsplice` pages or a user-namespace tmpfs, and one of them ended the MicroVM (S-16). A seccomp filter in the job and a free-memory floor close that, and N drops to ⌊0.6 × `MemTotal` / A⌋ so the routes left open fit above the floor. S-16 also answered the open items: `/work` is disk on every backend, the drain ends instances in 17 to 30 s, and the capacity provider has no minimum, so `nitro.minInstances` is dropped.
 
 Note 2026-11-20: amended by ADR-0021. The `nitro` watchdog reads the task group's `memory.current` instead of summing resident memory, and a `nitro` job filter blocks SysV IPC. `agentcore` needs no filter: its job group bounds SysV and socket memory (S-18).
+
+Note 2026-11-20: amended by ADR-0022. On `nitro` A is L less 64 MiB, because the runner's own memory counts in the task group. S-19 showed the watchdog is an early warning, not the cover: the kernel killed first in some fast fills, and the runner lived in all 85 fills.
