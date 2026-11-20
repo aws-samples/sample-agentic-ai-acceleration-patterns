@@ -272,7 +272,7 @@ describe('slice.sh', () => {
             'fi',
             '[[ "$1 $2" == "cloudformation describe-stacks" ]] || { echo "unexpected aws call: $*" >&2; exit 1; }',
             '[[ -d "$FAKE/stacks/$4" ]] || { echo "Stack with id $4 does not exist" >&2; exit 254; }',
-            'echo CREATE_COMPLETE',
+            'if [[ -f "$FAKE/stacks/$4/status" ]]; then cat "$FAKE/stacks/$4/status"; else echo CREATE_COMPLETE; fi',
             '',
           ].join('\n'),
           { mode: 0o755 },
@@ -395,10 +395,36 @@ describe('slice.sh', () => {
         });
       });
 
-      it('refuses a k6 host in a state it cannot reuse, and an AWS error it cannot read', () => {
+      it('refuses a k6 host in a state it cannot reuse, without deploying or marking anything', () => {
         withHome(ALL, (h) => {
           const stack = path.join(fake, 'stacks', 'StressTest-driver');
           fs.mkdirSync(stack, { recursive: true });
+          fs.writeFileSync(path.join(stack, 'status'), 'ROLLBACK_COMPLETE\n');
+          const r = run(script(), env(h), 'deploy');
+          expect(r.status).toBe(1);
+          expect(r.stderr).toContain('StressTest-driver is ROLLBACK_COMPLETE: remove or repair it');
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
+          expect(calls()).toBe('');
+        });
+      });
+
+      it('reuses a k6 host whose last update rolled back, and ignores a warning the CLI prints on success', () => {
+        withHome(ALL, (h) => {
+          const stack = path.join(fake, 'stacks', 'StressTest-driver');
+          fs.mkdirSync(stack, { recursive: true });
+          fs.writeFileSync(path.join(stack, 'status'), 'UPDATE_ROLLBACK_COMPLETE\n');
+          const warning = path.join(fake, 'bin-warning');
+          fs.mkdirSync(warning, { recursive: true });
+          fs.writeFileSync(path.join(warning, 'aws'), '#!/usr/bin/env bash\necho "a deprecation warning" >&2\necho UPDATE_ROLLBACK_COMPLETE\n', { mode: 0o755 });
+          const r = run(script(), { ...env(h), PATH: `${warning}:${process.env.PATH}` }, 'deploy');
+          expect(r.status).toBe(0);
+          expect(r.stdout).toContain('is already there');
+          expect(calls()).toBe('');
+        });
+      });
+
+      it('reads an AWS error it cannot interpret as a refusal, never as an absent or a reusable host', () => {
+        withHome(ALL, (h) => {
           const failing = path.join(fake, 'bin-failing');
           fs.mkdirSync(failing, { recursive: true });
           fs.writeFileSync(path.join(failing, 'aws'), '#!/usr/bin/env bash\necho "An error occurred (ExpiredToken) when calling the DescribeStacks operation" >&2\nexit 254\n', { mode: 0o755 });
@@ -407,6 +433,25 @@ describe('slice.sh', () => {
           expect(expired.stderr).toContain('could not read the status of StressTest-driver (ExpiredToken)');
           expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
           expect(calls()).toBe('');
+        });
+      });
+
+      it('keeps its ownership marker when the k6 host deploy failed after it made the stack, so teardown removes it', () => {
+        withHome(ALL, (h) => {
+          const driverDeploy = path.join(repo, 'stress', 'driver', 'deploy.sh');
+          const original = fs.readFileSync(driverDeploy, 'utf8');
+          fs.writeFileSync(driverDeploy, '#!/usr/bin/env bash\nmkdir -p "$FAKE/stacks/$STRESS_PREFIX-driver"\necho "failed later" >&2\nexit 1\n', { mode: 0o755 });
+          try {
+            const r = run(script(), env(h), 'deploy');
+            expect(r.status).toBe(1);
+            expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(true);
+          } finally {
+            fs.writeFileSync(driverDeploy, original, { mode: 0o755 });
+          }
+          const teardown = run(script(), env(h), 'teardown');
+          expect(teardown.status).toBe(0);
+          expect(calls()).toBe('driver teardown StressTest small\n');
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
         });
       });
 

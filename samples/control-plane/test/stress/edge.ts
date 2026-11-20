@@ -122,11 +122,18 @@ async function loadCredentials(): Promise<{ creds: Credentials; expiresAt: numbe
   }
 }
 
+/** What `liveEdge` calls for credentials and for the signed PUT; the tests replace both. */
+export interface EdgeDeps {
+  readonly load: () => Promise<{ creds: Credentials; expiresAt: number } | undefined>;
+  readonly put: (url: string, body: object, region: string, creds: Credentials) => Promise<number>;
+  readonly now: () => number;
+}
+
 /** The edge and registrar at the addresses in `inputs`. */
-export function liveEdge(inputs: EdgeInputs, region: string): Edge {
+export function liveEdge(inputs: EdgeInputs, region: string, deps: EdgeDeps = { load: loadCredentials, put: signedPut, now: Date.now }): Edge {
   let cached: { creds: Credentials; expiresAt: number } | undefined;
   const credentials = async (): Promise<Credentials | undefined> => {
-    if (cached === undefined || cached.expiresAt - Date.now() < 60_000) cached = await loadCredentials();
+    if (cached === undefined || cached.expiresAt - deps.now() < 60_000) cached = await deps.load();
     return cached?.creds;
   };
   return {
@@ -152,7 +159,7 @@ export function liveEdge(inputs: EdgeInputs, region: string): Edge {
       const creds = await credentials();
       if (creds === undefined) return 0;
       const regionOfUrl = REGISTRAR_URL.exec(inputs.registrarUrl)?.[1] ?? region;
-      return signedPut(`${inputs.registrarUrl}/tenants/${encodeURIComponent(tenantId)}/status`, { status }, regionOfUrl, creds);
+      return deps.put(`${inputs.registrarUrl}/tenants/${encodeURIComponent(tenantId)}/status`, { status }, regionOfUrl, creds);
     },
   };
 }

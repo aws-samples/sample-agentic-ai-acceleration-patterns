@@ -149,12 +149,15 @@ DRIVER_MARK="${STRESS_STATE_DIR}/platform-driver-owned"
 # exist; any other AWS error prints its code to stderr and fails, so an expired token is never
 # taken for "there" or for "absent".
 stack_status() {
-  local err out
-  if out="$(aws cloudformation describe-stacks --stack-name "$1" --query 'Stacks[0].StackStatus' --output text 2>&1)"; then
+  local out errfile err
+  errfile="$(mktemp)"
+  if out="$(aws cloudformation describe-stacks --stack-name "$1" --query 'Stacks[0].StackStatus' --output text 2>"$errfile")"; then
+    rm -f "$errfile"
     printf '%s\n' "$out"
     return 0
   fi
-  err="$out"
+  err="$(cat "$errfile")"
+  rm -f "$errfile"
   if grep -q 'does not exist' <<<"$err"; then
     echo absent
     return 0
@@ -202,7 +205,7 @@ case "$verb" in
             exit 1
           fi
           ;;
-        CREATE_COMPLETE | UPDATE_COMPLETE)
+        CREATE_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE | IMPORT_COMPLETE)
           echo "deploy: platform mode: ${DRIVER_STACK} is already there and stays its owner's; no cell stack here, the cells are the control plane's"
           ;;
         *)

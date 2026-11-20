@@ -6,7 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { CallResult, ControlPlaneApi } from './api';
 import { ps5, type Timing } from './churn';
-import { type Edge, edgeStateOf, parseEdgeInputs, probeToken, readEdgeInputs, signedPut } from './edge';
+import { type Edge, edgeStateOf, liveEdge, parseEdgeInputs, probeToken, readEdgeInputs, signedPut } from './edge';
 import { Recorder } from './recorder';
 import type { ScenarioEnv } from './scenarios';
 import { SCENARIOS } from './scenarios';
@@ -251,7 +251,7 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
   it('runs short and says so when the manifest holds fewer churn tenants than the tier churns', async () => {
     const w = new World(1);
     await ps5(w.env({ manifest: one, tier: { ...w.env().tier, churnPerRun: 3 } }), w.timing);
-    expect(w.recorder.findings).toEqual(['the manifest holds 1 churn tenants, the tier churns 3: PS-5 runs short']);
+    expect(w.recorder.findings).toEqual(['the manifest lists 1 churn tenants of the 3 the tier churns: PS-5 runs short']);
     expect(w.deleted.size).toBe(1);
   });
 
@@ -264,9 +264,21 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
 
   it('loads credentials before the first timed call', async () => {
     const w = new World(1);
-    const prepare = jest.fn(async () => undefined);
-    await ps5(w.env({ manifest: one, edge: { ...w.edge, prepare } }), w.timing);
-    expect(prepare).toHaveBeenCalledTimes(1);
+    const order: string[] = [];
+    const edge: Edge = {
+      prepare: async () => {
+        order.push('prepare');
+      },
+      probe: w.edge.probe,
+      setStatus: async (t, s) => {
+        order.push('setStatus');
+        return w.edge.setStatus(t, s);
+      },
+    };
+    await ps5(w.env({ manifest: one, edge }), w.timing);
+    expect(order[0]).toBe('prepare');
+    expect(order.filter((o) => o === 'prepare')).toHaveLength(1);
+    expect(order.filter((o) => o === 'setStatus')).toHaveLength(2);
   });
 
   it('says what a registrar answer of 0 can mean', async () => {
@@ -358,6 +370,40 @@ describe('signedPut', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('liveEdge credentials', () => {
+  const inputs = { edgeUrl: 'https://stress.example.com', registrarUrl: 'https://abc123.execute-api.us-east-1.amazonaws.com/prod', agentBackend: 'default' };
+  const creds = { accessKeyId: 'AKIATESTKEY0000', secretAccessKey: 'secret-test-value' };
+
+  function setup() {
+    const clock = { t: 0 };
+    const load = jest.fn(async () => ({ creds, expiresAt: clock.t + 10 * 60_000 }));
+    const put = jest.fn(async () => 200);
+    const edge = liveEdge(inputs, 'us-east-1', { load, put, now: () => clock.t });
+    return { clock, load, put, edge };
+  }
+
+  it('loads once, reuses the credentials until a minute before they expire, then loads again', async () => {
+    const { clock, load, put, edge } = setup();
+    await edge.prepare?.();
+    await edge.setStatus('T1', 'suspended');
+    clock.t += 8 * 60_000;
+    await edge.setStatus('T1', 'active');
+    expect(load).toHaveBeenCalledTimes(1);
+    clock.t += 90_000;
+    await edge.setStatus('T2', 'suspended');
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(put).toHaveBeenCalledTimes(3);
+    expect(put).toHaveBeenCalledWith('https://abc123.execute-api.us-east-1.amazonaws.com/prod/tenants/T1/status', { status: 'suspended' }, 'us-east-1', creds);
+  });
+
+  it('answers 0, without a call to the registrar, when there are no credentials', async () => {
+    const put = jest.fn(async () => 200);
+    const edge = liveEdge(inputs, 'us-east-1', { load: async () => undefined, put, now: Date.now });
+    await expect(edge.setStatus('T1', 'suspended')).resolves.toBe(0);
+    expect(put).not.toHaveBeenCalled();
   });
 });
 
