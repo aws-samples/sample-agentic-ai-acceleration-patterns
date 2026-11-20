@@ -2,10 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Tenant front door for agentic applications: specification
 
-Status: Proposed. §8 lists the decisions, all Accepted except ADR-0013,
-which ADR-0017 supersedes, and ADR-0027, which is Proposed. Routes are
-registered as ADR-0017 decides, from the control plane's global hooks
-(control-plane ADR-0044).
+Status: Implemented. §8 lists the decisions, all Accepted except
+ADR-0013, which ADR-0017 supersedes. Routes are registered as ADR-0017
+decides, from the control plane's global hooks (control-plane ADR-0044).
 
 ## 1. Problem statement
 
@@ -2401,8 +2400,8 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0024](../adr/0024-test-the-agent-route-against-a-stand-in-ingress.md) | Test the agent route against the stand-in ingress of spike S-5, not a composed `agentic-runtime-isolation` | compose `agentic-runtime-isolation` (deploy or reuse); a stand-in |
 | [ADR-0025](../adr/0025-change-a-route-status-without-reading-the-control-plane.md) | The edge operator's status change skips the control-plane read, so a suspension works while the control plane is down | read the placement first; skip the read |
 | [ADR-0026](../adr/0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to each cell account as a plain string | a JSON document; a plain string |
-| [ADR-0027](../adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Proposed. Write the front door hook parameter, one JSON document, from a `registrarUrl` input once the main stack is deployed | an input read after the main stack's deploy; the hook reads the edge parameter across accounts; a fixed registrar domain; a separate app |
-| [ADR-0028](../adr/0028-drive-the-integration-test-from-a-bash-driver.md) | Proposed. Drive the §10 integration test from `scripts/integ.sh` over two CDK apps, one stack per CDK call, with the §6.2 teardown in an `EXIT` trap | integ-runner with integ-tests-alpha; a bash driver |
+| [ADR-0027](../adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Write the front door hook parameter, one JSON document, from a `registrarUrl` input once the main stack is deployed | an input read after the main stack's deploy; the hook reads the edge parameter across accounts; a fixed registrar domain; a separate app |
+| [ADR-0028](../adr/0028-drive-the-integration-test-from-a-bash-driver.md) | Drive the §10 integration test from `scripts/integ.sh` over two CDK apps, one stack per CDK call, with the §6.2 teardown in an `EXIT` trap | integ-runner with integ-tests-alpha; a bash driver |
 
 ## 9. Spikes
 

@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0028: Drive the integration test from a bash driver
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Deciders: Dave Roberts (PSA)
 

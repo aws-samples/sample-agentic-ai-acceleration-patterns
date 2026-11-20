@@ -4,8 +4,8 @@
 
 One file per decision, in the template of
 [`docs/sample-standard.md` §2.2](../../../docs/sample-standard.md).
-Every record is Accepted except ADR-0013, which ADR-0017 supersedes, and
-ADR-0027, which is Proposed. ADR-0017 rests on the control plane's
+Every record is Accepted except ADR-0013, which ADR-0017 supersedes.
+ADR-0017 rests on the control plane's
 global hooks (control-plane ADR-0044 and ADR-0045), and its notes on
 ADR-0002, 0003, 0012, 0014 and 0015 are in effect. The spike results
 are in [spikes](../design/spikes.md).
@@ -38,5 +38,5 @@ are in [spikes](../design/spikes.md).
 | [0024](./0024-test-the-agent-route-against-a-stand-in-ingress.md) | Test the agent route against a stand-in ingress | Accepted | 2026-11-19 |
 | [0025](./0025-change-a-route-status-without-reading-the-control-plane.md) | Change a route's status without reading the control plane | Accepted | 2026-11-19 |
 | [0026](./0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to cell accounts as a plain string | Accepted | 2026-11-19 |
-| [0027](./0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Write the hook parameter from a registrar URL input | Proposed | 2026-11-20 |
-| [0028](./0028-drive-the-integration-test-from-a-bash-driver.md) | Drive the integration test from a bash driver | Proposed | 2026-11-20 |
+| [0027](./0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Write the hook parameter from a registrar URL input | Accepted | 2026-11-20 |
+| [0028](./0028-drive-the-integration-test-from-a-bash-driver.md) | Drive the integration test from a bash driver | Accepted | 2026-11-20 |
