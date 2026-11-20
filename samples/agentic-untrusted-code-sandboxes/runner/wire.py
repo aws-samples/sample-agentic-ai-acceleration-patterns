@@ -120,9 +120,9 @@ def _int(value: object, name: str) -> int:
 def parse_object(body: bytes) -> dict:
     try:
         obj = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as e:
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise Malformed("json") from e
-    if not isinstance(obj, dict) or obj.get("v") != PROTOCOL_VERSION:
+    if not isinstance(obj, dict) or type(obj.get("v")) is not int or obj["v"] != PROTOCOL_VERSION:
         raise Malformed("v")
     return obj
 

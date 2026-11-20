@@ -8,6 +8,7 @@ exercises it. Python 3.9 compatible.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import os
 import resource
@@ -18,17 +19,19 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from runner import sizing as sz
 from runner.seccomp import Filter
 
 UID = 1001
 WORK = "/work"
-SWEEP_DIRS = ("/tmp", "/dev/shm")
+SWEEP_DIRS = ("/tmp", "/dev/shm")  # nosec B108 - the sweep deletes uid 1001 files here (spec 3.5 step 3)
 CGROUP_ROOT = "/sys/fs/cgroup"
 SWEEP_DEADLINE_S = 5.0
 READ_CHUNK = 65536
+CPU_LIMIT_SLACK_MS = 100
+PR_SET_NO_NEW_PRIVS = 38
 JOB_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 # Runs as uid 1001 with no filter: removes every SysV object uid 1001 owns
@@ -55,7 +58,29 @@ print(removed)
 
 
 class ToolFailed(Exception):
-    """A runner fault: the job answer is tool_failed, never an exit code."""
+    """A runner fault: the job answer is tool_failed, never an exit code.
+
+    clean is the result of the sweep after the fault; False marks the sandbox dirty.
+    """
+
+    def __init__(self, clean: bool = True):
+        super().__init__("tool_failed")
+        self.clean = clean
+
+
+def cpu_seconds(timeout_ms: int) -> int:
+    """RLIMIT_CPU = runTimeout, rounded up to whole seconds."""
+    return max(1, -(-timeout_ms // 1000))
+
+
+def cpu_limit_hit(returncode: int, memory_exceeded: bool, duration_ms: int, timeout_ms: int) -> bool:
+    """RLIMIT_CPU ended the job at about runTimeout: report it as timedOut (ADR-0038).
+
+    CPU time starts at fork, before the wall timer, so for a CPU-bound job
+    the kernel's SIGKILL at the hard limit often comes first.
+    """
+    return (returncode in (-signal.SIGKILL, -signal.SIGXCPU) and not memory_exceeded
+            and duration_ms >= timeout_ms - CPU_LIMIT_SLACK_MS)
 
 
 def log(event: str, **sizes: object) -> None:
@@ -104,10 +129,17 @@ def reap() -> None:
             return
 
 
-def _remove_owned(top: str, uid: int) -> int:
-    """Delete every entry uid owns under top, bottom up, never following links. No uid process is alive."""
+def remove_owned(top: str, uid: int, deadline: float) -> Tuple[int, bool]:
+    """Delete every entry uid owns under top, bottom up, never following links.
+
+    Returns the count and whether the walk finished before deadline.
+    shortcut: a path-based walk, safe only because no uid process is alive
+    while it runs; use dir_fd-relative calls if that ever changes.
+    """
     removed = 0
     for root, dirs, files in os.walk(top, topdown=False, followlinks=False):
+        if time.monotonic() > deadline:
+            return removed, False
         for name in dirs + files:
             path = os.path.join(root, name)
             try:
@@ -121,7 +153,7 @@ def _remove_owned(top: str, uid: int) -> int:
                 removed += 1
             except OSError:
                 continue
-    return removed
+    return removed, True
 
 
 class Collector(threading.Thread):
@@ -167,29 +199,34 @@ class Executor:
         self.uid = uid
         self.python = python
         self._exceeded = threading.Event()
+        self._libc = ctypes.CDLL(None, use_errno=True)
 
     # Step 1 and 2: the job child.
 
     def _limits(self, timeout_ms: int):
-        """Every limit but RLIMIT_AS, which the child sets last."""
+        """The limits the child sets before the drop; RLIMIT_NOFILE and RLIMIT_AS come last (ADR-0038)."""
         s = self.sizing
-        cpu = max(1, -(-timeout_ms // 1000))
-        return ((resource.RLIMIT_CPU, cpu), (resource.RLIMIT_NPROC, s.n),
-                (resource.RLIMIT_FSIZE, sz.FSIZE), (resource.RLIMIT_NOFILE, s.nofile))
+        return ((resource.RLIMIT_CPU, cpu_seconds(timeout_ms)), (resource.RLIMIT_NPROC, s.n),
+                (resource.RLIMIT_FSIZE, sz.FSIZE))
 
     def _preexec(self, input_bytes: bytes, timeout_ms: int) -> Callable[[], None]:
         limits = self._limits(timeout_ms)
-        address_space = (self.sizing.a, self.sizing.a)
+        last = ((resource.RLIMIT_NOFILE, (self.sizing.nofile, self.sizing.nofile)),
+                (resource.RLIMIT_AS, (self.sizing.a, self.sizing.a)))
         uid = self.uid
         procs = os.path.join(self.job_group, "cgroup.procs") if self.job_group else None
         job_filter = self.filter
+        prctl = self._libc.prctl
         input_path = os.path.join(self.work, "input")
         aside = input_path + ".old-" + secrets.token_hex(4)
         tmp = os.path.join(self.work, "tmp")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 
         def child() -> None:
-            # Runs between fork and exec: system calls only, everything prepared above.
+            # Runs between fork and exec in a threaded process: system calls
+            # and objects prepared above only, no imports, no logging, no locks.
+            # shortcut: Python code in preexec_fn; a single-threaded root helper
+            # that execs the job would remove the fork hazard, if one ever shows.
             fd = os.open("/proc/self/oom_score_adj", os.O_WRONLY)
             os.write(fd, b"1000")
             os.close(fd)
@@ -203,6 +240,9 @@ class Executor:
             os.setgid(uid)
             os.setuid(uid)
             os.umask(0o077)
+            # No setuid binary of the image can give the job root back, on every backend.
+            if prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+                raise OSError(errno.EPERM, "no_new_privs")
             # The input is written as uid 1001, so a link the code left in
             # /work cannot point a root write elsewhere.
             try:
@@ -222,10 +262,12 @@ class Executor:
                 pass
             if job_filter is not None:
                 job_filter.install()
-            # RLIMIT_AS comes last (ADR-0037): this child is a fork of the
-            # runner, whose address space can exceed A until exec, so any
-            # allocation after it could fail. soft = hard, so code cannot raise it.
-            resource.setrlimit(resource.RLIMIT_AS, address_space)
+            # RLIMIT_NOFILE and RLIMIT_AS come last (ADR-0038): this child is a
+            # fork of the runner, which can hold more descriptors and more
+            # address space than the job may, until exec. soft = hard, so code
+            # cannot raise them.
+            for res, value in last:
+                resource.setrlimit(res, value)
 
         return child
 
@@ -258,17 +300,24 @@ class Executor:
             # The filter self-test and every other child failure land here,
             # before any tenant code ran.
             log("job_start_failed", error=type(e).__name__)
-            self.sweep()
-            raise ToolFailed() from e
+            raise ToolFailed(self.sweep()) from e
+        try:
+            return self._finish(job, proc, started, oom_before)
+        except ToolFailed:
+            raise
+        except BaseException as e:  # a thread that would not start, or any other runner fault
+            log("job_failed", error=type(e).__name__)
+            self._kill_group(proc.pid)
+            raise ToolFailed(self.sweep()) from e
+
+    def _finish(self, job, proc, started: float, oom_before: int) -> dict:
         out = Collector(proc.stdout, job.max_output)
         err = Collector(proc.stderr, job.max_output)
-        out.start()
-        err.start()
         writer = threading.Thread(target=self._feed, args=(proc, job.code), daemon=True)
-        writer.start()
         done = threading.Event()
         monitor = threading.Thread(target=self._monitor, args=(proc.pid, done), daemon=True)
-        monitor.start()
+        for t in (out, err, writer, monitor):
+            t.start()
         timed_out = False
         try:
             proc.wait(timeout=job.timeout_ms / 1000.0)
@@ -285,6 +334,7 @@ class Executor:
         for pipe in (proc.stdout, proc.stderr):
             pipe.close()
         exceeded = self._exceeded.is_set() or self._oom_kills() > oom_before
+        timed_out = timed_out or cpu_limit_hit(proc.returncode, exceeded, duration_ms, job.timeout_ms)
         log("job_done", code_bytes=len(job.code), input_bytes=len(job.input), stdout_bytes=len(out.data),
             stderr_bytes=len(err.data), exit_code=proc.returncode, duration_ms=duration_ms,
             timed_out=timed_out, memory_exceeded=exceeded, clean=clean)
@@ -371,11 +421,15 @@ class Executor:
                 log("sweep_incomplete", processes=len(pids))
                 return False
             time.sleep(0.005)
-        files = sum(_remove_owned(top, self.uid) for top in self.sweep_dirs if os.path.isdir(top))
+        files, walked = 0, True
+        for top in self.sweep_dirs:
+            if os.path.isdir(top):
+                count, done = remove_owned(top, self.uid, time.monotonic() + SWEEP_DEADLINE_S)
+                files, walked = files + count, walked and done
         sysv = self._sweep_sysv()
         reap()
-        log("sweep", files=files, sysv=sysv)
-        return sysv >= 0 and not uid_pids(self.uid)
+        log("sweep", files=files, sysv=sysv, walked=walked)
+        return walked and sysv >= 0 and not uid_pids(self.uid)
 
     def _sweep_sysv(self) -> int:
         try:
@@ -397,9 +451,8 @@ class Executor:
                           read_text(os.path.join(g, "memory.stat"))) >= sz.AGENTCORE_DIRTY
 
     def kill_all(self) -> None:
-        """On SIGTERM: end any job."""
+        """On SIGTERM: end any job. No reap here: a job thread may still be in Popen.wait()."""
         self._kill_uid()
-        reap()
 
 
 def prepare_work(work: str = WORK, uid: int = UID) -> None:
@@ -412,17 +465,18 @@ def prepare_work(work: str = WORK, uid: int = UID) -> None:
     if not stat.S_ISDIR(st.st_mode):
         raise OSError(errno.ENOTDIR, work)
     os.chown(work, uid, uid)
-    os.chmod(work, 0o700)
+    os.chmod(work, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions - owner only
 
 
-def lock_dev_shm(path: str = "/dev/shm") -> None:
+def lock_dev_shm(path: str = "/dev/shm") -> None:  # nosec B108
     """microvm: /dev/shm not writable by uid 1001, so the 60 % budget holds without counting tmpfs (spec §3.5 mounts)."""
     if not os.path.isdir(path):
         return
     st = os.stat(path)
     if st.st_uid != 0:
         os.chown(path, 0, 0)
-    os.chmod(path, 0o755)
+    # Removes write for everyone but root; read and search stay, as for any system directory.
+    os.chmod(path, 0o755)  # nosec B103  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
 
 
 def own_cgroup_dir(proc_self_cgroup: str, root: str = CGROUP_ROOT) -> str:

@@ -12,8 +12,10 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import ssl
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional, Tuple
 
@@ -21,6 +23,8 @@ from runner import wire
 from runner.job import ToolFailed, log
 
 BACKENDS = ("microvm", "nitro", "agentcore")
+# The platform's lifecycle hook paths on the hook port; the short forms (/run, ...) are served too.
+HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1/"
 Answer = Tuple[int, dict]
 
 
@@ -46,6 +50,7 @@ class Sandbox:
         self.fingerprint: Optional[bytes] = None  # nitro: SHA-256 of the certificate DER
         self._state = threading.Lock()
         self._job = threading.Lock()
+        self.boot_failed = threading.Event()  # microvm: a hook asked the runner to fail its start
 
     # Becoming one tenant's.
 
@@ -55,17 +60,30 @@ class Sandbox:
         self.boot_id = os.urandom(16).hex()
 
     def hook(self, body: bytes) -> Answer:
-        """microvm port 9000 /run: the first valid hook sets nonceHash; every later one changes nothing."""
+        """microvm /run hook: the first valid one sets nonceHash; every later one changes nothing.
+
+        The platform wraps the start call's runHookPayload as a JSON string:
+        {"microvmId": ..., "runHookPayload": "<payload>"} (spike S-2). A body
+        without that field is read as the payload itself.
+        """
         with self._state:
-            if self.nonce_hash is not None:
+            if self.nonce_hash is not None or self.boot_failed.is_set():
                 return 200, {}
             try:
                 obj = json.loads(body.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
+                if isinstance(obj, dict) and "runHookPayload" in obj:
+                    inner = obj["runHookPayload"]
+                    obj = json.loads(inner) if isinstance(inner, str) else None
+            except (UnicodeDecodeError, ValueError, RecursionError):
                 return 400, {}
             if not isinstance(obj, dict):
                 return 400, {}
             nonce_hash, tenant = obj.get("nonceHash"), obj.get("tenant")
+            if obj.get("failAtBoot") is True:
+                # Integration test of a failed start (ADR-0037): the runner exits, nothing is claimed.
+                log("fail_at_boot")
+                self.boot_failed.set()
+                return 200, {}
             if not isinstance(nonce_hash, str) or not wire.HEX64.match(nonce_hash) \
                     or not isinstance(tenant, str) or not wire.TENANT_ID.match(tenant):
                 return 400, {}
@@ -143,13 +161,15 @@ class Sandbox:
                 return self._refuse("dirty")
             if self.executor is None:
                 return self._refuse("tool_failed")
-            result = None
+            swept = False  # anything but a result or a ToolFailed leaves the sweep unproven
             try:
                 result = self.executor.run(job)
-            except ToolFailed:
+                swept = result["clean"]
+            except ToolFailed as e:
+                swept = e.clean
                 return self._refuse("tool_failed")
             finally:
-                self._after_job(result is None or result["clean"])
+                self._after_job(swept)
         finally:
             self._job.release()
         stdout, stderr, truncated = wire.cut_output(result["stdout"], result["stderr"], job.max_output, result["cut"])
@@ -176,35 +196,56 @@ class Sandbox:
         return body
 
 
-def read_body(handler: BaseHTTPRequestHandler) -> Optional[bytes]:
-    """The request body, Content-Length or chunked, at most MAX_BODY_BYTES; None when broken or too large."""
+CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,8}\Z")
+BODY_DEADLINE_S = 30.0
+MAX_HOOK_BODY_BYTES = 16 * 1024  # runHookPayload is at most 4096 characters
+MAX_CONNECTIONS = 4  # jobs run one at a time; this bounds threads and pre-auth memory
+
+
+def _read_exact(rfile, size: int, deadline: float) -> Optional[bytes]:
+    """size bytes in pieces, or None at EOF or past the deadline (the socket timeout is per read only)."""
+    parts, left = [], size
+    while left:
+        if time.monotonic() > deadline:
+            return None
+        piece = rfile.read(min(left, 65536))
+        if not piece:
+            return None
+        parts.append(piece)
+        left -= len(piece)
+    return b"".join(parts)
+
+
+def read_body(handler: BaseHTTPRequestHandler, limit: int = wire.MAX_BODY_BYTES) -> Optional[bytes]:
+    """The request body, Content-Length or chunked, at most limit bytes within BODY_DEADLINE_S; None when broken."""
+    deadline = time.monotonic() + BODY_DEADLINE_S
     if handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
         data = bytearray()
         while True:
-            line = handler.rfile.readline(64)
-            try:
-                size = int(line.split(b";")[0].strip(), 16)
-            except ValueError:
+            token = handler.rfile.readline(64).split(b";")[0].strip()
+            if not CHUNK_SIZE.match(token):
                 return None
+            size = int(token, 16)
             if size == 0:
-                while handler.rfile.readline(1024) not in (b"\r\n", b"\n", b""):
-                    pass
-                return bytes(data)
-            if len(data) + size > wire.MAX_BODY_BYTES:
+                for _ in range(8):  # trailer lines, then the blank line
+                    if handler.rfile.readline(1024) in (b"\r\n", b"\n", b""):
+                        return bytes(data)
                 return None
-            chunk = handler.rfile.read(size)
-            if len(chunk) != size:
+            if len(data) + size > limit:
+                return None
+            chunk = _read_exact(handler.rfile, size, deadline)
+            if chunk is None:
                 return None
             data += chunk
-            handler.rfile.readline(4)
-    try:
-        length = int(handler.headers.get("Content-Length", ""))
-    except ValueError:
+            if handler.rfile.readline(4) not in (b"\r\n", b"\n"):
+                return None
+    text = handler.headers.get("Content-Length", "")
+    if not text.isdigit() or len(text) > 10:
         return None
-    if not 0 <= length <= wire.MAX_BODY_BYTES:
+    length = int(text)
+    if length > limit:
         return None
-    body = handler.rfile.read(length)
-    return body if len(body) == length else None
+    return _read_exact(handler.rfile, length, deadline)
 
 
 def make_handler(sandbox: Sandbox, port_role: str):
@@ -236,7 +277,7 @@ def make_handler(sandbox: Sandbox, port_role: str):
 
         def do_POST(self):
             path = self.path
-            body = read_body(self)
+            body = read_body(self, MAX_HOOK_BODY_BYTES if port_role == "hooks" else wire.MAX_BODY_BYTES)
             if body is None:
                 self.close_connection = True
                 if port_role == "jobs":
@@ -247,9 +288,13 @@ def make_handler(sandbox: Sandbox, port_role: str):
                 return
             try:
                 if port_role == "hooks":
-                    if path == "/run":
+                    name = path[len(HOOK_PREFIX):] if path.startswith(HOOK_PREFIX) else path[1:]
+                    if name == "run":
                         status, answer = sandbox.hook(body)
-                    elif path in ("/suspend", "/resume"):
+                    elif name == "ready":
+                        # 200 once the runner serves and can take a job (ADR-0037); runs at image build.
+                        status, answer = (503, {}) if sandbox.boot_failed.is_set() else (200, {})
+                    elif name in ("suspend", "resume", "terminate"):
                         status, answer = 200, {}
                     else:
                         status, answer = 404, {}
@@ -276,12 +321,33 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request, client_address):
+        # A connection past MAX_CONNECTIONS is closed at once, before any byte is read.
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
     def handle_error(self, request, client_address):
         # A failed TLS handshake or a dropped connection: one line, no traceback.
         log("connection_failed")
 
 
-def serve(sandbox: Sandbox, port: int, port_role: str, host: str = "0.0.0.0",
+def serve(sandbox: Sandbox, port: int, port_role: str, host: str = "0.0.0.0",  # nosec B104 - the platform reaches the runner on the sandbox address (spec 3.4)
           tls: Optional[ssl.SSLContext] = None) -> Server:
     server = Server((host, port), make_handler(sandbox, port_role))
     if tls is not None:

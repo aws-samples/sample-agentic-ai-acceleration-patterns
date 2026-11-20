@@ -136,7 +136,7 @@ class MicrovmLinux(Base):
         try:
             out = run_json(self.executor(), calls_code())
         finally:
-            os.chmod("/dev/shm", 0o1777)
+            os.chmod("/dev/shm", 0o1777)  # nosec B103 B108 - restores the default mode in the test container
         for name in ("memfd_create", "socket_unix", "listen_9", "sndbuf", "semget", "shmget", "unshare_user"):
             self.assertEqual(out[name], "EPERM", name)
         for name in ("socket_inet", "socketpair", "listen_5", "reuseaddr", "thread", "subprocess", "fork"):
@@ -147,7 +147,7 @@ class MicrovmLinux(Base):
         try:
             r = self.executor().run(make_job("import multiprocessing; multiprocessing.Lock()"))
         finally:
-            os.chmod("/dev/shm", 0o1777)
+            os.chmod("/dev/shm", 0o1777)  # nosec B103 B108 - restores the default mode in the test container
         self.assertNotEqual(r["exitCode"], 0)
         self.assertIn(b"PermissionError", r["stderr"])
 
@@ -273,6 +273,8 @@ class AgentcoreLinux(Base):
         code = "print(open('/proc/self/cgroup').read().strip())"
         r = ex.run(make_job(code))
         self.assertTrue(r["stdout"].decode().strip().endswith("/job"), r["stdout"])
+        p = run_json(ex, PROBE)
+        self.assertEqual((p["seccomp"], p["nnp"]), ("0", "1"))  # no filter on agentcore, but no new privileges
         self.assertFalse(ex.dirty())
 
     def test_kernel_kill_in_the_job_group_is_marked_and_the_runner_lives(self):
@@ -295,6 +297,7 @@ class AgentcoreLinux(Base):
                 "open('/tmp/left', 'w').write('x')\nos.mkdir('/tmp/d')\nopen('/tmp/d/f', 'w').write('x')\n"
                 "open('/dev/shm/left', 'wb').write(b'x' * (8 << 20))\nopen('/work/kept', 'w').write('x')\n"
                 "os.symlink('/etc/passwd', '/work/input.link')\n"
+                "os.symlink('/etc', '/tmp/etc-link')\nos.symlink('/etc/hostname', '/tmp/host-link')\n"
                 % (nr["semget"], nr["shmget"], nr["msgget"]))
         self.assertEqual(ex.run(make_job(code))["exitCode"], 0)
         for name in ("msg", "sem", "shm"):
@@ -302,7 +305,8 @@ class AgentcoreLinux(Base):
                 lines = f.read().splitlines()
             uid = lines[0].split().index("uid")
             self.assertEqual([l for l in lines[1:] if l.split()[uid] == str(TEST_UID)], [], name)
-        for gone in ("/tmp/left", "/tmp/d", "/dev/shm/left"):
+        self.assertTrue(os.path.exists("/etc/hostname") and os.path.isdir("/etc"))
+        for gone in ("/tmp/left", "/tmp/d", "/dev/shm/left", "/tmp/etc-link", "/tmp/host-link"):  # nosec B108 - files the job made
             self.assertFalse(os.path.lexists(gone), gone)
         self.assertTrue(os.path.exists("/work/kept"))
         self.assertFalse(ex.dirty())
@@ -321,10 +325,13 @@ class AgentcoreLinux(Base):
 
     def test_timeout_survivors_output_and_exit_codes(self):
         ex = self.executor()
-        r = ex.run(make_job("while True: pass", timeout_ms=1500))
+        for timeout_ms in (1000, 1500, 2000):  # whole seconds: RLIMIT_CPU fires first and still reads as a timeout
+            r = ex.run(make_job("while True: pass", timeout_ms=timeout_ms))
+            self.assertEqual((r["timedOut"], r["exitCode"]), (True, -9), timeout_ms)
+            self.assertGreaterEqual(r["durationMs"], timeout_ms - jb.CPU_LIMIT_SLACK_MS)
+            self.assertLess(r["durationMs"], timeout_ms + 2500)
+        r = ex.run(make_job("import time; time.sleep(5)", timeout_ms=1000))  # the wall timer, no CPU used
         self.assertEqual((r["timedOut"], r["exitCode"]), (True, -9))
-        self.assertGreaterEqual(r["durationMs"], 1500)
-        self.assertLess(r["durationMs"], 4000)
         bg = "import os, time\nif os.fork() == 0:\n    os.setsid()\n    if os.fork() == 0:\n        time.sleep(100)\n    os._exit(0)\nprint('done')\n"
         r = ex.run(make_job(bg))
         self.assertEqual((r["exitCode"], r["stdout"]), (0, b"done\n"))
@@ -365,7 +372,7 @@ class AgentcoreEntryLinux(Base):
         deadline = time.monotonic() + 15
         while True:
             try:
-                ping = json.loads(urllib.request.urlopen("http://127.0.0.1:8080/ping", timeout=1).read())
+                ping = json.loads(urllib.request.urlopen("http://127.0.0.1:8080/ping", timeout=1).read())  # nosec B310 - fixed loopback URL
                 break
             except OSError:
                 if time.monotonic() > deadline:
@@ -378,7 +385,7 @@ class AgentcoreEntryLinux(Base):
                 "jobAuth": wire.job_auth(nonce, "r1", "tenant-a", code.encode(), b"")}
         req = urllib.request.Request("http://127.0.0.1:8080/invocations", json.dumps(body).encode(),
                                      {"Content-Type": "application/json", wire.SESSION_HEADER: wire.session_id("tenant-a")})
-        result = json.loads(urllib.request.urlopen(req, timeout=20).read())
+        result = json.loads(urllib.request.urlopen(req, timeout=20).read())  # nosec B310 - fixed loopback URL
         self.assertEqual((result["exitCode"], result["stdout"]), (0, "hi\n"), result)
         self.assertEqual(result["proof"], wire.result_proof(nonce, "r1"))
 
@@ -396,23 +403,45 @@ class MicrovmEntryLinux(Base):
         deadline = time.monotonic() + 15
         while True:
             try:
-                ping = json.loads(urllib.request.urlopen("http://127.0.0.1:8080/ping", timeout=1).read())
+                ping = json.loads(urllib.request.urlopen("http://127.0.0.1:8080/ping", timeout=1).read())  # nosec B310 - fixed loopback URL
                 break
             except OSError:
                 if time.monotonic() > deadline:
                     raise
                 time.sleep(0.1)
         self.assertEqual(ping, {"status": "Healthy"})
-        hook = json.dumps({"nonceHash": wire.nonce_hash(nonce), "tenant": "tenant-a"}).encode()
-        urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:9000/run", hook), timeout=10).read()
-        self.assertIn("bootId", json.loads(urllib.request.urlopen("http://127.0.0.1:8080/ping", timeout=5).read()))
+        ready = urllib.request.Request("http://127.0.0.1:9000/aws/lambda-microvms/runtime/v1/ready", b"{}")
+        self.assertEqual(urllib.request.urlopen(ready, timeout=5).status, 200)  # nosec B310 - fixed loopback URL
+        payload = json.dumps({"nonceHash": wire.nonce_hash(nonce), "tenant": "tenant-a"})
+        hook = json.dumps({"microvmId": "mvm-test", "runHookPayload": payload}).encode()
+        urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:9000/aws/lambda-microvms/runtime/v1/run", hook), timeout=10).read()  # nosec B310 - fixed loopback URL
+        self.assertIn("bootId", json.loads(urllib.request.urlopen("http://127.0.0.1:8080/ping", timeout=5).read()))  # nosec B310 - fixed loopback URL
         code = "import os; print(oct(os.stat('/dev/shm').st_mode & 0o777), open('/proc/self/status').read().count('Seccomp:\\t2'))"
         body = {"v": 1, "runId": "r1", "tenantId": "tenant-a", "nonce": wire.b64url(nonce), "code": code,
                 "timeoutMs": 5000, "maxOutputBytes": 4096,
                 "jobAuth": wire.job_auth(nonce, "r1", "tenant-a", code.encode(), b"")}
         req = urllib.request.Request("http://127.0.0.1:8080/run", json.dumps(body).encode(), {"Content-Type": "application/json"})
-        result = json.loads(urllib.request.urlopen(req, timeout=20).read())
+        result = json.loads(urllib.request.urlopen(req, timeout=20).read())  # nosec B310 - fixed loopback URL
         self.assertEqual((result["exitCode"], result["stdout"]), (0, "0o755 1\n"), result)
+
+    def test_fail_at_boot_hook_ends_the_runner(self):
+        env = {"PATH": jb.JOB_PATH, "RUNNER_BACKEND": "microvm"}
+        proc = subprocess.Popen([sys.executable, "-I", os.environ.get("RUNNER_ENTRY", "/opt/runner/runner.py")], env=env)
+        self.addCleanup(proc.wait)
+        self.addCleanup(lambda: proc.poll() is None and proc.terminate())
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                urllib.request.urlopen("http://127.0.0.1:8080/ping", timeout=1).read()  # nosec B310 - fixed loopback URL
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.1)
+        hook = json.dumps({"nonceHash": "0" * 64, "tenant": "tenant-a", "failAtBoot": True}).encode()
+        resp = urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:9000/run", hook), timeout=10)  # nosec B310 - fixed loopback URL
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(proc.wait(timeout=10), 1)
 
 
 if __name__ == "__main__":

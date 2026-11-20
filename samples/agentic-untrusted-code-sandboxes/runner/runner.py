@@ -18,6 +18,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 
 if __name__ == "__main__":
     # python3 -I puts neither the script directory nor the working directory
@@ -29,6 +30,7 @@ from runner.seccomp import Filter  # noqa: E402
 from runner.server import BACKENDS, Sandbox, serve  # noqa: E402
 
 BACKEND_ENV = "RUNNER_BACKEND"
+FAIL_AT_BOOT_ENV = "RUNNER_FAIL_AT_BOOT"
 HTTP_PORT, TLS_PORT, HOOK_PORT = 8080, 8443, 9000
 THREAD_STACK = 2 * 1024 * 1024  # keeps the runner's address space small: the job child is a fork of it until exec
 PR_SET_CHILD_SUBREAPER = 36
@@ -61,7 +63,7 @@ def tls_context():
     Returns the context and the SHA-256 of the certificate DER.
     """
     made = subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+        ["/usr/bin/openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
          "-keyout", "-", "-subj", "/CN=runner", "-days", "30"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=30)
     pem = made.stdout.decode("ascii")
@@ -97,6 +99,9 @@ def main() -> int:
     if backend not in BACKENDS:
         job.log("bad_backend")
         return 1
+    if backend != "microvm" and os.environ.get(FAIL_AT_BOOT_ENV) == "1":
+        job.log("fail_at_boot")  # integration test of a failed start (ADR-0037)
+        return 1
     own_process_setup()
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -120,8 +125,10 @@ def main() -> int:
         if backend == "microvm":
             serve(sandbox, HOOK_PORT, "hooks")
     job.log("listening", backend=backend)
-    while not stop.wait(3600):
-        pass
+    while not stop.wait(0.2):
+        if sandbox.boot_failed.is_set():
+            time.sleep(0.5)  # lets the hook answer go out before the process ends
+            return 1
     if sandbox.executor is not None:
         sandbox.executor.kill_all()
     job.log("stopped")

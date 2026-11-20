@@ -167,17 +167,28 @@ matches, and then sends the job on the same connection (HTTP/1.1
 keep-alive). A runner whose `nonceHash` does not match answers with the
 `wrong_sandbox` refusal (HTTP 403).
 
-### `/run` lifecycle hook (`microvm`, port 9000)
+### Lifecycle hooks (`microvm`, port 9000)
 
-`RunMicrovm` `runHookPayload` (at most 4096 characters):
+The platform calls `POST /aws/lambda-microvms/runtime/v1/<name>` on the
+hook port; the runner serves the same names at `/<name>` too. `ready`
+runs at image build and answers HTTP 200 `{}` once the runner serves and
+can take a job (HTTP 503 after a forced failed start). `run` delivers the
+start call's payload; `suspend`, `resume` and `terminate` answer HTTP 200
+`{}` and change nothing. Any other path is HTTP 404.
+
+The platform wraps the `RunMicrovm` `runHookPayload` (at most 4096
+characters) as a JSON string, `{"microvmId": "…", "runHookPayload":
+"<payload>"}`; a body without `runHookPayload` is read as the payload
+itself. The payload:
 
 ```json
 { "nonceHash": "64 lowercase hex", "tenant": "the tenant id" }
 ```
 
 The runner answers HTTP 200 with `{}`. It accepts the first hook only and
-answers every later `/run` hook with HTTP 200 `{}` and changes nothing.
-`/suspend` and `/resume` answer HTTP 200 `{}`.
+answers every later `run` hook with HTTP 200 `{}` and changes nothing; a
+first hook whose payload breaks the shape above answers HTTP 400 and is
+not taken.
 
 ### `nitro` start
 

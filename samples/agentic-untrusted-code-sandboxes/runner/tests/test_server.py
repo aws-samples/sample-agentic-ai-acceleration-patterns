@@ -7,10 +7,12 @@ import hashlib
 import http.client
 import json
 import os
-import shutil
 import socket
 import ssl
+import subprocess
+import sys
 import threading
+import time
 import unittest
 
 from runner import server, wire
@@ -131,6 +133,37 @@ class HashBackendsTest(unittest.TestCase):
         self.assertEqual(run(sb, signed(NONCE, tenant="tenant-b"))[1]["error"], "wrong_sandbox")
         status, body = run(sb, signed(NONCE))
         self.assertEqual((status, body["exitCode"], body["bootId"]), (200, 3, boot))
+        self.assertFalse(sb.boot_failed.is_set())
+
+    def test_microvm_fail_at_boot_hook(self):
+        hook = {"nonceHash": wire.nonce_hash(NONCE), "tenant": JOB["tenantId"]}
+        for value in (False, "true", 1, None):
+            sb, _ = make("microvm")
+            self.assertEqual(sb.hook(json.dumps(dict(hook, failAtBoot=value)).encode()), (200, {}))
+            self.assertFalse(sb.boot_failed.is_set(), value)
+            self.assertEqual(sb.nonce_hash, hook["nonceHash"])
+        for body in (dict(hook, failAtBoot=True), {"microvmId": "m", "runHookPayload": json.dumps(dict(hook, failAtBoot=True))}):
+            sb, fake = make("microvm")
+            self.assertEqual(sb.hook(json.dumps(body).encode()), (200, {}))
+            self.assertTrue(sb.boot_failed.is_set())
+            self.assertIsNone(sb.nonce_hash)
+            self.assertEqual(sb.hook(json.dumps(hook).encode()), (200, {}))  # nothing claims it afterwards
+            self.assertIsNone(sb.nonce_hash)
+            self.assertNotIn("bootId", sb.ping())
+            self.assertEqual(run(sb, signed(NONCE))[1]["error"], "wrong_sandbox")
+            self.assertEqual(fake.jobs, [])
+
+    def test_microvm_wrapped_hook_payload(self):
+        payload = json.dumps({"nonceHash": wire.nonce_hash(NONCE), "tenant": JOB["tenantId"]})
+        for bad in ({"runHookPayload": None}, {"runHookPayload": "not json"}, {"runHookPayload": "[]"},
+                    {"runHookPayload": json.dumps({"tenant": "a"})}):
+            sb, _ = make("microvm")
+            self.assertEqual(sb.hook(json.dumps(bad).encode()), (400, {}), bad)
+            self.assertIsNone(sb.nonce_hash)
+        sb, _ = make("microvm")
+        self.assertEqual(sb.hook(json.dumps({"microvmId": "m", "runHookPayload": payload}).encode()), (200, {}))
+        self.assertEqual((sb.nonce_hash, sb.hook_tenant), (wire.nonce_hash(NONCE), JOB["tenantId"]))
+
 
     def test_nitro_hash_and_job_auth(self):
         sb, fake = make("nitro")
@@ -150,8 +183,9 @@ class HashBackendsTest(unittest.TestCase):
         fake.gate = threading.Event()
         first = threading.Thread(target=run, args=(sb, signed(NONCE)))
         first.start()
-        while not fake.jobs:
-            pass
+        deadline = time.monotonic() + 5
+        while not fake.jobs and time.monotonic() < deadline:
+            time.sleep(0.001)
         self.assertEqual(run(sb, signed(NONCE, run_id="r2"))[:1], (409,))
         fake.gate.set()
         first.join()
@@ -178,6 +212,28 @@ class HashBackendsTest(unittest.TestCase):
         for bad in (dict(req, challenge=V["mustRefuseChallenge"]["short"]), dict(req, nonce=wire.b64url(OTHER_NONCE))):
             self.assertEqual(sb.hello(json.dumps(bad).encode())[0], 403)
         self.assertEqual(sb.hello(b"[]")[0], 400)
+
+
+class EntryTest(unittest.TestCase):
+    """runner.py exits 1 at boot with RUNNER_FAIL_AT_BOOT=1 on nitro and agentcore, or without a known backend."""
+
+    def start(self, env):
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return subprocess.run([sys.executable, "-I", os.path.join(root, "runner", "runner.py")], env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20)
+
+    def test_fail_at_boot(self):
+        for backend in ("nitro", "agentcore"):
+            done = self.start({"RUNNER_BACKEND": backend, "RUNNER_FAIL_AT_BOOT": "1",
+                               wire.NONCE_HASH_ENV: wire.nonce_hash(NONCE)})
+            self.assertEqual(done.returncode, 1, backend)
+            self.assertIn(b"fail_at_boot", done.stderr)
+
+    def test_unknown_backend(self):
+        for env in ({}, {"RUNNER_BACKEND": "lambda"}):
+            done = self.start(env)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn(b"bad_backend", done.stderr)
 
 
 def stop(*servers):
@@ -207,6 +263,7 @@ class HttpTest(unittest.TestCase):
         sb, _ = make("agentcore")
         port = free_port()
         srv = server.serve(sb, port, "jobs", host="127.0.0.1")
+        conn = None
         try:
             status, body = self.post(port, "/invocations", json.dumps(signed(NONCE)))
             self.assertEqual((status, body["error"]), (200, "wrong_sandbox"))
@@ -219,20 +276,31 @@ class HttpTest(unittest.TestCase):
             conn.request("GET", "/ping")
             self.assertEqual(json.loads(conn.getresponse().read())["bootId"], sb.boot_id)
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
             stop(srv)
 
     def test_microvm_ports_and_chunked(self):
         sb, _ = make("microvm")
         jobs, hooks = free_port(), free_port()
         srv = [server.serve(sb, jobs, "jobs", host="127.0.0.1"), server.serve(sb, hooks, "hooks", host="127.0.0.1")]
+        conn = None
         try:
             self.assertEqual(self.post(jobs, "/run", json.dumps(signed(NONCE)))[0], 403)
-            self.assertEqual(self.post(hooks, "/suspend", "{}"), (200, {}))
-            hook = {"nonceHash": wire.nonce_hash(NONCE), "tenant": JOB["tenantId"]}
-            self.assertEqual(self.post(hooks, "/run", json.dumps(hook)), (200, {}))
+            for prefix in ("/", server.HOOK_PREFIX):
+                for name in ("ready", "suspend", "resume", "terminate"):
+                    self.assertEqual(self.post(hooks, prefix + name, "{}"), (200, {}), prefix + name)
+                self.assertEqual(self.post(hooks, prefix + "nope", "{}")[0], 404)
+            self.assertIsNone(sb.nonce_hash)
+            payload = json.dumps({"nonceHash": wire.nonce_hash(NONCE), "tenant": JOB["tenantId"]})
+            wrapped = json.dumps({"microvmId": "mvm-1", "runHookPayload": payload})
+            self.assertEqual(self.post(hooks, server.HOOK_PREFIX + "run", wrapped), (200, {}))
+            self.assertEqual(sb.nonce_hash, wire.nonce_hash(NONCE))
+            self.assertEqual(self.post(hooks, "/run", payload), (200, {}))  # later hooks change nothing
             self.assertEqual(self.post(hooks, "/invocations", "{}")[0], 404)
+            self.assertEqual(self.post(hooks, "/aws/lambda-microvms/runtime/v2/run", "{}")[0], 404)
             self.assertEqual(self.post(jobs, "/hello", "{}")[0], 404)
+            self.assertEqual(self.post(jobs, server.HOOK_PREFIX + "run", "{}")[0], 404)  # no hooks on the job port
             conn = http.client.HTTPConnection("127.0.0.1", jobs, timeout=5)
             raw = json.dumps(signed(NONCE)).encode()
             conn.request("POST", "/run", body=iter([raw[:7], raw[7:]]), encode_chunked=True,
@@ -242,16 +310,18 @@ class HttpTest(unittest.TestCase):
             status, body = self.post(jobs, "/run", "x" * 10, {"Content-Length": str(wire.MAX_BODY_BYTES + 1)})
             self.assertEqual((status, body["error"]), (400, "tool_failed"))
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
             stop(*srv)
 
-    @unittest.skipUnless(shutil.which("openssl"), "no openssl on this host")
+    @unittest.skipUnless(os.path.exists("/usr/bin/openssl"), "no /usr/bin/openssl on this host")
     def test_nitro_tls_hello_then_job_on_one_connection(self):
         from runner.runner import tls_context
         sb, _ = make("nitro")
         context, sb.fingerprint = tls_context()
         port = free_port()
         srv = server.serve(sb, port, "jobs", host="127.0.0.1", tls=context)
+        conn = None
         try:
             client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             client.check_hostname = False
@@ -269,8 +339,99 @@ class HttpTest(unittest.TestCase):
             self.assertIs(conn.sock, sock)  # the job rode the checked connection
             self.assertEqual((status, body["proof"]), (200, wire.result_proof(NONCE, JOB["runId"])))
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
             stop(srv)
+
+
+class LimitsTest(unittest.TestCase):
+    def raw(self, port, data, read=True):
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(data)
+            return s.recv(4096) if read else b""
+
+    def test_chunk_sizes_and_bounds(self):
+        sb, fake = make("nitro")
+        port = free_port()
+        srv = server.serve(sb, port, "jobs", host="127.0.0.1")
+        try:
+            head = b"POST /run HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+            for size in (b"-1", b"+5", b"0x5", b"5_0", b"FFFFFFFF", b"123456789", b""):
+                answer = self.raw(port, head + size + b"\r\n" + b"x" * 64)
+                self.assertIn(b" 400 ", answer.split(b"\r\n")[0], size)
+            answer = self.raw(port, b"POST /run HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\n\r\n")
+            self.assertIn(b" 400 ", answer.split(b"\r\n")[0])
+            self.assertEqual(fake.jobs, [])
+        finally:
+            stop(srv)
+
+    def test_hook_body_cap(self):
+        sb, _ = make("microvm")
+        port = free_port()
+        srv = server.serve(sb, port, "hooks", host="127.0.0.1")
+        try:
+            big = b"POST /run HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % (server.MAX_HOOK_BODY_BYTES + 1)
+            self.assertIn(b" 400 ", self.raw(port, big).split(b"\r\n")[0])
+        finally:
+            stop(srv)
+
+    def test_connections_past_the_cap_are_closed(self):
+        sb, _ = make("agentcore")
+        port = free_port()
+        srv = server.serve(sb, port, "jobs", host="127.0.0.1")
+        held = []
+        try:
+            for _ in range(server.MAX_CONNECTIONS):
+                held.append(socket.create_connection(("127.0.0.1", port), timeout=5))
+            time.sleep(0.2)
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as extra:
+                extra.sendall(b"GET /ping HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertEqual(extra.recv(4096), b"")  # closed before a byte was read
+            for s in held:
+                s.close()
+            held = []
+            time.sleep(0.2)
+            answer = self.raw(port, b"GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            self.assertIn(b" 200 ", answer.split(b"\r\n")[0])
+        finally:
+            for s in held:
+                s.close()
+            stop(srv)
+
+    def test_runner_fault_is_tool_failed_and_dirty(self):
+        sb, fake = make("agentcore")
+        port = free_port()
+        fake.run = lambda job: (_ for _ in ()).throw(RuntimeError("can't start new thread"))
+        srv = server.serve(sb, port, "jobs", host="127.0.0.1")
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("POST", "/invocations", json.dumps(signed(NONCE)), {wire.SESSION_HEADER: SESSION})
+            resp = conn.getresponse()
+            self.assertEqual((resp.status, json.loads(resp.read())["error"]), (200, "tool_failed"))
+            conn.close()
+            self.assertTrue(sb.dirty)
+        finally:
+            stop(srv)
+
+    def test_tool_failed_carries_the_sweep(self):
+        sb, fake = make("nitro")
+        fake.run = lambda job: (_ for _ in ()).throw(ToolFailed(clean=False))
+        self.assertEqual(run(sb, signed(NONCE))[1]["error"], "tool_failed")
+        self.assertTrue(sb.dirty)
+        sb, fake = make("nitro")
+        fake.run = lambda job: (_ for _ in ()).throw(ToolFailed(clean=True))
+        run(sb, signed(NONCE))
+        self.assertFalse(sb.dirty)
+
+    def test_version_type_and_deep_json(self):
+        for v in (True, 1.0, "1"):
+            with self.assertRaises(wire.Malformed):
+                wire.parse_job(json.dumps(dict(JOB, v=v)).encode())
+        deep = b"[" * 100000 + b"]" * 100000
+        with self.assertRaises(wire.Malformed):
+            wire.parse_job(deep)
+        sb, _ = make("microvm")
+        self.assertEqual(sb.hook(deep), (400, {}))
 
 
 if __name__ == "__main__":

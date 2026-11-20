@@ -15,9 +15,9 @@ backend it runs in. Guessing from the environment (a `RUNNER_NONCE_HASH`
 means `nitro`) would turn a missing variable into the wrong adoption rule.
 The `microvm` image runs the AL2023 `python3` package, which is Python 3.9,
 and its Dockerfile must pin that package to an exact version (spec §3.5).
-The scaffold's container Dockerfile declared `ARG TARGETPLATFORM` before
-`FROM --platform=$TARGETPLATFORM`; with the Docker builder on the build
-host that left the platform empty and the build failed.
+`ARG TARGETPLATFORM` before `FROM --platform=$TARGETPLATFORM` leaves the
+platform empty with the Docker builder on the build host, and the build
+fails.
 
 ## Options considered
 
@@ -53,6 +53,14 @@ Option 1.
   the package of the base image's AL2023 release (2023.12.20261102). The
   runner and its tests are Python 3.9 compatible, and the Docker test runs
   them under that package.
+- A failed start can be forced for the integration test (spec §8): on
+  `nitro` and `agentcore` the runner exits 1 at boot when
+  `RUNNER_FAIL_AT_BOOT` is exactly `1`, before it opens a port; on
+  `microvm` a `/run` hook whose payload carries `failAtBoot: true` (the
+  JSON value `true`, nothing else) gets HTTP 200 `{}`, claims nothing,
+  and the runner exits 1 half a second later. The start option
+  `failAtBoot` and its payload contract are in `runner/PROTOCOL.md`. Any
+  other value, or no value, leaves the boot and every job unchanged.
 
 ## Consequences
 

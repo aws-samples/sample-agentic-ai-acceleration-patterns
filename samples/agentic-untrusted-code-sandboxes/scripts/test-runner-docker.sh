@@ -20,7 +20,11 @@ command -v docker >/dev/null || { echo "docker not found" >&2; exit 2; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 runner="$here/runner"
 image="runner-linux-test:$$"
-al2023="public.ecr.aws/amazonlinux/amazonlinux:2023-minimal"
+# The microvm base is arm64 only, so the Python 3.9 runs use the x86_64
+# AL2023 minimal image, pinned by digest, with dnf held to the microvm
+# base's release so the pinned python3 package resolves.
+al2023="public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:8873a7cbc7c3d51d55a749c7c4c7894b7981f0514c269003c7952cf3ed550d27"
+releasever="2023.12.20261102"
 python_pkg="$(sed -n 's/^RUN dnf install -y \(python3-[^ ]*\) .*/\1/p' "$runner/microvm/Dockerfile")"
 [ -n "$python_pkg" ] || { echo "no python3 pin in runner/microvm/Dockerfile" >&2; exit 2; }
 
@@ -48,8 +52,8 @@ for cls in MicrovmLinux NitroLinux AgentcoreLinux AgentcoreEntryLinux; do
 done
 for cls in MicrovmLinux MicrovmEntryLinux; do
   run_in "python 3.9 ($python_pkg) $cls" -e RUNNER_ENTRY=/src/runner/runner.py "$al2023" \
-    sh -c "dnf install -y $python_pkg >/dev/null && python3 -B -m unittest -v runner.tests.test_linux.$cls"
+    sh -c "dnf install -y --releasever=$releasever $python_pkg >/dev/null && python3 -c 'import sys; assert sys.version_info[:2] == (3, 9), sys.version' && python3 -B -m unittest -v runner.tests.test_linux.$cls"
 done
 run_in "python 3.9 ($python_pkg) unit tests" -e RUNNER_LINUX_TESTS=0 "$al2023" \
-  sh -c "dnf install -y $python_pkg >/dev/null && python3 -B -m unittest discover -s runner/tests -t ."
+  sh -c "dnf install -y --releasever=$releasever $python_pkg >/dev/null && python3 -c 'import sys; assert sys.version_info[:2] == (3, 9), sys.version' && python3 -B -m unittest discover -s runner/tests -t ."
 exit "$failed"
