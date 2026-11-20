@@ -4,7 +4,7 @@
 /**
  * The demo stack: a thin wrapper that wires the construct (standard §4.5).
  * It publishes the construct's properties as the sample's parameters
- * (spec §6.3) once the core worker has built them.
+ * (spec §6.3) once the core owner has built them.
  */
 
 import { Stack, type StackProps } from 'aws-cdk-lib';

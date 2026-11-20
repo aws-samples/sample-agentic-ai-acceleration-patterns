@@ -42,12 +42,12 @@ Option 1, with this layout:
 
 | Path | Holds | Owner |
 |---|---|---|
-| `runner/runner.py` | the runner entry, run as PID 1 or the container entrypoint | runner worker |
-| `runner/*.py` | runner modules, standard library only | runner worker |
-| `runner/Dockerfile` | the container image for `nitro` and `agentcore`; `COPY` only, the base image digest in an `ARG` | runner worker (the `COPY` list) |
-| `runner/microvm/Dockerfile` | the MicroVM code artifact's Dockerfile on the AL2023 minimal base | runner worker |
-| `runner/PROTOCOL.md`, `runner/protocol/` | the wire protocol and its vectors (ADR-0025) | conductor decision only |
-| `runner/tests/` | Python unit tests (ADR-0026) | runner worker |
+| `runner/runner.py` | the runner entry, run as PID 1 or the container entrypoint | runner owner |
+| `runner/*.py` | runner modules, standard library only | runner owner |
+| `runner/Dockerfile` | the container image for `nitro` and `agentcore`; `COPY` only, the base image digest in an `ARG` | runner owner (the `COPY` list) |
+| `runner/microvm/Dockerfile` | the MicroVM code artifact's Dockerfile on the AL2023 minimal base | runner owner |
+| `runner/PROTOCOL.md`, `runner/protocol/` | the wire protocol and its vectors (ADR-0025) | maintainer decision only |
+| `runner/tests/` | Python unit tests (ADR-0026) | runner owner |
 
 - Container images: the core creates the runner repository when `nitro`
   or `agentcore` is enabled (immutable tags, scan on push, `emptyOnDelete`).
@@ -61,7 +61,7 @@ Option 1, with this layout:
   `runner/`, and ships it as an S3 asset (`CodeArtifact.Uri`), without
   Docker. The Dockerfile copies from `runner/`.
 - A backend never edits a Dockerfile's base image for its own needs; a
-  change goes through the runner worker.
+  change goes through the runner owner.
 
 ## Consequences
 

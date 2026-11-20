@@ -4,7 +4,7 @@
 /**
  * The `microvm` backend: Lambda MicroVMs (spec §3.4).
  *
- * Stub from the scaffold (ADR-0025). The microvm backend worker owns this file
+ * Placeholder (ADR-0025). The microvm backend owner fills this file
  * and replaces every method; nothing else in src/ may depend on its
  * internals, only on {@link SandboxBackend}.
  */

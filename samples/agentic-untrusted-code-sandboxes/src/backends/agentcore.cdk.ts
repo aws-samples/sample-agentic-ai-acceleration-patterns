@@ -4,9 +4,9 @@
 /**
  * CDK side of the `agentcore` backend: the V2 runtime in VPC mode, its role and security group, the usage-log delivery.
  *
- * Stub from the scaffold (ADR-0025): it creates nothing and grants nothing,
+ * Placeholder (ADR-0025): it creates nothing and grants nothing,
  * so the core construct synthesises before the backend exists. The agentcore
- * backend worker owns this file.
+ * backend owner fills this file.
  */
 
 import type * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -55,6 +55,10 @@ export class AgentcoreBackendResources extends Construct implements BackendConst
 
   public logCleanup(): { prefixes: string[]; names: string[] } {
     return { prefixes: [], names: [] };
+  }
+
+  public outputs(): Record<string, string> {
+    return {};
   }
 }
 

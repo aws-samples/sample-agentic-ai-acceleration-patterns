@@ -38,6 +38,10 @@ describe('props validation (spec §3.3)', () => {
     expect(resolveProps({ runTimeout: Duration.seconds(60), startWait: Duration.seconds(45) }).toolBudget.toSeconds()).toBe(120);
   });
 
+  test('fractional durations round the budget up', () => {
+    expect(resolveProps({ runTimeout: Duration.millis(1500), startWait: Duration.millis(200) }).toolBudget.toSeconds()).toBe(18);
+  });
+
   test('dnsFirewall is refused with a supplied vpc', () => {
     const stack = new Stack();
     const vpc = new ec2.Vpc(stack, 'V');

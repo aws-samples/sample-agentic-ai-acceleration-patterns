@@ -56,7 +56,7 @@ Protocol (`runner/PROTOCOL.md`, `src/protocol.ts`):
   `runner/protocol/vectors.json`; the TypeScript unit test, the Python
   unit test and the runner's own tests read it. A change to the protocol
   changes the document, both sides and the vectors in one pull request,
-  by a conductor decision.
+  by a maintainer decision.
 
 Backend interface (`src/backend.ts`):
 
@@ -69,7 +69,9 @@ Backend interface (`src/backend.ts`):
   (spec §4.1 "every conditional write after the first uses the version
   returned by that call's own last successful write"). This keeps
   DynamoDB access with the tool tenant role and the reaper role.
-- `run` returns a result (proof checked), a refusal, or a dead handle.
+- `run` returns a result (proof checked), a refusal, `no_answer` when the
+  runner did not answer by the job's `timeoutMs` plus 5 s (spec §4.1 step
+  5; the backend enforces that deadline), or a dead handle.
 - Added: `startCapMs`, `list()` (with `tenantId` where the platform tags
   it and `startedAt`), `isAlive(handle)`, `stopReason(handle)` and an
   optional `cleanup(deadline)` for the drain. `SandboxHandle`,
@@ -77,7 +79,8 @@ Backend interface (`src/backend.ts`):
 - IAM statements live on the CDK side, `BackendConstruct` in
   `src/backend-construct.ts` (tool, tool tenant, reaper and drain
   statements, sandbox endpoints and their client groups, function
-  environment, drain order, log cleanup), with one
+  environment, drain order, log cleanup, and the per-backend ARNs the core
+  exposes), with one
   `src/backends/<name>.cdk.ts` per backend. The run-time class reads the
   environment its `BackendConstruct` sets.
 - `test/fake-backend.ts` implements the interface in memory and signs

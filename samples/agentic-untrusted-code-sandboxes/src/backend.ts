@@ -90,12 +90,21 @@ export type ReadyResult =
     readonly reason: string;
   };
 
-/** Outcome of one job call: a result, a refusal the runner sent, or a dead handle. */
+/** Outcome of one job call: a result, a refusal the runner sent, no answer in time, or a dead handle. */
 export type RunOutcome =
   | { readonly kind: 'result'; readonly result: RunResult }
   | { readonly kind: 'refused'; readonly refusal: Refusal }
+  /**
+   * The runner did not answer by `job.timeoutMs` + {@link NO_ANSWER_MARGIN_MS}
+   * (spec §4.1 step 5). The backend enforces that deadline; the tool then
+   * sets the row STOPPING, stops the sandbox and returns `timedOut`.
+   */
+  | { readonly kind: 'no_answer' }
   /** Not found, connection refused, or a failed identity check (spec §4.1 step 3). */
   | { readonly kind: 'dead'; readonly reason: string };
+
+/** Margin past the job's own timeout before `run` gives up waiting (spec §4.1 step 5). */
+export const NO_ANSWER_MARGIN_MS = 5000;
 
 /** One sandbox the backend can list, for the reaper's sweep and the drain (spec §4.1, §5.3). */
 export interface SandboxSummary {
@@ -127,13 +136,13 @@ export interface SandboxBackend {
   start(tenantId: string, nonce: string, creds: TenantCredentials): Promise<SandboxHandle>;
   /** One readiness probe; no waiting loop (the caller owns `startWait`). */
   ready(handle: SandboxHandle, row: RegistryRow): Promise<ReadyResult>;
-  /** Sends one signed job (spec §3.5) and verifies the result proof. */
+  /** Sends one signed job (spec §3.5), waits at most `job.timeoutMs` + NO_ANSWER_MARGIN_MS, and verifies the result proof. */
   run(handle: SandboxHandle, job: RunJob): Promise<RunOutcome>;
   /** Stops it. `creds` on the tool path (`nitro` StopTask is tag-conditioned); absent for the reaper, drain and offboard roles. */
   stop(handle: SandboxHandle, creds?: TenantCredentials): Promise<void>;
   /** Every sandbox of this deployment the platform lists (tasks tagged by the sample, MicroVMs of the image). Empty on `agentcore`. */
   list(): AsyncIterable<SandboxSummary>;
-  /** Whether a READY sandbox still exists (`GetMicrovm` on `microvm`, `DescribeTasks` on `nitro`; always true on `agentcore`). */
+  /** Whether a sandbox whose row says STARTING or READY still exists (`GetMicrovm` on `microvm`, `DescribeTasks` on `nitro`; always true on `agentcore`). */
   isAlive(handle: SandboxHandle): Promise<boolean>;
   /** Facts for the stop line, read after a stop or when the platform ended it. */
   stopReason(handle: SandboxHandle): Promise<StopFacts>;

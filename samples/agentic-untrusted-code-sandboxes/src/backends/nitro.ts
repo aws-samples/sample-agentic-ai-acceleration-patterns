@@ -4,7 +4,7 @@
 /**
  * The `nitro` backend: Nitro Sandboxes on ECS Managed Instances (spec §3.4, ADR-0004).
  *
- * Stub from the scaffold (ADR-0025). The nitro backend worker owns this file
+ * Placeholder (ADR-0025). The nitro backend owner fills this file
  * and replaces every method; nothing else in src/ may depend on its
  * internals, only on {@link SandboxBackend}.
  */

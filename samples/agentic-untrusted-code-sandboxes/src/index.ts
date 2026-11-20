@@ -4,7 +4,7 @@
 // The core entry (spec §3.3). Nothing reachable from here imports
 // agentic-runtime-isolation (ADR-0017): a lint rule and
 // test/import-graph.test.ts enforce it. `runCode` and `offboardTenant` are
-// exported here once the core worker builds them.
+// exported here once the core owner builds them.
 
 export * from './backend';
 export * from './backend-construct';

@@ -4,11 +4,11 @@
 /**
  * `UntrustedCodeSandboxes`, the core construct (spec §3.3, ADR-0017).
  *
- * Scaffold shell (ADR-0025): it validates the props, builds the shared
+ * Shell (ADR-0025): it validates the props, builds the shared
  * network, bucket and runner repository far enough to hand each enabled
  * backend a `BackendContext`, and calls each backend's factory. The core
- * worker fills the registry, roles, functions, endpoints, drain and
- * observability here; backend workers fill only src/backends/<name>.cdk.ts.
+ * owner fills the registry, roles, functions, endpoints, drain and
+ * observability here; backend owners fill only src/backends/<name>.cdk.ts.
  */
 
 import { RemovalPolicy, Validations } from 'aws-cdk-lib';
@@ -101,7 +101,7 @@ export class UntrustedCodeSandboxes extends Construct {
     }
 
     const nameFor: NameFor = (service) => {
-      // shortcut: the per-service sanitiser of spec §5.3 is the core worker's; the stubs never call it.
+      // shortcut: the per-service sanitiser of spec §5.3 is the core owner's; the stubs never call it.
       throw new Error(`UntrustedCodeSandboxes: nameFor(${service}) is not built yet`);
     };
     const ctx: BackendContext = {
@@ -130,7 +130,7 @@ export class UntrustedCodeSandboxes extends Construct {
 
   /**
    * Give a function everything the core run function has (spec §3.3). The
-   * scaffold only records it; the core worker adds subnets, environment,
+   * shell only records it; the core owner adds subnets, environment,
    * timeout, trust, actions, log group and Contributor Insights.
    */
   public bindRunCode(fn: lambda.IFunction): void {

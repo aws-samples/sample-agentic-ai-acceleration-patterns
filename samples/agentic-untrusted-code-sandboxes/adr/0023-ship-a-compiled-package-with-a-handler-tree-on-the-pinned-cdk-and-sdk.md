@@ -60,6 +60,12 @@ Option 1.
   pick `src/` or `runner/` in the repository and `lib/handlers/` from the
   package, and throw when the target is missing. The entries the
   constructs name are listed once, in `HANDLERS`.
+- `aws-cdk-lib` and `constructs` stay plain dependencies, as projen's
+  CDK app project writes them, pinned like the siblings'. npm shares one
+  copy when the consumer's version satisfies the pin; a consumer on another
+  CDK version gets a second copy and construct type mismatches, so the
+  README names the pinned version. `cdk-nag` is a dev dependency: only the
+  demo app applies it, and the package's `files` leaves the demo app out.
 - An app project may not declare peer dependencies through projen, and
   projen rewrites the dependency fields after rendering, so `.projenrc.ts`
   writes `peerDependencies` in a post-synthesis step.

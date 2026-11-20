@@ -330,6 +330,7 @@
             "aws-cdk",
             "aws-sdk-client-mock-jest",
             "aws-sdk-client-mock",
+            "cdk-nag",
             "eslint-import-resolver-typescript",
             "eslint-plugin-import",
             "eslint",
@@ -351,7 +352,6 @@
             "@aws-sdk/lib-dynamodb",
             "aws-cdk-lib",
             "cdk-ecr-deployment",
-            "cdk-nag",
             "constructs",
             "esbuild"
           ]

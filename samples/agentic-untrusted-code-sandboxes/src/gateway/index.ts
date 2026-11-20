@@ -3,7 +3,7 @@
 
 // The gateway entry (spec §3.3, ADR-0017): `RunCodeToolTarget` and its
 // props, which put the core behind agentic-runtime-isolation's tools
-// gateway. Placeholder from the scaffold; the gateway worker builds it.
+// gateway. Placeholder; the gateway owner builds it.
 // This directory is the only part of src/ (with the demo app files) that
 // may import agentic-runtime-isolation.
 

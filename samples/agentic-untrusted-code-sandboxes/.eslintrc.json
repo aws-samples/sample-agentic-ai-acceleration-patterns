@@ -246,6 +246,19 @@
     },
     {
       "files": [
+        "src/main.ts"
+      ],
+      "rules": {
+        "import/no-extraneous-dependencies": [
+          "error",
+          {
+            "devDependencies": true
+          }
+        ]
+      }
+    },
+    {
+      "files": [
         ".projenrc.ts"
       ],
       "rules": {

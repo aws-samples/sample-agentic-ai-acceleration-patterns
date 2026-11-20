@@ -39,7 +39,7 @@ const project = new awscdk.AwsCdkTypeScriptApp({
   },
   deps: [
     // Runtime clients of the tool, reaper, drain and offboard functions. Later
-    // workers do not add dependencies: scripts/CONVENTIONS.md.
+    // contributors do not add dependencies: scripts/CONVENTIONS.md.
     `@aws-sdk/client-lambda-microvms@${sdk}`, // RunMicrovm, GetMicrovm, ListMicrovms, TerminateMicrovm, CreateMicrovmAuthToken (microvm)
     `@aws-sdk/client-ecs@${sdk}`, // RunTask, DescribeTasks, ListTasks, StopTask, container instances (nitro, drain)
     `@aws-sdk/client-ec2@${sdk}`, // DescribeInstances in the drain (spec §5.3)
@@ -57,10 +57,11 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     // consumer's synth (ADR-0017), so esbuild is a runtime dependency of the
     // package, not only of this repository's build.
     'esbuild@0.28.2',
-    // Security linting: AwsSolutionsChecks aspect in src/main.ts
-    'cdk-nag@3.0.2',
   ],
   devDeps: [
+    // Security linting in the demo app (src/main.ts) only; the construct
+    // records its acknowledgments through aws-cdk-lib's Validations.
+    'cdk-nag@3.0.2',
     '@types/node@24.19.2',
     '@types/aws-lambda@8.10.164',
     'aws-sdk-client-mock@4.1.0',
@@ -103,12 +104,19 @@ project.package.addField('typesVersions', { '*': { gateway: ['lib/gateway/index.
 // written once projen has finished with package.json.
 class OptionalPeer extends Component {
   public postSynthesize(): void {
-    const file = 'package.json';
-    const pkg = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
-    pkg.peerDependencies = { [producer]: '*' };
-    fs.chmodSync(file, 0o644);
-    fs.writeFileSync(file, `${JSON.stringify(pkg, undefined, 2)}\n`);
-    fs.chmodSync(file, 0o444);
+    // projen installs before this runs, so the lock file's root entry is
+    // patched too, or `npm ci` would find the two out of step.
+    for (const file of ['package.json', 'package-lock.json']) {
+      if (!fs.existsSync(file)) continue;
+      const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, any>;
+      const target = file === 'package.json' ? doc : doc.packages?.[''];
+      if (!target) continue;
+      target.peerDependencies = { [producer]: '*' };
+      const mode = fs.statSync(file).mode;
+      fs.chmodSync(file, 0o644);
+      fs.writeFileSync(file, `${JSON.stringify(doc, undefined, 2)}\n`);
+      fs.chmodSync(file, mode);
+    }
   }
 }
 new OptionalPeer(project);
@@ -119,6 +127,9 @@ project.package.addField('files', [
   'lib/**/*.js',
   'lib/**/*.d.ts',
   'lib/handlers/**',
+  // The demo app is not part of the package (it needs cdk-nag, a dev dependency).
+  '!lib/main.*',
+  '!lib/demo.cdk.*',
   'LICENSE',
   'README.md',
 ]);
@@ -149,6 +160,12 @@ project.eslint?.addOverride({
       },
     ],
   },
+});
+
+// The demo app may import dev dependencies (cdk-nag); it is not in the package.
+project.eslint?.addOverride({
+  files: ['src/main.ts'],
+  rules: { 'import/no-extraneous-dependencies': ['error', { devDependencies: true }] },
 });
 
 // ---------------------------------------------------------------------------

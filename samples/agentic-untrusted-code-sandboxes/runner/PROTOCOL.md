@@ -40,15 +40,17 @@ An absent input and an empty input are both zero bytes, so they sign the
 same. The runner decodes `input` from base64 before it hashes it. Every
 proof the receiver checks is compared in constant time.
 
-base64url decoders on both sides refuse padding and any character outside
-`A-Z a-z 0-9 - _`. A nonce that does not decode to 32 bytes is a refusal
-(`wrong_sandbox`).
+base64url decoders on both sides refuse padding, any character outside
+`A-Z a-z 0-9 - _`, and text that does not re-encode to itself (non-zero
+spare bits in the last character). A nonce or a challenge that does not
+decode to 32 bytes is a refusal (`wrong_sandbox`).
 
 ## Bodies
 
 Every body is a JSON object, UTF-8, `Content-Type: application/json`.
-Every body the tool sends and every result or refusal carries `"v": 1`.
-Unknown fields are ignored by both sides.
+Every job, `/hello` request and response, result and refusal carries
+`"v": 1`; the `/run` hook payload and `/ping` do not. Unknown fields are
+ignored by both sides.
 
 ### `RunJob`: `POST /run` (`microvm`, `nitro`) and `POST /invocations` (`agentcore`)
 
@@ -73,14 +75,25 @@ job and carry no tenant data.
 
 The runner, in this order, before it writes the input or starts code:
 
-1. parses the body; a malformed body is `tool_failed` (HTTP 400);
-2. decodes the nonce; on `microvm` and `nitro` it adopts it only when
-   `nonceHash` matches, on `agentcore` only when the
-   `x-amzn-bedrock-agentcore-runtime-session-id` header equals the session
-   id of `tenantId`; a held nonce that differs is `wrong_sandbox`;
-3. checks `jobAuth` over the decoded fields; a mismatch is `wrong_sandbox`;
-4. refuses with `busy` while another job runs, and with `dirty` once the
+1. parses the body; a malformed body is `tool_failed` (HTTP 400,
+   `MALFORMED_JOB_STATUS`); a fault inside the runner is `tool_failed`
+   (HTTP 500);
+2. decodes the nonce and checks that it may adopt it: on `microvm` and
+   `nitro` its `nonceHash` must match, on `agentcore` the
+   `x-amzn-bedrock-agentcore-runtime-session-id` header must equal the
+   session id of `tenantId`; a held nonce that differs, or one it may not
+   adopt, is `wrong_sandbox`;
+3. checks `jobAuth` under that candidate nonce; a mismatch is
+   `wrong_sandbox`, and the runner keeps nothing;
+4. adopts the nonce only now (idempotent when it already holds it), so a
+   job with a valid session header but a forged `jobAuth` cannot pin a
+   nonce on `agentcore`;
+5. refuses with `busy` while another job runs, and with `dirty` once the
    `agentcore` job group did not drain (spec §3.5 step 3).
+
+The tool waits at most `timeoutMs` + 5 s for an answer (spec §4.1 step
+5); a backend reports a longer wait as `no_answer`, and the tool stops the
+sandbox and returns `timedOut`.
 
 ### `RunResult`: HTTP 200
 

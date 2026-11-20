@@ -83,7 +83,8 @@ export function resolveProps(props: UntrustedCodeSandboxesProps): ResolvedProps 
   const runMs = runTimeout.toMilliseconds();
   if (runMs < 1000 || runMs > 60000) fail('runTimeout must be between 1 s and 60 s');
   if (startWait.toMilliseconds() < 0) fail('startWait must not be negative');
-  const budget = 5 + startWait.toSeconds() + runTimeout.toSeconds() + 10;
+  // Whole seconds, rounded up, so a fractional Duration never reaches CDK's integral conversion.
+  const budget = 5 + Math.ceil(startWait.toMilliseconds() / 1000) + Math.ceil(runMs / 1000) + 10;
   if (budget > CORE_BUDGET_CAP_SECONDS) {
     fail(`the tool budget 5 s + startWait + runTimeout + 10 s is ${budget} s, above ${CORE_BUDGET_CAP_SECONDS} s`);
   }

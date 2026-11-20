@@ -4,9 +4,9 @@
 /**
  * CDK side of the `microvm` backend: the MicroVM image, the VPC egress connector, the image build and connector operator roles.
  *
- * Stub from the scaffold (ADR-0025): it creates nothing and grants nothing,
+ * Placeholder (ADR-0025): it creates nothing and grants nothing,
  * so the core construct synthesises before the backend exists. The microvm
- * backend worker owns this file.
+ * backend owner fills this file.
  */
 
 import type * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -55,6 +55,10 @@ export class MicrovmBackendResources extends Construct implements BackendConstru
 
   public logCleanup(): { prefixes: string[]; names: string[] } {
     return { prefixes: [], names: [] };
+  }
+
+  public outputs(): Record<string, string> {
+    return {};
   }
 }
 

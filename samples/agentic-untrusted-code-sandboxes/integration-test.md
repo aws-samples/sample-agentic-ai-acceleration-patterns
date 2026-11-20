@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Integration test
 
-The sections follow standard §5.3. The integration worker fills each one
+The sections follow standard §5.3. The integration test owner fills each one
 from the code it ships; spec §8 holds the step outline until then.
 
 ## What it is

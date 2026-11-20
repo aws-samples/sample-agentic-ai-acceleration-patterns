@@ -78,6 +78,9 @@ export const REFUSAL_STATUS: Readonly<Record<RefusalCode, number>> = {
   tool_failed: 500,
 };
 
+/** HTTP status of a `tool_failed` refusal for a body the runner cannot parse or that breaks the schema. */
+export const MALFORMED_JOB_STATUS = 400;
+
 /** Body of every refusal. The tool decides on `error`, never on the status alone. */
 export interface Refusal {
   readonly v: 1;
@@ -129,12 +132,16 @@ export function base64url(data: Uint8Array): string {
   return Buffer.from(data).toString('base64url');
 }
 
-/** Decode base64url; refuses padding and any character outside the alphabet. */
+/** Decode base64url; refuses padding, any character outside the alphabet, and non-canonical text. */
 export function fromBase64url(text: string): Buffer {
   if (!/^[A-Za-z0-9_-]*$/.test(text) || text.length % 4 === 1) {
     throw new Error('not base64url without padding');
   }
-  return Buffer.from(text, 'base64url');
+  const raw = Buffer.from(text, 'base64url');
+  if (raw.toString('base64url') !== text) {
+    throw new Error('not canonical base64url');
+  }
+  return raw;
 }
 
 /** Decode a nonce and check its length. */
@@ -201,7 +208,11 @@ export function helloProof(nonce: string, challenge: string, certFingerprintHex:
   if (fp.length !== 32 || fp.toString('hex') !== certFingerprintHex) {
     throw new Error('certFingerprint must be 64 lowercase hex characters');
   }
-  return base64url(createHmac('sha256', decodeNonce(nonce)).update(Buffer.concat([fromBase64url(challenge), fp])).digest());
+  const ch = fromBase64url(challenge);
+  if (ch.length !== 32) {
+    throw new Error('challenge must be 32 bytes');
+  }
+  return base64url(createHmac('sha256', decodeNonce(nonce)).update(Buffer.concat([ch, fp])).digest());
 }
 
 /** Constant-time comparison of two base64url proofs. */

@@ -12,7 +12,7 @@ A projen TypeScript project runs jest and eslint only. The runner is
 Python, its Dockerfiles and the scripts are not TypeScript, and the
 standard asks for an MIT-0 header on every authored file, no account
 ids or aliases in the tree, and the sample's terms ("vendor", "tenant").
-Several workers build this sample in parallel; each new dependency would
+Several contributors build this sample in parallel; each new dependency would
 change `.projenrc.ts` and `package-lock.json`, which do not merge cleanly.
 
 ## Options considered
@@ -33,7 +33,7 @@ Option 1. `test` spawns, after jest and eslint:
 - `test:runner`: `python3 -B -m unittest discover -s runner/tests -t .`
   from the sample root; tests need no root and no Docker. Behaviour that
   needs Linux privileges or a real sandbox (uid drop, seccomp, cgroups,
-  PID 1 reaping) is proven by the integration test, and the runner worker
+  PID 1 reaping) is proven by the integration test, and the runner owner
   lists which is which in `integration-test.md`.
 - `check:headers` (`scripts/check-headers.sh`): every tracked or new
   `.py`, `Dockerfile` and `.sh` file carries the two header lines in its
@@ -45,12 +45,12 @@ Option 1. `test` spawns, after jest and eslint:
   new file except generated ones.
 
 `.projenrc.ts` and `package-lock.json` already carry every dependency the
-sample needs (ADR-0023); only the scaffold changes them, and a missing
-dependency is a question to the conductor (`scripts/CONVENTIONS.md`).
+sample needs (ADR-0023); only the maintainers change them, and a missing
+dependency is a question for the maintainers (`scripts/CONVENTIONS.md`).
 
 ## Consequences
 
 `npx projen build` fails on a missing header, a banned term or a red
-Python test, in every worker's branch. A Python linter is not part of the
+Python test, in every contributor's branch. A Python linter is not part of the
 gate. A check that needs an exception edits the allowed list in the script
 with a reason.

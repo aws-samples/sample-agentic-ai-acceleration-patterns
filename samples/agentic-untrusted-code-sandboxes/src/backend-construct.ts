@@ -88,10 +88,18 @@ export interface BackendConstruct {
   endpointClients(): ec2.ISecurityGroup[];
   /** Function environment for the tool, reaper, drain and offboard functions; read by the run-time backend class. */
   environment(): Record<string, string>;
-  /** Resources the drain must run before on delete: the drain depends on nothing, these depend on the drain (spec §5.3). */
+  /**
+   * Resources the drain must stop sandboxes before (cluster, capacity
+   * provider, runtime, image). The core makes the drain depend on each of
+   * these, so CloudFormation deletes the drain, which runs on delete, before
+   * them (spec §5.3). The log cleanup resource is made a dependency of each,
+   * so it is deleted after them.
+   */
   drainOrder(): IConstruct[];
   /** Log group names or prefixes the log cleanup resource deletes after the backend (spec §5.3). */
   logCleanup(): { readonly prefixes: string[]; readonly names: string[] };
+  /** Read-only values the core exposes per backend (spec §3.3: image ARN, cluster ARN or runtime ARN), by name. */
+  outputs(): Record<string, string>;
 }
 
 /** Each `src/backends/<name>.cdk.ts` exports one factory of this shape. */

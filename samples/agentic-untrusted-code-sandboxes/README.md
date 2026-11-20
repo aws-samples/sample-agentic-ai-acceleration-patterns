@@ -15,7 +15,7 @@ This sample is being built. The design is the contract:
 - [Runner wire protocol](runner/PROTOCOL.md)
 - [Conventions for contributors and scripts](scripts/CONVENTIONS.md)
 
-Build and test:
+Build and test (Node.js 24, `aws-cdk-lib` 2.274.0):
 
 ```bash
 npm ci

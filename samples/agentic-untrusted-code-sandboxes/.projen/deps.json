@@ -76,6 +76,11 @@
       "type": "build"
     },
     {
+      "name": "cdk-nag",
+      "version": "3.0.2",
+      "type": "build"
+    },
+    {
       "name": "eslint-import-resolver-typescript",
       "version": "4.4.5",
       "type": "build"
@@ -178,11 +183,6 @@
     {
       "name": "cdk-ecr-deployment",
       "version": "4.2.92",
-      "type": "runtime"
-    },
-    {
-      "name": "cdk-nag",
-      "version": "3.0.2",
       "type": "runtime"
     },
     {

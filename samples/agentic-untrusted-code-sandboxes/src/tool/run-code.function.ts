@@ -4,8 +4,8 @@
 /**
  * Lambda entry of the run_code tool (spec §4.1, §5.1).
  *
- * Placeholder from the scaffold so the handler tree and its tests have a
- * real entry (ADR-0023). The owning worker replaces the body; the file
+ * Placeholder so the handler tree and its tests have a
+ * real entry (ADR-0023). The owner replaces the body; the file
  * path is fixed by HANDLERS in src/handler-entry.ts.
  */
 

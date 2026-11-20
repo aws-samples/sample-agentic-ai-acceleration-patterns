@@ -4,7 +4,7 @@
 /**
  * The `agentcore` backend: AgentCore Runtime V2 sessions (spec §3.4, ADR-0009).
  *
- * Stub from the scaffold (ADR-0025). The agentcore backend worker owns this file
+ * Placeholder (ADR-0025). The agentcore backend owner fills this file
  * and replaces every method; nothing else in src/ may depend on its
  * internals, only on {@link SandboxBackend}.
  */

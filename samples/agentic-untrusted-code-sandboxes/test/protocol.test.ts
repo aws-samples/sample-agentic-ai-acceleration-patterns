@@ -79,10 +79,13 @@ describe('encodings', () => {
     expect(newNonce()).not.toBe(n);
   });
 
-  test('padding, standard base64 and short nonces are refused', () => {
+  test('padding, standard base64, non-canonical text and short values are refused', () => {
     expect(() => fromBase64url('AAAA=')).toThrow();
     expect(() => fromBase64url('AA+/')).toThrow();
+    expect(() => fromBase64url('AB')).toThrow(/canonical/);
     expect(() => decodeNonce('AAAA')).toThrow(/32 bytes/);
+    const h = vectors.hello;
+    expect(() => helloProof(h.nonce, 'AAAA', h.certFingerprint)).toThrow(/challenge/);
   });
 
   test('a fingerprint must be lowercase hex of 32 bytes', () => {

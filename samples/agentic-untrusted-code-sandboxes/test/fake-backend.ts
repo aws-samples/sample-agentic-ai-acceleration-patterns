@@ -88,12 +88,12 @@ export class FakeBackend implements SandboxBackend {
     }
     const s = this.sandboxes.get(handle.handle);
     if (!s || !s.live) return { kind: 'dead', reason: 'not found' };
-    if (s.busy) return { kind: 'refused', refusal: { v: 1, error: 'busy', bootId: s.bootId } };
     const input = job.input === undefined ? undefined : Buffer.from(job.input, 'base64');
     const expected = jobAuth(s.handle.nonce, job.runId, job.tenantId, job.code, input);
     if (job.nonce !== s.handle.nonce || job.tenantId !== s.handle.tenantId || !proofMatches(expected, job.jobAuth)) {
       return { kind: 'refused', refusal: { v: 1, error: 'wrong_sandbox' } };
     }
+    if (s.busy) return { kind: 'refused', refusal: { v: 1, error: 'busy', bootId: s.bootId } };
     return {
       kind: 'result',
       result: {
