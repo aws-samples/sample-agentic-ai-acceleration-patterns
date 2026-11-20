@@ -552,7 +552,7 @@ is always tenant data. The check proves only that a filter is
 installed (S-18: an allow-all filter passes it), so the child also
 calls one blocked call (`memfd_create` on `microvm`, `semget` on
 `nitro`) and raises unless it gets `EPERM`.
-The list blocks only the routes S-17 found, so the runner also keeps a
+No list can close every route, so the runner also keeps a
 free-memory floor on `microvm`: every 50 ms it reads `MemAvailable`
 and, below 512 MiB, kills the job's process group, sweeps uid 1001 and
 sets `memoryExceeded`. S-18 found the guest lost at about 2 to 7 MiB
@@ -1292,7 +1292,7 @@ check, the floor):
 
 | Check | `nitro` (1 GiB task, L 768 MiB) | `agentcore` (job group, L about 7.3 GiB) |
 |---|---|---|
-| SysV semaphores | charged to the task group as kernel memory, 1023 MiB in 0.4 to 0.8 s, killed at the task limit; the RSS watchdog saw 13 MiB | charged to the job group, killed at L in 1.9 s, runner alive |
+| SysV semaphores | charged to the task group as kernel memory, 963 MiB in 0.4 to 0.8 s, killed at the task limit (1023 MiB) in 0.9 to 2.2 s; the RSS watchdog saw 13 MiB | charged to the job group, killed at L in 1.9 s, runner alive |
 | SysV message queues | 514 MiB at 8 KiB messages (`msgmni` 32000); 949 MiB and a global kill at 1-byte messages | 523 MiB, `msgget` `ENOSPC`, no kill |
 | SysV objects after the job | stay, and stay charged; root `IPC_RMID` `EPERM` | stay, and stay charged; root `IPC_RMID` works (`CAP_SYS_ADMIN`) |
 | Sweep as uid 1001 | 0.08 to 2.6 s, frees the group; after a kill at the limit the runner died in 4 of 5 semaphore runs and 1 of 3 queue runs | 0.07 to 0.46 s for up to 7.4 GiB, frees the group |
