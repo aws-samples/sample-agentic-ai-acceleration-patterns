@@ -1316,7 +1316,11 @@ application's cells (threat T5, the highest-consequence open item).
   destroy. `slice.sh teardown --fixtures` lists every log group named after
   the two stacks and does not count them; delete them after the run, they
   hold test output only. The API access log group above can reappear the
-  same way.
+  same way. Each `<STRESS_PREFIX>-control-plane` also leaves its REST API's
+  CloudWatch role (`<STRESS_PREFIX>-control-plane-ApiCloudWatchRole...`),
+  which the CDK retains on destroy because the account's API Gateway setting
+  may still point at it; `teardown --fixtures` lists them. Delete one only
+  when the account setting names another role.
 - **Builds over the concurrent build limit are refused, not queued.**
   CodeBuild refuses a `StartBuild` above a project's `concurrentBuildLimit`
   (`AccountLimitExceededException`), and the workflow retries it a few times

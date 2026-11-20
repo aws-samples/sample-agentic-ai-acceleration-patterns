@@ -241,6 +241,13 @@ case "$verb" in
         echo "teardown: log groups named after the stacks (listed, not counted; see README.md, Known issues):"
         printf '  %s\n' $groups
       fi
+      # The REST API's CloudWatch role is retained on destroy (the CDK default), since the
+      # account's API Gateway setting may still point at it.
+      kept="$(aws iam list-roles --query "Roles[?starts_with(RoleName, '${CP_STACK}-ApiCloudWatchRole')].RoleName" --output text | tr '\t' '\n' | grep -v -e '^$' -e '^None$' || true)"
+      if [ -n "$kept" ]; then
+        echo "teardown: API Gateway CloudWatch roles the stack retains (listed, not counted; see README.md, Known issues):"
+        printf '  %s\n' $kept
+      fi
     fi
     # Cells go with the seeded fleet; at a fixture tier without --fixtures they stay.
     if [ "$fixtures" -eq 1 ] || [ "$onboarding" = "every-run" ]; then
