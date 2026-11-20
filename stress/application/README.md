@@ -243,6 +243,9 @@ of the W-10 run below; fleet `stressw5`, `CELL_POLICY_SUFFIX=-w10`.
 | Account check, with a list that leaves out the two `*-spike` account-base stacks | refused: both `*-spike` stacks are tagged account-base but not on the list | refused, the same |
 | Account check, expecting the policies without the suffix | refused: each pair half holds a managed policy outside its stack's set and lacks the expected one | refused, the same |
 
+The three account-check rows are from a run at commit `4f69c38`,
+2026-11-20 19:48 UTC.
+
 The check refuses an account while `CellBoundaryProbe` is deployed: it is
 none of the stacks a cell account may hold. `CellWorkloadProbe` deploys
 through the cell bootstrap, so the check counts it as a cell. Remove the
@@ -282,6 +285,7 @@ The slice runs (`./run.sh run --tier small --slices control-plane
 | Run | Result | Deploy | Destroy | In all |
 |---|---|---|---|---|
 | `20261120T142632Z` | PASSED, pass criteria met | 223 s | 765 s (the cell delete is most of it) | 2,499 s |
+| `20261120T194839Z` (commit `4f69c38`) | PASSED, pass criteria met | 203 s | 792 s (the cell delete is most of it) | 2,668 s |
 
 | Run | Scenario | Requests | Isolation (mismatches / assertions) | Unattributed | Measured |
 |---|---|---|---|---|---|
@@ -289,6 +293,14 @@ The slice runs (`./run.sh run --tier small --slices control-plane
 | `20261120T142632Z` | placement-race | 27 | 0 / 25 | 0 | 10 racers on 5 free slots: 5 placed, 5 refused `InsufficientCapacityError`, each attributed |
 | `20261120T142632Z` | read-rate | 678 | 0 / 1,015 | 0 | 598 reads at 10 rps while 5 deployments were placed and tenants updated |
 | `20261120T142632Z` | build-limit-scaling | 194 | 0 / 189 | 0 | 20 deployments in 152 s at limit 5, 49 s at 20, 48 s at 50 (one tenant build is about 25 s, so 20 fit at once at 20 and 50); 2 `DELETE_FAILED:retried` |
+| `20261120T194839Z` | PS-1 | 74 | 0 / 63 | 0 | 20 of 20 placed in 647 s; the first, with its cell, `ACTIVE` after 516 s |
+| `20261120T194839Z` | placement-race | 29 | 0 / 25 | 0 | 10 racers on 5 free slots: 5 placed, 5 refused, each attributed |
+| `20261120T194839Z` | read-rate | 678 | 0 / 1,015 | 0 | 598 reads at 10 rps; 60 of 60 tenant updates accepted; 5 deployments placed |
+| `20261120T194839Z` | build-limit-scaling | 202 | 0 / 189 | 0 | 20 deployments in 152 s at limit 5, 111 s at 20, 39 s at 50 |
+
+Leftovers after run `20261120T194839Z`: the same as below. Its teardown read
+the retained API Gateway CloudWatch role from the stack and listed it, not
+counted.
 
 Leftovers after run `20261120T142632Z`: none of the slice's in either cell
 account (cell stacks, cell and tenant parameters, `/cell/` roles: 0). In the
