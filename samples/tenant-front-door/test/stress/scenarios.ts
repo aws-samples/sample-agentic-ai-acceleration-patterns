@@ -67,9 +67,17 @@ async function tokensFor(ctx: Ctx, tenants: readonly TenantEntry[]): Promise<Map
     const p = payloadOf(first);
     console.log(`tokens: ${tokens.size} issued, lifetime ${Number(p.exp) - Number(p.iat)} s, refreshed every ${TOKEN_REFRESH_MS / 1000} s`);
   }
-  setInterval(() => {
-    issue().catch((e: unknown) => console.error(`tokens: refresh failed, the old ones stay: ${e instanceof Error ? e.message : String(e)}`));
-  }, TOKEN_REFRESH_MS).unref();
+  // A refresh that fails is tried again after 20 s, well before the tokens it replaces (five minutes) run out.
+  const refresh = (): void => {
+    issue().then(
+      () => { setTimeout(refresh, TOKEN_REFRESH_MS).unref(); },
+      (e: unknown) => {
+        console.error(`tokens: refresh failed (${e instanceof Error ? e.message : String(e)}); trying again in 20 s, the tokens in hand are at most ${300 - TOKEN_REFRESH_MS / 1000} s from expiring`);
+        setTimeout(refresh, 20_000).unref();
+      },
+    );
+  };
+  setTimeout(refresh, TOKEN_REFRESH_MS).unref();
   return tokens;
 }
 
@@ -145,6 +153,28 @@ export async function ps7(ctx: Ctx): Promise<Outcome> {
 // route-write: route write rate and time to edge
 // ---------------------------------------------------------------------------
 
+/** What a registrar answer to a write means for the driver. */
+export interface WriteAnswer {
+  readonly written: boolean;
+  /** Worth another attempt: the route table was busy. */
+  readonly retry: boolean;
+  /** For a refusal: the reason it is counted under. */
+  readonly reason?: string;
+  /** A refusal the registrar is not documented to give a hook-role write; the scenario fails. */
+  readonly violation?: string;
+}
+
+export function writeAnswer(r: { status: number; body: string }): WriteAnswer {
+  if (r.status === 200) return { written: true, retry: false };
+  if (r.status === 503) return { written: false, retry: true, reason: `registrar-${registrarCause({ status: 503, headers: {}, body: r.body, ttfb: 0, total: 0 })}` };
+  return {
+    written: false,
+    retry: false,
+    reason: `registrar-${r.status === 0 ? 'network' : 'refused'}`,
+    violation: `route-write: the registrar answered a write with ${r.status === 0 ? 'no answer (network)' : `HTTP ${r.status}`}`,
+  };
+}
+
 export interface Watch {
   readonly tenantId: string;
   firstRoutable?: number;
@@ -153,8 +183,10 @@ export interface Watch {
   finalMisses: number;
 }
 
-/** After a write, requests for the tenant every second; the answers give time to routable and the last miss. */
-/** `tokenOf` is read on every request, so a refreshed token is used. */
+/**
+ * After a write, requests for the tenant every second: the answers give time to routable and the last miss.
+ * `tokenOf` is read on every request, so a refreshed token is used.
+ */
 export async function watchRoute(ctx: Ctx, sink: Sink, w: Watch, tokenOf: () => string, seconds: number): Promise<void> {
   const from = Date.now();
   const until = from + seconds * 1000;
@@ -210,23 +242,26 @@ export async function routeWrite(ctx: Ctx): Promise<Outcome> {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       attempts += 1;
       const r = await ctx.registrar.putTenant(t.tenantId);
-      if (r.status === 200) {
+      const a = writeAnswer(r);
+      if (a.written) {
         rec.tally('200:registrar-write');
         rec.hop('registrar-write', r.total);
         const w: Watch = { tenantId: t.tenantId, flaps: 0, finalMisses: 0 };
         watches.push(w);
-        watching.push(watchRoute(ctx, sink, w, () => token(tokens, t.tenantId), plan.routeWatchSeconds));
+        // A watch that throws (no token, say) is a finding of the scenario, not an unhandled rejection.
+        watching.push(
+          watchRoute(ctx, sink, w, () => token(tokens, t.tenantId), plan.routeWatchSeconds).catch((e: unknown) => {
+            sink.violate(`route-write: a watch stopped: ${e instanceof Error ? e.message : String(e)}`);
+          }),
+        );
         return;
       }
-      const reason = r.status === 503 ? `registrar-${registrarCause(r)}` : `registrar-${r.status === 0 ? 'network' : 'refused'}`;
-      rec.request(r.status === 0 ? 599 : r.status, { tenant: t.tenantId, reason });
+      rec.request(r.status === 0 ? 599 : r.status, { tenant: t.tenantId, reason: a.reason as string });
       rec.hop('registrar-write-failed', r.total);
-      if (r.status !== 503) {
-        // The registrar's documented refusals of a write the hook role may make are 503s only; anything else is a finding.
-        sink.violate(`route-write: the registrar answered a write with ${r.status === 0 ? 'no answer (network)' : `HTTP ${r.status}`}`);
-        break;
-      }
-      await sleep(5000 * (0.5 + Math.random()));
+      if (a.violation !== undefined) sink.violate(a.violation);
+      if (!a.retry) break;
+      // Wait before the next attempt, not after the last one: a given-up write must not add its wait to the burst's time.
+      if (attempt < 4) await sleep(5000 * (0.5 + Math.random()));
     }
     // A 503 after the driver's five attempts is counted, by cause, and does not fail the run: the hook retries it and the spec sets no limit before it is measured.
     failedWrites += 1;
@@ -361,8 +396,6 @@ export async function edgeRefusals(ctx: Ctx): Promise<Outcome> {
   const sink = new Sink(rec);
   const kinds: (() => Promise<void>)[] = [];
   const n = plan.refusalsPerKind;
-  const liveToken = token(tokens, live.tenantId);
-  const spareToken = token(tokens, spare.tenantId);
   for (let i = 0; i < n; i += 1) {
     kinds.push(
       () => send(ctx, sink, { kind: 'no-token', tenant: '-', edgeTenant: '-' }),
@@ -371,9 +404,9 @@ export async function edgeRefusals(ctx: Ctx): Promise<Outcome> {
         const ghost = newUlid();
         return send(ctx, sink, { kind: 'unrouted', tenant: ghost, edgeTenant: ghost.toLowerCase() }, { auth: bearer(unsignedToken(ghost)) });
       },
-      () => send(ctx, sink, { kind: 'suspended', tenant: spare.tenantId, edgeTenant: spare.tenantId.toLowerCase() }, { auth: bearer(spareToken) }),
-      () => send(ctx, sink, { kind: 'cross-site', tenant: live.tenantId }, { auth: bearer(liveToken), headers: { 'sec-fetch-site': 'same-site' } }),
-      () => send(ctx, sink, { kind: 'token-too-long', tenant: '-', edgeTenant: '-' }, { auth: bearer(forgeToken(liveToken, live.tenantId, OVER_LIMIT_BYTES)) }),
+      () => send(ctx, sink, { kind: 'suspended', tenant: spare.tenantId, edgeTenant: spare.tenantId.toLowerCase() }, { auth: bearer(token(tokens, spare.tenantId)) }),
+      () => send(ctx, sink, { kind: 'cross-site', tenant: live.tenantId }, { auth: bearer(token(tokens, live.tenantId)), headers: { 'sec-fetch-site': 'same-site' } }),
+      () => send(ctx, sink, { kind: 'token-too-long', tenant: '-', edgeTenant: '-' }, { auth: bearer(forgeToken(token(tokens, live.tenantId), live.tenantId, OVER_LIMIT_BYTES)) }),
       () => send(ctx, sink, { kind: 'agents-closed', tenant: '-' }, { path: '/agents/probe/invocations' }),
     );
   }

@@ -43,8 +43,11 @@ cd "$SAMPLE_DIR"
 LOGS="$(mktemp -d)"
 trap 'rm -rf "$LOGS"' EXIT
 status=0
+# Compared with the creation time AWS gives a log group: the two clocks may differ by a few seconds, so a group made within seconds of this
+# mark may be read the wrong way round.
 TEARDOWN_START_MS="$(( $(date +%s) * 1000 ))"
-echo "teardown: account $(aws sts get-caller-identity --query Account --output text), ${AWS_REGION}, prefix ${PREFIX}"
+account="$(aws sts get-caller-identity --query Account --output text)"
+echo "teardown: account ${account}, ${AWS_REGION}, prefix ${PREFIX}"
 
 driver() { (cd "$SAMPLE_DIR" && node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/driver.ts "$@"); }
 
@@ -128,8 +131,11 @@ echo "teardown: stacks destroyed in $((SECONDS - total_start)) s"
 for s in "$STACK_CELL" "$STACK_LOGGING" "$STACK_MAIN" "$STACK_EDGE" "$STACK_CP" "$STACK_SUPPORT"; do
   if stack_exists "$s"; then echo "teardown: stack ${s} is still there" >&2; status=1; fi
 done
-if aws ssm get-parameter --name "$PARAM_EDGE" >/dev/null 2>&1; then
+if err="$(aws ssm get-parameter --name "$PARAM_EDGE" 2>&1 >/dev/null)"; then
   echo "teardown: ${PARAM_EDGE} is still there; remove it with: aws ssm delete-parameter --name ${PARAM_EDGE} --region ${AWS_REGION}" >&2
+  status=1
+elif ! grep -q 'ParameterNotFound' <<<"$err"; then
+  echo "teardown: could not tell whether ${PARAM_EDGE} is gone" >&2
   status=1
 fi
 
@@ -189,7 +195,7 @@ exists() {
 
 # The log group of a function a CDK custom resource provider creates is not declared in any stack: Lambda makes it
 # on the first call. CDK names such a function <prefix>-<stack part>-Custom...-<12 characters> or ...-AWS<hex>-<12 characters>.
-CDK_PROVIDER="^${PREFIX}-[A-Za-z-]+-(Custom[A-Za-z0-9]+|AWS[0-9a-f]{20,32})-[A-Za-z0-9]{12}\$"
+CDK_PROVIDER="^${PREFIX}-[A-Za-z-]+-(Custom[A-Za-z0-9]+|AWS[0-9a-f]{1,32})-[A-Za-z0-9]{12}\$"
 
 unchecked=0
 unowned=0
@@ -235,6 +241,10 @@ while IFS= read -r line; do
 done <"$RESOURCES"
 if (( left > 0 || unsure > 0 )); then status=1; fi
 if (( status == 0 )); then
-  echo "teardown: no stack, tenant, resource, log group or edge parameter left (${unchecked} resources of types this check does not read; ${unowned} log groups noted above)"
+  kept=""
+  if [[ "$fixtures" -ne 1 && "$onboarding" != every-run ]]; then
+    kept=" The tenants of the fixture tier are kept (no --fixtures)."
+  fi
+  echo "teardown: no stack, resource, log group or edge parameter left (${unchecked} resources of types this check does not read; ${unowned} log groups noted above).${kept}"
 fi
 exit "$status"

@@ -3,11 +3,13 @@
 
 import { classify, EXPECT, meets, type RequestKind } from './classify';
 import { forgeToken, newUlid, payloadOf, registrarCause, retrying, unsignedToken } from './clients';
+import { loadEdgeRows } from './collect';
+import * as http from './http';
 import { compareCell, expectedAtCell, joinEdge, type EdgeRow } from './join';
 import { paced, pool, Rate } from './load';
 import { drawsOf, parseTier, planOf, tenantsToSeed } from './plan';
 import { percentiles, Recorder } from './recorder';
-import { type Watch, watchRoute } from './scenarios';
+import { type Watch, watchRoute, writeAnswer } from './scenarios';
 import { regionOf } from './sigv4';
 import { Sink, answerOf } from './sink';
 import type { RequestLine } from './state';
@@ -270,7 +272,6 @@ describe('watching a written route', () => {
 
   async function watch(statuses: number[], seconds: number): Promise<{ w: Watch; rec: Recorder }> {
     const queue = [...statuses];
-    const http = await import('./http');
     jest.spyOn(http, 'request').mockImplementation(async () => answer(queue.shift() ?? 200));
     jest.spyOn(http, 'sleep').mockResolvedValue(undefined);
     const rec = new Recorder();
@@ -294,5 +295,38 @@ describe('watching a written route', () => {
     expect(w.lastMiss).toBeDefined();
     expect(w.flaps).toBeGreaterThanOrEqual(1);
     expect(w.finalMisses).toBe(0);
+  });
+});
+
+describe('the registrar answer to a write', () => {
+  it('writes on 200, tries again on 503 and names its cause, and calls anything else a finding', () => {
+    expect(writeAnswer({ status: 200, body: '{}' })).toEqual({ written: true, retry: false });
+    expect(writeAnswer({ status: 503, body: '{"message":"the route table is busy; retry"}' })).toEqual({ written: false, retry: true, reason: 'registrar-route-table-busy' });
+    expect(writeAnswer({ status: 503, body: '{"message":"the control plane could not be read"}' }).reason).toBe('registrar-control-plane-unreadable');
+    expect(writeAnswer({ status: 403, body: '{}' })).toMatchObject({ written: false, retry: false, reason: 'registrar-refused', violation: expect.stringContaining('HTTP 403') });
+    expect(writeAnswer({ status: 0, body: '' })).toMatchObject({ reason: 'registrar-network', violation: expect.stringContaining('no answer') });
+  });
+});
+
+describe('edge log rows', () => {
+  const row = (fields: Record<string, string>): { field: string; value: string }[] => Object.entries(fields).map(([field, value]) => ({ field, value }));
+
+  it('keeps the rows with a numeric status and time, and returns the ids of the others', async () => {
+    const results = [
+      row({ id: 'a', status: '200', resultType: 'Miss', tenant: 't1', seconds: '0.25' }),
+      row({ id: 'b', status: '200', resultType: 'Miss', tenant: 't1', seconds: '-' }),
+      row({ id: 'c', status: '', resultType: 'Miss', tenant: 't1', seconds: '0.1' }),
+    ];
+    const client = {
+      send: async (command: { constructor: { name: string } }) => {
+        return command.constructor.name === 'StartQueryCommand' ? { queryId: 'q' } : { status: 'Complete', results };
+      },
+    };
+    const rows = new Map<string, EdgeRow>();
+    const skipped = new Set<string>();
+    await loadEdgeRows(client as never, 'group', 0, 1000, 60, rows, skipped);
+    expect([...rows.keys()]).toEqual(['a']);
+    expect(rows.get('a')).toMatchObject({ status: 200, seconds: 0.25 });
+    expect([...skipped].sort()).toEqual(['b', 'c']);
   });
 });

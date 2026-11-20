@@ -65,8 +65,13 @@ async function seed(env: Env, out: Outputs): Promise<void> {
   const gate = new Rate(SSM_PER_SECOND);
 
   // An entry whose create tenant-identity never confirmed has no username: remove that tenant (404 is fine) and make it again.
-  for (const t of tenants.filter((x) => x.username === '')) await ctx.identity.deleteTenant(t.tenantId);
+  // Only a confirmed delete (or a 404) drops the entry; any other answer keeps it in the manifest, where the sweep finds it.
+  for (const t of tenants.filter((x) => x.username === '')) {
+    const status = await ctx.identity.deleteTenant(t.tenantId);
+    if (status !== 200 && status !== 204 && status !== 404) throw new Error(`could not remove a half-made tenant: DeleteTenant HTTP ${status}; it stays in the manifest`);
+  }
   tenants.splice(0, tenants.length, ...tenants.filter((x) => x.username !== ''));
+  writeManifest(env, { version: 1, tenants });
   const haveActive = tenants.filter((t) => t.kind === 'active').length;
   const wanted: TenantEntry['kind'][] = [];
   for (let i = haveActive; i < plan.activeTenants; i += 1) wanted.push('active');
@@ -149,8 +154,17 @@ async function sweep(env: Env, routes: boolean): Promise<number> {
   });
   const gate = new Rate(SSM_PER_SECOND);
   for (let i = 0; i < manifest.tenants.length; i += 10) {
-    await gate.take();
-    await ssm.send(new DeleteParametersCommand({ Names: manifest.tenants.slice(i, i + 10).map((t) => namespaceParameter(out, t.tenantId)) }));
+    const names = manifest.tenants.slice(i, i + 10).map((t) => namespaceParameter(out, t.tenantId));
+    for (let attempt = 0; ; attempt += 1) {
+      await gate.take();
+      try {
+        await ssm.send(new DeleteParametersCommand({ Names: names }));
+        break;
+      } catch (e) {
+        if (attempt >= 8 || (e as Error).name !== 'ThrottlingException') throw e;
+        await sleep(Math.min(8000, 500 * 2 ** attempt));
+      }
+    }
   }
   if (routes) {
     const cell = await ctx.registrar.deleteCell(out.cellId);
