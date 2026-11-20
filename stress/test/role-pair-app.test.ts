@@ -5,6 +5,9 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+// The account check's own expectations, so the template and the check cannot drift apart.
+// eslint-disable-next-line import/no-relative-packages
+import { PAIR_INLINE, PAIR_INLINE_ACTIONS, PAIR_POLICY } from '../../samples/control-plane/test/stress/account-check';
 
 /**
  * Synthesises `application/role-pair-app.ts` as `deploy-role-pair.sh` does and pins the
@@ -81,10 +84,31 @@ function synth(): any {
     ]);
   });
 
-  it('gives the default policies SSM namespace actions only', () => {
-    for (const p of resources.filter((r) => r.Type === 'AWS::IAM::Policy')) {
-      const actions = (p.Properties.PolicyDocument.Statement as any[]).flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
-      expect(actions.every((a: string) => a.startsWith('ssm:'))).toBe(true);
+  it('gives each half the default policy the account check expects: its name, its SSM actions and its parameter resources', () => {
+    const policies = resources.filter((r) => r.Type === 'AWS::IAM::Policy');
+    expect(policies).toHaveLength(2);
+    for (const half of ['cell', 'tenant'] as const) {
+      const role = Object.entries(template.Resources).find(([, r]: [string, any]) => r.Properties?.RoleName === `${FLEET}-${half}-provisioning`)![0];
+      const mine = policies.filter((p) => (p.Properties.Roles as any[]).some((r) => r.Ref === role));
+      expect(mine).toHaveLength(1);
+      // CloudFormation names the inline policy by PolicyName, which the check matches.
+      expect(mine[0].Properties.PolicyName).toMatch(PAIR_INLINE[half]);
+      for (const st of mine[0].Properties.PolicyDocument.Statement as any[]) {
+        expect(st.Effect).toBe('Allow');
+        expect(st.NotAction).toBeUndefined();
+        expect(st.NotResource).toBeUndefined();
+        for (const a of [st.Action].flat()) expect(PAIR_INLINE_ACTIONS).toContain(a);
+        for (const r of [st.Resource].flat()) {
+          // arn:<partition>:ssm:<region>:<account>:parameter/application-plane/...
+          expect(r['Fn::Join']).toBeDefined();
+          const parts = r['Fn::Join'][1] as any[];
+          expect(parts[0]).toBe('arn:');
+          expect(parts[1]).toEqual({ Ref: 'AWS::Partition' });
+          const rendered = parts.map((x) => (typeof x === 'string' ? x : x.Ref === 'AWS::AccountId' ? CELL : `<${x.Ref}>`)).join('');
+          expect(rendered).toMatch(new RegExp(`^arn:<AWS::Partition>:ssm:[^:]+:${CELL}:parameter/application-plane/`));
+        }
+      }
     }
+    expect(Object.keys(PAIR_POLICY)).toEqual(['cell', 'tenant']);
   });
 });

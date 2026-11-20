@@ -105,11 +105,11 @@ export function pairTrustProblems(half: 'cell' | 'tenant', role: RoleState, s: A
 }
 
 /** The owner policy the role pair stack attaches to each half (stress ADR-0012, control-plane ADR-0047). */
-const PAIR_POLICY = { cell: 'cell-build-policy', tenant: 'cell-tenant-build-policy' } as const;
+export const PAIR_POLICY = { cell: 'cell-build-policy', tenant: 'cell-tenant-build-policy' } as const;
 /** The inline policy the role pair stack gives each half: CDK's default policy of the role. */
-const PAIR_INLINE = { cell: /^RolesCellProvisioningRoleDefaultPolicy[0-9A-F]{8}$/, tenant: /^RolesTenantProvisioningRoleDefaultPolicy[0-9A-F]{8}$/ } as const;
+export const PAIR_INLINE = { cell: /^RolesCellProvisioningRoleDefaultPolicy[0-9A-F]{8}$/, tenant: /^RolesTenantProvisioningRoleDefaultPolicy[0-9A-F]{8}$/ } as const;
 /** What that default policy grants: the control plane's SSM namespace grants (control-plane §6.2). */
-const PAIR_INLINE_ACTIONS: readonly string[] = [
+export const PAIR_INLINE_ACTIONS: readonly string[] = [
   'ssm:AddTagsToResource',
   'ssm:DeleteParameter',
   'ssm:GetParameter',
