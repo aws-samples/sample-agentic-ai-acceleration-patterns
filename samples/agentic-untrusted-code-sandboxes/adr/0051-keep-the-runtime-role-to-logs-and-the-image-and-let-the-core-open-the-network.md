@@ -65,6 +65,11 @@ on `*` (the action takes no resource), `ecr:BatchGetImage` and
 `sessionFiles` the two S3 statements of ADR-0007. The runtime waits for the
 role and its policy.
 
+The backend also returns its statements for each endpoint's policy from
+`endpointStatements()`, for the core to merge (the Logs endpoint is shared
+with `nitro`): the ECR layer bucket, the runner repository, this runtime's
+log groups and, with `sessionFiles`, the sessions prefix.
+
 The security group has no ingress and no egress of its own and is returned
 by `endpointClients()`. Spec §3.7 states what the core must open for it: 443
 to the ECR and Logs endpoint groups and to the S3 prefix list (in the VPC the
