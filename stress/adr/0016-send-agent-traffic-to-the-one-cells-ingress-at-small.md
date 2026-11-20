@@ -108,8 +108,10 @@ goes through the router's cell origin as the front door specifies. The
 front door is deployed in two phases (spec §3.5). Phase one is two
 deploys of the front-door app, the second with `registrarUrl`, which
 adds the route hook (the `RouteHookAccess` stack, front-door ADR-0027),
-so the first cell's route is registered when the cell is built. Phase
-two, once the first cell exists, sets `agentIngress`.
+so the first cell's route is registered when the cell is built; a cell
+built before the hook has no cell route, and its deployments fail their
+hook with 409 (front-door spec §3.2, §3.4). Phase two, once the first cell
+exists, sets `agentIngress` only.
 
 Per-cell agent routing for `medium` and `large` stays open as spec Q-7,
 with Options 1 and 2 as its candidates. It is decided, by a new ADR that
