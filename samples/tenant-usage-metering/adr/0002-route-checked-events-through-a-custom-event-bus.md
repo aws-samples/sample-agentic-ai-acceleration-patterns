@@ -25,8 +25,8 @@ In September 2026 EventBridge launched a new *Custom Event Bus*
 
 - a Firehose target is called with `PutRecordBatch`, up to 500 events a
   call, so the bus no longer throttles Firehose;
-- it is priced by data, about $0.18 per GB in and $0.05 per GB out, so a
-  0.5 KB usage event costs about $0.11 per million in and out;
+- it is priced by data, about $0.235 per GB in and $0.071 per GB out, so
+  a 0.5 KB usage event costs about $0.15 per million in and out;
 - it keeps every event for 1 to 365 days, and a subscriber can start from a
   point in the past, so a new reader can catch up without code in this
   sample. It also suppresses a repeated `DeduplicationId` within five
@@ -39,21 +39,25 @@ the event unless a dead-letter queue is set.
 Firehose bills ingestion in 5 KB steps per record. A record of one usage
 event costs as much as a record of 5 KB, so packing many events into one
 newline-delimited record cuts that cost by a factor of up to the packing
-ratio.
+ratio. Dynamic partitioning, which writes the raw store by hour, adds
+about $0.029 per GB processed.
 
-Prices are list prices for Europe (Frankfurt) on 2026-11-18 and are not
-verified with the AWS Pricing Calculator.
+Prices are list prices for Europe (Frankfurt) from the AWS Price List API
+on 2026-11-20. Correction, 2026-11-20: the first version of this record
+used estimates from 2026-11-18 ($0.18 and $0.05 per GB for the new bus)
+and left out dynamic partitioning. The corrected figures keep the order of
+the options and do not change the decision.
 
 ## Options considered
 ### Option 1: Function → Custom Event Bus - Classic → Firehose → S3
-Pros: any later reader of raw events is a new rule. Cons: about $1.14 per
+Pros: any later reader of raw events is a new rule. Cons: about $1.17 per
 million events; one Firehose call per event, so it throttles at load; a
 DLQ, a retry policy and alarms are needed to be loss-free; no retention
 without an archive.
 
 ### Option 2: Function → Firehose (`PutRecordBatch`) → S3
-Pros: about $0.14 per million with one event per record, and well under
-$0.01 with events packed per record; one service and role fewer. Cons: the
+Pros: about $0.17 per million with one event per record, and about $0.03
+with events packed per record; one service and role fewer. Cons: the
 function resends the failed part of each batch; a new raw-event reader
 reads S3 or needs a change to the function; no shared place for other
 accounts to subscribe.
@@ -64,7 +68,7 @@ entries), `DeduplicationId` set to
 `<applicationId>#<tenantId>#<eventId>` and `EventGroupId` set to the
 tenant id. A subscriber delivers to Firehose in batches of up to 500,
 with a retry policy of 24 hours maximum event age and an SQS dead-letter
-queue. Pros: no Firehose throttle; about $0.25 per million at one event per Firehose record;
+queue. Pros: no Firehose throttle; about $0.32 per million at one event per Firehose record;
 retention gives a replay buffer in front of S3; other teams and accounts
 attach readers through AWS RAM without a change to this sample; matches
 the bus-first shape control-plane toolkits use. Cons: a service two
