@@ -14,7 +14,7 @@ import { HOOK_POST, HOOK_POST_EVENTS, HOOK_PRE, HOOK_PRE_EVENTS, ROUTE_HOOK_SCRI
 
 const SCRIPT = path.join(SAMPLE_ROOT, 'scripts', 'register-hooks.sh');
 const API = 'https://cp.example.com/prod';
-const TOKEN = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJvcCJ9.c2lnbmF0dXJl';
+const TOKEN = 'test-operator-token-example';
 const SHA = '0123456789abcdef0123456789abcdef01234567';
 const REPO = 'https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns.git';
 

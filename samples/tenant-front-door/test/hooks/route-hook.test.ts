@@ -21,9 +21,10 @@ const TENANT = '01KAF5M0000000000000000T01';
 const API_DOMAIN = `${'a1'.repeat(16)}.lambda-url.${REGION}.on.aws`;
 const CREDS = {
   Version: 1,
-  AccessKeyId: 'ASIAEXAMPLEKEY000001',
-  SecretAccessKey: 'SeCrEtKeY/+0123456789abcdefghijklmnopqrs',
-  SessionToken: 'SeSsIoNtOkEn+/0123456789abcdefghijklmnop=',
+  // AWS documentation example values, not real credentials.
+  AccessKeyId: 'ASIAIOSFODNN7EXAMPLE',
+  SecretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+  SessionToken: 'TESTSESSIONTOKENEXAMPLE=',
   Expiration: '2026-11-20T12:00:00Z',
 };
 

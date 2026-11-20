@@ -660,11 +660,22 @@ None. Spec §11 has no open question.
 
 ## Security review
 
-No scanner has run: nothing is built. When the build lands, the synthesised
-tree is scanned with ProtoShield and the Automated Security Helper (standard
-§6). This section then lists each finding as fixed, accepted with its
-reason, or a false positive with the evidence, and every cdk-nag suppression
-cites a mitigation or an ADR here.
+ProtoShield scanned the sample on 2026-11-20 (semgrep, bandit, cdk-nag,
+checkov, gitleaks, CVE, IAM least privilege, licence headers): 0 critical,
+7 high, 6 medium, 2 low. Each finding:
+
+| Finding | Severity | Outcome |
+|---|---|---|
+| gitleaks: a JWT-shaped token in `test/hooks/register-hooks.test.ts` and a secret access key in `test/hooks/route-hook.test.ts` | high (2) | Fixed. Both were made-up test values; the tests now use a plain placeholder token and the AWS documentation example key pair. |
+| IAM: `cloudfront:ListDistributionTenants` on `*` (sweeper, teardown, guard) and `acm:ListCertificates` on `*` (in `us-east-1` only) | high (3) | Accepted. Neither action supports a resource type or a condition key in the service authorisation reference, so `*` is the only resource. Each role reads only; every update and delete is scoped by the distribution tag (AR-33). |
+| IAM: `cloudfront:CreateDistributionTenant` and `acm:RequestCertificate` on `*` | high (2) | Accepted. Neither action supports a resource type. Both require the request tags to name this distribution and allow only the front door's tag keys (spec §3.4, AR-33), so a created resource is always one this front door's scoped delete reaches. |
+| IAM: `s3:GetObject` and the write deny on the SPA bucket's objects; `execute-api:Invoke` on the registrar's own API | medium (2) | Accepted. Scoped to one bucket and one API, with a source-ARN or principal-ARN condition (ADR-0011, ADR-0013). |
+| semgrep `unknown-value-with-script-tag` in `spa/build.ts` | medium (2) | False positive. The build fills its own `index.html` with constants and digests at build time; no request value reaches it. |
+| CVE: `minimatch` 10.2.6 in `aws-cdk-lib`, `glob` 10.5.0 in `ts-jest` | medium (2) | Accepted. Build and test time only; neither is in a Lambda bundle or the SPA. They clear with the next `aws-cdk-lib` and Jest upgrades. |
+| IAM: the sweeper's table actions and its Lambda invoke | low (2) | Accepted. One table and one function each. |
+
+cdk-nag (47) and checkov (35) suppressions were all reviewed as info; each
+cites its reason in the code.
 
 ## Links
 
