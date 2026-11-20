@@ -15,11 +15,13 @@
 import type { BackendName, RegistryRow, SandboxBackend, SandboxSummary } from '../backend';
 import { handleLessStaleMs, type ToolConfig } from '../tool/config';
 import { errorName, type Logger } from '../tool/log';
-import type { Registry } from '../tool/registry';
-import { handleOf, orphanHandle, stopQuietly, writeStopLine } from '../tool/sandbox';
+import type { Registry, RowKey } from '../tool/registry';
+import { handleOf, orphanHandle, readStopFacts, stopQuietly, writeStopLine } from '../tool/sandbox';
 
 /** A failed start backs off this long, as in the tool (spec §4.1). */
 const FAIL_BACKOFF_MS = 30_000;
+/** Clock difference allowed between the platform's `startedAt` and a row's `createdAt` (ms). */
+const CLOCK_SKEW_MS = 5000;
 
 export interface ReaperDeps {
   readonly config: ToolConfig;
@@ -65,24 +67,29 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
   }
 
   const known = new Set<string>();
-  /** Backends with a young handle-less STARTING row, and the tenants it names: a start between its takeover and recording its handle. */
-  const youngStarts = new Set<string>();
+  /**
+   * Backend and tenant (`*` for all), mapped to the oldest `createdAt` among young handle-less STARTING rows: a start
+   * between its takeover and recording its handle. Only a sandbox started after that row was written can belong to it.
+   */
+  const youngStarts = new Map<string, number>();
+  const young = (k: string, createdAt: number) => youngStarts.set(k, Math.min(youngStarts.get(k) ?? createdAt, createdAt));
   const key = (backend: string, handle: string) => `${backend}|${handle}`;
 
-  const stopRow = async (backend: SandboxBackend, row: Handled, reason: string): Promise<void> => {
-    await stopQuietly(backend, handleOf(row), log);
-    stats.stopped += 1;
+  /** The row moved out of READY or STARTING by this pass: its one line is written even when the stop call fails (ADR-0033). */
+  const stopRow = async (backend: SandboxBackend, row: Handled, reason: string, stoppedReason?: string): Promise<boolean> => {
+    const ok = await stopQuietly(backend, handleOf(row), log);
+    if (ok) stats.stopped += 1;
     await writeStopLine({
-      log, backend, row, now: deps.now(), sandboxIdleMs: config.sandboxIdleMs, by: 'reaper', reason,
+      log, backend, row, now: deps.now(), sandboxIdleMs: config.sandboxIdleMs, by: 'reaper', reason, stoppedReason,
     });
+    return ok;
   };
 
-  /** STOPPING with the version seen, then stop and line; true when this pass moved the row. */
-  const retire = async (backend: SandboxBackend, row: Handled, reason: string): Promise<number | undefined> => {
-    const version = await registry.update(row.tenantId, row.backend, row.version, { state: 'STOPPING' });
+  /** STOPPING with the version seen, then stop and line. Undefined when a call moved the row first, else the row as written and whether the stop worked. */
+  const retire = async (backend: SandboxBackend, row: Handled, reason: string): Promise<{ key: RowKey; stopped: boolean } | undefined> => {
+    const version = await registry.update(row, { state: 'STOPPING' });
     if (version === undefined) return undefined;
-    await stopRow(backend, row, reason);
-    return version;
+    return { key: { ...row, version }, stopped: await stopRow(backend, row, reason) };
   };
 
   for await (const row of registry.scan()) {
@@ -98,18 +105,19 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
 
       if (row.state === 'STOPPING' || row.state === 'FAILED') {
         // Already has its stop line. Stop again only a sandbox the platform still lists.
-        if (summary !== undefined && handled !== undefined) await stopQuietly(backend, handleOf(handled), log);
-        if (expired && await registry.delete(row.tenantId, row.backend, row.version)) stats.deletedRows += 1;
+        const gone = summary === undefined || handled === undefined || await stopQuietly(backend, handleOf(handled), log);
+        // The row stays while a stop is failing: it is what makes the next pass stop the sandbox again.
+        if (expired && gone && await registry.delete(row)) stats.deletedRows += 1;
         continue;
       }
 
       if (expired) {
         if (handled === undefined) {
-          if (await registry.delete(row.tenantId, row.backend, row.version)) stats.deletedRows += 1;
+          if (await registry.delete(row)) stats.deletedRows += 1;
           continue;
         }
-        const version = await retire(backend, handled, 'expired');
-        if (version !== undefined && await registry.delete(row.tenantId, row.backend, version)) stats.deletedRows += 1;
+        const moved = await retire(backend, handled, 'expired');
+        if (moved?.stopped && await registry.delete(moved.key)) stats.deletedRows += 1;
         continue;
       }
 
@@ -120,7 +128,7 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
           continue;
         }
         const alive = summary !== undefined || await backend.isAlive(handleOf(handled));
-        if (!alive && await registry.delete(row.tenantId, row.backend, row.version)) {
+        if (!alive && await registry.delete(row)) {
           // The platform ended it: the delete moved the row out of READY, so this pass owes the line.
           stats.deletedRows += 1;
           await writeStopLine({
@@ -133,24 +141,23 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
       // STARTING
       if (handled === undefined) {
         if (now - row.createdAt <= handleLessStaleMs(config)) {
-          youngStarts.add(key(row.backend, row.tenantId));
-          youngStarts.add(key(row.backend, '*'));
+          young(key(row.backend, row.tenantId), row.createdAt);
+          young(key(row.backend, '*'), row.createdAt);
         }
         continue;
       }
-      const probe = await backend.ready(handleOf(handled), handled);
+      // The tool's rule for a start (spec §4.1) from what the reaper role can see: the sandbox ended, or its lease ran out.
+      // `ready` is the tool's own probe and may need what this role does not have, so the reaper does not call it. A start
+      // whose lease ran out is stopped even when it became ready: nobody came back for it within the cap.
+      const alive = summary !== undefined || await backend.isAlive(handleOf(handled));
       let failed: string | undefined;
-      if (probe.state === 'ended') failed = probe.reason;
-      else if (probe.state === 'starting' && now >= (row.leaseUntil ?? row.createdAt + backend.startCapMs)) failed = 'start_cap';
+      if (!alive) failed = (await readStopFacts(backend, handleOf(handled))).reason ?? 'ended';
+      else if (now >= (row.leaseUntil ?? row.createdAt + backend.startCapMs)) failed = 'start_cap';
       if (failed === undefined) continue;
-      const version = await registry.update(row.tenantId, row.backend, row.version, { state: 'FAILED', retryAt: now + FAIL_BACKOFF_MS });
-      if (version === undefined) continue;
+      if (await registry.update(row, { state: 'FAILED', retryAt: now + FAIL_BACKOFF_MS }) === undefined) continue;
       stats.failedStarts += 1;
-      await stopQuietly(backend, handleOf(handled), log);
-      stats.stopped += 1;
-      await writeStopLine({
-        log, backend, row: handled, now, sandboxIdleMs: config.sandboxIdleMs, by: 'reaper', reason: 'failed_start', stoppedReason: failed,
-      });
+      if (alive) await stopRow(backend, handled, 'failed_start', failed);
+      else await writeStopLine({ log, backend, row: handled, now, sandboxIdleMs: config.sandboxIdleMs, by: 'reaper', reason: 'failed_start', stoppedReason: failed });
     } catch (error) {
       err('row', row.backend, error);
     }
@@ -162,9 +169,11 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
     if (backend === undefined || !listed.has(name)) continue;
     for (const s of summaries.values()) {
       if (known.has(key(name, s.handle))) continue;
-      if (youngStarts.has(key(name, s.tenantId ?? '*'))) continue;
+      const shield = youngStarts.get(key(name, s.tenantId ?? '*'));
+      if (shield !== undefined && (s.startedAt === undefined || s.startedAt >= shield - CLOCK_SKEW_MS)) continue;
       try {
-        await stopQuietly(backend, orphanHandle(s), log);
+        // No row remembers an orphan: its line is written once it is stopped, and a failed stop is tried again next pass.
+        if (!await stopQuietly(backend, orphanHandle(s), log)) continue;
         stats.stopped += 1;
         stats.orphans += 1;
         await writeStopLine({

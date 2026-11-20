@@ -4,6 +4,14 @@
 import { harness, maintenanceDeps, seedSandbox, type Harness } from './harness';
 import { drain, DRAIN_BOUND_MS } from '../src/drain/drain';
 import { handler } from '../src/drain/drain.function';
+import { ENV } from '../src/env';
+
+// The entry builds its deps from the environment; the test swaps the AWS-facing builders for the in-memory ones.
+const mockWired: { h?: Harness } = {};
+jest.mock('../src/tool/deps', () => ({
+  loadBackends: () => mockWired.h?.backends,
+  registryClient: () => mockWired.h?.registry,
+}));
 
 const A = 'tenant-a';
 const B = 'tenant-b';
@@ -132,7 +140,7 @@ describe('the drain', () => {
     expect(h.clock.t).toBe(1_700_000_000_000);
   });
 
-  test('a row a call updated first is still stopped, with no line from the drain', async () => {
+  test('a row a call updated first is read again, moved, stopped and lined once by the drain', async () => {
     const h = harness();
     await seedSandbox(h, 'READY');
     h.db.hook = (op) => {
@@ -142,9 +150,35 @@ describe('the drain', () => {
       }
     };
     const out = await drain(deps(h));
-    expect(out.rowsStopped).toBe(0);
+    expect(out).toEqual({ rowsStopped: 1, orphansStopped: 0 });
     expect(h.backends.get('microvm')!.sandboxes.get('fake-1')!.live).toBe(false);
-    expect(h.events('sandbox_stopped')).toEqual([]);
+    expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: 'fake-1', by: 'drain', reason: 'drain' })]);
+  });
+
+  test('a row that keeps changing still gets its one line, from the drain, once the sandbox is stopped', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY');
+    h.db.hook = (op) => {
+      if (op === 'update') h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.version = (h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.version as number) + 1;
+    };
+    const out = await drain(deps(h));
+    expect(out).toEqual({ rowsStopped: 1, orphansStopped: 0 });
+    expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: 'fake-1', by: 'drain', reason: 'drain' })]);
+  });
+
+  test('an orphan whose stop fails gets its line only once a stop works', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    await h.backends.get('nitro')!.start(A, 'A'.repeat(43), { tenantId: A, accessKeyId: 'k', secretAccessKey: 's', sessionToken: 't' });
+    const b = h.backends.get('nitro')!;
+    const realStop = b.stop.bind(b);
+    let failures = 2;
+    jest.spyOn(b, 'stop').mockImplementation(async (handle, creds) => {
+      if (failures-- > 0) throw new Error('throttled');
+      return realStop(handle, creds);
+    });
+    await drain(deps(h));
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
+    expect(h.events('stop_failed')).toHaveLength(2);
   });
 });
 
@@ -152,5 +186,54 @@ describe('the custom resource entry', () => {
   test.each(['Create', 'Update'] as const)('%s does nothing and returns the physical id', async (RequestType) => {
     await expect(handler({ RequestType })).resolves.toEqual({ PhysicalResourceId: 'untrusted-code-sandboxes-drain' });
     await expect(handler({ RequestType, PhysicalResourceId: 'kept' })).resolves.toEqual({ PhysicalResourceId: 'kept' });
+  });
+});
+
+describe('the custom resource entry on Delete', () => {
+  const env = {
+    [ENV.REGISTRY_TABLE]: 'registry',
+    [ENV.INPUT_BUCKET]: 'b',
+    [ENV.BACKENDS]: 'microvm',
+    [ENV.DEFAULT_BACKEND]: 'microvm',
+    [ENV.TOOL_TENANT_ROLE_ARN]: 'arn',
+    [ENV.RUN_TIMEOUT_MS]: '30000',
+    [ENV.START_WAIT_MS]: '15000',
+    [ENV.MAX_OUTPUT_BYTES]: '1',
+    [ENV.MAX_INPUT_BYTES]: '1',
+    [ENV.SANDBOX_IDLE_MS]: '900000',
+    [ENV.SANDBOX_MAX_LIFE_MS]: '28800000',
+  };
+  const saved = { ...process.env };
+  beforeEach(() => Object.assign(process.env, env));
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  test('stops every sandbox, echoes the physical id, and writes the totals line', async () => {
+    const h = harness();
+    mockWired.h = h;
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
+    const out = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      await expect(handler({ RequestType: 'Delete', PhysicalResourceId: 'drain-1' }, { getRemainingTimeInMillis: () => 900_000 }))
+        .resolves.toEqual({ PhysicalResourceId: 'drain-1' });
+    } finally {
+      out.mockRestore();
+    }
+    expect(h.backends.get('microvm')!.sandboxes.get('fake-1')!.live).toBe(false);
+  });
+
+  test('fails the resource when a sandbox is still live at the Lambda\'s own limit', async () => {
+    const h = harness();
+    mockWired.h = h;
+    await seedSandbox(h, 'READY');
+    jest.spyOn(h.backends.get('microvm')!, 'stop').mockResolvedValue();
+    const out = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      // 30 s margin is kept back, so 30 s of remaining time leaves no time to wait at all
+      await expect(handler({ RequestType: 'Delete' }, { getRemainingTimeInMillis: () => 30_000 })).rejects.toThrow(/still live at the deadline/);
+    } finally {
+      out.mockRestore();
+    }
   });
 });

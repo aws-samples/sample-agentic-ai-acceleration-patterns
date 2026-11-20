@@ -141,13 +141,22 @@ describe('rows', () => {
 });
 
 describe('starts', () => {
-  test('a STARTING row whose sandbox ended is FAILED, stopped, and lined with the platform reason', async () => {
+  test('a STARTING row whose sandbox ended is FAILED and lined with the platform reason, with no stop call', async () => {
     const h = harness();
     const handle = await seedSandbox(h, 'STARTING');
-    h.backends.get('microvm')!.script.endBeforeReady = 'Task failed to start';
+    h.backends.get('microvm')!.kill(handle.handle);
     await reapOnce(maintenanceDeps(h));
     expect(await row(h)).toMatchObject({ state: 'FAILED', retryAt: h.clock.t + 30_000, handle: handle.handle });
-    expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ reason: 'failed_start', stoppedReason: 'Task failed to start', by: 'reaper' })]);
+    expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ reason: 'failed_start', stoppedReason: 'stopped', by: 'reaper' })]);
+    expect(stops(h)).toEqual([]);
+  });
+
+  test('the reaper never calls ready: that probe is the tool\'s and needs more than the reaper role has', async () => {
+    const h = harness();
+    await seedSandbox(h, 'STARTING', { leaseUntil: h.clock.t - 1 });
+    const ready = jest.spyOn(h.backends.get('microvm')!, 'ready');
+    await reapOnce(maintenanceDeps(h));
+    expect(ready).not.toHaveBeenCalled();
   });
 
   test('a STARTING row past its lease and not ready is FAILED with start_cap', async () => {
@@ -168,11 +177,20 @@ describe('starts', () => {
     expect(stops(h)).toEqual([]);
   });
 
-  test('a STARTING row that is already ready is left for the tool to promote', async () => {
+  test('a STARTING row inside its lease is left alone even when its sandbox is ready', async () => {
     const h = harness();
     await seedSandbox(h, 'STARTING');
     await reapOnce(maintenanceDeps(h));
     expect(await row(h)).toMatchObject({ state: 'STARTING', version: 5 });
+  });
+
+  test('a STARTING row nobody came back to is stopped when its lease runs out, so a ready sandbox is never left to run until sandboxMaxLife', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    await seedSandbox(h, 'STARTING', { leaseUntil: h.clock.t + 300_000 }, 'nitro');
+    h.clock.t += 7 * HOUR;
+    await reapOnce(maintenanceDeps(h));
+    expect(stops(h, 'nitro')).toEqual(['fake-1']);
+    expect(h.events('sandbox_stopped')[0]).toMatchObject({ reason: 'failed_start', stoppedReason: 'start_cap' });
   });
 });
 
@@ -220,6 +238,18 @@ describe('orphans', () => {
     expect((await reapOnce(maintenanceDeps(h))).orphans).toBe(1);
   });
 
+  test('a sandbox started before the in-flight start\'s row was written is not shielded: it is an orphan', async () => {
+    const h = harness();
+    await h.backends.get('microvm')!.start(B, 'A'.repeat(43), { tenantId: B, accessKeyId: 'k', secretAccessKey: 's', sessionToken: 't' });
+    h.clock.t += 60_000;
+    h.db.seed(rowItem({ tenantId: A, backend: 'microvm', state: 'STARTING', createdAt: h.clock.t, leaseUntil: h.clock.t + 20_000 }, h.clock.t));
+    expect((await reapOnce(maintenanceDeps(h))).orphans).toBe(1);
+    // one started after that row, and one with no start time, are shielded
+    await h.backends.get('microvm')!.start(B, 'A'.repeat(43), { tenantId: B, accessKeyId: 'k', secretAccessKey: 's', sessionToken: 't' });
+    h.clock.t += 1000;
+    expect((await reapOnce(maintenanceDeps(h))).orphans).toBe(0);
+  });
+
   test('a start in flight for one tenant does not shield another tenant\'s orphan on nitro', async () => {
     const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
     await h.backends.get('nitro')!.start(B, 'A'.repeat(43), { tenantId: B, accessKeyId: 'k', secretAccessKey: 's', sessionToken: 't' });
@@ -261,6 +291,36 @@ describe('a pass', () => {
     expect(h.events('sandbox_stopped')).toHaveLength(linesAfterFirst);
     expect([...stops(h, 'nitro'), ...stops(h, 'microvm')]).toHaveLength(stopCalls);
     expect(h.db.items.size).toBe(0);
+  });
+
+  test('an orphan whose stop fails gets no line and is not counted, and the next pass stops it and writes its one line', async () => {
+    const h = harness();
+    await h.backends.get('microvm')!.start(B, 'A'.repeat(43), { tenantId: B, accessKeyId: 'k', secretAccessKey: 's', sessionToken: 't' });
+    const b = h.backends.get('microvm')!;
+    const realStop = b.stop.bind(b);
+    const failing = jest.spyOn(b, 'stop').mockRejectedValue(new Error('throttled'));
+    for (let i = 0; i < 3; i++) expect(await reapOnce(maintenanceDeps(h))).toMatchObject({ stopped: 0, orphans: 0 });
+    expect(h.events('sandbox_stopped')).toEqual([]);
+    failing.mockImplementation(realStop);
+    expect(await reapOnce(maintenanceDeps(h))).toMatchObject({ stopped: 1, orphans: 1 });
+    await reapOnce(maintenanceDeps(h));
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
+  });
+
+  test('an expired row whose stop fails keeps its STOPPING row so the next pass stops it again, then deletes it', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
+    h.clock.t += 8 * HOUR;
+    const b = h.backends.get('microvm')!;
+    const realStop = b.stop.bind(b);
+    const failing = jest.spyOn(b, 'stop').mockRejectedValue(new Error('throttled'));
+    await reapOnce(maintenanceDeps(h));
+    expect(await row(h)).toMatchObject({ state: 'STOPPING' });
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
+    failing.mockImplementation(realStop);
+    await reapOnce(maintenanceDeps(h));
+    expect(await row(h)).toBeUndefined();
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
   });
 
   test('one pass logs its totals', async () => {

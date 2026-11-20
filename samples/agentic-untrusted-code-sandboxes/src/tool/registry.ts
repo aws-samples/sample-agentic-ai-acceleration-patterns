@@ -35,14 +35,19 @@ export interface RowPatch {
   readonly retryAt?: number;
 }
 
+/**
+ * The row a caller holds: a write names its version and its nonce. The nonce is
+ * unique per start, so a row deleted and recreated, which restarts its version
+ * at 1, is never written by a caller that read the earlier one (ADR-0032).
+ */
+export type RowKey = Pick<RegistryRow, 'tenantId' | 'backend' | 'version' | 'nonce'>;
+
 /** Whether DynamoDB refused a conditional write. */
 export function isConditionFailure(error: unknown): boolean {
   return error instanceof Error && error.name === 'ConditionalCheckFailedException';
 }
 
-function states(): string[] {
-  return ['STARTING', 'READY', 'STOPPING', 'FAILED'];
-}
+const STATES: readonly string[] = ['STARTING', 'READY', 'STOPPING', 'FAILED'];
 
 /** A row from an item, or undefined for an item with no valid `state` (a partial write counts as missing, spec §4.1). */
 export function rowFromItem(item: Record<string, unknown> | undefined): RegistryRow | undefined {
@@ -54,7 +59,7 @@ export function rowFromItem(item: Record<string, unknown> | undefined): Registry
     return undefined;
   }
   const backend = BACKEND_NAMES.find((b) => b === sk.slice(SANDBOX_KEY_PREFIX.length));
-  if (backend === undefined || typeof state !== 'string' || !states().includes(state)) return undefined;
+  if (backend === undefined || typeof state !== 'string' || !STATES.includes(state)) return undefined;
   const str = (k: string) => (typeof item[k] === 'string' ? (item[k] as string) : undefined);
   const num = (k: string) => (typeof item[k] === 'number' ? (item[k] as number) : undefined);
   const nonce = str(R.NONCE);
@@ -132,7 +137,14 @@ export class Registry {
         TableName: this.table,
         Item: item,
         ...(prev === undefined
-          ? { ConditionExpression: 'attribute_not_exists(#state)', ExpressionAttributeNames: { '#state': R.STATE } }
+          ? {
+            // Missing, or a partial write: no state, or a field the tool needs is absent (spec §4.1, a row it cannot read is missing).
+            ConditionExpression: 'attribute_not_exists(#state) OR attribute_not_exists(#version) OR attribute_not_exists(#nonce) '
+              + 'OR attribute_not_exists(#created) OR attribute_not_exists(#expires)',
+            ExpressionAttributeNames: {
+              '#state': R.STATE, '#version': R.VERSION, '#nonce': R.NONCE, '#created': R.CREATED_AT, '#expires': R.EXPIRES_AT,
+            },
+          }
           : {
             ConditionExpression: '#version = :v AND #nonce = :n',
             ExpressionAttributeNames: { '#version': R.VERSION, '#nonce': R.NONCE },
@@ -149,11 +161,12 @@ export class Registry {
   }
 
   /**
-   * Writes `patch` on the row the caller read at `version`, bumping the
-   * version. Returns the new version, or undefined when the row moved or is
-   * gone (a conditional update never creates a row).
+   * Writes `patch` on the row the caller holds (its version and nonce),
+   * bumping the version. Returns the new version, or undefined when the row
+   * moved or is gone (a conditional update never creates a row).
    */
-  public async update(tenantId: string, backend: BackendName, version: number, patch: RowPatch): Promise<number | undefined> {
+  public async update(row: RowKey, patch: RowPatch): Promise<number | undefined> {
+    const { tenantId, backend, version } = row;
     const attrs: Record<string, string | number> = {};
     if (patch.state !== undefined) attrs[R.STATE] = patch.state;
     if (patch.handle !== undefined) attrs[R.HANDLE] = patch.handle;
@@ -161,8 +174,8 @@ export class Registry {
     if (patch.bootId !== undefined) attrs[R.BOOT_ID] = patch.bootId;
     if (patch.retryAt !== undefined) attrs[R.RETRY_AT] = patch.retryAt;
     attrs[R.VERSION] = version + 1;
-    const names: Record<string, string> = { '#cv': R.VERSION };
-    const values: Record<string, unknown> = { ':v': version };
+    const names: Record<string, string> = { '#cv': R.VERSION, '#cn': R.NONCE };
+    const values: Record<string, unknown> = { ':v': version, ':n': row.nonce };
     const sets = Object.entries(attrs).map(([k, v], i) => {
       names[`#a${i}`] = k;
       values[`:a${i}`] = v;
@@ -173,7 +186,7 @@ export class Registry {
         TableName: this.table,
         Key: keyOf(tenantId, backend),
         UpdateExpression: `SET ${sets.join(', ')}`,
-        ConditionExpression: '#cv = :v',
+        ConditionExpression: '#cv = :v AND #cn = :n',
         ExpressionAttributeNames: names,
         ExpressionAttributeValues: values,
       }));
@@ -192,10 +205,11 @@ export class Registry {
    * write, or undefined when the condition failed.
    */
   public async markStart(row: RegistryRow, now: number, suspendGapMs: number | undefined): Promise<RegistryRow | undefined> {
+    if (row.handle === undefined) return undefined;
     const names: Record<string, string> = {
-      '#last': R.LAST_USED_AT, '#version': R.VERSION, '#handle': R.HANDLE, '#state': R.STATE,
+      '#last': R.LAST_USED_AT, '#version': R.VERSION, '#handle': R.HANDLE, '#state': R.STATE, '#nonce': R.NONCE,
     };
-    const values: Record<string, unknown> = { ':t': now, ':one': 1, ':h': row.handle, ':ready': 'READY' };
+    const values: Record<string, unknown> = { ':t': now, ':one': 1, ':h': row.handle, ':ready': 'READY', ':n': row.nonce };
     let update = 'SET #last = :t, #version = #version + :one';
     if (suspendGapMs !== undefined) {
       names['#susp'] = R.SUSPENDED_MS;
@@ -203,7 +217,7 @@ export class Registry {
       values[':zero'] = 0;
       update += ', #susp = if_not_exists(#susp, :zero) + :gap';
     }
-    let condition = 'attribute_exists(PK) AND #handle = :h AND #state = :ready AND ';
+    let condition = 'attribute_exists(PK) AND #handle = :h AND #nonce = :n AND #state = :ready AND ';
     if (row.lastUsedAt === undefined) {
       condition += 'attribute_not_exists(#last)';
     } else {
@@ -229,7 +243,7 @@ export class Registry {
 
   /**
    * Step 4 (spec §4.1): move `lastUsedAt` forward to the end of a run. Writes
-   * only when the row still exists, still holds `handle`, and `lastUsedAt` is
+   * only when the row still exists, is still `READY` with `handle`, and `lastUsedAt` is
    * older, so a deleted or replaced row is not recreated and the value only
    * moves forward, whichever call wrote last. Returns the new version, or
    * undefined when nothing was written.
@@ -240,9 +254,9 @@ export class Registry {
         TableName: this.table,
         Key: keyOf(tenantId, backend),
         UpdateExpression: 'SET #last = :end, #version = #version + :one',
-        ConditionExpression: 'attribute_exists(PK) AND #handle = :h AND #last < :end',
-        ExpressionAttributeNames: { '#last': R.LAST_USED_AT, '#version': R.VERSION, '#handle': R.HANDLE },
-        ExpressionAttributeValues: { ':end': end, ':one': 1, ':h': handle },
+        ConditionExpression: 'attribute_exists(PK) AND #handle = :h AND #state = :ready AND #last < :end',
+        ExpressionAttributeNames: { '#last': R.LAST_USED_AT, '#version': R.VERSION, '#handle': R.HANDLE, '#state': R.STATE },
+        ExpressionAttributeValues: { ':end': end, ':one': 1, ':h': handle, ':ready': 'READY' },
         ReturnValues: 'UPDATED_NEW',
       }));
       const v = out.Attributes?.[R.VERSION];
@@ -253,15 +267,15 @@ export class Registry {
     }
   }
 
-  /** Deletes the row the caller holds at `version`. False when it moved or is already gone. */
-  public async delete(tenantId: string, backend: BackendName, version: number): Promise<boolean> {
+  /** Deletes the row the caller holds (its version and nonce). False when it moved or is already gone. */
+  public async delete(row: RowKey): Promise<boolean> {
     try {
       await this.client.send(new DeleteCommand({
         TableName: this.table,
-        Key: keyOf(tenantId, backend),
-        ConditionExpression: '#version = :v',
-        ExpressionAttributeNames: { '#version': R.VERSION },
-        ExpressionAttributeValues: { ':v': version },
+        Key: keyOf(row.tenantId, row.backend),
+        ConditionExpression: '#version = :v AND #nonce = :n',
+        ExpressionAttributeNames: { '#version': R.VERSION, '#nonce': R.NONCE },
+        ExpressionAttributeValues: { ':v': row.version, ':n': row.nonce },
       }));
       return true;
     } catch (error) {

@@ -35,6 +35,8 @@ const FAIL_BACKOFF_MS = 30_000;
 const STARTING_RETRY_SECONDS = 5;
 /** Exit code of a job the tool ended by stopping its sandbox: the runner never answered, so it was killed (signal 9). */
 const OVERRUN_EXIT_CODE = -9;
+/** What a runner's `bootId` looks like on the wire (hex in the protocol); the tool bounds it before it writes it to the row. */
+const BOOT_ID_PATTERN = /^[A-Za-z0-9]{1,64}$/;
 /** `code` limit in UTF-8 bytes (spec §5.1). */
 const MAX_CODE_BYTES = 65536;
 
@@ -53,6 +55,8 @@ interface Call {
   readonly registry: Registry;
   readonly runId: string;
   readonly code: string;
+  /** Milliseconds the function may still run (a Lambda's `getRemainingTimeInMillis`). */
+  readonly remainingMs?: () => number;
   input?: Uint8Array;
   sandbox: 'started' | 'reused';
   handle?: string;
@@ -72,32 +76,40 @@ const fail = (error: RunCodeError['error'], retryAfterSeconds?: number): RunCode
 
 /** Checks the fields (spec §5.1). Everything here comes from a caller, so each field is checked as `unknown`. */
 function validate(request: unknown, deps: RunCodeDeps):
-  | { readonly error: RunCodeError }
+  | { readonly error: RunCodeError; readonly tenantId?: string }
   | { readonly tenantId: string; readonly code: string; readonly input?: string; readonly backend: BackendName; readonly saveOutput: boolean } {
   if (typeof request !== 'object' || request === null) return { error: fail('invalid_argument') };
   const r = request as Record<string, unknown>;
   if (typeof r.tenantId !== 'string' || !TENANT_ID_PATTERN.test(r.tenantId)) return { error: fail('invalid_argument') };
   const code = r.code;
-  if (typeof code !== 'string' || Buffer.byteLength(code, 'utf8') > MAX_CODE_BYTES) return { error: fail('invalid_argument') };
+  // From here the tenant id is a valid one, so a refusal is counted against it.
+  const tenantId = r.tenantId;
+  const refuse = (error: RunCodeError['error']) => ({ error: fail(error), tenantId });
+  if (typeof code !== 'string' || Buffer.byteLength(code, 'utf8') > MAX_CODE_BYTES) return refuse('invalid_argument');
   // A lone surrogate does not survive UTF-8: the runner would hash different bytes than the tool.
-  if (Buffer.from(code, 'utf8').toString('utf8') !== code) return { error: fail('invalid_argument') };
-  if (r.input !== undefined && !validInputName(r.input)) return { error: fail('invalid_argument') };
-  if (r.saveOutput !== undefined && typeof r.saveOutput !== 'boolean') return { error: fail('invalid_argument') };
+  if (Buffer.from(code, 'utf8').toString('utf8') !== code) return refuse('invalid_argument');
+  if (r.input !== undefined && !validInputName(r.input)) return refuse('invalid_argument');
+  if (r.saveOutput !== undefined && typeof r.saveOutput !== 'boolean') return refuse('invalid_argument');
   let backend = deps.config.defaultBackend;
   if (r.backend !== undefined) {
     const named = BACKEND_NAMES.find((b) => b === r.backend);
-    if (named === undefined) return { error: fail('invalid_argument') };
+    if (named === undefined) return refuse('invalid_argument');
     backend = named;
   }
-  if (!deps.config.backends.includes(backend) || !deps.backends.has(backend)) return { error: fail('backend_disabled') };
+  if (!deps.config.backends.includes(backend) || !deps.backends.has(backend)) return refuse('backend_disabled');
   return { tenantId: r.tenantId, code, input: r.input as string | undefined, backend, saveOutput: r.saveOutput === true };
+}
+
+export interface RunCodeOptions {
+  /** The function's remaining time. With it, a call that has used most of its time does not start a second sandbox. */
+  readonly remainingMs?: () => number;
 }
 
 /**
  * Runs `request.code` in the tenant's sandbox and returns the output, or a
  * tool error (spec §5.1). `deps` is for tests; the handlers pass none.
  */
-export async function runCode(request: RunCodeRequest, deps?: RunCodeDeps): Promise<RunCodeResult> {
+export async function runCode(request: RunCodeRequest, deps?: RunCodeDeps, options: RunCodeOptions = {}): Promise<RunCodeResult> {
   let d: RunCodeDeps;
   try {
     d = deps ?? defaultDeps();
@@ -108,7 +120,7 @@ export async function runCode(request: RunCodeRequest, deps?: RunCodeDeps): Prom
   const t0 = d.now();
   const checked = validate(request, d);
   if ('error' in checked) {
-    d.log.run({ tenantId: 'invalid', outcome: checked.error.error, durationMs: d.now() - t0 });
+    d.log.run({ tenantId: checked.tenantId ?? 'invalid', outcome: checked.error.error, durationMs: d.now() - t0 });
     return checked.error;
   }
   let call: Call | undefined;
@@ -125,6 +137,7 @@ export async function runCode(request: RunCodeRequest, deps?: RunCodeDeps): Prom
       registry: d.registryFor(creds),
       runId: d.newRunId(),
       code: checked.code,
+      remainingMs: options.remainingMs,
       sandbox: 'reused',
       waited: false,
       spent: false,
@@ -174,6 +187,7 @@ async function execute(call: Call, saveOutput: boolean, objects: ObjectStore): P
       if (acquired.kind === 'error') return acquired.error;
       row = acquired.row;
     }
+    call.handle = row.handle;
     const marked = await markStart(call, row);
     if (marked === undefined) {
       row = undefined;
@@ -274,11 +288,11 @@ async function startNew(call: Call, prev: RegistryRow | undefined, why: string):
   } catch (error) {
     // Nothing is recorded to stop. A sandbox the failed call launched anyway is an orphan the reaper's sweep stops.
     call.stoppedReason = errorName(error);
-    await call.registry.update(call.tenantId, call.backendName, row.version, { state: 'FAILED', retryAt: deps.now() + FAIL_BACKOFF_MS });
+    await call.registry.update(row, { state: 'FAILED', retryAt: deps.now() + FAIL_BACKOFF_MS });
     return { kind: 'error', error: fail('sandbox_failed', FAIL_BACKOFF_MS / 1000) };
   }
   call.handle = started.handle;
-  const version = await call.registry.update(call.tenantId, call.backendName, row.version, { handle: started.handle, address: started.address });
+  const version = await call.registry.update(row, { handle: started.handle, address: started.address });
   if (version === undefined) {
     // The row moved while the sandbox started (an offboard, or the reaper): nothing names it any more.
     await stopQuietly(call.backend, started, deps.log, call.creds);
@@ -318,13 +332,13 @@ async function probe(call: Call, start: ReadyRow): Promise<Next> {
     if (result.state === 'ready') {
       const address = result.patch.address ?? row.address;
       const bootId = result.patch.bootId ?? row.bootId;
-      const version = await call.registry.update(call.tenantId, call.backendName, row.version, { state: 'READY', address, bootId });
+      const version = await call.registry.update(row, { state: 'READY', address, bootId });
       if (version === undefined) return { kind: 'reread' };
       call.handle = row.handle;
       return { kind: 'ready', row: { ...row, state: 'READY', address, bootId, version } };
     }
     if (result.patch.address !== undefined && result.patch.address !== row.address) {
-      const version = await call.registry.update(call.tenantId, call.backendName, row.version, { address: result.patch.address });
+      const version = await call.registry.update(row, { address: result.patch.address });
       if (version === undefined) return { kind: 'reread' };
       row = { ...row, address: result.patch.address, version };
     }
@@ -338,7 +352,7 @@ async function probe(call: Call, start: ReadyRow): Promise<Next> {
 async function failStart(call: Call, row: ReadyRow, reason: string): Promise<Next> {
   const { deps } = call;
   call.stoppedReason = reason;
-  const version = await call.registry.update(call.tenantId, call.backendName, row.version, { state: 'FAILED', retryAt: deps.now() + FAIL_BACKOFF_MS });
+  const version = await call.registry.update(row, { state: 'FAILED', retryAt: deps.now() + FAIL_BACKOFF_MS });
   if (version === undefined) return { kind: 'reread' };
   await stopQuietly(call.backend, handleOf(row), deps.log, call.creds);
   await writeStopLine({
@@ -367,7 +381,8 @@ async function markStart(call: Call, row: ReadyRow): Promise<ReadyRow | undefine
     if (fresh === undefined || fresh.state !== 'READY' || fresh.handle !== row.handle || fresh.nonce !== row.nonce) return undefined;
     cur = { ...fresh, handle: fresh.handle };
   }
-  return cur;
+  // Three marks lost to other calls: re-read the row from the top rather than run on a stale snapshot.
+  return undefined;
 }
 
 type Ran =
@@ -393,11 +408,11 @@ async function runJob(call: Call, row: ReadyRow): Promise<Ran> {
     case 'result': {
       const res = outcome.result;
       if (res.runId !== call.runId || !proofMatches(resultProof(row.nonce, call.runId), res.proof)) return { kind: 'dead', row };
-      let version = row.version;
+      if (typeof res.bootId !== 'string' || !BOOT_ID_PATTERN.test(res.bootId)) return { kind: 'dead', row };
       if (res.bootId !== row.bootId) {
         // A changed boot id is a restarted sandbox (spec §4.1 step 3); the first one the row sees is only recorded.
         if (row.bootId !== undefined) call.sandbox = 'started';
-        version = (await call.registry.update(call.tenantId, call.backendName, version, { bootId: res.bootId })) ?? version;
+        await call.registry.update(row, { bootId: res.bootId });
       }
       await call.registry.touch(call.tenantId, call.backendName, row.handle, deps.now());
       const [stdout, stderr, cut] = capOutput(res.stdout, res.stderr, config.maxOutputBytes);
@@ -449,14 +464,17 @@ async function runJob(call: Call, row: ReadyRow): Promise<Ran> {
 /** Step 5: the runner did not answer by `runTimeout` + 5 s. Set STOPPING, stop the sandbox, write its line. */
 async function overrun(call: Call, row: ReadyRow): Promise<void> {
   const { deps } = call;
-  let wrote = (await call.registry.update(call.tenantId, call.backendName, row.version, { state: 'STOPPING' })) !== undefined;
-  if (!wrote) {
-    const cur = await call.registry.get(call.tenantId, call.backendName);
-    // Another call moved the row. The handle unchanged means this sandbox is still the row's: stop it anyway.
-    if (cur?.handle !== row.handle) return;
-    if (cur.state === 'READY' || cur.state === 'STARTING') {
-      wrote = (await call.registry.update(call.tenantId, call.backendName, cur.version, { state: 'STOPPING' })) !== undefined;
-    }
+  let wrote = false;
+  let cur: RegistryRow = row;
+  for (let attempt = 0; attempt < MAX_REREADS; attempt++) {
+    wrote = (await call.registry.update(cur, { state: 'STOPPING' })) !== undefined;
+    if (wrote) break;
+    const fresh = await call.registry.get(call.tenantId, call.backendName);
+    // Another call moved the row. The same sandbox still on it means stop it anyway; a different one is not ours to stop.
+    if (fresh?.handle !== row.handle || fresh.nonce !== row.nonce) return;
+    // Out of READY and STARTING already: whoever moved it wrote the line.
+    if (fresh.state !== 'READY' && fresh.state !== 'STARTING') break;
+    cur = fresh;
   }
   await stopQuietly(call.backend, handleOf(row), deps.log, call.creds);
   if (wrote) {
@@ -470,7 +488,7 @@ async function overrun(call: Call, row: ReadyRow): Promise<void> {
 async function retireDead(call: Call, row: ReadyRow): Promise<Next> {
   const { deps } = call;
   if (call.deads >= 1) {
-    const version = await call.registry.update(call.tenantId, call.backendName, row.version, { state: 'FAILED', retryAt: deps.now() + FAIL_BACKOFF_MS });
+    const version = await call.registry.update(row, { state: 'FAILED', retryAt: deps.now() + FAIL_BACKOFF_MS });
     if (version === undefined) return { kind: 'reread' };
     call.stoppedReason = 'dead';
     await stopQuietly(call.backend, handleOf(row), deps.log, call.creds);
@@ -478,6 +496,11 @@ async function retireDead(call: Call, row: ReadyRow): Promise<Next> {
       log: deps.log, backend: call.backend, row, now: deps.now(), sandboxIdleMs: deps.config.sandboxIdleMs, by: 'tool', reason: 'dead',
     });
     return { kind: 'error', error: fail('sandbox_failed', FAIL_BACKOFF_MS / 1000) };
+  }
+  // Another start and run must fit in what is left of the function's time, or the next call finds a handle-less row.
+  const left = call.remainingMs?.();
+  if (left !== undefined && left < deps.config.startWaitMs + deps.config.runTimeoutMs + 5000) {
+    return { kind: 'error', error: fail('sandbox_starting', 1) };
   }
   call.deads += 1;
   // A call that already waited for a start does not wait again (spec §4.1 step 3).
@@ -492,5 +515,13 @@ function capOutput(stdout: string, stderr: string, max: number): [string, string
   if (out.length + err.length <= max) return [stdout, stderr, false];
   const errKept = Math.min(err.length, max);
   const outKept = Math.max(0, max - errKept);
-  return [out.subarray(0, outKept).toString('utf8'), err.subarray(0, errKept).toString('utf8'), true];
+  return [cutUtf8(out, outKept), cutUtf8(err, errKept), true];
+}
+
+/** The first `max` bytes of `buf`, ending on a character boundary so the cut never adds a replacement character. */
+function cutUtf8(buf: Buffer, max: number): string {
+  if (buf.length <= max) return buf.toString('utf8');
+  let end = max;
+  while (end > 0 && buf[end] >= 0x80 && buf[end] < 0xc0) end--;
+  return buf.subarray(0, end).toString('utf8');
 }

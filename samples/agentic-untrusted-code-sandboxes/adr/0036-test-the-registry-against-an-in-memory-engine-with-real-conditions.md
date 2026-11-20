@@ -27,8 +27,9 @@ pulled image, which a consumer's CI may not have.
 Pros: no container; evaluates `ConditionExpression` (`attribute_exists`,
 `attribute_not_exists`, comparisons, `AND`, `OR`, `NOT`, parentheses),
 `UpdateExpression` `SET` with `+` and `if_not_exists`, name and value
-placeholders, `ReturnValues`, and paged scans; an expression it does not
-understand throws, so a test cannot pass on a condition nobody ran. Cons: a
+placeholders, `ReturnValues`, and paged scans; it also refuses a reserved word
+written bare and a placeholder no expression uses, as DynamoDB's validation does
+(the reserved list is a subset); an expression it does not understand throws, so a test cannot pass on a condition nobody ran. Cons: a
 second implementation of a subset of DynamoDB, which can differ from the real
 engine.
 

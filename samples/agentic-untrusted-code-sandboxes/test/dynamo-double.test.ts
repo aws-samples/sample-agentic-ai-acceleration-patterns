@@ -43,14 +43,28 @@ describe('registry over the in-memory DynamoDB', () => {
     expect(row?.version).toBe(1);
   });
 
-  test('update never creates a row and fails on a moved version', async () => {
+  test('update never creates a row and fails on a moved version or another nonce', async () => {
     const { db, registry } = setup();
-    expect(await registry.update(T, 'microvm', 1, { state: 'READY' })).toBeUndefined();
+    const key = { tenantId: T, backend: 'microvm' as const, version: 1, nonce: 'n' };
+    expect(await registry.update(key, { state: 'READY' })).toBeUndefined();
     expect(db.items.size).toBe(0);
-    db.seed(rowItem({ tenantId: T, backend: 'microvm', state: 'STARTING', version: 3 }, now));
-    expect(await registry.update(T, 'microvm', 2, { state: 'READY' })).toBeUndefined();
-    expect(await registry.update(T, 'microvm', 3, { state: 'READY', handle: 'h' })).toBe(4);
+    db.seed(rowItem({ tenantId: T, backend: 'microvm', state: 'STARTING', version: 3, nonce: 'A'.repeat(43) }, now));
+    const row = (await registry.get(T, 'microvm'))!;
+    expect(await registry.update({ ...row, version: 2 }, { state: 'READY' })).toBeUndefined();
+    // a row deleted and recreated restarts at the same version: the nonce tells them apart
+    expect(await registry.update({ ...row, nonce: 'B'.repeat(43) }, { state: 'READY' })).toBeUndefined();
+    expect(await registry.update(row, { state: 'READY', handle: 'h' })).toBe(4);
     expect(await registry.get(T, 'microvm')).toMatchObject({ state: 'READY', handle: 'h', version: 4 });
+  });
+
+  test('a row with a state but no version is a partial write: takeOver replaces it', async () => {
+    const { db, registry } = setup();
+    db.seed({ PK: 'TENANT#tenant-a', SK: 'SANDBOX#microvm', state: 'READY', handle: 'h' });
+    expect(await registry.get(T, 'microvm')).toBeUndefined();
+    const row = await registry.takeOver({ tenantId: T, backend: 'microvm', nonce: 'n', now, startCapMs: 1000, sandboxMaxLifeMs: 1000 }, undefined);
+    expect(row?.version).toBe(1);
+    // a complete row is not
+    expect(await registry.takeOver({ tenantId: T, backend: 'microvm', nonce: 'm', now, startCapMs: 1000, sandboxMaxLifeMs: 1000 }, undefined)).toBeUndefined();
   });
 
   test('touch moves lastUsedAt forward only, for the same handle, and never creates a row', async () => {
@@ -61,6 +75,8 @@ describe('registry over the in-memory DynamoDB', () => {
     expect(await registry.touch(T, 'microvm', 'h', now + 5)).toBeUndefined();
     expect(await registry.touch(T, 'microvm', 'other', now + 20)).toBeUndefined();
     expect(await registry.touch(T, 'microvm', 'h', now + 20)).toBe(2);
+    db.seed(rowItem({ tenantId: T, backend: 'nitro', state: 'STOPPING', handle: 'h', lastUsedAt: now, version: 1 }, now));
+    expect(await registry.touch(T, 'nitro', 'h', now + 20)).toBeUndefined();
     expect((await registry.get(T, 'microvm'))?.lastUsedAt).toBe(now + 20);
   });
 
@@ -83,12 +99,14 @@ describe('registry over the in-memory DynamoDB', () => {
     expect(await registry.markStart({ ...read, state: 'READY' }, now, undefined)).toBeUndefined();
   });
 
-  test('delete is conditioned on the version', async () => {
+  test('delete is conditioned on the version and the nonce', async () => {
     const { db, registry } = setup();
-    db.seed(rowItem({ tenantId: T, backend: 'microvm', state: 'READY', handle: 'h', version: 2 }, now));
-    expect(await registry.delete(T, 'microvm', 1)).toBe(false);
-    expect(await registry.delete(T, 'microvm', 2)).toBe(true);
-    expect(await registry.delete(T, 'microvm', 2)).toBe(false);
+    db.seed(rowItem({ tenantId: T, backend: 'microvm', state: 'READY', handle: 'h', version: 2, nonce: 'A'.repeat(43) }, now));
+    const row = (await registry.get(T, 'microvm'))!;
+    expect(await registry.delete({ ...row, version: 1 })).toBe(false);
+    expect(await registry.delete({ ...row, nonce: 'B'.repeat(43) })).toBe(false);
+    expect(await registry.delete(row)).toBe(true);
+    expect(await registry.delete(row)).toBe(false);
   });
 
   test('scan pages through every row of every tenant', async () => {
@@ -118,5 +136,32 @@ describe('registry over the in-memory DynamoDB', () => {
       ExpressionAttributeNames: { '#a': 'x' },
       ExpressionAttributeValues: { ':a': 1 },
     }))).rejects.toThrow(/dynamo double/);
+  });
+
+  test('the double refuses what DynamoDB refuses: a reserved word written bare, and a placeholder nobody uses', async () => {
+    const { db } = setup();
+    db.seed(rowItem({ tenantId: T, backend: 'microvm', state: 'READY', handle: 'h' }, now));
+    const key = { PK: 'TENANT#tenant-a', SK: 'SANDBOX#microvm' };
+    await expect(db.client.send(new UpdateCommand({
+      TableName: 't',
+      Key: key,
+      UpdateExpression: 'SET handle = :a',
+      ConditionExpression: 'state = :s',
+      ExpressionAttributeValues: { ':a': 'x', ':s': 'READY' },
+    }))).rejects.toThrow(/reserved word/);
+    await expect(db.client.send(new UpdateCommand({
+      TableName: 't',
+      Key: key,
+      UpdateExpression: 'SET #a = :a',
+      ExpressionAttributeNames: { '#a': 'handle', '#unused': 'x' },
+      ExpressionAttributeValues: { ':a': 'x' },
+    }))).rejects.toThrow(/unused/);
+    await expect(db.client.send(new UpdateCommand({
+      TableName: 't',
+      Key: key,
+      UpdateExpression: 'SET #a = :a',
+      ExpressionAttributeNames: { '#a': 'handle' },
+      ExpressionAttributeValues: { ':a': 'x', ':unused': 1 },
+    }))).rejects.toThrow(/unused/);
   });
 });

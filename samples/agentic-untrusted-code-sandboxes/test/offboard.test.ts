@@ -106,7 +106,7 @@ describe('offboardTenant', () => {
     expect(h.events('sandbox_stopped')).toHaveLength(1);
   });
 
-  test('a row that keeps changing is given up on after a few reads, without a stop', async () => {
+  test('a row that keeps changing is given up on after a few reads, without a stop, and the call fails so the caller repeats it', async () => {
     const h = harness();
     await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
     h.db.hook = (op) => {
@@ -115,10 +115,11 @@ describe('offboardTenant', () => {
         item.version = (item.version as number) + 1;
       }
     };
-    const out = await offboardTenant(A, maintenanceDeps(h));
-    expect(out.stopped).toEqual([]);
+    await expect(offboardTenant(A, maintenanceDeps(h))).rejects.toThrow(/1 sandbox\(es\) or row\(s\) could not be cleared/);
     expect(h.backends.get('microvm')!.stops).toEqual([]);
     expect(h.db.items.size).toBe(1);
+    h.db.hook = undefined;
+    expect((await offboardTenant(A, maintenanceDeps(h))).stopped).toEqual([{ backend: 'microvm', handle: 'fake-1' }]);
   });
 
   test('a stop that fails keeps the row (STOPPING) for the reaper and fails the call', async () => {
@@ -126,10 +127,28 @@ describe('offboardTenant', () => {
     await seedSandbox(h, 'READY', {}, 'microvm', A);
     await seedSandbox(h, 'READY', {}, 'nitro', A);
     jest.spyOn(h.backends.get('microvm')!, 'stop').mockRejectedValue(new Error('x'));
-    await expect(offboardTenant(A, maintenanceDeps(h))).rejects.toThrow(/1 sandbox\(es\) could not be stopped/);
+    await expect(offboardTenant(A, maintenanceDeps(h))).rejects.toThrow(/1 sandbox\(es\) or row\(s\) could not be cleared/);
     expect(await h.registry.get(A, 'microvm')).toMatchObject({ state: 'STOPPING' });
     // the other backend was still handled
     expect(await h.registry.get(A, 'nitro')).toBeUndefined();
+  });
+
+  test('a stop that fails reports the sandbox once, and a delete that loses a race does not list a handle twice', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
+    let raced = false;
+    h.db.hook = (op) => {
+      if (op === 'delete' && !raced) {
+        raced = true;
+        const item = h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!;
+        item.version = (item.version as number) + 1;
+      }
+    };
+    const out = await offboardTenant(A, maintenanceDeps(h));
+    expect(raced).toBe(true);
+    expect(out.stopped).toEqual([{ backend: 'microvm', handle: 'fake-1' }]);
+    expect(h.db.items.size).toBe(0);
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
   });
 
   test.each([undefined, null, 5, '', 'a b', 'a#b', '-a', 'a'.repeat(65), { tenantId: A }])('refuses the tenant id %p', async (bad) => {

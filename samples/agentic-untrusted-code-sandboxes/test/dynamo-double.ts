@@ -215,6 +215,25 @@ class UpdateEvaluator extends Parser {
   }
 }
 
+/** Words DynamoDB reserves, a subset of its list: an expression must write these through `#name` placeholders. */
+const RESERVED = new Set(['STATE', 'STATUS', 'NAME', 'DATA', 'VALUE', 'TYPE', 'SIZE', 'KEY', 'TIMESTAMP', 'ZONE', 'TOKEN', 'USER', 'SESSION']);
+
+/** Rejects a bare reserved word and a placeholder no expression uses, as DynamoDB's validation does. */
+function validateExpressions(i: Record<string, unknown>): void {
+  const exprs = [i.ConditionExpression, i.UpdateExpression].filter((e): e is string => typeof e === 'string');
+  const tokens = exprs.flatMap(tokenize);
+  for (const t of tokens) {
+    if (RESERVED.has(t.toUpperCase()) && !t.startsWith('#') && !t.startsWith(':')) throw new Error(`dynamo double: reserved word ${t} used bare`);
+  }
+  const used = new Set(tokens);
+  for (const name of Object.keys((i.ExpressionAttributeNames as Names) ?? {})) {
+    if (!used.has(name)) throw new Error(`dynamo double: unused ExpressionAttributeNames entry ${name}`);
+  }
+  for (const value of Object.keys((i.ExpressionAttributeValues as Values) ?? {})) {
+    if (!used.has(value)) throw new Error(`dynamo double: unused ExpressionAttributeValues entry ${value}`);
+  }
+}
+
 function condition(expr: string | undefined, names: Names, values: Values, item: Item | undefined): void {
   if (expr === undefined) return;
   if (!new ConditionEvaluator(tokenize(expr), names, values, item).evaluate()) throw new ConditionalCheckFailedException();
@@ -269,6 +288,7 @@ export class DynamoDouble {
   }
 
   private check(i: Record<string, unknown>, existing: Item | undefined): void {
+    validateExpressions(i);
     condition(i.ConditionExpression as string | undefined, i.ExpressionAttributeNames as Names, i.ExpressionAttributeValues as Values, existing);
   }
 
@@ -289,7 +309,7 @@ export class DynamoDouble {
     const k = i.Key as Item;
     const key = this.keyOf(k);
     const existing = this.items.get(key);
-    condition(i.ConditionExpression as string | undefined, i.ExpressionAttributeNames as Names, i.ExpressionAttributeValues as Values, existing);
+    this.check(i, existing);
     const next: Item = existing === undefined ? { ...k } : { ...existing };
     const changed = new UpdateEvaluator(
       tokenize(i.UpdateExpression as string), i.ExpressionAttributeNames as Names, i.ExpressionAttributeValues as Values, next,

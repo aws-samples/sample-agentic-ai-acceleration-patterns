@@ -42,13 +42,13 @@ It never touches another tenant's key, which `TENANT#<id>` makes exact, so
 
 A stop that fails keeps the row, finishes the other backends, and throws, so
 the control plane's tenant delete script stops. A second call repeats the
-stop. A tenant id that breaks the §5.1 rule throws before any client is
+stop. Each stopped handle is listed once. A tenant id that breaks the §5.1 rule throws before any client is
 built. A call finds no rows on a repeat and returns `{ tenantId, stopped: [] }`.
 The stopped list holds only sandboxes this call stopped.
 
 ## Consequences
 
 A row that keeps changing is given up on after four reads without a stop,
-and the call returns without it; the caller removes the `run_code` grant
-first (spec §5.2), which stops the changes. An orphan with no row is the
-reaper's.
+and that counts as a failure: the call throws, and the caller repeats it
+(the call is idempotent). The caller removes the `run_code` grant first
+(spec §5.2), which stops the changes. An orphan with no row is the reaper's.

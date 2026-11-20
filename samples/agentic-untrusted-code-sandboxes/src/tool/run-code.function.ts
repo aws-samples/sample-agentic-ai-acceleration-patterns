@@ -13,9 +13,10 @@
  * a value, not a Lambda error, so the caller sees the code (spec §5.1).
  */
 
+import type { Context } from 'aws-lambda';
 import { runCode } from './run-code';
 import type { RunCodeRequest, RunCodeResult } from './types';
 
-export async function handler(event: unknown): Promise<RunCodeResult> {
-  return runCode(event as RunCodeRequest);
+export async function handler(event: unknown, context?: Pick<Context, 'getRemainingTimeInMillis'>): Promise<RunCodeResult> {
+  return runCode(event as RunCodeRequest, undefined, { remainingMs: context === undefined ? undefined : () => context.getRemainingTimeInMillis() });
 }

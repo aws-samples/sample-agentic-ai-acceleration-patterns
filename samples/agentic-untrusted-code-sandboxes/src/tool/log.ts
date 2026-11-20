@@ -18,6 +18,9 @@ export const LOG_EVENT = { run: 'run', sandboxStopped: 'sandbox_stopped' } as co
 /** CloudWatch namespace of the opt-in per-tenant metrics (`perTenantMetrics`). */
 export const METRICS_NAMESPACE = 'UntrustedCodeSandboxes';
 
+/** A platform's free-text reason is cut to this many characters before it reaches a line keyed for Contributor Insights. */
+export const MAX_REASON_CHARS = 200;
+
 export type LineWriter = (line: string) => void;
 
 export const stdoutWriter: LineWriter = (line) => {
@@ -53,7 +56,7 @@ export interface StopLine {
   readonly by: string;
   /** Why the writer stopped it: `idle`, `expired`, `overrun`, `dead`, `failed_start`, `gone`, `offboard`, `drain` or `orphan`. */
   readonly reason?: string;
-  /** The platform's own reason (`stoppedReason`, `stateReason`), when it gave one. */
+  /** The platform's own reason (`stoppedReason`, `stateReason`), when it gave one, cut to {@link MAX_REASON_CHARS}. */
   readonly stoppedReason?: string;
   readonly orphan?: true;
   /** `microvm` only. */
@@ -74,7 +77,7 @@ export class Logger {
   }
 
   public run(line: RunLine): void {
-    this.line(LOG_EVENT.run, line);
+    this.line(LOG_EVENT.run, { ...line, stoppedReason: line.stoppedReason?.slice(0, MAX_REASON_CHARS) });
     if (this.perTenantMetrics && line.backend !== undefined) {
       this.emf(line.tenantId, line.backend, {
         Runs: { unit: 'Count', value: 1 },
@@ -146,7 +149,7 @@ export function buildStopLine(args: {
     sandboxSeconds,
     by,
     ...(args.reason === undefined ? {} : { reason: args.reason }),
-    ...(facts.reason === undefined ? {} : { stoppedReason: facts.reason }),
+    ...(facts.reason === undefined ? {} : { stoppedReason: facts.reason.slice(0, MAX_REASON_CHARS) }),
     ...(orphan ? { orphan: true as const } : {}),
   };
   if (row.backend !== 'microvm') return base;
@@ -157,5 +160,5 @@ export function buildStopLine(args: {
 
 /** The error's class name only: a message can carry a code fragment, an id or a tenant's data. */
 export function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : 'Error';
+  return error instanceof Error && /^[A-Za-z0-9_.]{1,64}$/.test(error.name) ? error.name : 'Error';
 }

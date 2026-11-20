@@ -11,7 +11,7 @@
  * task is stopping.
  */
 
-import type { BackendName, SandboxBackend, SandboxSummary } from '../backend';
+import type { BackendName, RegistryRow, SandboxBackend, SandboxSummary } from '../backend';
 import type { ToolConfig } from '../tool/config';
 import type { Logger } from '../tool/log';
 import type { Registry } from '../tool/registry';
@@ -19,6 +19,8 @@ import { handleOf, orphanHandle, stopQuietly, writeStopLine } from '../tool/sand
 
 /** How long the drain waits for sandboxes to end, and how long a backend's cleanup may take (spec §5.3). */
 export const DRAIN_BOUND_MS = 600_000;
+/** Reads of one row the drain makes while calls keep updating it. */
+const MAX_ROW_READS = 4;
 /** Pause between two looks at what the platform lists. */
 const POLL_MS = 5000;
 /** A sandbox still listed this long after its stop is stopped again. */
@@ -64,15 +66,29 @@ export async function drain(deps: DrainDeps, limitMs: number = Number.POSITIVE_I
       const backend = deps.backends.get(row.backend);
       if (backend === undefined || row.handle === undefined) continue;
       const handle = { ...row, handle: row.handle };
-      lined.add(key(row.backend, row.handle));
-      const moved = (row.state === 'READY' || row.state === 'STARTING')
-        && await registry.update(row.tenantId, row.backend, row.version, { state: 'STOPPING' }) !== undefined;
-      await stopQuietly(backend, handleOf(handle), log);
-      stoppedAt.set(key(row.backend, row.handle), deps.now());
-      if (moved) {
+      const k = key(row.backend, row.handle);
+      // A row already STOPPING or FAILED has its line. A READY or STARTING row earns it for whoever moves it.
+      let hasLine = row.state === 'STOPPING' || row.state === 'FAILED';
+      let moved = false;
+      let cur: RegistryRow = row;
+      for (let attempt = 0; attempt < MAX_ROW_READS && !hasLine && !moved; attempt++) {
+        moved = await registry.update(cur, { state: 'STOPPING' }) !== undefined;
+        if (moved) break;
+        const fresh = await registry.get(row.tenantId, row.backend);
+        if (fresh?.handle !== row.handle || fresh.nonce !== row.nonce) break;
+        hasLine = fresh.state === 'STOPPING' || fresh.state === 'FAILED';
+        cur = fresh;
+      }
+      const stoppedNow = await stopQuietly(backend, handleOf(handle), log);
+      if (stoppedNow) stoppedAt.set(k, deps.now());
+      // A row that kept changing under the drain could not be moved. The sandbox is stopped now and nothing else will line it
+      // (the sweep below sees it ended), so the drain writes the line, once the stop worked.
+      if (moved || (!hasLine && stoppedNow)) {
         stats.rowsStopped += 1;
         await writeStopLine({ log, backend, row: handle, now: deps.now(), sandboxIdleMs: idle, by: 'drain', reason: 'drain' });
       }
+      // A stop that failed leaves the sandbox listed, and the sweep below stops it and writes its one line.
+      if (moved || hasLine || stoppedNow) lined.add(k);
     }
   } catch (error) {
     if (!tableGone(error)) throw error;
@@ -90,7 +106,7 @@ export async function drain(deps: DrainDeps, limitMs: number = Number.POSITIVE_I
         const k = key(name, s.handle);
         const last = stoppedAt.get(k);
         if (last !== undefined && deps.now() - last < RESTOP_MS) continue;
-        await stopQuietly(backend, orphanHandle(s), log);
+        if (!await stopQuietly(backend, orphanHandle(s), log)) continue;
         stoppedAt.set(k, deps.now());
         if (!lined.has(k)) {
           lined.add(k);

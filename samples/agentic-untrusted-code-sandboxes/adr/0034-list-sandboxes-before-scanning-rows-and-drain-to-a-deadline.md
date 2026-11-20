@@ -43,12 +43,23 @@ that updated the row meanwhile wins and the reaper leaves that row to it.
 | `FAILED` or `STOPPING` | stop again only a sandbox the platform still lists, with no new line; delete once expired |
 | `READY`, `nitro`, idle past `sandboxIdle` | `STOPPING`, stop, line |
 | `READY`, sandbox gone (`isAlive` false) | conditional delete, then the line |
-| `STARTING` with a handle, ended or past its lease | `FAILED` with a 30 s backoff, stop, line, as the tool does |
+| `STARTING` with a handle, sandbox ended, or its lease run out | `FAILED` with a 30 s backoff, stop, line, as the tool does; a start whose lease ran out is stopped even if it became ready, because nobody came back for it, and a ready `nitro` task would otherwise run to `sandboxMaxLife` |
 | `STARTING` with a handle, otherwise | left alone |
-| `STARTING`, no handle, younger than `startWait` plus the tool timeout | left alone, and it shields unlabelled sandboxes of its backend (`microvm`) or its tenant's (`nitro`) from the sweep |
+| `STARTING`, no handle, younger than `startWait` plus the tool timeout | left alone, and it shields sandboxes started after that row was written, of its backend (`microvm`) or its tenant's (`nitro`), from the sweep |
+
+The reaper does not call `ready`. That probe is the tool's: on `microvm` it
+needs an auth token the reaper role does not hold, and on `nitro` a TLS
+connection the reaper has no network path for. The reaper answers "ended?"
+with `isAlive` and the reason with `stopReason`.
 
 A listed live sandbox that no row names, and that no such shield covers, is
-stopped and gets an `orphan` line. `agentcore` lists nothing. A row that
+stopped and then gets an `orphan` line; a stop that fails writes no line and
+is tried again on the next pass, so an orphan has one line however many
+passes it takes. A row whose stop fails stays `STOPPING` (also when expired)
+and is stopped again while the platform lists its sandbox.
+The shield uses the platform's `startedAt` against the row's `createdAt`
+(with 5 s of clock slack), so a real orphan is not shielded for as long as
+new starts keep arriving. `agentcore` lists nothing. A row that
 throws is counted, the pass finishes the others, and the pass fails at the
 end so the error shows in the function's metrics. A second pass over the same
 state stops nothing and writes no second line.
@@ -57,8 +68,11 @@ The drain is the `onEvent` handler of a custom resource provider. Create and
 Update return the physical resource id and do nothing. Delete stops every
 handle in the registry (a line each for rows it moved), then lists and stops
 every live sandbox until none is live, stopping one again after a minute if it
-is still listed, then runs each backend's `cleanup(deadline)`. The bound is
-ten minutes or the function's remaining time less 30 s, whichever is sooner.
+is still listed, then runs each backend's `cleanup(deadline)`. A row a call
+updates while the drain moves it is read again (four times); a row that keeps
+changing is stopped anyway and the drain writes its line. The wait and the
+cleanup each have a bound of ten minutes, both cut to the function's remaining
+time less 30 s.
 At the bound with a sandbox live it throws, which fails the resource and the
 stack delete, and it never runs cleanup. A registry table that is already
 gone counts as no rows.
@@ -68,5 +82,9 @@ gone counts as no rows.
 The drain must be deleted before the table, the cluster, the runtime and the
 image (`BackendConstruct.drainOrder`), and the construct wires it as the
 `onEvent` handler of a custom resource provider, with a function timeout that
-covers the ten-minute bound plus the backend cleanup. A drain that fails leaves the sandboxes it could not end for the
+covers the ten-minute bound plus the backend cleanup. A start in flight when the drain runs (a handle-less `STARTING` row the drain
+skips) can produce a second line for its sandbox: an `orphan` line from the
+drain's sweep and a `failed_start` line from the tool call that finds it
+stopped. The window is one start, and the integration test's teardown has
+no calls in flight. A drain that fails leaves the sandboxes it could not end for the
 operator to remove, and its error names how many.

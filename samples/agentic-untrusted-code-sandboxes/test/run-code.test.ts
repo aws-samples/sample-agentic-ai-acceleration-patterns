@@ -69,6 +69,8 @@ describe('a later call', () => {
     expect(second?.lastUsedAt).toBe(h.clock.t);
     expect(second?.version).toBeGreaterThan(first?.version ?? 0);
     expect(second?.nonce).toBe(first?.nonce);
+    // the per-call line names the sandbox on a reused call too: AgentCore cost is joined through it (spec §3.8)
+    expect(h.events('run').map((l) => [l.sandbox, l.handle])).toEqual([['started', 'fake-1'], ['reused', 'fake-1']]);
   });
 
   test('another tenant gets its own sandbox, its own credentials and its own row', async () => {
@@ -115,6 +117,16 @@ describe('validation', () => {
     expect(h.db.log).toEqual([]);
     expect(starts(h)).toBe(0);
     expect(h.events('run')[0]).toMatchObject({ tenantId: 'invalid', outcome: 'invalid_argument' });
+  });
+
+  test('a refusal after the tenant id passed is counted against that tenant, not against "invalid"', async () => {
+    const h = harness();
+    await runCode(req({ code: 5 as never }), h.deps);
+    await runCode(req({ backend: 'agentcore' }), h.deps);
+    await runCode(req({ tenantId: 'bad id' }), h.deps);
+    expect(h.events('run').map((l) => [l.tenantId, l.outcome])).toEqual([
+      [A, 'invalid_argument'], [A, 'backend_disabled'], ['invalid', 'invalid_argument'],
+    ]);
   });
 
   test.each([
@@ -333,6 +345,72 @@ describe('what the runner returns', () => {
   });
 });
 
+describe('a sandbox that is not the one the call read', () => {
+  test('a stale writer cannot flip a recreated row: version numbers restart at 1, the nonce does not', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    const held = (await rowA(h))!;
+    h.db.items.clear();
+    await runCode(req(), h.deps);
+    const recreated = (await rowA(h))!;
+    expect(recreated.version).toBe(held.version);
+    expect(recreated.nonce).not.toBe(held.nonce);
+    expect(await h.registry.update(held, { state: 'STOPPING' })).toBeUndefined();
+    expect(await h.registry.delete(held)).toBe(false);
+    expect((await rowA(h))?.state).toBe('READY');
+  });
+
+  test('a call that overruns on a row recreated meanwhile leaves the new sandbox alone', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    const b = h.backends.get('microvm')!;
+    b.script.nextRun = { kind: 'no_answer' };
+    h.db.hook = (op, input) => {
+      if (op === 'update' && String(input.UpdateExpression).includes('#a0') && b.calls.some((c) => c.startsWith('run fake-1'))) {
+        h.db.hook = undefined;
+        h.db.items.clear();
+        h.db.seed(rowItem({ tenantId: A, backend: 'microvm', state: 'READY', handle: 'fake-9', version: (1), lastUsedAt: h.clock.t }, h.clock.t));
+      }
+    };
+    expect(ok(await runCode(req(), h.deps)).timedOut).toBe(true);
+    expect((await rowA(h))).toMatchObject({ state: 'READY', handle: 'fake-9' });
+    expect(b.stops).toEqual([]);
+  });
+
+  test('a runner bootId that is not alphanumeric and short is a dead handle, never written to the row', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    const row = await rowA(h);
+    h.backends.get('microvm')!.script.nextRun = signedResult(row?.nonce ?? '', 'run-2', { bootId: 'x'.repeat(2000) });
+    ok(await runCode(req(), h.deps));
+    expect(h.backends.get('microvm')!.sandboxes.size).toBe(2);
+    expect((await rowA(h))?.bootId?.length).toBeLessThan(65);
+  });
+
+  test('output cut inside a multi-byte character stays within maxOutputBytes and adds no replacement character', async () => {
+    const h = harness({ maxOutputBytes: 5 });
+    await runCode(req(), h.deps);
+    const row = await rowA(h);
+    h.backends.get('microvm')!.script.nextRun = signedResult(row?.nonce ?? '', 'run-2', { stdout: 'ab\u00e9\u00e9\u00e9', stderr: '' });
+    const out = ok(await runCode(req(), h.deps));
+    expect(out.stdout).toBe('ab\u00e9');
+    expect(Buffer.byteLength(out.stdout)).toBeLessThanOrEqual(5);
+    expect(out.truncated).toBe(true);
+  });
+
+  test('a second sandbox is not started when too little of the function\'s time is left', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    h.backends.get('microvm')!.script.nextRun = { kind: 'refused', refusal: { v: 1, error: 'wrong_sandbox' } };
+    const result = await runCode(req(), h.deps, { remainingMs: () => 10_000 });
+    expect(result).toEqual({ error: 'sandbox_starting', retryAfterSeconds: 1 });
+    expect(starts(h)).toBe(1);
+    expect((await rowA(h))?.state).toBe('READY');
+    h.backends.get('microvm')!.script.nextRun = { kind: 'refused', refusal: { v: 1, error: 'wrong_sandbox' } };
+    expect(ok(await runCode(req(), h.deps, { remainingMs: () => 120_000 })).sandbox).toBe('started');
+  });
+});
+
 describe('refusals and dead handles', () => {
   test('busy is sandbox_busy, and the start mark still moved lastUsedAt', async () => {
     const h = harness();
@@ -410,7 +488,7 @@ describe('the runner never answers', () => {
     expect(h.events('sandbox_stopped')).toHaveLength(1);
   });
 
-  test('when another call moved the row, the same handle is still stopped, and no line is written by this call', async () => {
+  test('when another call moved the row, the same handle is still stopped, and this call writes the one line', async () => {
     const h = harness();
     await runCode(req(), h.deps);
     h.backends.get('microvm')!.script.nextRun = { kind: 'no_answer' };

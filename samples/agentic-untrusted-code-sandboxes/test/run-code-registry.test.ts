@@ -47,6 +47,42 @@ describe('two callers on one tenant', () => {
     expect(h.db.log.filter((l) => l.op === 'put' && !l.ok)).toHaveLength(1);
   });
 
+  test('warm, with four callers: marks are retried then re-read, nobody runs on a stale snapshot, and every call returns a result', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    h.clock.t += 20 * 60_000;
+    const results = await Promise.all([1, 2, 3, 4].map(() => runCode(req(), h.deps)));
+    results.forEach((r) => ok(r));
+    expect(starts(h)).toBe(1);
+    expect((await rowA(h))?.suspendedMs).toBe(5 * 60_000);
+  });
+
+  test('when two STOPPING writes lose to busy callers the sandbox is still stopped, and the sandbox gets one line from whoever moves it', async () => {
+    const h = harness();
+    await runCode(req(), h.deps);
+    const b = h.backends.get('microvm')!;
+    b.script.nextRun = { kind: 'no_answer' };
+    let lost = 0;
+    h.db.hook = (op, input) => {
+      if (op === 'update' && String(input.UpdateExpression).includes('#a0') && b.calls.some((c) => c.startsWith('run fake-1')) && lost < 2) {
+        lost += 1;
+        const item = h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!;
+        item.version = (item.version as number) + 3;
+      }
+    };
+    expect(ok(await runCode(req(), h.deps)).timedOut).toBe(true);
+    expect(lost).toBe(2);
+    expect((await rowA(h))?.state).toBe('STOPPING');
+    expect(h.events('sandbox_stopped')).toHaveLength(1);
+    expect(b.stops.map((s) => s.handle)).toEqual(['fake-1']);
+  });
+
+  test('a row with a state but no version (a partial write) does not wedge the tenant', async () => {
+    const h = harness();
+    h.db.seed({ PK: 'TENANT#tenant-a', SK: 'SANDBOX#microvm', state: 'READY', handle: 'h' });
+    expect(ok(await runCode(req(), h.deps)).sandbox).toBe('started');
+  });
+
   test('warm: both start marks land, the loser re-reads, and the idle gap is counted once', async () => {
     const h = harness();
     await runCode(req(), h.deps);

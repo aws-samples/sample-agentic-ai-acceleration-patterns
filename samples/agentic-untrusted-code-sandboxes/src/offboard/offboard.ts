@@ -16,7 +16,7 @@ import type { BackendName, SandboxBackend } from '../backend';
 import { TENANT_ID_PATTERN } from '../protocol';
 import type { ToolConfig } from '../tool/config';
 import type { Logger } from '../tool/log';
-import type { Registry } from '../tool/registry';
+import type { Registry, RowKey } from '../tool/registry';
 import { handleOf, stopQuietly, writeStopLine } from '../tool/sandbox';
 
 /** Re-reads one row after losing a race with a call, before giving up on it. */
@@ -46,41 +46,51 @@ export function assertTenantId(tenantId: unknown): asserts tenantId is string {
 export async function offboardTenant(tenantId: unknown, deps: OffboardDeps): Promise<OffboardResult> {
   assertTenantId(tenantId);
   const { registry, log, config } = deps;
-  const stopped: Array<{ backend: BackendName; handle: string }> = [];
+  const stopped = new Map<string, { backend: BackendName; handle: string }>();
   let failures = 0;
   for (const name of config.backends) {
     const backend = deps.backends.get(name);
     if (backend === undefined) continue;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    let settled = false;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS && !settled; attempt++) {
       const row = await registry.get(tenantId, name);
-      if (row === undefined) break;
-      let version = row.version;
+      if (row === undefined) {
+        settled = true;
+        break;
+      }
+      let held: RowKey = row;
       if (row.handle !== undefined) {
         const handle = { ...row, handle: row.handle };
         if (row.state === 'READY' || row.state === 'STARTING') {
           // Move the row first: a call that updated it meanwhile wins, and we read it again.
-          const moved = await registry.update(tenantId, name, row.version, { state: 'STOPPING' });
+          const moved = await registry.update(row, { state: 'STOPPING' });
           if (moved === undefined) continue;
-          version = moved;
+          held = { ...row, version: moved };
           const stoppedOk = await stopQuietly(backend, handleOf(handle), log);
-          if (!stoppedOk) failures += 1;
-          stopped.push({ backend: name, handle: row.handle });
           await writeStopLine({
             log, backend, row: handle, now: deps.now(), sandboxIdleMs: config.sandboxIdleMs, by: 'offboard', reason: 'offboard',
           });
-          if (!stoppedOk) break;
+          if (!stoppedOk) {
+            failures += 1;
+            settled = true;
+            break;
+          }
+          stopped.set(`${name}|${row.handle}`, { backend: name, handle: row.handle });
         } else if (await backend.isAlive(handleOf(handle))) {
           // STOPPING or FAILED: its line is written. A sandbox still alive is stopped again.
           if (!await stopQuietly(backend, handleOf(handle), log)) {
             failures += 1;
+            settled = true;
             break;
           }
-          stopped.push({ backend: name, handle: row.handle });
+          stopped.set(`${name}|${row.handle}`, { backend: name, handle: row.handle });
         }
       }
-      if (await registry.delete(tenantId, name, version)) break;
+      settled = await registry.delete(held);
     }
+    // A row that kept changing for every read is not offboarded: the caller must know, and may repeat the call.
+    if (!settled) failures += 1;
   }
-  if (failures > 0) throw new Error(`offboardTenant: ${failures} sandbox(es) could not be stopped; their rows stay for the reaper`);
-  return { tenantId, stopped };
+  if (failures > 0) throw new Error(`offboardTenant: ${failures} sandbox(es) or row(s) could not be cleared; repeat the call`);
+  return { tenantId, stopped: [...stopped.values()] };
 }

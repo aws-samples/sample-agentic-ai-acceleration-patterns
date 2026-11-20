@@ -32,7 +32,7 @@ the result (`isRunCodeError`).
 Option 2.
 
 ```ts
-runCode(request: RunCodeRequest, deps?: RunCodeDeps): Promise<RunCodeOutput | RunCodeError>
+runCode(request: RunCodeRequest, deps?: RunCodeDeps, options?: { remainingMs?: () => number }): Promise<RunCodeOutput | RunCodeError>
 ```
 
 `request` is `{ tenantId, code, input?, backend?, saveOutput? }`. Every field
@@ -56,7 +56,12 @@ Registry writes, in the spec's order:
 - The start mark (§3.8) is conditioned on the `lastUsedAt` the caller read, on
   the row still being `READY` for the same handle, and is retried after a
   re-read up to three times. Step 4 (`touch`) is conditioned as the spec says
-  and its failure is ignored.
+  and its failure is ignored. A start mark that loses three times to other
+  calls reads the row again from the top instead of running on a stale snapshot.
+- Every write after the takeover (`update`, `delete`) names the row's version
+  and its nonce. Version numbers restart at 1 when a row is deleted and
+  recreated, so a version alone lets a caller that read the earlier row write the
+  later one; the nonce, unique per start, does not.
 - A `start` that throws leaves a `FAILED` row with no handle and a 30 s
   backoff, and the call returns `sandbox_failed`. Nothing is recorded to stop;
   a sandbox the failed call launched anyway is an orphan the reaper stops.
@@ -68,11 +73,19 @@ Registry writes, in the spec's order:
   after that takeover (§4.1 step 3).
 - A `no_answer` returns a result with `timedOut` true, `exitCode` -9 (the
   runner never answered, so the sandbox was killed) and empty output.
-- The tool cuts output above `maxOutputBytes` again, stdout first. The
+- The tool cuts output above `maxOutputBytes` again, stdout first, on a
+  character boundary. The
   runner already does; this is the tool's own cap on what it returns.
 - `sandbox` is `started` when the call won a takeover, waited for a start, or
   saw a `bootId` different from the one on the row. The first `bootId` a row
   gets (`agentcore` has none from `ready`) is recorded and is not a restart.
+- A result whose `bootId` is not 1 to 64 letters or digits is a dead handle; the
+  tool never writes a runner's free text to a row.
+- With `options.remainingMs` (the Lambda's remaining time) a call that has used
+  most of its time does not start a second sandbox after a dead handle: it
+  returns `sandbox_starting` and leaves the row for the next call.
+- The run line names the sandbox (`handle`) on a reused call too, because
+  `agentcore` cost is joined through it (spec §3.8).
 - Credentials are one `AssumeRole` with the `TenantId` session tag, cached per
   tenant in the warm environment until two minutes before they expire.
 
