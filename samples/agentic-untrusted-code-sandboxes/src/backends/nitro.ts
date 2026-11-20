@@ -290,6 +290,16 @@ function isTaskMissing(err: unknown): boolean {
   return e.name === 'InvalidParameterException' && /task.*not found/i.test(e.message ?? '');
 }
 
+/**
+ * A short reason for a failed connect or /hello: a code, never the error text, which can carry the
+ * task's private address and port (they would reach the stop line and its Contributor Insights key).
+ */
+function connectionReason(stage: 'connect' | 'hello', err: unknown): string {
+  if (err instanceof RunnerTimeoutError) return `${stage}_timeout`;
+  const errno = /\b(E[A-Z0-9]{3,})\b/.exec((err as Error | undefined)?.message ?? '')?.[1];
+  return errno === undefined ? `${stage}_failed` : `${stage}_failed: ${errno}`;
+}
+
 function parseJson(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -440,15 +450,14 @@ export class NitroBackend implements SandboxBackend {
     try {
       conn = await this.deps.connect(handle.address, RUNNER_PORTS.tls, Math.min(left(), 5000));
     } catch (err) {
-      return { kind: 'dead', reason: (err as Error).message };
+      return { kind: 'dead', reason: connectionReason('connect', err) };
     }
     try {
       let hs: Handshake;
       try {
         hs = await this.handshake(conn, handle, Math.min(left(), 5000));
       } catch (err) {
-        if (err instanceof RunnerTimeoutError) return { kind: 'dead', reason: 'the runner did not answer /hello in time' };
-        return { kind: 'dead', reason: (err as Error).message };
+        return { kind: 'dead', reason: connectionReason('hello', err) };
       }
       if (hs.kind !== 'ok') return { kind: 'dead', reason: hs.reason };
 
@@ -457,9 +466,11 @@ export class NitroBackend implements SandboxBackend {
       let reply: HttpReply;
       try {
         reply = await conn.post('/run', JSON.stringify(job), left(), maxBytes);
-      } catch (err) {
-        if (err instanceof RunnerTimeoutError) return { kind: 'no_answer' };
-        return { kind: 'dead', reason: (err as Error).message };
+      } catch {
+        // /hello succeeded, so the job bytes may have reached the runner: a lost connection, an answer
+        // past the limit or a timeout is no answer, never a dead handle, because a rerun in a fresh
+        // sandbox would run the tenant's code twice (ADR-0047, ADR-0044).
+        return { kind: 'no_answer' };
       }
       const body = parseJson(reply.body);
       const refusal = asRefusal(body);

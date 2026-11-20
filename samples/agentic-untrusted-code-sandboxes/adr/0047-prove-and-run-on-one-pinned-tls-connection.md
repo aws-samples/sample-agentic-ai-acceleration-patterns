@@ -36,8 +36,14 @@ keep-alive HTTP/1.1 channel over that one socket. `ready` and `run` post
 the connection's, or a proof that does not match is an identity failure:
 `ended` in `ready`, a dead handle in `run`, and no job is sent. A runner
 that is not listening or answers with something unusable is `starting` in
-`ready`. `run` waits at most `timeoutMs` plus 5 s from the call (`no_answer`
-after that), reads at most `6 × maxOutputBytes + 64 KiB` (stdout and
+`ready`. In `run`, a connect or `/hello` error, a runner refusal and a
+failed identity check are a dead handle. Once `/hello` has succeeded, any
+transport error on the `/run` post (a lost connection, an answer past the
+size limit, a timeout) is `no_answer`, because the job may have run and a
+rerun in a fresh sandbox would run the tenant's code twice (ADR-0044). The
+reason of a dead handle is a code (`connect_failed: ECONNREFUSED`), never
+the error text, which carries the task's address. `run` waits at most
+`timeoutMs` plus 5 s from the call (`no_answer` after that), reads at most `6 × maxOutputBytes + 64 KiB` (stdout and
 stderr are cut by bytes, then decoded and JSON-escaped), refuses a result
 whose run id or proof does not match, and returns a runner refusal as
 `refused`. `ready` reads `DescribeTasks` first on every probe and takes the
@@ -59,3 +65,9 @@ connection error and never opens a second, unchecked connection. The runner
 must answer `/hello` while a job runs, as it answers a second `/run` with
 `busy`; a runner that did not would make a second call to the same sandbox
 a dead handle and stop the sandbox under the first job.
+
+A keep-alive socket that closes between `/hello` and the job also ends as
+`no_answer`, although no job byte was sent: the sandbox is stopped and the
+tenant sees a timeout. That is the safe side, as in ADR-0044. An answer
+that arrives but is unusable (an HTTP error with no refusal) stays a dead
+handle, the honest-runner case of spec §3.5.

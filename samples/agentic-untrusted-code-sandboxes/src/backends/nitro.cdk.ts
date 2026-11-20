@@ -118,10 +118,18 @@ export class NitroBackendResources extends Construct implements BackendConstruct
     const cfnProvider = this.capacityProvider.node.findAll().find((c): c is ecs.CfnCapacityProvider => c instanceof ecs.CfnCapacityProvider);
     if (cfnProvider === undefined) throw new Error('nitro: the capacity provider has no L1 resource to configure');
     cfnProvider.addPropertyOverride('ManagedInstancesProvider.InfrastructureOptimization.ScaleInAfter', SCALE_IN_AFTER_SECONDS);
+    // A task with the ISOLATED_SANDBOX mode only launches on a provider that enables Nitro Enclaves; without it
+    // RunTask answers "Cannot launch a task that requires ISOLATED_SANDBOX on a capacity provider that does not
+    // enable Nitro Enclaves" (found by the first smoke deploy). The L1 types at the pin do not carry the property.
+    cfnProvider.addPropertyOverride('ManagedInstancesProvider.InstanceLaunchTemplate.NitroEnclavesEnabled', true);
+    Validations.of(cfnProvider).acknowledge({
+      id: 'CloudFormation-Validate::F3002',
+      reason: 'The CloudFormation schema that aws-cdk-lib 2.274.0 validates against predates NitroEnclavesEnabled. The spikes deployed this property in raw CloudFormation (S-6, S-14, S-19, S-20); the synth test asserts it (ADR-0004).',
+    });
 
     // ---- task execution role (spec §3.6) -----------------------------------------------------------
     this.executionRole = new iam.Role(this, 'TaskExecutionRole', {
-      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com', { conditions: { StringEquals: { 'aws:SourceAccount': stack.account } } }),
       description: 'Pulls the runner image and writes the task log group; never reachable by sandboxed code (S-5)',
     });
     this.executionRole.addToPolicy(new iam.PolicyStatement({
