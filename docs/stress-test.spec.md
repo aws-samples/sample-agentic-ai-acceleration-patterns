@@ -502,7 +502,7 @@ Q-5.
 
 | # | Question | Needed by |
 |---|---|---|
-| Q-1 | How long does one cell take to deploy from a CodeBuild cell script (expected about 8 minutes on Runtime V2), and does `BUILD_GENERAL1_SMALL` (3 GB) hold the synth? | Answered (W-5, 2026-11-20): `CreateDeployment` to the cell `ACTIVE` took 471 s; inside the cell build the install took 21 s, the synth 11 s and the deploy 405 s. `BUILD_GENERAL1_SMALL` held it: the container showed 3,831 MiB and 2 vCPUs, and peaked at 1,971 MiB (`stress/application/README.md`, Results) |
+| Q-1 | How long does one cell take to deploy from a CodeBuild cell script (expected about 8 minutes on Runtime V2), and does `BUILD_GENERAL1_SMALL` (3 GB) hold the synth? | Answered (W-5, 2026-11-20, on the code merged with W-10, W-3 and W-8): `CreateDeployment` to the cell `ACTIVE` took 486 s; inside the cell build the install took 20 s, the synth 10 s and the deploy 421 s. `BUILD_GENERAL1_SMALL` held it: the container showed 3,831 MiB and 2 vCPUs, and peaked at 1,977 MiB (`stress/application/README.md`, Results) |
 | Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
 | Q-3 | Does the platform run keep the `large` fleet in every account between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
