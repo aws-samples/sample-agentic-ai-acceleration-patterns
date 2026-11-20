@@ -72,7 +72,7 @@ async function tokensFor(ctx: Ctx, tenants: readonly TenantEntry[]): Promise<Map
     issue().then(
       () => { setTimeout(refresh, TOKEN_REFRESH_MS).unref(); },
       (e: unknown) => {
-        console.error(`tokens: refresh failed (${e instanceof Error ? e.message : String(e)}); trying again in 20 s, the tokens in hand had about ${300 - TOKEN_REFRESH_MS / 1000} s left when this refresh began`);
+        console.error(`tokens: refresh failed (${e instanceof Error ? e.message : String(e)}); trying again in 20 s, the tokens in hand had about ${300 - TOKEN_REFRESH_MS / 1000} s left when the first try began`);
         setTimeout(refresh, 20_000).unref();
       },
     );
