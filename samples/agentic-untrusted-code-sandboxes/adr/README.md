@@ -25,3 +25,4 @@
 | [0019](0019-cap-job-memory-per-backend.md) | Cap job memory per backend | Proposed | 2026-11-19 |
 | [0020](0020-filter-job-system-calls-on-microvm.md) | Filter job system calls on microvm, and back the caps with a free-memory floor | Proposed | 2026-11-19 |
 | [0021](0021-close-socket-and-sysv-routes-and-reap-every-job.md) | Close the socket and SysV routes, watch the nitro group, and reap every job | Proposed | 2026-11-20 |
+| [0022](0022-leave-room-for-the-runner-in-the-nitro-process-cap.md) | Leave room for the runner in the nitro process cap | Proposed | 2026-11-20 |

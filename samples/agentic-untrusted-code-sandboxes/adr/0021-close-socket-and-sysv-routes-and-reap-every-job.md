@@ -5,6 +5,7 @@
 - Status: Proposed
 - Date: 2026-11-20
 - Amends: ADR-0019, ADR-0020
+- Amended by: ADR-0022
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -58,3 +59,5 @@ watchdog, the 50 ms floor against an unmapped fill and the `nitro`
 filter's x32 entry are untested and planned in S-19. A floor that polls
 20 times a second costs a little CPU, and a poll can still slip to
 hundreds of milliseconds when every CPU is busy.
+
+Note 2026-11-20: amended by ADR-0022. S-19 measured the open items. The 50 ms floor saved the guest in 24 of 24 unmapped fills at 4.5 to 10 GiB/s. The `nitro` kernel has no x32 ABI and the filter kills x32 calls. The `memory.current` watchdog saw every route but is an early warning, not the cap, and the runner's own memory made a single process at A = L reach the watchdog, so A on `nitro` drops to L less 64 MiB.
