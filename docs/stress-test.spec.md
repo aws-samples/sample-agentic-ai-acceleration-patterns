@@ -465,8 +465,8 @@ The policies, the `/cell/` aspect and the scripts ship in
 
 Three walls hold the scope together. The two boundaries keep the execution
 role and every cell role under them, and no role a cell creates holds an
-IAM permission. The `/cell/` path keeps cell roles and the execution role from
-writing to, passing or assuming any role that is not a cell role: the
+IAM permission. The `/cell/` path keeps cell roles and the execution role
+from writing to, passing or assuming any role that is not a cell role: the
 account's own administrator roles, the role pair and the bootstrap roles.
 The standalone account (§3.7) leaves no other stack or data for the service
 grants to reach. The boundary spike (`stress/spikes/cell-boundary/`)

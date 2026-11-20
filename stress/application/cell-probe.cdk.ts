@@ -73,13 +73,10 @@ export const PROBE_ACTIONS = [
   'lambda:CreateFunctionUrlConfig',
   'lambda:AddPermission',
   'logs:PutDestination',
-  'logs:DeleteDestination',
   'logs:PutResourcePolicy',
-  'logs:DeleteResourcePolicy',
   'dynamodb:PutResourcePolicy',
   'kms:PutKeyPolicy',
   'ssm:PutParameter',
-  'ssm:DeleteParameter',
   'apigateway:PATCH',
 ] as const;
 
