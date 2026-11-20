@@ -38,7 +38,9 @@ Validations.of(app).addPlugins(
 // without `aud`, and vendorIdpRequiredScope (default none), the scope such a
 // token must also carry (spec R-38, ADR-043), and globalHookManagedPolicyArns
 // and appHookManagedPolicyArns (default none), the customer-managed policies
-// attached to the two hook roles (spec R-41, ADR-044).
+// attached to the two hook roles (spec R-41, ADR-044), and stackName (default
+// control-plane-dev), the control plane stack's name, so another sample's
+// integration run can deploy its own control plane through this app.
 //
 // A second mode (ADR-025): `--context cellAccount='{...}'` synthesizes ONLY
 // the account role pair stack, for deployment into another account by its
