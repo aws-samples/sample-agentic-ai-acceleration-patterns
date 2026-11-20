@@ -138,6 +138,15 @@ describe('put', () => {
     }));
   });
 
+  it('pins an S3 zip source to its object version (the integration test, spec §10 step 1)', () => {
+    const version = 'Wq.8_uYv3+rk/0a-Zz1';
+    h.curl(NOT_FOUND, { status: 200, body: { hook: {} } }, NOT_FOUND, { status: 200, body: { hook: {} } });
+    h.run(SCRIPT, env({ HOOK_SOURCE_TYPE: 'S3', HOOK_SOURCE_LOCATION: 'tfd-integ-src-bucket/0a1b.zip', HOOK_SOURCE_VERSION: version }));
+    expect(JSON.parse(h.curlCalls()[1].data!)).toEqual(definition('PRE', HOOK_PRE_EVENTS, {
+      source: { type: 'S3', location: 'tfd-integ-src-bucket/0a1b.zip', sourceVersion: version },
+    }));
+  });
+
   it('follows ListHooks pages', () => {
     h.curl(
       { status: 200, body: { hook: summary(HOOK_PRE, PRE_DEF) } },
@@ -185,7 +194,11 @@ describe('put', () => {
     ['a branch for the commit', { HOOK_SOURCE_VERSION: 'main' }, /full commit SHA/],
     ['a short SHA', { HOOK_SOURCE_VERSION: '0123456' }, /full commit SHA/],
     ['a location with userinfo', { HOOK_SOURCE_LOCATION: 'https://user:token@github.com/x/y.git' }, /without userinfo/],
-    ['an S3 source type', { HOOK_SOURCE_TYPE: 'S3' }, /git source type/],
+    ['an unknown source type', { HOOK_SOURCE_TYPE: 'NO_SOURCE' }, /git source type or S3/],
+    ['an S3 source with no location', { HOOK_SOURCE_TYPE: 'S3' }, /set HOOK_SOURCE_LOCATION/],
+    ['an S3 folder, which has no version', { HOOK_SOURCE_TYPE: 'S3', HOOK_SOURCE_LOCATION: 'tfd-integ-src/src/' }, /<bucket>\/<key>\.zip/],
+    ['an S3 location that is a URL', { HOOK_SOURCE_TYPE: 'S3', HOOK_SOURCE_LOCATION: 'https://tfd-integ-src.s3.amazonaws.com/src.zip' }, /<bucket>\/<key>\.zip/],
+    ['an S3 version id with a space', { HOOK_SOURCE_TYPE: 'S3', HOOK_SOURCE_LOCATION: 'tfd-integ-src/src.zip', HOOK_SOURCE_VERSION: 'a b' }, /object version id/],
     ['a timeout of 4 minutes', { HOOK_TIMEOUT_MINUTES: '4' }, /5 to 30/],
     ['a timeout of 31 minutes', { HOOK_TIMEOUT_MINUTES: '31' }, /5 to 30/],
   ])('refuses %s and calls nothing', (_name, over, error) => {
