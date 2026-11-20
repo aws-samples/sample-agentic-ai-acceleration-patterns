@@ -189,7 +189,7 @@ export class UntrustedCodeSandboxes extends Construct {
       throw new Error('UntrustedCodeSandboxes: createEndpoints false needs a supplied vpc that already has the spec 3.7 endpoints');
     }
 
-    // --- Logs, drain and observability scaffolding ---
+    // --- Log drain and Contributor Insights rules ---
     this.logDrain = new LogDrain(this, 'LogDrain');
     this.insights = new InsightRules(this, 'Insights', nameFor);
 

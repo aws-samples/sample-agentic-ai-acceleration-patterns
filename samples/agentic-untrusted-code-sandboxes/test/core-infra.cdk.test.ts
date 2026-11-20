@@ -13,6 +13,8 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { requestedNames } from './fake-core-backend';
 import { ALLOW_PRIORITY, BLOCK_PRIORITY, DNS_FIREWALL_ALLOWED_DOMAINS } from '../src/core/dns-firewall';
@@ -278,6 +280,36 @@ describe('bindRunCode (spec 3.3)', () => {
     expect(() => synth({ standalone: false }, (stack, c) => {
       c.bindRunCode(new lambda.Function(stack, 'G', { runtime: lambda.Runtime.NODEJS_24_X, handler: 'index.handler', code: lambda.Code.fromInline('x') }));
     })).not.toThrow();
+  });
+
+  const inline = { runtime: lambda.Runtime.NODEJS_24_X, handler: 'index.handler', code: lambda.Code.fromInline('exports.handler=async()=>1') };
+
+  test('two bound functions each get a group and a place in the trust policy and the rules', () => {
+    const s = synth({ standalone: false }, (stack, c) => {
+      for (const id of ['One', 'Two']) c.bindRunCode(new lambda.Function(stack, id, { ...inline, role: new iam.Role(stack, `${id}Role`, { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') }) }));
+    });
+    const trust = (s.t.findResources('AWS::IAM::Role')[roleId(s.t, 'ToolTenantRole')] as Json).Properties.AssumeRolePolicyDocument.Statement as Json[];
+    expect(trust).toHaveLength(3);
+    const runs = Object.values(s.t.findResources('AWS::CloudWatch::InsightRule')).map((r) => JSON.stringify((r as Json).Properties.RuleBody)).find((b) => b.includes('$.runId')) as string;
+    expect(runs).toContain('BoundLogs0');
+    expect(runs).toContain('BoundLogs1');
+  });
+
+  test('a function built with the tool role needs no trust change, and a function with its own log group gets no second group', () => {
+    const s = synth({ standalone: false }, (stack, c) => {
+      c.bindRunCode(new lambda.Function(stack, 'OnToolRole', { ...inline, role: c.toolRole }));
+      c.bindRunCode(new lambda.Function(stack, 'OwnLogs', {
+        ...inline,
+        role: new iam.Role(stack, 'OwnRole', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') }),
+        logGroup: new logs.LogGroup(stack, 'OwnGroup', { logGroupName: 'own-tool-group' }),
+      }));
+    });
+    const trust = (s.t.findResources('AWS::IAM::Role')[roleId(s.t, 'ToolTenantRole')] as Json).Properties.AssumeRolePolicyDocument.Statement as Json[];
+    expect(trust).toHaveLength(2);
+    expect(Object.values(s.t.findResources('AWS::Logs::LogGroup')).filter((g) => /^\/aws\/lambda\//.test(JSON.stringify((g as Json).Properties.LogGroupName ?? '')))).toHaveLength(0);
+    const runs = Object.values(s.t.findResources('AWS::CloudWatch::InsightRule')).map((r) => JSON.stringify((r as Json).Properties.RuleBody)).find((b) => b.includes('$.runId')) as string;
+    expect(runs).toContain('OwnGroup');
+    expect(runs).toContain('BoundLogs0');
   });
 });
 
@@ -658,9 +690,9 @@ describe('props validation, core side (spec 3.3)', () => {
 describe('cdk-nag (AwsSolutions)', () => {
   test.each([
     ['all backends, the firewall and a bound function', { dnsFirewall: true, standalone: true }],
-    ['a single backend, a supplied bucket', { backends: ['microvm'] as const, standalone: true }],
-  ])('%s: no unacknowledged finding', (_name, props) => {
-    const s = synth(props as UntrustedCodeSandboxesProps, (stack, c) => {
+    ['a single backend and a supplied bucket', { backends: ['microvm'] as const, standalone: true, supplyBucket: true }],
+  ])('%s: no unacknowledged finding', (_name, { supplyBucket, ...props }: UntrustedCodeSandboxesProps & { supplyBucket?: boolean }) => {
+    const s = synth({ ...props, ...(supplyBucket ? { inputBucket: s3.Bucket.fromBucketName(new Stack(), 'Supplied', 'supplied-input-bucket') } : {}) }, (stack, c) => {
       c.bindRunCode(new lambda.Function(stack, 'Gateway', {
         runtime: lambda.Runtime.NODEJS_24_X,
         handler: 'index.handler',

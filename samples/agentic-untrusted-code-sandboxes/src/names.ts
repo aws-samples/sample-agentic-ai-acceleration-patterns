@@ -79,8 +79,10 @@ export function nameFor(path: string, service: NamedService, suffix: string): st
   if (rule.lowercase) base = base.toLowerCase();
   // Each run of characters the service refuses becomes one separator.
   let kept = '';
-  for (const ch of base) kept += rule.keep.test(ch) ? ch : sep;
-  kept = kept.replace(new RegExp(`${escapeForClass(sep)}{2,}`, 'g'), sep);
+  for (const ch of base) {
+    if (rule.keep.test(ch)) kept += ch;
+    else if (!kept.endsWith(sep)) kept += sep;
+  }
   kept = trimEdges(kept, sep);
   if (rule.startsWithLetter && !/^[a-zA-Z]/.test(kept)) kept = `r${sep}${kept}`;
   if (rule.reservedPrefixes?.some((p) => kept.toLowerCase().startsWith(p))) kept = `${rule.fallbackPrefix}${kept}`;
@@ -92,10 +94,6 @@ export function nameFor(path: string, service: NamedService, suffix: string): st
 /** A `NameFor` bound to the core construct's path (spec §5.3). */
 export function makeNameFor(path: string): (service: NamedService, suffix: string) => string {
   return (service, suffix) => nameFor(path, service, suffix);
-}
-
-function escapeForClass(ch: string): string {
-  return ch === '-' ? '\\-' : ch;
 }
 
 function trimEdges(s: string, sep: string): string {
