@@ -51,6 +51,11 @@ Option 1.
   answers `ready` with 200 once it can take a hook (503 while it cannot), the
   first `run` hook with 200 and every later one with 200 and no change (spec
   §3.5).
+- The image sets `RUNNER_BACKEND=microvm` in `environmentVariables` as well as
+  in the Dockerfile `ENV`, so the runner has its backend name whichever of the
+  two the platform passes to PID 1.
+- Both roles trust `lambda.amazonaws.com` only for calls from this account
+  (`aws:SourceAccount`).
 - The build role trusts `lambda.amazonaws.com`; it reads the one artifact
   object and writes `/aws/lambda-microvms/<imageName>`, which is also the
   image's build log group. The connector operator role trusts the same

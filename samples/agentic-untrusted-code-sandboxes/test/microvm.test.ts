@@ -536,6 +536,21 @@ describe('run', () => {
     expect(fetchMock.mock.calls[0][0]).toBe(`${ORIGIN}/run`);
   });
 
+  test('a proxy 502 from a MicroVM that ended before the call is a dead handle; one that ended after is no answer', async () => {
+    aws.on(GetMicrovmCommand).resolves(microvm('TERMINATED', { terminatedAt: new Date(Date.now() - 60_000), stateReason: 'terminated by caller' }));
+    fetchMock.mockResolvedValueOnce(reply(502, ''));
+    expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'dead', reason: 'terminated by caller' });
+    aws.on(GetMicrovmCommand).resolves(microvm('TERMINATED', { terminatedAt: new Date(Date.now() + 1000) }));
+    fetchMock.mockResolvedValueOnce(reply(502, ''));
+    expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
+    aws.on(GetMicrovmCommand).resolves(microvm('RUNNING'));
+    fetchMock.mockResolvedValueOnce(reply(502, ''));
+    expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
+    aws.on(GetMicrovmCommand).rejects(new Error('boom'));
+    fetchMock.mockResolvedValueOnce(reply(502, ''));
+    expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
+  });
+
   test('a proxy 502 is no answer; other proxy errors are errors that never carry the token', async () => {
     fetchMock.mockResolvedValueOnce(reply(502, 'Bad Gateway'));
     expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });

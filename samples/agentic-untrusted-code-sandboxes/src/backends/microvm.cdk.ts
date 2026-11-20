@@ -73,7 +73,7 @@ export class MicrovmBackendResources extends Construct implements BackendConstru
     });
     const sandboxSubnets = ctx.vpc.selectSubnets(ctx.sandboxSubnets);
     this.operatorRole = new iam.Role(this, 'ConnectorOperatorRole', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com', { conditions: { StringEquals: { 'aws:SourceAccount': stack.account } } }),
       description: 'Lets Lambda manage the network interfaces of the microvm egress connector',
     });
     this.operatorRole.addToPolicy(new iam.PolicyStatement({
@@ -116,7 +116,7 @@ export class MicrovmBackendResources extends Construct implements BackendConstru
     const buildLogGroup = this.buildLogGroupName();
     this.artifact = this.stageArtifact();
     this.buildRole = new iam.Role(this, 'ImageBuildRole', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com', { conditions: { StringEquals: { 'aws:SourceAccount': stack.account } } }),
       description: 'Lets Lambda read the runner artifact and write the image build log',
     });
     this.buildRole.addToPolicy(new iam.PolicyStatement({
@@ -150,7 +150,8 @@ export class MicrovmBackendResources extends Construct implements BackendConstru
       egressNetworkConnectors: [this.managedConnectorArn('INTERNET_EGRESS')],
       // None: a MicroVM has no way to add a capability (ADR-0019); the runner needs no more than root.
       additionalOsCapabilities: [],
-      environmentVariables: [],
+      // The runner also reads its backend name from the image ENV; set here too, in case the platform does not pass the image ENV to PID 1 (ADR-0037).
+      environmentVariables: [{ key: 'RUNNER_BACKEND', value: 'microvm' }],
       hooks: {
         port: RUNNER_PORTS.hooks,
         microvmImageHooks: { ready: 'ENABLED', readyTimeoutInSeconds: HOOK_READY_TIMEOUT_SECONDS },
