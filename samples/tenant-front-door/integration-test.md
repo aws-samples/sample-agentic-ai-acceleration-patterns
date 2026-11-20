@@ -165,11 +165,11 @@ because they hold its access role and the vendor IdP a rerun needs.
 `scripts/integ.sh leftovers <run id> <mode>` runs the leftover check
 alone: it exits 1 when something is left and 2 when a read failed, since
 then it cannot say the accounts are clean. It also reads the run's
-tenants in both `tenant-identity` deployments with `GetTenant`; a
-tenant still there (for example in `DELETING`) is reported, and a
-teardown rerun sends `DeleteTenant` again. By hand, look for stacks named `TfdInteg-<run id>-*` and
-`tfdi-<run id>-*` in both accounts (and in `us-east-1` of the edge
-account), the parameter
+tenants in both `tenant-identity` deployments with `GetTenant`; a tenant
+still there (for example in `DELETING`) is reported, and a teardown
+rerun sends `DeleteTenant` again. By hand, look for stacks named
+`TfdInteg-<run id>-*` and `tfdi-<run id>-*` in both accounts (and in
+`us-east-1` of the edge account), the parameter
 `/application-plane/applications/tfd-<run id>/shared/front-door-hook` in
 the control plane's account, TXT records at `_tfd-challenge.<dd>`, and
 certificates for `<dd>` and `probe.<dd>` in the edge account's

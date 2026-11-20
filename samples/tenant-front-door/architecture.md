@@ -221,8 +221,8 @@ deployment roles.
   leaves out the query string, the referrer and the cookie.
 - **Registrar.** The registrar logs one structured line per call with the
   caller role, the key and the outcome, never a body or a token, and
-  publishes
-  `RouteTableBytes` per distribution. An alarm fires at 80 % of the store.
+  publishes `RouteTableBytes` per distribution. An alarm fires at 80 % of
+  the store.
 - **Rate limits.** In `host` mode two WAF rate rules (per client address and
   host, then per host) count each tenant host's `/api/*` and `/agents/*`
   requests. In `single` mode the cell limits each verified tenant

@@ -492,8 +492,8 @@ estimates. Its inputs, steps and shortcuts are in
 
 The registrar is modelled in [`model/routes.smithy`](./model/routes.smithy).
 Every operation uses `AWS_IAM` and is idempotent. Only the two admitted
-principals can call it: the control plane's global hook role (`<fleet>-global-hook`)
-and the edge operator role.
+principals can call it: the control plane's global hook role
+(`<fleet>-global-hook`) and the edge operator role.
 
 | Operation | HTTP | Caller |
 |---|---|---|
@@ -527,7 +527,7 @@ challenge, are in the specification §5.1.
 - **Web baseline.** One response headers policy sets a hash-based CSP with
   Trusted Types, HSTS and the other headers on every response.
 - **Static analysis.** cdk-nag runs at synth with every acknowledgement
-  carrying its reason. The scan result and its dispositions are in the
+  carrying its reason. The scan results and their dispositions are in the
   threat model's "Security review".
 
 The full threat model, with every threat, mitigation and accepted risk, is in
@@ -611,8 +611,8 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
   [`integration-test.md`](./integration-test.md#test-only-shortcuts). A
   deployment does not copy them.
 - **Scans.** The threat model's security review records the ProtoShield
-  scan of the sample, the integration test's stacks included, and the outcome
-  of each finding. Rescan after your own changes.
+  scans of the sample, the integration test's stacks included, and the
+  outcome of each finding. Rescan after your own changes.
 - **The integration driver needs bash 4.4, GNU coreutils, curl 7.75, jq 1.6
   and AWS CLI v2** or later, and a unit test of the driver needs `npm ci` in
   `../control-plane`.
