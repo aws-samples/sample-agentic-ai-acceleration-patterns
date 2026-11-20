@@ -177,8 +177,9 @@ and the records in
    route registrar (front-door spec §3.2, front-door ADR-0017). The
    ingress publishes its own parameter in the cell account, as
    runtime-isolation does (front-door spec §6.3).
-3. The tenant script runs: `PutTenantSubscription` on the cell
-   ingress's Entitlements API, and makes no identity or route call. It does not run
+3. The tenant script runs `PutTenantSubscription` on the cell
+   ingress's Entitlements API and makes no call to the identity or to the
+   route registrar. It does not run
    tenant-identity's own control-plane mount
    (`scripts/control-plane/tenant/create.sh`), because the platform API
    admits a caller in the identity's own account only and the tenant role
@@ -479,7 +480,7 @@ A platform run uses four manifests:
 |---|---|---|---|
 | `tenant-identity.json` | `tenant-identity` `seed` | `agentic-runtime-isolation` | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each user as `{username, email}` |
 | `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation`; `control-plane`, for the identity calls of §3.3 step 4 (W-9) | the value of the SSM parameter `/<prefix>/identity`: `region`, `apiUrl` (the execute-api URL of the platform API), `userPoolId`, `appClientId`; the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>` |
-| `control-plane.json` | `control-plane` `seed`; its driver adds `identity[]` in PS-1 | `agentic-runtime-isolation` | tenant ids in `seeded[]` (the platform's steady set), `churn[]` and `extra[]`; the last two belong to the control-plane scenarios; `identity[]`: for each tenant whose identity the driver created (§3.3 step 4), `tenantId`, `admin` and `users[]` as in `tenant-identity.json` |
+| `control-plane.json` | `control-plane` `seed`; its driver adds `identity[]` after each deployment it onboards (§3.3 step 4) | `agentic-runtime-isolation`; `control-plane` (teardown) | tenant ids in `seeded[]` (the platform's steady set), `churn[]` and `extra[]`; the last two belong to the control-plane scenarios; `identity[]`: for each tenant whose identity the driver created (§3.3 step 4), `tenantId`, `admin` and `users[]` as in `tenant-identity.json` |
 | `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` (W-7) | `agentic-runtime-isolation`; `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
 
 `agentic-runtime-isolation` also writes `manifest.json` (the tenants it
@@ -495,10 +496,13 @@ writes; the driver records them in `identity[]` of `control-plane.json`
 (stress ADR-0017), and the runtime-isolation slice reads that list for
 control-plane tenants in place of `tenant-identity.json` (W-9); a
 control-plane tenant with no entry is refused (`no-identity-tenant`). The
-`control-plane` `teardown` deletes the identity tenants its driver created,
-because the control plane's `DeleteDeployment` does not and the
+`control-plane` `teardown` deletes the identity tenants of the deployments
+it deletes, because the control plane's `DeleteDeployment` does not and the
 `tenant-identity` `teardown` removes only the tenants it seeded; the
-reverse order runs it before `tenant-identity`'s (P-6).
+reverse order runs it before `tenant-identity`'s (P-6). The `large` fleet
+is a fixture (P-5): its identity tenants stay with it, and `--fixtures`
+removes them. `DeleteTenant` scans the whole pool in `shared-pool`
+(tenant-identity README), so that teardown's time at `large` is a result.
 
 ### 4.3 Result records
 
@@ -702,7 +706,7 @@ Q-5.
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
 | W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | no: blocked on the front door |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part yes; front-door part after its merge |
-| W-9 first platform run at `small`: also the control-plane driver's identity calls (§3.3 step 4) and the record of them that the runtime-isolation slice reads (§4.2), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | no |
+| W-9 first platform run at `small`: also the control-plane driver's identity calls (§3.3 step 4) and the record of them that the runtime-isolation slice reads (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | no |
 
 ## 10. Open questions
 

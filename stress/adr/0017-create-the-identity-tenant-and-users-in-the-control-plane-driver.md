@@ -169,9 +169,10 @@ W-9 implements: the driver's identity calls after each tenant's deployment
 is `ACTIVE`; `identity[]` in `control-plane.json`, read by the
 runtime-isolation slice for control-plane tenants; `execute-api:Invoke` on
 the platform API for the driver's session; retry on throttling; the
-Cognito draw in the slice's `budget`; and the cleanup of those identity
-tenants in the `control-plane` `teardown`, because the control plane's
+Cognito draw in the slice's `budget`; and the cleanup of the identity
+tenants of the deployments the `control-plane` `teardown` deletes (the
+`large` fleet's stay with the fixture), because the control plane's
 `DeleteDeployment` no longer removes them and the `tenant-identity`
 `teardown` knows only the tenants it seeded. Revisit if the tenant-identity
-sample gains a
-control-plane hook, or if the platform API admits cell-account roles.
+sample gains a control-plane hook, or if the platform API admits
+cell-account roles.
