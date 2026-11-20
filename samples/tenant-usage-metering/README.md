@@ -55,16 +55,27 @@ HTTPS (secret or SigV4) or the export bucket.
 
 ## How it works
 
-1. **Register.** On `CELL_CREATE` (`PRE`) the hook calls `PutCellEmitter`;
-   on `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE` (`PRE`),
-   `PutTenantBinding`; deletes run in `POST` and close the registration
-   with a grace period (spec §3.4).
+1. **Register.** A cell's emitter is the IAM role that the cell's
+   workload signs its usage events with; it is the only identity the
+   ingest door accepts for that cell. Whatever places tenants in cells
+   calls `PutCellEmitter` when a cell is created, to register that role,
+   and `PutTenantBinding` when a tenant is placed in a cell, so the role
+   may report usage for that tenant. Deletes close the registration after a grace period
+   (spec §3.4). (With the [`control-plane`](../control-plane/) sample, a
+   global vendor hook makes these calls: `PutCellEmitter` on
+   `CELL_CREATE`, `PutTenantBinding` on `DEPLOYMENT_CREATE` and
+   `DEPLOYMENT_UPDATE`, both in `PRE`, and the deletes in `POST`.)
 2. **Define meters.** An operator creates meters (`COUNT`, `SUM`, `MAX`,
    `UNIQUE_COUNT`) and sinks. A change writes a new version that counts
    from the next whole hour (ADR-0004).
-3. **Emit.** A cell's workload sends batches of up to 100 events as
-   `<fleet>-ue-<cellId>`. Each event gets `ACCEPTED`, `RETRY` or
-   `REFUSED` with a reason (architecture.md §6).
+3. **Emit.** The workload in a cell runs under the cell's emitter role,
+   `<fleet>-ue-<cellId>`, where `<fleet>` is the `fleetName` the stack was
+   deployed with. It sends usage with the `UsageEmitter` client in
+   [`scripts/emit-usage.ts`](scripts/emit-usage.ts), a code snippet to
+   copy into the workload, not a CDK construct: `record()` buffers an
+   event, and `flush()` signs and posts the buffer in batches of up to
+   100 events. Each event gets `ACCEPTED`, `RETRY` or `REFUSED` with a
+   reason (architecture.md §6).
 4. **Store.** Accepted events go through the ingest bus and Firehose to
    `raw/hour=<event hour>/` (ADR-0002); refused ones go to `error/`.
 5. **Count.** After the hour's grace, the recounter dedupes on
@@ -249,10 +260,10 @@ traffic with the [AWS Pricing Calculator](https://calculator.aws/).
 
 | Cost | Unit | Estimate | Main parts |
 |---|---|---|---|
-| Per event | million events | about $0.37 | ingest bus in and out ($0.15), Firehose ingestion in 5 KB steps and dynamic partitioning ($0.17), API Gateway ($0.04), ingest Lambda ($0.02) |
-| Per event, one event per call | million events | about $5.50 | API Gateway ($3.70, $3.19 after the first 333 million requests a month) and one ingest Lambda call per event ($1.55) take over |
+| Per event, 100 events per ingest call | million events | about $0.37 | ingest bus in and out ($0.15), Firehose ingestion in 5 KB steps and dynamic partitioning ($0.17), API Gateway ($0.04), ingest Lambda ($0.02) |
+| Per event, one event per ingest call | million events | about $5.50 | the same, but each event pays for its own API Gateway request ($3.70, $3.19 after the first 333 million requests a month) and its own ingest Lambda call ($1.55) |
 | Per record | million records | about $6 | transactional record writes and delivery updates in DynamoDB, usage bus, dispatcher queue and Lambda; each further sink adds about $2 |
-| Raw store | GB-month | $0.0245 | S3 Standard; 1 GB holds about two million events, kept for `rawRetentionDays` (400 by default) |
+| Raw event storage | GB-month | $0.0245 | the S3 `raw/` objects that keep every accepted event for recounts; S3 Standard, 1 GB holds about two million events, kept for `rawRetentionDays` (400 by default) |
 | Fixed | month | about $5 | the two 5-minute schedules, the recounter, alarms, logs; $0.40 a month per `SECRET` sink |
 
 A record is one tenant, application and meter in one hour, so the record
@@ -267,8 +278,13 @@ meters, in the first month:
 | 100,000 events per tenant, active every hour | 1 billion | 21.9 million | about $520 | about $0.05 |
 | As above, one event per ingest call | 1 billion | 21.9 million | about $5,400 | about $0.54 |
 
-Batching is the largest lever: send many events per ingest call. Storage
-grows with retention: the raw store of the third row adds about 500 GB a
+Batching is the largest lever: send many events per ingest call. The
+workload that emits usage owns the batching: the service accepts up to
+100 events per call but does not require more than one. With
+`UsageEmitter`, each `flush()` sends what has been recorded since the
+last one, so call it on a timer or after a number of events, not after
+every `record()`. Storage
+grows with retention: the raw event storage of the third traffic row adds about 500 GB a
 month and reaches about 6.5 TB, about $160 a month, after 400 days. Usage
 records stay in the table, which has no TTL on them: at about 0.5 KB a
 record, 21.9 million records add about 11 GB a month, and with PITR each
@@ -304,6 +320,9 @@ Threats, mitigations and residuals: [`threat-model.md`](threat-model.md).
 - [ ] `alarmTopicArn` wired to the on-call rotation (M-12, M-21).
 - [ ] A reconciliation of the registry against the control plane's
       deployments, for delete hooks that were skipped (T-9).
+- [ ] Where cells share an account, a trust policy on each emitter role
+      that names only that cell's compute, never the account root, and
+      `iam:PassRole` scoped per cell; or one account per cell (T-28).
 - [ ] `RemovalPolicy.RETAIN` on the table and the buckets (M-24 residual:
       a stack delete removes them).
 - [ ] A distributed map in the recounter for hours larger than one task's
