@@ -260,7 +260,7 @@ code; destroy 32 s for the stack and 35 s for the DNS records.
 ## Smoke run, 2026-11-19
 
 `scripts/smoke.sh`: the built sample in `single` mode with one demo cell,
-before the control plane's hooks exist. Routes are seeded straight into the
+with no control plane and no hooks. Routes are seeded straight into the
 route table (the §10 step 2 shortcut); the control plane the front door
 names does not exist.
 

@@ -2,13 +2,10 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Tenant front door for agentic applications: specification
 
-Status: Proposed. §8 lists the decisions, all Accepted except ADR-0017,
-which is Proposed. This specification describes route registration as
-ADR-0017 decides it, from the control plane's global hooks. That design
-depends on control-plane ADR-0044, which is on `main` and also Proposed
-(Q-5). The registration design is therefore not settled until ADR-0044
-and ADR-0017 are both accepted. ADR-0013 stays Accepted until then, and
-ADR-0017 will supersede it on acceptance.
+Status: Proposed. §8 lists the decisions, all Accepted except ADR-0013,
+which ADR-0017 supersedes, and ADR-0027, which is Proposed. Routes are
+registered as ADR-0017 decides, from the control plane's global hooks
+(control-plane ADR-0044).
 
 ## 1. Problem statement
 
@@ -184,8 +181,8 @@ has passed the registrar's domain challenge (ADR-0018).
 | `CellRouteAccess` construct | the cell's | Lambda permission | Grants `cloudfront.amazonaws.com` `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`, conditioned on the edge distribution's ARN |
 | Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy. The router forwards only `/agents/<backend>/invocations` and strips the leading `/agents`, so the ingress receives `<stage>/<backend>/invocations` (§3.3 step 7, ADR-0019) |
 | Route hook | the control plane's | CodeBuild, the control plane's global hook project, under `<fleet>-global-hook` (control-plane R-41) | `hooks/route-hook.sh`, registered as two global hooks. `front-door-post` (`POST` on `CELL_CREATE`, `CELL_UPDATE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`) puts the cell or tenant route; `front-door-pre` (`PRE` on `CELL_DELETE`, `DEPLOYMENT_DELETE`) deletes it (§3.2, §3.4). It acts only for an application that has a front door hook parameter (`RouteHookAccess`, below) in the control plane's account, and exits 0 for every other (ADR-0014) |
-| `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | The front door hook parameter `/application-plane/applications/<applicationId>/shared/front-door-hook` with `registrarUrl`, a name of its own so that it cannot collide with the cell-account copy (§6.4) when the control plane's account also hosts cells. The parameter has `DeletionPolicy` and `UpdateReplacePolicy` `Retain`, so deleting or replacing the stack keeps it (§3.4 route hook step 1, §6.2). The name is fixed, so a retained parameter has to be deleted, or imported into the new stack, before `RouteHookAccess` is deployed again after a stack delete or after a first create that rolled back (CloudFormation keeps `Retain` resources on a create rollback too); otherwise the create fails because the parameter exists. When `applicationId` changes, the operator deletes the old application's parameter: while it stays, the hook calls the registrar for that application, the registrar refuses with 403 (§3.4 step 3) and that application's creates and updates fail (§6.2 limits). The stack also holds a customer-managed policy, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` invoke this registrar and read any front door hook parameter, `/application-plane/applications/*/shared/front-door-hook` |
-| `register-hooks.sh` | the operator's shell | the control plane API, with an operator token | Puts both global hooks with `PutHook`, from this sample's source at a pinned commit; idempotent. `--delete` removes them (§5.2) |
+| `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | Added by the front door's app once the `registrarUrl` input names the deployed registrar (§3.6, ADR-0027). The front door hook parameter `/application-plane/applications/<applicationId>/shared/front-door-hook`, one JSON document with `version`, `registrarUrl`, `appDomain` and `addressing` (§6.4), a name of its own so that it cannot collide with the cell-account copy (§6.4) when the control plane's account also hosts cells. The parameter has `DeletionPolicy` and `UpdateReplacePolicy` `Retain`, so deleting or replacing the stack keeps it (§3.4 route hook step 1, §6.2). The name is fixed, so a retained parameter has to be deleted, or imported into the new stack, before `RouteHookAccess` is deployed again after a stack delete or after a first create that rolled back (CloudFormation keeps `Retain` resources on a create rollback too); otherwise the create fails because the parameter exists. When `applicationId` changes, the operator deletes the old application's parameter: while it stays, the hook calls the registrar for that application, the registrar refuses with 403 (§3.4 step 3) and that application's creates and updates fail (§6.2 limits). The stack also holds a customer-managed policy, `tenant-front-door-route-hook-<applicationId>`, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` read any front door hook parameter (`ssm:GetParameter` on `/application-plane/applications/*/shared/front-door-hook`) and invoke this registrar's hook routes (`execute-api:Invoke` on `PUT` and `DELETE` of `/cells/*` and `/tenants/*`). `/tenants/*` also matches `PUT /tenants/<tenantId>/status`, which the registrar refuses to the hook role (§5.1). It grants nothing else |
+| `register-hooks.sh` | the operator's shell | the control plane API, with an operator token | Puts both global hooks with `PutHook`, from this sample's source at a pinned commit, and checks them with `ListHooks`; idempotent. `--delete` removes them (§5.2) |
 | Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010) | Per-tenant requests, errors, bytes and latency from the record fields ADR-0010 lists, and the tenant in `viewer-request-log-data` (Telemetry, below) |
 
 **Telemetry.** The delivery's record fields are the ones ADR-0010 lists.
@@ -228,7 +225,7 @@ billing-grade count comes from the cell's own log of verified requests.
 | Edge stack | edge | `us-east-1` | The ACM certificate for `<appDomain>` (and `*.<appDomain>` in `host` mode) and the CloudFront-scope web ACL with its rate rules (ADR-0009, ADR-0021) |
 | Main stack | edge | The deployment Region, the control plane's (`eu-central-1` in the integration test) | The multi-tenant distribution and the pooled distribution tenant, the router, the KeyValueStore, the response headers policy (§7.1) and the SPA bucket; the registrar (API, function, resource policy); the custom resources for the `signin` key and the teardown; the published parameter. With `dedicatedDomains` on: the sweeper, its table, queue, schedules, log group and alarms, the guard and the starter. The `dedicatedDomains` switch is an update of this stack |
 | Edge logging stack | edge | `us-east-1` | The log group, delivery source, delivery destination and delivery, after the main stack |
-| `RouteHookAccess` stack | the control plane's | The control plane's | The hook parameter and the hook policy (§3.1) |
+| `RouteHookAccess` stack | the control plane's | The control plane's | The hook parameter and the hook policy (§3.1), after the main stack, with that stack's `registrarUrl` as an input (ADR-0027) |
 
 A cell's own stack (`CellRouteAccess`) is in the cell's account and Region.
 The registrar requests the ACM certificates of dedicated domains, in
@@ -1221,7 +1218,10 @@ store, `cloudfront:ListDistributionTenants` and, in `us-east-1`,
 `acm:ListCertificates` and `acm:ListTagsForCertificate`.
 
 The route hook (`hooks/route-hook.sh`) runs on the events of §3.2 with
-the control plane's hook environment (control-plane R-42):
+the control plane's hook environment (control-plane R-42). It first
+checks `PHASE` and `EVENT` against the two registrations of §5.2, and
+`HOOK_SCOPE` against `GLOBAL`, and fails on any other, so a wrong
+registration fails loudly (control-plane `scripts/CONVENTIONS.md`).
 
 1. Read `/application-plane/applications/<APPLICATION_ID>/shared/front-door-hook`
    in the control plane's account. No such parameter: exit 0, because
@@ -1242,9 +1242,13 @@ the control plane's hook environment (control-plane R-42):
    (`ThrottlingException`, `TooManyRequestsException`) is retried inside
    the build, five attempts with jittered backoff over about a minute,
    and fails the hook only when it still fails after that. Any other
-   read error fails the hook at once.
+   read error fails the hook at once. A parameter that is not a version 1
+   document, whose `registrarUrl` is not an API Gateway stage URL in the
+   control plane's Region, or whose `appDomain` is not a lower-case DNS
+   name, fails the hook too.
 2. Take the ids from `CELL_ID` and `TENANT_ID`, never from
-   `SCRIPT_OUTPUTS`. The hook sends no display name; the registrar reads
+   `SCRIPT_OUTPUTS`, and fail on one that is not a control-plane id (26
+   upper-case Crockford base32 characters). The hook sends no display name; the registrar reads
    it from the control plane (step 2 of §3.4). On a cell `POST`,
    read `frontDoorApiDomain` from `SCRIPT_OUTPUTS`. The outputs are
    written by a
@@ -1252,14 +1256,15 @@ the control plane's hook environment (control-plane R-42):
    (control-plane R-43, T44). The hook finds a repeated key with a
    streaming parse (`jq --stream`, comparing the keys it emits with the
    object's own), because plain `jq` keeps the last value of a repeated
-   key. An object with a repeated key, or no `frontDoorApiDomain`,
-   fails the hook. It checks the value against the §3.4 step 3 origin
+   key. A value that is not a JSON object of strings, an object with a
+   repeated key, or one with no `frontDoorApiDomain`, fails the hook. It checks the value against the §3.4 step 3 origin
    form before sending, and the registrar checks it again (400). It
    builds every request body with `jq --arg`, and never `eval`s an
    input or splices one into a command line.
 3. Call the registrar with `curl --aws-sigv4`, signed for
    `execute-api` with the hook role's credentials, which the hook reads
-   from the CodeBuild container credential endpoint and never prints.
+   with `aws configure export-credentials` from the CodeBuild container
+   credential provider and never prints.
    They are temporary, so the request also carries the session token
    in `x-amz-security-token`. The key pair and that header reach curl
    through a config file (`-K`), mode 600 in a temporary directory,
@@ -1497,7 +1502,7 @@ carries over (step 5).
 | `addressing` | no | `single` | `single`: one URL, tenant from the token. `host`: one host per tenant |
 | `applicationId` | yes | | The control-plane application this front door serves |
 | `controlPlane` | yes | | Control plane API URL, account id and Region, and the vendor IdP token URL and client (secret in Secrets Manager) the registrar uses to get a reader token. The deployer lists that client id in the control plane's `vendorIdp.clientIds` (§6.1). The account id names the global hook role the registrar admits; the Region is the one every cell origin must be in (§3.4 step 3) |
-| `fleet` | yes | | The control plane's fleet name, which names its global hook role, `<fleet>-global-hook`, the one control-plane role the registrar admits |
+| `fleet` | yes | | The control plane's fleet name (`fleetName`, `[a-z0-9][a-z0-9-]{0,31}`, control-plane §3.3), which names its global hook role, `<fleet>-global-hook`, the one control-plane role the registrar admits |
 | `edgeOperatorRoleArn` | yes | | ARN of a role in the edge account that the registrar admits for the vendor-only calls: suspend and resume, `customDomain`, backfill, origin changes and clearing leftovers (§3.4). The deployer brings the role; the stack does not create it |
 | `issuer` | yes | | The SPA's client id and scopes, and the issuer's authorize, token and logout endpoints as `https` URLs, or a Cognito user-pool domain they are derived from (`/oauth2/authorize`, `/oauth2/token`, `/logout`). Optionally `exchangeEndpoint`, an `https` URL, for an issuer that serves the multi-tenant token exchange on a URL other than its token endpoint (§3.5); omit it when the issuer serves the exchange at its token endpoint or no user holds a `tenants` token. Validated at synth, with no network call (§7.1) |
 | `signinKeys` | no | `{ids: ["k1"], current: "k1"}` | `host` mode only: `{ids: string[], current: string}`, the `kid`s the `signin` key holds and the one that signs. Synth checks that `ids` holds one or two unique ids, each matching `[a-z0-9]{1,8}`, and that `current` is one of them (§4.1) |
@@ -1508,6 +1513,7 @@ carries over (step 5).
 | `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate: at the edge per host in `host` mode, at the origin per verified tenant in `single` mode (ADR-0009) |
 | `ipRequestsPer5Min` | no | 500 | `host` mode only: the most requests one client IP may send to one tenant host's `/api/*` and `/agents/*` in 5 minutes before the edge answers 429, counted ahead of the per-host count (ADR-0021). One value for every tenant host; there is no per-tenant setting. A chosen value, not a measured one. Keep it below `tenantRequestsPer5Min`. A tenant whose users all reach the edge through one office NAT address shares one count: at 500 its whole user base gets about 1.7 requests per second before `tenantRequestsPer5Min` applies. Raising it raises it for every host |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports, on for the whole session in both modes. No report carries the callback's code, because the first inline script removes it from the URL before anything loads (§7.1 Reports) |
+| `registrarUrl` | no | none | The `registrarUrl` of this front door's edge parameter (§6.4), `https://<api id>.execute-api.<control plane Region>.amazonaws.com/v1/`, known once the main stack is deployed. Set, the app adds the `RouteHookAccess` stack in the control plane's account and Region (§3.1, ADR-0027); validated at synth |
 | `alarmTopicArn` | no | none | ARN of an SNS topic in the main stack's account and Region. The construct adds it as the ALARM action of every alarm this specification defines: the three-miss, `unverifiable`, queue-depth, missing-pages and no-lister alarms of the sweeper (§3.4 step 5) and the 80 % route table alarm on the registrar's `RouteTableBytes` metric (§4.1). Every one of these alarms is in the main stack's Region, so one topic serves them all. The deployer owns the topic, its policy (it must allow CloudWatch to publish) and its subscribers. With no topic the alarms exist and notify no one |
 
 `tenant_id` in this specification means the claim that `tenantClaim`
@@ -1669,8 +1675,8 @@ cell routes and every call in `single` mode it waits the full 45 s, a
 bound and not a check: in `single` mode a route cannot be observed
 without a tenant token, and a `cell#` route cannot be observed from
 outside. In `host` mode a tenant route put polls
-`https://<tenant>.<appDomain>/config.json` and returns on the first 200
-whose `rev` equals the `dt` in the registrar's answer. A replaced entry
+`https://<tenant>.<appDomain>/config.json` every 3 s and returns on the
+first 200 whose `rev` equals the `dt` in the registrar's answer. A replaced entry
 (a new `dt`, §3.4 step 5) is therefore live before the hook ends, which
 the old entry's own 200 would otherwise hide. A tenant route delete
 returns on the first 404. When none arrives within
@@ -1802,26 +1808,40 @@ backoff; a 429 with `reason: certificate-quota` is not.
 ### 5.2 Script and construct forms
 
 - **`hooks/route-hook.sh`**, the route hook (§3.4), driven by the control
-  plane's hook variables (`APPLICATION_ID`, `EVENT`, `PHASE`, `CELL_ID`,
-  `TENANT_ID`, `SCRIPT_OUTPUTS`; control-plane R-42) and
-  the registrar URL from the front door hook parameter in the control
-  plane's account. It signs with the global hook role's credentials
+  plane's hook variables (`EVENT`, `PHASE`, `HOOK_ID`, `HOOK_SCOPE`,
+  `APPLICATION_ID`, `CELL_ID`, `TENANT_ID` and, on `POST`,
+  `SCRIPT_OUTPUTS`; control-plane R-42), `AWS_REGION`, which CodeBuild
+  sets, and the front door hook parameter in the control plane's
+  account. It signs with the global hook role's credentials
   through `curl --aws-sigv4`, with the session token in
   `x-amz-security-token` and every credential in a `-K` config file,
   parses the outputs with `jq --stream` and
-  builds bodies with `jq --arg` (§3.4).
+  builds bodies with `jq --arg` (§3.4). It needs the AWS CLI v2, `jq` and
+  curl 7.75 or later, which the CodeBuild standard image of the control
+  plane's hook projects carries. Its worst case, a minute of throttled
+  parameter reads, two minutes of registrar retries and the 45 s wait,
+  fits the hooks' 10-minute run timeout.
 - **`scripts/register-hooks.sh [--delete]`**, run by an operator with an
-  operator token: puts `front-door-post` and `front-door-pre` with
+  operator token (`CONTROL_PLANE_URL`, `CONTROL_PLANE_TOKEN`, which
+  reaches curl on stdin): puts `front-door-post` and `front-door-pre` with
   `PutHook` (control-plane R-39), each with this sample's repository as
-  `source`, pinned to a full commit SHA, and
-  `samples/tenant-front-door/hooks/route-hook.sh` as `script`. The two
+  `source` (`GITHUB`, overridable for a fork), pinned to a full commit
+  SHA (`HOOK_SOURCE_VERSION`), `samples/tenant-front-door/hooks/route-hook.sh`
+  as `script` and `timeoutMinutes` 10. It first reads each hook with
+  `GetHook` and leaves one registered with the same definition as it is,
+  so a rerun changes nothing and does not raise the revision, then checks
+  with `ListHooks` that both hooks are there with their phases and
+  events. A put reaches only operations the control plane accepts after
+  it (control-plane R-40), so the operator runs it before the
+  application's first cell. The two
   hooks serve every front door on the control plane, and take two of
   its five global hook slots. One pin serves them all, so moving it
   changes the hook for every front door at once: the hook-to-registrar
   API stays backward compatible across sample versions (a new hook works
   with an older registrar and the reverse), or every front door on the
   control plane upgrades together. `--delete` removes them with
-  `DeleteHook`.
+  `DeleteHook`, a 404 included, and checks that `ListHooks` names
+  neither.
   Run it first when the last front door on a control plane is removed:
   once no `RouteHookAccess` policy is attached, the hook can no longer
   read the front door hook parameters, so it fails, and with it every cell
@@ -1897,10 +1917,16 @@ All with a small static HTML or JSON body and `no-store`:
 - A control plane with global hooks (control-plane R-39 to R-46,
   control-plane ADR-0044) and two global hook slots free, on which an
   operator runs `register-hooks.sh` (§5.2). In the control plane's
-  account, this front door's `RouteHookAccess` stack, with its policy
+  account, this front door's `RouteHookAccess` stack, deployed after the
+  main stack with its `registrarUrl` (§3.6), with its policy
   listed in the control plane's `globalHookManagedPolicyArns`, which
   takes only customer-managed policies in the control plane's own
-  account. The registrar admits no role in a cell account (§3.4).
+  account and partition, and an update of the control plane. The global
+  hook project must be able to fetch the hook's source: a public GitHub
+  repository needs no credential, and a private one or a fork needs the
+  source credentials the control plane's provisioning projects use
+  (control-plane N-6). The registrar admits no role in a cell account
+  (§3.4).
   The front door's hooks name only cell and deployment events, so the
   application, tenant and account events of control-plane ADR-0045 do
   not run them. Under ADR-0045 the control plane's record writes
@@ -2115,7 +2141,7 @@ Limits of these promises:
 
 | Sample | How | Needed for |
 |---|---|---|
-| `control-plane` | its API (`GetCell`, `GetDeployment`, `GetTenant`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its global hooks (R-39 to R-46, control-plane ADR-0044): `PutHook`, the `<fleet>-global-hook` role and `globalHookManagedPolicyArns`, the hook environment and `SCRIPT_OUTPUTS`. A prerequisite: without hooks the front door registers no route, and ADR-0044 is on `main` but still Proposed (Q-5) | placement checks, route registration, the integration test |
+| `control-plane` | its API (`GetCell`, `GetDeployment`, `GetTenant`) with the reader grant (R-36) and a client-credentials reader token (spike S-9 showed both are needed: a `role` trigger on the vendor IdP and the `vendorIdp.clientIds` input of R-38, ADR-0043), its global hooks (R-39 to R-46, control-plane ADR-0044): `PutHook`, the `<fleet>-global-hook` role and `globalHookManagedPolicyArns`, the hook environment and `SCRIPT_OUTPUTS`. A prerequisite: without hooks the front door registers no route | placement checks, route registration, the integration test |
 | `tenant-identity` `shared-pool` and `shared-pool-multi-tenant` | its published parameters; the second topology also mints the `tenants` token and serves the token exchange (§3.5), whose `allowedOrigins` input lists the app's origins (`tenant-identity` §5.4.1 and ADR-0040; the values are in §6.1). Step 5 of §10 uses a `tenants` token only to check the edge's 401 and calls no exchange. | the demo issuer and the integration test |
 | `agentic-runtime-isolation` | its `/application-plane/shared/agent-runtime/ingress` parameter: `baseUrl` gives the `agentIngress` origin's domain and origin path. The integration test does not compose it: step 23 runs against a stand-in ingress (ADR-0024) | `/agents/*`, optional |
 
@@ -2157,8 +2183,9 @@ ingress behind `/agents/*` needs its URL form checked first.
   stack reads as a CloudFormation SSM parameter (ADR-0026). The
   `RouteHookAccess` stack writes
   `/application-plane/applications/<applicationId>/shared/front-door-hook`
-  in the control plane's account, with `registrarUrl`, for the route
-  hook (§3.1). The names differ, so a control-plane account that also
+  in the control plane's account for the route hook (§3.1), one JSON
+  document: `version` (1), `registrarUrl`, `appDomain` and `addressing`,
+  which the hook needs to poll a tenant host in `host` mode (§4.2). The names differ, so a control-plane account that also
   hosts cells, as in the integration test, holds both.
 
 ## 7. Web platform baseline
@@ -2331,11 +2358,11 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0010](../adr/0010-deploy-the-edge-stack-in-us-east-1.md) | Split the edge stack into `us-east-1`, logs included | edge stacks plus main stack with cross-Region references and CloudWatch Logs; the same with logs in S3; everything in `us-east-1` |
 | [ADR-0011](../adr/0011-protect-cell-origins-with-origin-access-control-across-accounts.md) | Protect cell origins with origin access control, across accounts | OAC with a cross-account Lambda permission; secret header; IP allowlist |
 | [ADR-0012](../adr/0012-cap-the-route-table-and-shard-by-distribution.md) | Route table size ceiling and sharding | one store and a ceiling; shard by distribution |
-| [ADR-0013](../adr/0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Register routes through a registrar that checks the control plane, called from the cell's account. Accepted; ADR-0017 supersedes it once control-plane ADR-0044 is accepted | registrar with a placement check; a cross-account role that writes the store directly; the control plane writes routes |
+| [ADR-0013](../adr/0013-register-routes-through-a-registrar-that-checks-the-control-plane.md) | Register routes through a registrar that checks the control plane, called from the cell's account. Superseded by ADR-0017 | registrar with a placement check; a cross-account role that writes the store directly; the control plane writes routes |
 | [ADR-0014](../adr/0014-run-one-front-door-per-control-plane-application.md) | One front door per control-plane application | one per application; one shared front door keyed by application |
 | [ADR-0015](../adr/0015-read-the-control-plane-with-a-reader-token.md) | Read the control plane with a reader token | reader role (control-plane ADR-0042); operator app client; an IAM-authorised read stage |
 | [ADR-0016](../adr/0016-sign-in-through-one-shared-host-in-host-mode.md) | Sign in and out through one shared host in `host` mode | shared sign-in host with a signed `state`; a callback URL per tenant; a wildcard callback URL |
-| [ADR-0017](../adr/0017-register-routes-from-a-control-plane-global-hook.md) | Proposed. Register routes from a control-plane global hook; the registrar admits no cell account role, still checks the control plane, and takes a cell's origin once; amends ADR-0002, ADR-0003, ADR-0012, ADR-0014, ADR-0015 | provisioning role in the cell account calls the registrar; tombstones and operator-only rules; the control plane writes the store directly; a global hook calls the registrar |
+| [ADR-0017](../adr/0017-register-routes-from-a-control-plane-global-hook.md) | Register routes from a control-plane global hook; the registrar admits no cell account role, still checks the control plane, and takes a cell's origin once; amends ADR-0002, ADR-0003, ADR-0012, ADR-0014, ADR-0015 | provisioning role in the cell account calls the registrar; tombstones and operator-only rules; the control plane writes the store directly; a global hook calls the registrar |
 | [ADR-0018](../adr/0018-prove-a-dedicated-domain-with-a-per-tenant-dns-challenge.md) | Keep dedicated domains in the sample, off unless `dedicatedDomains` is on; route one only after a TXT record holds a token the registrar issued for the tenant and domain, resolved by the function's default resolver and re-checked daily; amends ADR-0002, ADR-0012, ADR-0016 | validated ACM certificate only; TXT record with a registrar-issued per-tenant token; HTTP file challenge on the domain; operator attestation only |
 | [ADR-0019](../adr/0019-strip-agents-before-the-agent-ingress.md) | The router strips `/agents` from `/agents/<backend>/invocations` before the agent ingress, and answers 404 for any other `/agents` path; amends ADR-0011 | router `uri` rewrite; an `/agents` base path on the ingress side; no prefix |
 | [ADR-0020](../adr/0020-keep-the-re-check-state-in-a-sweeper-owned-dynamodb-table.md) | Keep the dedicated-domain re-check state in a sweeper-owned DynamoDB table: one item for each tenant and domain, one for each daily run | the log as the record (Logs Insights); a sweeper-owned DynamoDB table; fields in the route table |
@@ -2345,6 +2372,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0024](../adr/0024-test-the-agent-route-against-a-stand-in-ingress.md) | Test the agent route against the stand-in ingress of spike S-5, not a composed `agentic-runtime-isolation` | compose `agentic-runtime-isolation` (deploy or reuse); a stand-in |
 | [ADR-0025](../adr/0025-change-a-route-status-without-reading-the-control-plane.md) | The edge operator's status change skips the control-plane read, so a suspension works while the control plane is down | read the placement first; skip the read |
 | [ADR-0026](../adr/0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to each cell account as a plain string | a JSON document; a plain string |
+| [ADR-0027](../adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Proposed. Write the front door hook parameter, one JSON document, from a `registrarUrl` input once the main stack is deployed | an input read after the main stack's deploy; the hook reads the edge parameter across accounts; a fixed registrar domain; a separate app |
 
 ## 9. Spikes
 
@@ -2457,7 +2485,8 @@ destroy time, which the test reports with the rest.
    operator role the test created, `controlPlane` naming the control
    plane's account and the stand-in's endpoint as `agentIngress`. In the
    control plane's account deploy its
-   `RouteHookAccess` stack, add the stack's policy to the control plane's
+   `RouteHookAccess` stack (the front door app with `registrarUrl` from
+   the edge parameter, §3.6), add the stack's policy to the control plane's
    `globalHookManagedPolicyArns` and update the control plane, then run
    `register-hooks.sh`: `ListHooks` names `front-door-post` and
    `front-door-pre`. Register the demo application, whose cell scripts
@@ -2845,10 +2874,16 @@ checks its exchange's CORS answers); and the per-IP rate rule's block (the web A
 checks its priority, its Host-and-IP key and each rule's
 `x-tfd-rate-rule` header, and the test has one source address). The alarms' notifications are not checked; a template test checks that
 every alarm names `alarmTopicArn` when it is set, and
-step 14 checks the metric count the re-check alarm watches.
+step 14 checks the metric count the re-check alarm watches. The route
+hook's own paths that the run does not provoke (a throttled parameter
+read and its five attempts, the registrar retries on 503, 429 and no
+answer, the fail-at-once statuses, `SCRIPT_OUTPUTS` that is not an
+object of strings or repeats a key, a `frontDoorApiDomain` outside the
+origin form, credentials in an unexpected form, and the `host` mode
+poll that gives up after 45 s) and `register-hooks.sh` are unit tested
+by running the scripts with bash against stub `curl`, `aws` and `sleep`
+commands.
 
 ## 11. Open questions
 
-| # | Question | Needed by |
-|---|---|---|
-| Q-5 | Route registration depends on the control plane's global hooks (control-plane R-39 to R-46, ADR-0044), which are on `main` and Proposed. Does their final shape keep what ADR-0017 uses: `POST` hooks only after a successful script, `PRE` delete hooks with three attempts that cannot stop a delete, one `<fleet>-global-hook` role, `SCRIPT_OUTPUTS` and `globalHookManagedPolicyArns`? If not, ADR-0017 is revisited. ADR-0017 stays Proposed and ADR-0013 Accepted until ADR-0044 is accepted | build start |
+None is open.
