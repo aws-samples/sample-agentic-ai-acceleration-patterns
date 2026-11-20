@@ -236,8 +236,8 @@ step_09() {
 
 step_10() {
   section "10. the cells' function URLs refuse a direct call"
-  check "cell A direct 403" 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${CELL_A_URL}api/whoami" || echo 000)"
-  check "cell B direct 403" 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${CELL_B_URL}api/whoami" || echo 000)"
+  check "cell A direct 403" 403 "$(http_status -s -o /dev/null -w '%{http_code}' --max-time 15 "${CELL_A_URL}api/whoami")"
+  check "cell B direct 403" 403 "$(http_status -s -o /dev/null -w '%{http_code}' --max-time 15 "${CELL_B_URL}api/whoami")"
   skip "SPA bucket policy, versioning and Block Public Access: template tests (test/edge/stacks.test.ts)"
   skip "a chunk with no integrity entry fails the SPA build: test/spa/build.test.ts"
 }
@@ -733,7 +733,7 @@ step_23() {
   token_for a A_TOKEN
   curl -sN --max-time 30 -X POST --config - "https://${APP_DOMAIN}/agents/support-bot/invocations" \
     <<<"header = \"Authorization: Bearer ${A_TOKEN}\"" | while IFS= read -r line; do
-      [[ "$line" == data:* ]] && printf '%s %s\n' "$(date +%s%3N)" "${line#data: }"; done >"$TMP/stream"
+      [[ "$line" == data:* ]] && printf '%s %s\n' "$(date +%s%3N)" "${line#data: }"; done >"$TMP/stream" || true
   check "ten events streamed" 10 "$(grep -c . "$TMP/stream" || true)"
   local lag gaps
   lag="$(head -1 "$TMP/stream" | while read -r got ev; do echo $(( got - $(jq -r .at <<<"$ev") )); done)"

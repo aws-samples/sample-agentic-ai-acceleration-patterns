@@ -23,9 +23,10 @@
 #   TFD_INTEG_RUN_ID        optional, [a-z0-9]{1,10}; default a new one per run
 #   TFD_IDENTITY_REGION     optional, the tenant-identity shared pool's Region; default AWS_REGION
 #   TFD_ISSUER_DOMAIN       optional, a Cognito domain for the front door's issuer input
-#   TFD_CDK_QUALIFIER       optional, the control plane account's CDK bootstrap qualifier; default hnb659fds
 #   TFD_INTEG_KEEP=1        optional, skip the teardown (debugging; run `teardown` after)
 #
+# Both accounts use CDK's default bootstrap qualifier: the test apps use the
+# default synthesizer and the preflight reads through the default lookup role.
 # Everything the run makes carries its run id. Tokens, passwords and keys
 # stay in shell variables and 0600 files (scripts/CONVENTIONS.md).
 
@@ -106,6 +107,8 @@ IDENTITY_REGION="${TFD_IDENTITY_REGION:-$REGION}"
 RUN_DIR="$SAMPLE_DIR/.integ/$RUN_ID"
 mkdir -p "$RUN_DIR/logs"
 TMP="$(mktemp -d)"
+# Removes TMP on an exit before the teardown trap (on_exit, below) replaces it.
+trap 'rm -f "$TMP"/*; rmdir "$TMP"' EXIT
 BODY="$TMP/body"; HEAD="$TMP/head"; REQ="$TMP/req"
 : >"$BODY"; : >"$HEAD"; : >"$REQ"; chmod 600 "$BODY" "$HEAD" "$REQ"
 [[ "$CP_ACCOUNT" =~ ^[0-9]{12}$ ]] || die "TFD_INTEG_ACCOUNT_B must be a 12-digit account id"
@@ -165,12 +168,12 @@ preflight() {
   done
   # The control plane's account, read only, through its CDK bootstrap lookup role (it trusts the edge account): no
   # control plane may be there (its parameter name is fixed), and no stack of this run id.
-  lookup="arn:aws:iam::${CP_ACCOUNT}:role/cdk-${TFD_CDK_QUALIFIER:-hnb659fds}-lookup-role-${CP_ACCOUNT}-${REGION}"
+  lookup="arn:aws:iam::${CP_ACCOUNT}:role/cdk-hnb659fds-lookup-role-${CP_ACCOUNT}-${REGION}"
   if err="$(as_role "$lookup" aws ssm get-parameter --region "$REGION" --name /control-plane/tenant-api-url 2>&1 >/dev/null)"; then
     die "the control plane's account already holds a control plane in ${REGION} (/control-plane/tenant-api-url): the test deploys its own (spec §10); remove it or pick another Region"
   fi
   [[ "$err" == *ParameterNotFound* ]] \
-    || die "cannot read the control plane's account through its CDK lookup role ${lookup##*/} (set TFD_CDK_QUALIFIER for a custom bootstrap qualifier): $(clip <<<"$err")"
+    || die "cannot read the control plane's account through its CDK lookup role ${lookup##*/} (the default bootstrap qualifier): $(clip <<<"$err")"
   stacks="$(as_role "$lookup" aws cloudformation list-stacks --region "$REGION" --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text)" \
     || die "cannot list the control plane's account's stacks through ${lookup##*/}"
   for s in $stacks; do
@@ -189,7 +192,6 @@ preflight() {
       + (if $issuer == "" then {} else {issuerDomain: $issuer} end)
       + (if $mode == "host" then {tenantRequestsPer5Min: $tr, ipRequestsPer5Min: $ir2} else {} end)' >"$RUN_DIR/context.json"
   : >"$RUN_DIR/state.env"
-  state_set EXTERNAL_ID "$EXTERNAL_ID"
   printf 'kind\tname\tseconds\tresult\n' >"$RUN_DIR/times.tsv"
 }
 
@@ -223,7 +225,6 @@ case "$COMMAND" in
   teardown | leftovers)
     state_load
     [[ -s "$RUN_DIR/times.tsv" ]] || printf 'kind\tname\tseconds\tresult\n' >"$RUN_DIR/times.tsv"
-    trap 'rm -f "$TMP"/*; rmdir "$TMP"' EXIT
     if [[ "$COMMAND" == teardown ]]; then
       teardown || true
     else

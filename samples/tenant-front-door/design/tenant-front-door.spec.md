@@ -511,7 +511,8 @@ given below):
    limit of 3 s, or what is left of the budget when that is less. A read
    whose call times out, fails on the network or gets a 5xx is tried once
    more from the start of the unit after a pause of 100 to 400 ms (random),
-   and only when at least 1 s is left after the pause. A 401 or 403 from the
+   and only when at least 1.4 s of the budget is left when the call fails
+   (the longest pause plus 1 s). A 401 or 403 from the
    control plane drops the cached token and repeats the GET once with a new
    one, with no pause. A 404 `ResourceNotFoundError` is a missing record and
    is not repeated, nor is any other 4xx, a body that is not JSON, or a
@@ -2587,8 +2588,8 @@ sweeper to delete the certificate. Step 23 adds the stand-in's deploy
 and destroy (67 s and 33 s in S-5), two 90 s waits around the
 suspended-tenant check, and a streamed call of a few seconds. The
 control plane the test deploys has its own deploy and
-destroy time, which the test reports with the rest. In all, an estimate
-until the first run measures it: about 30 minutes of deploys, about three
+destroy time, which the test reports with the rest. In all, an estimate:
+about 30 minutes of deploys, about three
 hours of steps in `single` mode (each control-plane operation runs its
 scripts and hook builds one at a time, and steps 14 and 22 take about 40
 minutes each) and about 50 minutes of teardown, so about four and a half

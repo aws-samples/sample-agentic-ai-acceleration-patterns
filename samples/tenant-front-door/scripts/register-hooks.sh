@@ -107,7 +107,7 @@ if [[ "$MODE" == delete ]]; then
   exit 0
 fi
 
-: "${HOOK_SOURCE_VERSION:?set HOOK_SOURCE_VERSION to the full commit SHA to pin}"
+: "${HOOK_SOURCE_VERSION:?set HOOK_SOURCE_VERSION to pin the source: the full commit SHA for git, the object version of the zip for S3}"
 TYPE="${HOOK_SOURCE_TYPE:-GITHUB}"
 TIMEOUT="${HOOK_TIMEOUT_MINUTES:-10}"
 if [[ "$TYPE" == S3 ]]; then

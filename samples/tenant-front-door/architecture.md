@@ -133,7 +133,10 @@ it signs the call with the hook role's credentials. The registrar then:
 1. Admits only the hook role and the edge operator role (a resource policy
    with an explicit deny for every other principal).
 2. Reads the cell or deployment from the control plane with a reader token,
-   and takes the cell and account from that record, never from the body.
+   and takes the cell and account from that record, never from the body. A
+   read that times out, fails on the network or gets a 5xx is tried once
+   more inside a 10 s budget; a read that still fails refuses the write with
+   503 (spec §3.4 step 2).
 3. Refuses (403) a record that is missing or belongs to another
    application, and, for the hook role, refuses (409) a record that has no
    matching operation in flight.

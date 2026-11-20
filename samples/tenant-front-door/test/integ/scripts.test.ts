@@ -21,7 +21,8 @@ const REGISTRAR = 'https://abcdefghij.execute-api.eu-central-1.amazonaws.com/v1/
 const TENANT = '01KAF5M0000000000000000T01';
 const PEER = '01KAF5M0000000000000000T02';
 const CELL = '01KAF5M0000000000000000C01';
-const CREDS = { Version: 1, AccessKeyId: 'AKIAEXAMPLESTUB00000', SecretAccessKey: 'stub-secret-key-value', SessionToken: 'stub-session-token' };
+// AWS documentation example values, not real credentials.
+const CREDS = { Version: 1, AccessKeyId: 'ASIAIOSFODNN7EXAMPLE', SecretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', SessionToken: 'TESTSESSIONTOKENEXAMPLE=' };
 
 /**
  * An aws stub that also takes `ssm put-parameter` and `ssm delete-parameter`
@@ -286,7 +287,7 @@ if [[ -f "$STUB_DIR/creds-gone" ]]; then echo 'Unable to locate credentials. You
 fail() { echo "An error occurred ($1) when calling the $2 operation: $3" >&2; exit 254; }
 case "$1 $2" in
   "sts get-caller-identity") [[ "$args" == *Account* ]] && echo 111111111111 || echo arn:aws:sts::111111111111:assumed-role/Admin/s; exit 0 ;;
-  "sts assume-role") ${opts.assume ? 'echo \'{"AccessKeyId":"AKIAEXAMPLESTUB00000","SecretAccessKey":"stub-secret","SessionToken":"stub-token"}\'; exit 0' : 'fail AccessDenied AssumeRole "not authorized to perform sts:AssumeRole"'} ;;
+  "sts assume-role") ${opts.assume ? 'echo \'{"AccessKeyId":"ASIAIOSFODNN7EXAMPLE","SecretAccessKey":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY","SessionToken":"TESTSESSIONTOKENEXAMPLE="}\'; exit 0' : 'fail AccessDenied AssumeRole "not authorized to perform sts:AssumeRole"'} ;;
 esac
 ${opts.blind ? 'fail AccessDenied Any "not authorized"' : ''}
 case "$1 $2" in
@@ -321,7 +322,7 @@ exit 1
   beforeEach(() => {
     dir = new ScriptHarness();
     fs.mkdirSync(path.join(runDir, 'logs'), { recursive: true });
-    fs.writeFileSync(path.join(runDir, 'state.env'), 'EXTERNAL_ID=tfd-integ-x\n');
+    fs.writeFileSync(path.join(runDir, 'state.env'), '');
     fs.writeFileSync(path.join(runDir, 'context.json'), '{}');
   });
   afterEach(() => {
@@ -520,5 +521,14 @@ check "as: 200" 200 "$(as arn:aws:iam::111111111111:role/op GET tenants/T1)"`);
     expect(r.stdout).toContain('FAIL api: an external id is set: want true, got  (body: )');
     expect(r.stdout).toContain('FAIL as: 200: want 200, got 000 (body: )');
     expect(r.stdout).not.toContain('earlier answer');
+  });
+
+  it('http_status: a curl that fails prints 000 once, whatever its -w wrote', () => {
+    const r = lib(`curl() { printf 000; return 7; }
+echo "[$(http_status -s -o /dev/null -w '%{http_code}' https://cell.example.com/)]"
+curl() { printf 403; }
+echo "[$(http_status -s -o /dev/null -w '%{http_code}' https://cell.example.com/)]"`);
+    expect(r.stdout).toContain('[000]');
+    expect(r.stdout).toContain('[403]');
   });
 });

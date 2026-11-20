@@ -57,7 +57,7 @@ state_set() { # NAME VALUE
   printf '%s=%s\n' "$1" "$2" >>"$RUN_DIR/state.env.new"
   mv "$RUN_DIR/state.env.new" "$RUN_DIR/state.env"
 }
-state_load() { [[ -f "$RUN_DIR/state.env" ]] || return 0; while IFS='=' read -r k v; do [[ -n "$k" ]] && printf -v "$k" '%s' "$v"; done <"$RUN_DIR/state.env"; }
+state_load() { [[ -f "$RUN_DIR/state.env" ]] || return 0; while IFS='=' read -r k v; do if [[ "$k" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then printf -v "$k" '%s' "$v"; fi; done <"$RUN_DIR/state.env"; }
 
 # ctx_set KEY JSON: adds a value to the integ context the CDK app reads.
 ctx_set() {
@@ -127,6 +127,9 @@ in_cp() { as_role "$CP_ACCESS_ROLE" "$@"; }
 as_test() { as_role "$TEST_ROLE" "$@"; }
 
 # -- HTTP ---------------------------------------------------------------------------
+# http_status CURL_ARGS...: runs curl (its -w writes the status) and prints
+# the status once; 000 when curl fails, which -w alone may also print.
+http_status() { local st; st="$(curl "$@")" || st=000; echo "$st"; }
 # signed METHOD URL [JSON]: SigV4 with AK/SK/ST for SIG_REGION (default REGION) -> status; body in $BODY.
 signed() {
   local args=(-s -o "$BODY" -w '%{http_code}' --max-time 30 -X "$1" --aws-sigv4 "aws:amz:${SIG_REGION:-$REGION}:execute-api" --config -) config
@@ -134,7 +137,7 @@ signed() {
   [[ -n "$ST" ]] && config+=$'\n'"header = \"x-amz-security-token: ${ST}\""
   if [[ -n "${3:-}" ]]; then printf '%s' "$3" >"$REQ"; args+=(-H 'Content-Type: application/json' --data-binary "@$REQ"); fi
   : >"$BODY"
-  curl "${args[@]}" "$2" <<<"$config" || echo 000
+  http_status "${args[@]}" "$2" <<<"$config"
 }
 # as ROLE_ARN METHOD PATH [JSON]: one registrar call as ROLE_ARN. A 503 whose
 # body says the control plane cannot be read is retried up to three times,
@@ -173,7 +176,7 @@ edge() {
   fi
   [[ -n "$tv" ]] && config="header = \"Authorization: Bearer ${!tv}\""
   : >"$BODY"; : >"$HEAD"
-  curl -s -D "$HEAD" -o "$BODY" -w '%{http_code}' --max-time 30 -X "$method" "$@" --config - "https://${host}${path}" <<<"$config" || echo 000
+  http_status -s -D "$HEAD" -o "$BODY" -w '%{http_code}' --max-time 30 -X "$method" "$@" --config - "https://${host}${path}" <<<"$config"
 }
 header() { { grep -i "^$1:" "$HEAD" || true; } | head -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//'; }
 has_header() { [[ -n "$(header "$1")" ]] && echo yes || echo no; }
@@ -236,7 +239,7 @@ api() {
   api_token || { echo 000; return 1; }
   local args=(-s -o "$BODY" -w '%{http_code}' --max-time 30 -X "$1" --config -)
   if [[ -n "${3:-}" ]]; then printf '%s' "$3" >"$REQ"; args+=(-H 'Content-Type: application/json' --data-binary "@$REQ"); fi
-  curl "${args[@]}" "${CP_API}${2#/}" <<<"header = \"Authorization: Bearer ${CP_TOKEN}\"" || echo 000
+  http_status "${args[@]}" "${CP_API}${2#/}" <<<"header = \"Authorization: Bearer ${CP_TOKEN}\""
 }
 # api_poll PATH JQ WANT [timeout s] [interval s]: polls a Get until JQ matches WANT or a *_FAILED status; leaves the answer in $BODY.
 api_poll() {

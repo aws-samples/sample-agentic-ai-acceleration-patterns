@@ -28,10 +28,12 @@ registrar_url() {
 
 # registrar_call METHOD PATH [JSON] -> the HTTP status, 000 for no answer.
 # Signed with the script's own credentials, which reach curl in a 0600
-# config file, never on its command line.
-registrar_call() {
+# config file, never on its command line. It runs in a subshell, so its EXIT
+# trap removes that file on every exit, a failed command under set -e too.
+registrar_call() (
   local dir creds status
   dir="$(mktemp -d)"
+  trap 'rm -f "$dir"/*; rmdir "$dir"' EXIT
   creds="$(aws configure export-credentials --format process)"
   {
     printf 'user = "%s:%s"\n' "$(jq -r .AccessKeyId <<<"$creds")" "$(jq -r .SecretAccessKey <<<"$creds")"
@@ -46,10 +48,8 @@ registrar_call() {
     args+=(-H 'Content-Type: application/json' --data-binary "@$dir/body")
   fi
   status="$(curl "${args[@]}" "${REGISTRAR_URL}$2" 2>/dev/null)" || status=000
-  rm -f "$dir"/*
-  rmdir "$dir"
   printf '%s' "$status"
-}
+)
 
 # probe_expect NAME WANT METHOD PATH [JSON]: one call; records NAME=status
 # in PROBE_RESULTS and counts a mismatch in PROBE_FAILS.

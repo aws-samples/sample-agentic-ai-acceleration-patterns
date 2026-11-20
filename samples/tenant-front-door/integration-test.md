@@ -68,8 +68,10 @@ npx projen integ
 
 `npx projen integ:host` runs the `host` mode steps. A run takes hours;
 start it from a shell that outlives it (`nohup`, `tmux`). The driver
-needs bash 4 or later and GNU coreutils (`date +%s%3N` for millisecond
-log windows); on macOS, install them and put them first on `PATH`.
+needs bash 4.4 or later, GNU coreutils (`date +%s%3N` for millisecond
+log windows), curl 7.75 or later (`--aws-sigv4`) and AWS CLI v2
+(`aws configure export-credentials`); on macOS, install them and put
+them first on `PATH`.
 
 | Knob | Default | Effect |
 |---|---|---|
@@ -79,8 +81,11 @@ log windows); on macOS, install them and put them first on `PATH`.
 | `TFD_INTEG_RUN_ID` | new per run | `[a-z0-9]{1,10}`; names every stack, role, policy and application of the run |
 | `TFD_IDENTITY_REGION` | `AWS_REGION` | The Region of the `tenant-identity` deployments |
 | `TFD_ISSUER_DOMAIN` | reserved example endpoints | A Cognito domain for the front door's `issuer` input |
-| `TFD_CDK_QUALIFIER` | `hnb659fds` | The control plane's account's CDK bootstrap qualifier, for the preflight's lookup role |
 | `TFD_INTEG_KEEP` | unset | `1` skips the teardown; run `scripts/integ.sh teardown <run id> <mode>` after |
+
+Both accounts use CDK's default bootstrap qualifier (`hnb659fds`): the test
+apps use the default synthesizer, and the preflight reads the control
+plane's account through its default lookup role.
 
 `scripts/integ.sh plan [single|host]` prints the run's names, its deploy
 order, its steps and its teardown order without an AWS call.
@@ -131,7 +136,7 @@ unit tests.
 ## Runtime and cost
 
 About four and a half hours for a `single` run and two and a half for a
-`host` run (estimates until the first run): about 30 minutes of deploys,
+`host` run (estimates): about 30 minutes of deploys,
 the control plane's script and hook builds one at a time, and about 50
 minutes of teardown. The driver prints each stack's deploy and destroy
 time at the end (`.integ/<run id>/times.tsv`). The cost is a few dollars:
