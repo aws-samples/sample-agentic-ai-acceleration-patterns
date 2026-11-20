@@ -229,8 +229,9 @@ export class UntrustedCodeSandboxes extends Construct {
     this.backendOutputs = Object.assign({}, ...enabled.map((b) => b.outputs())) as Record<string, string>;
 
     const needsEndpoints = enabled.some((b) => b.endpoints().length > 0);
+    let endpoints: SandboxEndpoints | undefined;
     if (needsEndpoints && this.config.createEndpoints) {
-      new SandboxEndpoints(this, 'Endpoints', {
+      endpoints = new SandboxEndpoints(this, 'Endpoints', {
         vpc: this.vpc,
         sandboxSubnets,
         backends: enabled,
@@ -358,6 +359,10 @@ export class UntrustedCodeSandboxes extends Construct {
       for (const resource of b.drainOrder()) {
         // The resource that runs the image waits for the copy of every architecture its backend asked for (ADR-0029).
         for (const arch of copiesOf[b.name] ?? []) resource.node.addDependency((images as RunnerImages).copy(arch));
+        // The endpoints, their policies and the endpoint groups' ingress exist before the runtime, cluster or image that
+        // needs them, and go after it. A security group is a client of the endpoints (their ingress rules name it), so
+        // it cannot wait for them: that would be a cycle.
+        if (endpoints && !(resource instanceof ec2.SecurityGroup || resource instanceof ec2.CfnSecurityGroup)) resource.node.addDependency(endpoints);
         this.drainResource.node.addDependency(resource);
         if (cleanup) resource.node.addDependency(cleanup.resource);
       }

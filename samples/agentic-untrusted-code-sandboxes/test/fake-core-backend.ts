@@ -93,7 +93,8 @@ export class FakeBackendResources extends Construct implements BackendConstruct 
   }
 
   public drainOrder(): IConstruct[] {
-    return [this.resource];
+    // The real nitro backend lists its security groups too; they are clients of the endpoints.
+    return this.name === 'nitro' ? [this.resource, ...this.clients] : [this.resource];
   }
 
   public logCleanup(): { prefixes: string[]; names: string[] } {

@@ -119,7 +119,11 @@ own groups.
   backend's `drainOrder()` resources depend on the copies the backend asked
   for, so the runtime or cluster is never created before its image exists and
   is deleted before the copy, and the repository is emptied last. `microvm`
-  asks for no tag and waits for no copy.
+  asks for no tag and waits for no copy. Every `drainOrder()` resource also
+  waits for the sandbox endpoints (the endpoints, their policies and the
+  endpoint groups' ingress), so a runtime or cluster never starts without
+  them; a security group is the exception, because it is a client the
+  endpoints' ingress rules name and waiting would be a cycle.
 
 ## Consequences
 
