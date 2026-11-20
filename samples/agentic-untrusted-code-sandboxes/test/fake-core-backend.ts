@@ -19,6 +19,9 @@ import type { BackendConstruct, BackendContext, BackendFactory, NamedService, Sa
 import { NAME_RULES } from '../src/names';
 
 /** Every name the fakes asked for, by construct path of the backend, for the name tests. */
+/** A test sets this to make every fake backend list these log groups. */
+export const logCleanupOverride: { value?: { prefixes: string[]; names: string[] } } = {};
+
 export const requestedNames: { path: string; service: NamedService; name: string }[] = [];
 
 const ENDPOINTS: Record<BackendName, SandboxEndpoint[]> = {
@@ -94,6 +97,7 @@ export class FakeBackendResources extends Construct implements BackendConstruct 
   }
 
   public logCleanup(): { prefixes: string[]; names: string[] } {
+    if (logCleanupOverride.value) return logCleanupOverride.value;
     const region = Stack.of(this).region;
     if (this.name === 'agentcore') return { prefixes: ['/aws/bedrock-agentcore/runtimes/Fake_agentcore-'], names: [] };
     if (this.name === 'nitro') return { prefixes: [], names: [`/fake/${region}/task-logs`] };

@@ -17,7 +17,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { DockerImageName, ECRDeployment } from 'cdk-ecr-deployment';
 import { AwsSolutionsChecks } from 'cdk-nag';
-import { requestedNames } from './fake-core-backend';
+import { logCleanupOverride, requestedNames } from './fake-core-backend';
 import { ALLOW_PRIORITY, BLOCK_PRIORITY, DNS_FIREWALL_ALLOWED_DOMAINS } from '../src/core/dns-firewall';
 import { CLEANUP_SOURCE } from '../src/core/log-cleanup';
 import { acknowledgeKnownFindings, knownWildcard } from '../src/core/nag';
@@ -356,10 +356,21 @@ describe('bindRunCode (spec 3.3)', () => {
     expect(JSON.stringify(write.Resource)).toContain('TheirGroup');
   });
 
-  test('every managed policy of a Lambda event source is removed from a bound role; others stay', () => {
+  test.each(['AWSLambdaSQSQueueExecutionRole', 'AWSLambdaKinesisExecutionRole', 'AWSLambdaDynamoDBExecutionRole', 'AWSLambdaMSKExecutionRole'])(
+    'a role with %s is refused, with the way out in the message',
+    (name) => {
+      expect(() => synth({ standalone: false }, (stack, c) => {
+        const role = new iam.Role(stack, 'Source', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
+        role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName(`service-role/${name}`));
+        c.bindRunCode(new lambda.Function(stack, 'S', { ...inline, role }));
+      })).toThrow(new RegExp(`${name}.*L2 grant`));
+    },
+  );
+
+  test('the basic and VPC access policies are removed from a bound role; other managed policies stay', () => {
     const s = synth({ standalone: false }, (stack, c) => {
       const role = new iam.Role(stack, 'Mixed', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
-      for (const name of ['service-role/AWSLambdaBasicExecutionRole', 'service-role/AWSLambdaSQSQueueExecutionRole', 'service-role/AWSLambdaDynamoDBExecutionRole', 'AmazonS3ReadOnlyAccess']) {
+      for (const name of ['service-role/AWSLambdaBasicExecutionRole', 'service-role/AWSLambdaVPCAccessExecutionRole', 'AmazonS3ReadOnlyAccess']) {
         role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName(name));
       }
       c.bindRunCode(new lambda.Function(stack, 'M', { ...inline, role }));
@@ -796,6 +807,27 @@ describe('cdk-nag (AwsSolutions)', () => {
     // Only the function resource the test itself builds is excluded; its role, default or explicit, is the construct's to keep clean.
     const findings = report.violations.flatMap((v) => v.violatingResources.map((r) => `${v.ruleName}: ${r.constructPath}`));
     expect(findings.filter((f) => !/: S\/Gateway\/(?!ServiceRole)/.test(f))).toEqual([]);
+  });
+});
+
+describe('log groups the backends list (ADR-0030)', () => {
+  afterEach(() => {
+    logCleanupOverride.value = undefined;
+  });
+
+  test.each([
+    [{ prefixes: ['/aws/lambda/'], names: [] }, '/aws/lambda/'],
+    [{ prefixes: [], names: ['/aws/lambda'] }, '/aws/lambda'],
+    [{ prefixes: [''], names: [] }, ''],
+    [{ prefixes: [], names: ['/aws/x/'] }, '/aws/x/'],
+  ])('%j is refused', (value, shown) => {
+    logCleanupOverride.value = value;
+    expect(() => synth()).toThrow(new RegExp(`"${shown}".*whole service`));
+  });
+
+  test('a narrow name and prefix are accepted', () => {
+    logCleanupOverride.value = { prefixes: ['/aws/bedrock-agentcore/runtimes/Rt-'], names: ['/aws/lambda-microvms/image-1'] };
+    expect(() => synth()).not.toThrow();
   });
 });
 

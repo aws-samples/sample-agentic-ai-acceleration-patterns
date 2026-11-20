@@ -321,6 +321,15 @@ export class UntrustedCodeSandboxes extends Construct {
     const logCleanups = enabled.map((b) => b.logCleanup());
     const prefixes = logCleanups.flatMap((c) => c.prefixes);
     const names = logCleanups.flatMap((c) => c.names);
+    for (const [what, list] of [['name', names], ['prefix', prefixes]] as const) {
+      for (const g of list) {
+        // A group name or prefix that is empty, ends in `/`, or is a service's whole root would let the cleanup delete, and the
+        // wildcard guard accept, every group of that service (ADR-0030).
+        if (g === '' || g.endsWith('/') || /^\/aws\/[^/]*$/.test(g)) {
+          throw new Error(`UntrustedCodeSandboxes: a backend lists the log group ${what} "${g}", which is empty or covers a whole service's groups`);
+        }
+      }
+    }
     const cleanup = prefixes.length + names.length > 0 ? new LogCleanup(this, 'LogCleanup', { prefixes, names }) : undefined;
     this.nagContext = {
       ...this.nagContext,
@@ -377,12 +386,15 @@ export class UntrustedCodeSandboxes extends Construct {
    * statements, an owned log group and the Contributor Insights rules. The
    * function must be a `lambda.Function` (a `NodejsFunction` is one) with
    * a role created in this app; the subnets, the timeout and the environment
-   * are set through the underlying `CfnFunction`. The role loses the managed
-   * execution policies of the Lambda event sources (basic, VPC access, SQS,
-   * Kinesis, DynamoDB, MSK), which allow log writes on every group, and
-   * gets the exact statements instead (ADR-0029): attach any other managed
-   * policy before binding, and give the function a role of its own, because
-   * a role shared with another function loses those policies for both.
+   * are set through the underlying `CfnFunction`. The role loses the basic
+   * and VPC access execution policies, which allow log writes on every
+   * group, and gets the exact statements instead (ADR-0029). A role that
+   * carries the SQS, Kinesis, DynamoDB or MSK execution policy is refused,
+   * because they allow the same writes and also event source rights the core
+   * cannot replace: grant the event source with its L2 grant. Attach any
+   * other managed policy before binding, and give the function a role of its
+   * own, because a role shared with another function loses the two policies
+   * for both.
    */
   public bindRunCode(fn: lambda.IFunction): void {
     if (!(fn instanceof lambda.Function)) {
@@ -402,7 +414,11 @@ export class UntrustedCodeSandboxes extends Construct {
       // below replace them (ADR-0029).
       const cfnRole = role.node.defaultChild as iam.CfnRole;
       const managed = (Stack.of(role).resolve(cfnRole.managedPolicyArns) as unknown[] | undefined) ?? [];
-      const keep = managed.filter((m) => !/:iam::aws:policy\/service-role\/AWSLambda(Basic|VPCAccess|SQSQueue|Kinesis|DynamoDB|MSK)ExecutionRole$/.test(flatten(m)));
+      const eventSource = managed.map(flatten).find((m) => /:iam::aws:policy\/service-role\/AWSLambda(SQSQueue|Kinesis|DynamoDB|MSK)ExecutionRole$/.test(m));
+      if (eventSource) {
+        throw new Error(`UntrustedCodeSandboxes.bindRunCode: the role carries ${eventSource.split('/').pop()}, which allows log writes on every group and also the event source rights; grant the event source with its L2 grant (for example queue.grantConsumeMessages(fn)) instead (ADR-0029)`);
+      }
+      const keep = managed.filter((m) => !/:iam::aws:policy\/service-role\/AWSLambda(Basic|VPCAccess)ExecutionRole$/.test(flatten(m)));
       // The property itself, not an override, so cdk-nag sees the role as it is.
       if (keep.length !== managed.length) cfnRole.managedPolicyArns = keep.length > 0 ? (keep as string[]) : undefined;
       role.addToPrincipalPolicy(vpcAccessStatement());

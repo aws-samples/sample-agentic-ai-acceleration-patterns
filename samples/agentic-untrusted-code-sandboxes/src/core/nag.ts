@@ -86,7 +86,6 @@ export interface KnownContext {
 
 const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-
 /**
  * The wildcards the backends' statements and roles carry, each with the
  * reason it is accepted. A wildcard that matches none of these stays a

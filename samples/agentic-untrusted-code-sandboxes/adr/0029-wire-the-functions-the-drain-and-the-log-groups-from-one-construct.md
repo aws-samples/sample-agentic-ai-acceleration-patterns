@@ -60,13 +60,15 @@ Option 1.
   underlying `CfnFunction`. The tool statements and the network interface
   statement go on the function's own role, so a bound function holds the
   same rights as the tool role without running as it, and the role is added
-  to the tenant role's trust. The managed execution policies of the Lambda
-  event sources (basic, VPC access, SQS, Kinesis, DynamoDB, MSK) are removed
-  from it, because each allows log writes on every group; the function
+  to the tenant role's trust. The basic and VPC access execution policies are
+  removed from it, because both allow log writes on every group; the function
   writes to its owned group, or to its own group's ARN when it was built with
-  one. Attach other managed policies before binding, and give the function a
-  role of its own: a role shared with another function loses those policies
-  for both. The function resource, not its role, becomes
+  one. A role that carries the SQS, Kinesis, DynamoDB or MSK execution
+  policy is refused at synth: those allow the same log writes and also
+  event source rights the core cannot replace, so the app grants the event
+  source with its L2 grant. Attach other managed policies before binding, and
+  give the function a role of its own: a role shared with another function
+  loses the two policies for both. The function resource, not its role, becomes
   a dependent of the drain. If the function was built with its own log group
   the core reads it; if not the core creates an unnamed group (retention one
   month, deleted on destroy), sets it on the function, grants the role the
