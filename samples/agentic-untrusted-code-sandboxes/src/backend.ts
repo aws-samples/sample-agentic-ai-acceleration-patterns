@@ -128,12 +128,22 @@ export interface StopFacts {
   readonly reason?: string;
 }
 
+/**
+ * Test hook of the integration test (spec §8 `failed-start`, ADR-0058). `failAtBoot` makes the runner of this one
+ * sandbox exit at boot: `nitro` sets `RUNNER_FAIL_AT_BOOT=1` in the container override, `microvm` adds
+ * `"failAtBoot": true` to the `run` hook payload, `agentcore` ignores it. Only the tool sets it, and only when
+ * its environment has `RC_INTEG_OVERRIDES=1` and the tenant is `RC_INTEG_FAIL_START_TENANT` (src/env.ts `TEST_HOOKS`).
+ */
+export interface StartOptions {
+  readonly failAtBoot?: boolean;
+}
+
 export interface SandboxBackend {
   readonly name: BackendName;
   /** Start cap in ms (spec §3.4): `leaseUntil` = start + this. */
   readonly startCapMs: number;
   /** Creates a sandbox; never reuses. `nitro` starts with `creds`; the others with the tool role. */
-  start(tenantId: string, nonce: string, creds: TenantCredentials): Promise<SandboxHandle>;
+  start(tenantId: string, nonce: string, creds: TenantCredentials, options?: StartOptions): Promise<SandboxHandle>;
   /** One readiness probe; no waiting loop (the caller owns `startWait`). */
   ready(handle: SandboxHandle, row: RegistryRow): Promise<ReadyResult>;
   /** Sends one signed job (spec §3.5), waits at most `job.timeoutMs` + NO_ANSWER_MARGIN_MS, and verifies the result proof. */

@@ -196,6 +196,15 @@ not taken.
 `nonceHash` (lowercase hex). The runner removes it from the environment
 it hands to code.
 
+### Test hook: a failed start
+
+The integration test makes one sandbox fail to start (spec §8 `failed-start`). `nitro`: the `RunTask` container
+override `environment` also holds `RUNNER_FAIL_AT_BOOT` = `1`; the runner exits at process start. `microvm`: the `run`
+hook payload also holds `"failAtBoot": true`; the runner answers HTTP 200 `{}`, claims nothing and answers `ready`
+and every job with HTTP 503. `agentcore` has no start call and ignores the hook. The tool passes the hook only when
+its own environment has `RC_INTEG_OVERRIDES` = `1` and the tenant is the one named in `RC_INTEG_FAIL_START_TENANT`;
+nothing else sets it (ADR-0058, threat T-88).
+
 ## Vectors
 
 [`protocol/vectors.json`](protocol/vectors.json) holds, per case, the
