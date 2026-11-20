@@ -519,4 +519,4 @@ installed). No finding is in code the branch added or changed.
 | ProtoShield (IAM least privilege) | 3 high, 1 medium: `resources: ['*']` in the KMS key policies (`kms:GetPublicKey` and `kms:Sign` on the token signer, `kms:Sign` on the tool-context key); X-Ray | `src/shared/token-signer.cdk.ts`, `src/tools-gateway.cdk.ts`, `src/backend/agentcore-runtime.cdk.ts` | As in the 2026-11-04 review: a KMS key policy applies to its own key and `*` is the only resource it accepts; X-Ray accepted (ADR-0014) |
 | ProtoShield (CVE) | minimatch, glob | `package-lock.json` | Accepted in the 2026-11-04 review (transitive build- and test-time dependencies); ASH npm-audit reports 0 |
 | ASH (detect-secrets) | 1 on the base32 alphabet constant of the stress probe | `scripts/stress/k6/probe.js` | False positive: a constant, not a secret; suppressed with a reason in `.ash/.ash.yaml` |
-| ASH (bandit, CDK NAG, Checkov, Semgrep) | 0 beyond the suppressions above | - | - |
+| ASH (bandit, CDK NAG, Checkov, Semgrep) | 0 actionable; 6 Semgrep results matched the existing suppressions in `.ash/.ash.yaml` | - | - |
