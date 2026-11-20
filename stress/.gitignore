@@ -41,6 +41,8 @@ junit.xml
 !/.eslintrc.json
 !/projenrc/tsconfig.json
 !/driver/tsconfig.json
+!/application/tsconfig.json
 cdk.driver.out/
+cdk.application.out/
 cdk.context.json
 !/.projenrc.ts

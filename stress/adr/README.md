@@ -20,6 +20,7 @@ that change a sample are recorded in that sample's `adr/`.
 | [0008](./0008-split-the-k6-library-and-write-the-record-from-handlesummary.md) | Split the k6 library, mirror the repository on the host, and write the record from handleSummary | Accepted | 2026-11-19 |
 | [0009](./0009-deploy-the-driver-as-its-own-cdk-app-in-stress.md) | Deploy the driver as its own CDK app in `stress/` | Accepted | 2026-11-19 |
 | [0010](./0010-count-an-isolation-assertion-per-answered-request.md) | Count an isolation assertion per answered request, and every refusal under `refusals` | Accepted | 2026-11-19 |
+| [0011](./0011-give-the-roles-a-cell-creates-a-workload-boundary-without-iam.md) | Give the roles a cell creates a workload boundary without IAM | Proposed | 2026-11-20 |
 
 In `samples/control-plane/adr/`:
 

@@ -7,8 +7,9 @@ SPDX-License-Identifier: MIT-0
 The code every sample's stress slice plugs into, so the samples can be
 stress-tested alone or together as one agent platform. The design is
 [`docs/stress-test.spec.md`](../docs/stress-test.spec.md); the decisions are
-in [`adr/`](./adr/README.md). It is a test asset: the only thing it deploys is the driver
-host, for the length of a run.
+in [`adr/`](./adr/README.md). It is a test asset that deploys two things:
+the driver host, for the length of a run, and the account owner's stacks in
+`application/`, which stay in each standalone cell account.
 
 | Part | File | What it holds |
 |---|---|---|
@@ -19,6 +20,7 @@ host, for the length of a run.
 | Runner | [`src/runner.ts`](./src/runner.ts), [`run.sh`](./run.sh) | budget, then `deploy`, `seed`, `run`, `collect` in dependency order, `teardown` in reverse (spec §3.5) |
 | Driver host | [`driver/`](./driver/stress-driver.cdk.ts) | the k6 host every slice runs its load from: one EC2 instance, no inbound rule, no public IP, SSM Session Manager (ADR-0007, ADR-0009) |
 | k6 library | [`k6/`](./k6/README.md) | tokens, pacing, the correlation header and the result record every slice's scenarios share (ADR-0008) |
+| Cell account owner's stacks | [`application/`](./application/README.md) | the cell policies, the account base, the `/cell/` path aspect, the cell bootstrap and its probes (spec §3.7, §8 decision 7; ADR-0006, ADR-0011) |
 
 ## A slice
 
@@ -95,9 +97,9 @@ the host through Run Command and reads its output from the results bucket.
 `driver/k6.sh <script> [NAME=value ...]` runs a k6 script on the host: it mirrors `stress/k6/` and
 the script's folder under `/opt/stress/repo/` at their repository paths, passes the `STRESS_*`
 variables, and brings the result records back to `$STRESS_RESULTS`. A slice's `run` verb calls it
-(the runtime-isolation `run.sh` copies its files through S3 instead; see Known limitations). The library, the
-record it writes and the correlation header are described in [`k6/README.md`](./k6/README.md);
-`k6/smoke.js` is the check that a deployed host runs k6 and writes a record `parseRecord` accepts.
+(the runtime-isolation slice's `run` verb does). The library, the record it writes and the
+correlation header are described in [`k6/README.md`](./k6/README.md); `k6/smoke.js` is the
+check that a deployed host runs k6 and writes a record `parseRecord` accepts.
 
 ## Run it
 
@@ -142,8 +144,7 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   against the same accounts is not detected. Run one stress test per set of
   accounts at a time.
 - One run per driver host. `stress/driver/k6.sh` clears `/opt/stress/repo`, `inputs` and `out`
-  on the host before it unpacks, and a sample's own S3 copy (`run.sh ... s3 sync --delete`)
-  rewrites `/opt/stress/`, so two runs against one `<prefix>-driver` overwrite each other's
+  on the host before it unpacks, so two runs against one `<prefix>-driver` overwrite each other's
   files. Nothing on the host locks; give a concurrent run its own prefix and driver.
 - Budget limits are what `--limits` says; without it the runner checks
   against service defaults, not the accounts' applied quotas.

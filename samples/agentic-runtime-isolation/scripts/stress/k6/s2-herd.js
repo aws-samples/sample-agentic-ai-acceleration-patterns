@@ -1,12 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 //
-// S2 thundering herd (§5, §13 question 2): run.sh first retires every warm ingress instance
+// S2 thundering herd (§5, §13 question 2): slice.sh run first retires every warm ingress instance
 // and flushes the authoriser cache. This file then primes the tokens (platform API only, the
 // ingress stays idle), and ramps 0 -> herd rate in 5 s, held for the tier's length (large:
 // 120 s; herd rate 1.6 x steady, 800 rps at large; HERD_RPS overrides). No conversation is
-// warmed: set CONVERSATION_RUN_ID to an S1 run id from the Runtime's idle window to hit warm
-// microVMs behind the cold ingress, or leave it unset to open new sessions in the herd.
+// warmed here: the herd uses the conversations S1 opened in the same run, which the run id
+// names, so it hits warm microVMs behind the cold ingress (slice.sh refuses S2 without S1's
+// record). CONVERSATION_RUN_ID names another run's conversations instead.
 
 import { loadTier, loadManifest, plan, tokenMode, setupTokens, setPacing, vusFor, warmupScenario, warmAll, step, pickProbe, buildOptions, summarize, scenarioSeconds } from './probe.js';
 

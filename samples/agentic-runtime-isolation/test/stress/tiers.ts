@@ -111,7 +111,7 @@ export const STRESS_TIERS: Record<'small' | 'medium' | 'large', StressTier> = {
     ingressReservedConcurrency: 800,
     // Together with the 800 for the integration Lambda that is 1,800 of a
     // 1,000 account pool: the account needs its Lambda concurrency quota
-    // raised to about 2,500 before this tier deploys (F-17). CloudFormation
+    // raised to at least 1,900 before this tier deploys (F-17). CloudFormation
     // refuses a reserve the pool cannot hold.
     authorizerReservedConcurrency: 1_000,
     // k6 driver sizing (F-14): VUs per rps and where tokens live. A report

@@ -27,7 +27,7 @@ import type { APIGatewayAuthorizerResult, APIGatewayRequestAuthorizerEvent } fro
 import { AuthorityError, type AuthorityResolver, checkDelegation } from '../shared/authority';
 import { type DelegationConfig, isLambdaRuntime, readIngressConfig } from '../shared/config';
 import type { DelegationCaller, DelegationTokenVerifier } from '../shared/delegation';
-import { headerValue } from '../shared/headers';
+import { correlationIdOf, headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { BackendRegistry, backendFromPath, DELEGATION_ROUTE, isValidBackendName, type RegistryEntry, RegistryError, routeFromPath } from '../shared/registry';
 import { authorityFor, delegationVerifierFor, PUBLIC_REASONS, type RegistryResolver, verifierFor } from '../shared/request';
@@ -114,7 +114,7 @@ async function authorizeDelegation(
   target: string,
   deps: AuthorizerDependencies,
 ): Promise<APIGatewayAuthorizerResult> {
-  const fields = { ingress: 'api-gateway', component: 'authorizer', route: DELEGATION_ROUTE };
+  const fields = { ingress: 'api-gateway', component: 'authorizer', route: DELEGATION_ROUTE, correlationId: correlationIdOf(event.headers) };
   if (deps.delegation === undefined || !('delegate' in deps.authority)) {
     // The route exists only with the module; a request here without it is a deployment fault.
     log.error('delegation refused', { ...fields, to: target, reason: 'delegation_unavailable', status: 502 });
@@ -192,7 +192,9 @@ export async function authorize(event: APIGatewayRequestAuthorizerEvent, deps: A
   if (target !== undefined) {
     return authorizeDelegation(event, target, deps);
   }
-  const fields = { ingress: 'api-gateway', component: 'authorizer' };
+  // ADR-0053: logged only. The header is not an identity source, so a
+  // cached decision is reused across correlation ids and logs nothing here.
+  const fields = { ingress: 'api-gateway', component: 'authorizer', correlationId: correlationIdOf(event.headers) };
   let tenantId: string;
   let sub: string;
   try {

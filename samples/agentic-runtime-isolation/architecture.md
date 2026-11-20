@@ -4,28 +4,28 @@ SPDX-License-Identifier: MIT-0
 -->
 # Agentic Runtime Isolation: Architecture
 
-> **Status: implemented and verified.** Last green integration run: run 20,
-> 2026-11-13 10:33 to 11:14 UTC, eu-central-1, every Runtime on platform
-> version V2 (ADR-0050), 60/60 steps (59 PASS, 1 SKIP), deploy 454 s at the
-> default concurrency 6 (each V2 Runtime about 3.5 min from create to
-> ready, for its snapshot), steps 1,629 s, key rotation 159 s, sweep of 147
-> log groups clean, teardown clean (commit b4cf4f1). The per-VM nonce told
-> the microVMs apart on V2: B1 got its own unit and microVM, A1 resumed c1
-> on the same one, and session off gave two microVMs for two requests. The
-> run used a sandbox account and `scripts/integ.sh` (the CDK CLI driver,
-> ADR-0044) with six stacks (`api-gateway`, `agentcore-gateway`,
-> `session-off`, `session-user`, `limits`, `multi-tenant`). Both all-on
-> stacks ran spec §8 steps 3 to 25: P-1 (direct invoke refused), units and
-> sessions, the grants table, ABAC, model usage, latency, the registry, a
-> late agent and a drain, the headers that reach the agent (no identity
-> token), cuts landing on the next request, the per-tool wall, forged
-> contexts, token expiry, `aud` and `act` refusals, the tool-side TVM,
-> AgentCore Policy time-to-ACTIVE, the RESPONSE filter and delegation
-> between agents (step 25, ADR-0048: PASS on `api-gateway`, SKIP on
-> `agentcore-gateway`, which has no delegation route). The timings below
-> are from run 15 (2026-11-06, eu-central-1, 58/58 steps, deploy 272 s,
-> whole run about 36 min, key rotation 172 s), the last run that recorded
-> them. Step 9, total time of a `report` call (a one-event
+> **Status: implemented and verified.** Last green integration run: run 21,
+> 2026-11-20 10:48 to 11:46 UTC, eu-central-1, every Runtime on platform
+> version V2 (ADR-0050), 62/62 steps (61 PASS, 1 SKIP), deploy 1,277 s at
+> `INTEG_DEPLOY_CONCURRENCY=2` (the API Gateway control-plane throttle trips
+> at the default 6), steps done 2,518 s after the start (deploy included),
+> key rotation 161 s, sweep of 147 log groups clean, teardown clean (commit
+> ff6d91e). The per-VM nonce told the microVMs apart on V2: B1 got its own
+> unit and microVM, A1 resumed c1 on the same one, and session off gave two
+> microVMs for two requests. The run used a sandbox account and
+> `scripts/integ.sh` (the CDK CLI driver, ADR-0044) with six stacks
+> (`api-gateway`, `agentcore-gateway`, `session-off`, `session-user`,
+> `limits`, `multi-tenant`). Both all-on stacks ran spec §8 steps 3 to 25:
+> P-1 (direct invoke refused), units and sessions, the grants table, ABAC,
+> model usage, latency, the registry, a late agent and a drain, the headers
+> that reach the agent (no identity token), cuts landing on the next
+> request, the per-tool wall, forged contexts, token expiry, `aud` and `act`
+> refusals, the tool-side TVM, AgentCore Policy time-to-ACTIVE, the RESPONSE
+> filter and delegation between agents (step 25, ADR-0048: PASS on
+> `api-gateway`, SKIP on `agentcore-gateway`, which has no delegation
+> route). The timings below are from run 15 (2026-11-06, eu-central-1, 58/58
+> steps, deploy 272 s, whole run about 36 min, key rotation 172 s), the last
+> run that recorded them. Step 9, total time of a `report` call (a one-event
 > stream, so TTFB is within 1 ms of it), p50/p95: `api-gateway` warm mint
 > cache 0.204/0.247 s, cold 0.229/0.244 s; `agentcore-gateway` warm
 > 0.248/0.306 s, cold 0.308/0.405 s; `stream 10` first byte at about 0.2 to
@@ -35,10 +35,10 @@ SPDX-License-Identifier: MIT-0
 > several tenants). Step 21 served the rotated JWKS with two keys 10 s after
 > the deploy returned. The log sweep read 139 log groups and found 0 token
 > segments; the teardown left no stack, parameter, log group, table, Gateway
-> or policy engine (13 KMS keys pending deletion). The
-> [integration test](./integration-test.md#steps) has the
-> step table; the [threat model](./threat-model.md#security-review) records
-> the security scans and their dates.
+> or policy engine (13 KMS keys pending deletion). The [integration
+> test](./integration-test.md#steps) has the step table; the [threat
+> model](./threat-model.md#security-review) records the security scans and
+> their dates.
 
 This file describes what is deployed. The design trail is
 [`design/agentic-runtime-isolation.spec.md`](./design/agentic-runtime-isolation.spec.md), the
@@ -429,7 +429,7 @@ keys it owns (`dynamodb:LeadingKeys`). See the
 
 | Route | Auth | Operation |
 |---|---|---|
-| `POST /{backend}/invocations`, `POST /invocations` | identity token, `X-Tenant-Id` when the token carries `tenants` | InvokeAgent; body `{prompt}`, with `session` `{conversationId, prompt}`; `200` `text/event-stream`, last event `event: usage` |
+| `POST /{backend}/invocations`, `POST /invocations` | identity token, `X-Tenant-Id` when the token carries `tenants` | InvokeAgent; body `{prompt}`, with `session` `{conversationId, prompt}`; `200` `text/event-stream`, last event `event: usage`; optional `x-correlation-id` (1 to 64 of `[A-Za-z0-9-]`, else ignored) logged as `correlationId` (ADR-0053) |
 | `GET /.well-known/openid-configuration`, `GET /.well-known/jwks.json` | none | issuer discovery (ADR-0037) |
 | `PUT`, `GET`, `DELETE /entitlements/tenants/{tenantId}` | IAM (SigV4) | tenant subscription |
 | `PUT`, `GET`, `DELETE /entitlements/plans/{planName}`, `GET /entitlements/plans` | IAM (SigV4) | plans |
@@ -689,7 +689,7 @@ reading code against spec §5.1:
 | Signal | Where | Tenant field |
 |---|---|---|
 | Access log (`api-gateway`) | `ApiAccessLogs` | `tenantId` from the authoriser context, `principalId` |
-| Ingress lines | `request authorised` (authoriser), `request served` (integration Lambda: `ttfbMs`, `streamedBytes`, `backendInvokeSeconds`, `usageInput`, `usageOutput`, `modelId`), `request admitted` (interceptor: `sessionPrefix`), `request refused` and `token refused` with `reason` | `tenantId`, `backend`/`agent`, `txn`, `grantSize`, `mint` |
+| Ingress lines | `request authorised` (authoriser), `request served` (integration Lambda: `ttfbMs`, `streamedBytes`, `backendInvokeSeconds`, `usageInput`, `usageOutput`, `modelId`), `request admitted` (interceptor: `sessionPrefix`), `request refused` and `token refused` with `reason` | `tenantId`, `backend`/`agent`, `txn`, `grantSize`, `mint`; `correlationId` when the client sent a well-formed `x-correlation-id` (ADR-0053); not on the limiter, mint or SDK-retry lines, not on a delegated hop, and no authoriser line at all for a cached decision |
 | Tools lines | `tools request admitted`, `tool admitted` (`decision`, `gateway`, `target`, `reason`), `tools list filtered` (`listed`, `kept`), `tool served` (`durationMs`, `bytes`), `tool refused` | `tenantId`, `agent`, `txn` |
 | Entitlement API | `entitlement written`, `entitlement deleted`, `entitlement request refused` | the target tenant id |
 | EMF, opt-in | namespace `RuntimeIsolation`, dimensions `[TenantId, Ingress]` and `[TenantId, Ingress, Backend]`: `Requests`, `Errors4xx`, `Errors5xx`, `IngressDurationMs`, `TtfbMs`, `BackendInvokeSeconds`, `StreamedBytes`, `ModelInputTokens`, `ModelOutputTokens` | `perTenantMetrics`, off by default because each tenant adds about nine billed metrics per ingress (ADR-0021); integ 8b-metrics checks it |
