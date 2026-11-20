@@ -16,7 +16,7 @@
 #   byTenantReason: the counted refusals by tenant and reason, the largest first
 #   unattributed:   what the driver saw beyond the counted lines, never below 0
 
-def count: (.count // 1) | tonumber;
+def count: (.count // 1) | (if type == "number" then . else 1 end);
 
 (
   [$lines[0][] | select(.kind == "edge_refusal" and (.tenantId | type) == "string" and (.status | type) == "number")

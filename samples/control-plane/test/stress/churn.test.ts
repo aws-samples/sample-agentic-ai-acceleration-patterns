@@ -6,7 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { CallResult, ControlPlaneApi } from './api';
 import { ps5, type Timing } from './churn';
-import { type Edge, edgeStateOf, parseEdgeInputs, probeToken, readEdgeInputs } from './edge';
+import { type Edge, edgeStateOf, parseEdgeInputs, probeToken, readEdgeInputs, signedPut } from './edge';
 import { Recorder } from './recorder';
 import type { ScenarioEnv } from './scenarios';
 import { SCENARIOS } from './scenarios';
@@ -109,7 +109,7 @@ class World {
       cellAccounts: [],
       region: 'eu-central-1',
       log: () => undefined,
-      tier: { name: 'small', cellAccounts: 1, cells: 1, maxTenants: 25, tenantsSeeded: 20, onboarding: 'every-run', churnPerRun: 3, steadyRps: 10, scenarioSeconds: 60 },
+      tier: { name: 'small', cellAccounts: 1, cells: 1, maxTenants: 25, tenantsSeeded: 20, onboarding: 'every-run', churnPerRun: over.manifest?.churn.length ?? 3, steadyRps: 10, scenarioSeconds: 60 },
       manifest: { version: 1, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: TENANTS, extra: [] },
       buildLimit: 1,
       setBuildLimit: async () => 0,
@@ -219,6 +219,63 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
     expect(w.deleted.size).toBe(1);
   });
 
+  const one = { version: 1 as const, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: [TENANTS[0]], extra: [] };
+
+  it('asserts again after a blip when the edge gives no answer once the tenant has settled', async () => {
+    const w = new World(10);
+    let firstSuspended: number | undefined;
+    let blips = 1;
+    w.script = (_t, state) => {
+      if (state !== 'suspended') return undefined;
+      firstSuspended ??= w.now;
+      return w.now >= firstSuspended + 90_000 && blips-- > 0 ? 0 : undefined;
+    };
+    await ps5(w.env({ manifest: one }), w.timing);
+    expect(w.recorder.findings).toEqual([]);
+    expect(record(w).isolation).toEqual({ assertions: 6, mismatches: 0 });
+  });
+
+  it('reports no answer from the edge as a finding, never as a served tenant', async () => {
+    const w = new World(10);
+    let firstSuspended: number | undefined;
+    w.script = (_t, state) => {
+      if (state !== 'suspended') return undefined;
+      firstSuspended ??= w.now;
+      return w.now >= firstSuspended + 90_000 ? 0 : undefined;
+    };
+    await ps5(w.env({ manifest: one }), w.timing);
+    expect(record(w).isolation.mismatches).toBe(0);
+    expect(w.recorder.findings.filter((f) => /no answer from the edge when asserting the tenant is suspended/.test(f))).toHaveLength(3);
+  });
+
+  it('runs short and says so when the manifest holds fewer churn tenants than the tier churns', async () => {
+    const w = new World(1);
+    await ps5(w.env({ manifest: one, tier: { ...w.env().tier, churnPerRun: 3 } }), w.timing);
+    expect(w.recorder.findings).toEqual(['the manifest holds 1 churn tenants, the tier churns 3: PS-5 runs short']);
+    expect(w.deleted.size).toBe(1);
+  });
+
+  it('names the cause when a cycle stops on an error', async () => {
+    const w = new World(1);
+    const api = { call: async () => { throw new Error('boom'); }, listAll: async () => ({ status: 200, items: [] }) } as unknown as ControlPlaneApi;
+    await ps5(w.env({ manifest: one, api }), w.timing);
+    expect(w.recorder.findings).toEqual([`tenant ${TENANTS[0]}: the churn cycle stopped (Error: boom)`]);
+  });
+
+  it('loads credentials before the first timed call', async () => {
+    const w = new World(1);
+    const prepare = jest.fn(async () => undefined);
+    await ps5(w.env({ manifest: one, edge: { ...w.edge, prepare } }), w.timing);
+    expect(prepare).toHaveBeenCalledTimes(1);
+  });
+
+  it('says what a registrar answer of 0 can mean', async () => {
+    const w = new World(1);
+    w.edge.setStatus = async () => 0;
+    await ps5(w.env({ manifest: one }), w.timing);
+    expect(w.recorder.findings.some((f) => /HTTP 0, expected 200 \(no answer, or no credentials for the registrar/.test(f))).toBe(true);
+  });
+
   it('fails when there is no edge, naming the cause', async () => {
     const w = new World(1);
     await ps5(w.env({ edge: undefined }), w.timing);
@@ -263,6 +320,44 @@ describe('the front door\'s manifest (stress/README.md, "Platform mode: manifest
     ['a bad backend name', JSON.stringify({ ...valid, agentBackend: 'A/b' }), /agentBackend/],
   ])('refuses %s', (_name, text, pattern) => {
     expect(() => parseEdgeInputs(text, 'f')).toThrow(pattern);
+  });
+});
+
+describe('signedPut', () => {
+  const creds = { accessKeyId: 'AKIATESTKEY0000', secretAccessKey: 'secret-test-value', sessionToken: 'session-test-value' };
+  const fake = (script: string): { dir: string; curl: string } => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fakecurl-'));
+    const curl = path.join(dir, 'curl');
+    fs.writeFileSync(curl, script, { mode: 0o755 });
+    return { dir, curl };
+  };
+
+  it('gives curl the keys on stdin only, and returns the status curl printed', async () => {
+    const dir0 = fs.mkdtempSync(path.join(os.tmpdir(), 'fakecurl-out-'));
+    const { dir, curl } = fake(`#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${dir0}/args.txt"\ncat > "${dir0}/stdin.txt"\nprintf 200\n`);
+    try {
+      await expect(signedPut('https://abc.execute-api.us-east-1.amazonaws.com/prod/tenants/T/status', { status: 'suspended' }, 'us-east-1', creds, curl)).resolves.toBe(200);
+      const args = fs.readFileSync(path.join(dir0, 'args.txt'), 'utf8');
+      const stdin = fs.readFileSync(path.join(dir0, 'stdin.txt'), 'utf8');
+      for (const secret of Object.values(creds)) {
+        expect(args).not.toContain(secret);
+        expect(stdin).toContain(secret);
+      }
+      expect(args).toContain('aws:amz:us-east-1:execute-api');
+      expect(args).toContain('{"status":"suspended"}');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(dir0, { recursive: true, force: true });
+    }
+  });
+
+  it('answers 0 when curl fails before it reads its config, without throwing', async () => {
+    const { dir, curl } = fake('#!/usr/bin/env bash\nexit 2\n');
+    try {
+      await expect(signedPut('https://abc.execute-api.us-east-1.amazonaws.com/prod/x', {}, 'us-east-1', creds, curl)).resolves.toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

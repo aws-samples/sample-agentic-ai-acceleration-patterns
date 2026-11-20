@@ -53,7 +53,7 @@ fi
 
 status=0
 for record in "${records[@]}"; do
-  scenario="$(jq -r .scenario "$record")"
+  scenario="$(jq -er .scenario "$record" 2>/dev/null)" || { echo "collect: ${record##*/} is not a record with a scenario" >&2; status=1; continue; }
   [[ "$(jq -r .runId "$record")" == "$STRESS_RUN_ID" ]] || { echo "collect: ${record##*/} belongs to another run; left alone" >&2; continue; }
   name="$(k6_name "$scenario")" || { echo "collect: no k6 script for ${scenario}" >&2; status=1; continue; }
   summary="${K6_DIR}/${name}.summary.json"
@@ -64,6 +64,8 @@ for record in "${records[@]}"; do
   fi
   seen="$(jq -r '(.metrics.refusals_seen.values // .metrics.refusals_seen // {}).count // 0' "$summary")"
   # k6 writes console.log to stderr as msg="<JSON, quoted>"; the JSON lines are the ones of interest.
+  # shortcut: only \" is unescaped, so a tenant id or reason holding a backslash is dropped and
+  # stays unattributed (ids and reasons are plain tokens); unescape \\ too if that changes.
   if [[ -s "${K6_DIR}/${name}.k6-stdout.txt" ]]; then
     sed -n 's/.*msg="\(.*\)".*/\1/p' "${K6_DIR}/${name}.k6-stdout.txt" | sed 's/\\"/"/g' \
       | jq -R 'fromjson? | select(type == "object")' | jq -s . >"${tmp}/lines.json"

@@ -134,6 +134,13 @@ describe('runner (spec §3.5)', () => {
     expect(named.calls.filter((c) => c.includes(' run '))).toEqual(['control-plane run placement-race']);
   });
 
+  it('refuses a platform run in which no slice declares a PS scenario', async () => {
+    const { root, home } = fixture({ a: { scenarios: ['x'] }, b: { needs: ['a'], scenarios: ['y'] } });
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['a', 'b'], exec })).rejects.toThrow(/nothing to run/);
+    expect(calls).toEqual([]);
+  });
+
   it('refuses a scenario no slice in the run declares', async () => {
     const { root, home } = fixture(slices);
     const { calls, exec } = stub();

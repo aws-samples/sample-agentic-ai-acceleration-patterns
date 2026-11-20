@@ -57,12 +57,20 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
     return;
   }
   const existing = await deploymentsOf(s);
-  const tenants = s.manifest.churn.slice(0, s.tier.churnPerRun).filter((t) => {
+  const wanted = s.manifest.churn.slice(0, s.tier.churnPerRun);
+  if (wanted.length < s.tier.churnPerRun) {
+    s.rec.finding(`the manifest holds ${s.manifest.churn.length} churn tenants, the tier churns ${s.tier.churnPerRun}: PS-5 runs short`);
+  }
+  const tenants = wanted.filter((t) => {
     if (!existing.has(t)) return true;
     s.rec.finding(`tenant ${t} already has a deployment: PS-5 times a create from nothing`);
     return false;
   });
+  // Credentials load before the first timed call, so no `suspended` or `resumed` hop includes them.
+  await edge.prepare?.();
   const queue = [...tenants];
+  // Cycles in flight: the most builds that can run at once, an upper bound on the draw on the
+  // platform account's concurrent builds (a cycle also waits on the edge, with no build running).
   let active = 0;
   const worker = async (): Promise<void> => {
     for (let tenant = queue.shift(); tenant !== undefined; tenant = queue.shift()) {
@@ -71,7 +79,8 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
       try {
         await cycle(s, edge, tenant, timing);
       } catch (e) {
-        s.rec.finding(`tenant ${tenant}: ${e instanceof EdgeMisconfigured ? e.message : 'the churn cycle stopped'}`);
+        const cause = e instanceof EdgeMisconfigured ? e.message : `the churn cycle stopped (${e instanceof Error ? `${e.name}: ${e.message}` : 'unknown error'})`;
+        s.rec.finding(`tenant ${tenant}: ${cause}`);
       } finally {
         active -= 1;
       }
@@ -123,8 +132,18 @@ async function waitFor(
 async function hold(s: ScenarioEnv, edge: Edge, tenant: string, state: 'suspended' | 'unrouted', timing: Timing): Promise<void> {
   await timing.sleep(timing.settleSeconds * 1000);
   for (let i = 0; i < timing.confirmations; i += 1) {
-    const now = await read(s, edge, tenant);
-    s.rec.assertIsolation(now === state, `a ${state === 'unrouted' ? 'removed' : 'suspended'} tenant was answered as ${now}, not refused at the router`, tenant);
+    // No answer from the edge (a timeout, a dropped connection) says nothing about the tenant:
+    // read again a few times before it counts, and then as a finding, never as a served tenant.
+    let now = await read(s, edge, tenant);
+    for (let retry = 0; now === 'error' && retry < 3; retry += 1) {
+      await timing.sleep(timing.pollMs);
+      now = await read(s, edge, tenant);
+    }
+    if (now === 'error') {
+      s.rec.finding(`tenant ${tenant}: no answer from the edge when asserting the tenant is ${state === 'unrouted' ? 'removed' : 'suspended'}`);
+    } else {
+      s.rec.assertIsolation(now === state, `a ${state === 'unrouted' ? 'removed' : 'suspended'} tenant was answered as ${now}, not refused at the router`, tenant);
+    }
     await timing.sleep(timing.pollMs);
   }
 }
@@ -133,7 +152,11 @@ async function setRoute(s: ScenarioEnv, edge: Edge, tenant: string, status: 'act
   const started = process.hrtime.bigint();
   const answer = await edge.setStatus(tenant, status);
   s.rec.observe('update-route-status', asCall(answer, started), tenant, answer === 200);
-  if (answer !== 200) s.rec.finding(`tenant ${tenant}: UpdateTenantRouteStatus ${status}: HTTP ${answer}, expected 200`);
+  // A 5xx is already a finding of its own (`observe`); the rest names the call.
+  if (answer !== 200 && answer < 500) {
+    const hint = answer === 0 ? ' (no answer, or no credentials for the registrar: the session needs the edge operator role)' : '';
+    s.rec.finding(`tenant ${tenant}: UpdateTenantRouteStatus ${status}: HTTP ${answer}, expected 200${hint}`);
+  }
   return answer === 200;
 }
 
@@ -170,6 +193,7 @@ async function cycle(s: ScenarioEnv, edge: Edge, tenant: string, timing: Timing)
   if (removed === undefined) return;
   s.rec.sample('removed', removed);
   await hold(s, edge, tenant, 'unrouted', timing);
-  // The delete build ends after the route is gone: leave the fleet as the scenario found it.
+  // The delete build ends after the route is gone: wait for it, so a successful cycle leaves the
+  // fleet as the scenario found it. A cycle that stops early leaves its deployment for the sweep.
   await waitDeployments(s, [tenant], { gone: true, timeoutSeconds: REMOVED_TIMEOUT_SECONDS });
 }

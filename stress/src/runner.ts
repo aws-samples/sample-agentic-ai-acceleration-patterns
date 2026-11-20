@@ -264,6 +264,9 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices, mode))];
   const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
   if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
+  if (scenarios.length === 0 && mode === 'platform') {
+    throw new Error('no slice in the run declares a PS-<n> scenario, so a platform run has nothing to run: name --scenarios or add the slices that own them');
+  }
   // A scenario that needs the other slices' interfaces has nothing to run against alone.
   const alone = scenarios.filter((sc) => mode === 'slice' && slices.some((s) => s.platformOnly.includes(sc)));
   if (alone.length > 0) throw new Error(`${alone.join(', ')} runs in platform mode only: name every slice it needs in --slices`);

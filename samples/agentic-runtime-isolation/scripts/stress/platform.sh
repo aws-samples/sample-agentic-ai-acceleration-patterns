@@ -31,7 +31,7 @@ need_platform_inputs() {
       echo "slice.sh ${verb}: platform mode reads ${d}/${f}, which the $(platform_producer "$f") slice writes; it is missing" >&2
       bad=1
     elif ! jq -e 'type == "object"' "${d}/${f}" >/dev/null 2>&1; then
-      echo "slice.sh ${verb}: ${d}/${f} is not a JSON object" >&2
+      echo "slice.sh ${verb}: ${d}/${f} (written by the $(platform_producer "$f") slice) is not a JSON object" >&2
       bad=1
     fi
   done
@@ -40,7 +40,11 @@ need_platform_inputs() {
   EDGE_URL="$(jq -r '.edgeUrl // empty' "${d}/tenant-front-door.json")"
   EDGE_URL="${EDGE_URL%/}"
   [[ "$EDGE_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] \
-    || { echo "slice.sh ${verb}: tenant-front-door.json: edgeUrl must be an https origin with no path (got '${EDGE_URL:-nothing}')" >&2; exit 1; }
+    || { echo "slice.sh ${verb}: tenant-front-door.json (written by the tenant-front-door slice): edgeUrl must be an https origin with no path (got '${EDGE_URL:-nothing}')" >&2; exit 1; }
+
+  EDGE_BACKEND="$(jq -r '.agentBackend // "default"' "${d}/tenant-front-door.json")"
+  [[ "$EDGE_BACKEND" =~ ^[a-z0-9-]{1,32}$ ]] \
+    || { echo "slice.sh ${verb}: tenant-front-door.json (written by the tenant-front-door slice): agentBackend must match [a-z0-9-]{1,32}" >&2; exit 1; }
 
   IDENTITY_API="$(jq -r '.apiUrl // empty' "${d}/identity.json")"
   IDENTITY_CLIENT="$(jq -r '.appClientId // empty' "${d}/identity.json")"
@@ -48,16 +52,16 @@ need_platform_inputs() {
   local pool
   pool="$(jq -r '.userPoolId // empty' "${d}/identity.json")"
   [[ "$IDENTITY_API" =~ ^https://[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com(/[A-Za-z0-9_./-]*)?$ ]] \
-    || { echo "slice.sh ${verb}: identity.json: apiUrl must be an execute-api URL (got '${IDENTITY_API:-nothing}')" >&2; exit 1; }
+    || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): apiUrl must be an execute-api URL (got '${IDENTITY_API:-nothing}')" >&2; exit 1; }
   [[ "$IDENTITY_API" == */ ]] || IDENTITY_API="${IDENTITY_API}/"
-  [[ "$IDENTITY_CLIENT" =~ ^[A-Za-z0-9]{1,128}$ ]] || { echo "slice.sh ${verb}: identity.json: appClientId is missing or malformed" >&2; exit 1; }
-  [[ "$IDENTITY_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "slice.sh ${verb}: identity.json: region is missing or malformed" >&2; exit 1; }
-  [[ "$pool" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]_[A-Za-z0-9]+$ ]] || { echo "slice.sh ${verb}: identity.json: userPoolId is missing or malformed" >&2; exit 1; }
+  [[ "$IDENTITY_CLIENT" =~ ^[A-Za-z0-9]{1,128}$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): appClientId is missing or malformed" >&2; exit 1; }
+  [[ "$IDENTITY_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): region is missing or malformed" >&2; exit 1; }
+  [[ "$pool" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]_[A-Za-z0-9]+$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): userPoolId is missing or malformed" >&2; exit 1; }
   IDENTITY_ISSUER="https://cognito-idp.${IDENTITY_REGION}.amazonaws.com/${pool}"
 
   for f in control-plane.json tenant-identity.json; do
     jq -e '.seeded | type == "array"' "${d}/${f}" >/dev/null 2>&1 \
-      || { echo "slice.sh ${verb}: ${d}/${f}: \"seeded\" must be an array" >&2; exit 1; }
+      || { echo "slice.sh ${verb}: ${d}/${f} (written by the $(platform_producer "$f") slice): \"seeded\" must be an array" >&2; exit 1; }
   done
 }
 

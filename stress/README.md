@@ -68,8 +68,9 @@ starts, so a slice's `deploy` can read what an earlier slice seeded (the front d
 the control plane's application). `teardown` runs in reverse order. Without `--scenarios`, a
 slice-mode run runs the slice's scenarios except its `platformOnly` ones, and a platform run
 (several slices) runs only the `PS-<n>` scenarios, platform scenarios first by number, then
-each slice's own in slice order; `--scenarios` can name any scenario a slice declares, a
-slice's own ones included. A scenario no slice declares is refused before the run starts, so
+each slice's own in slice order; `--scenarios` can name any scenario a slice declares (a
+slice-mode run refuses a `platformOnly` one), and a platform run that has no `PS-<n>` scenario
+to run is refused. A scenario no slice declares is refused before the run starts, so
 the run id stays free.
 
 A run fails when a scenario's record is missing, does not parse, belongs
@@ -94,7 +95,7 @@ anything it left running in its group gets SIGTERM, then SIGKILL after
 A run with several slices sets `STRESS_MODE=platform`. A slice then works on what the others
 made and reads it from manifest files in `$STRESS_HOME/$STRESS_PREFIX/`: ids and names only,
 never a token, a password or a key, mode 0600 in a 0700 folder. A slice that finds a manifest
-missing or unusable stops with a message that names the file and the slice that writes it.
+missing or unusable stops with a message that names the file, the slice that writes it and, when the content is wrong, the field.
 
 Who owns which platform scenario (spec §5.1):
 
@@ -234,6 +235,11 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   without checking the signature (front-door spec §3.3, step 5), so a probe reaches the ingress
   at most and is refused there with 401. It shows what the router does for the tenant, not
   what a signed request would get.
+- PS-5 suspends and resumes tenants through the front door's route registrar with a SigV4
+  call that `curl` (7.75 or later) signs with the driver session's own credentials. The
+  registrar allows only its edge operator role for `UpdateTenantRouteStatus`, so the session
+  that runs PS-5 must hold that role; with another role the finding reads `HTTP 403`, and with
+  no credentials `HTTP 0`.
 - The quota catalogue has no ids yet for the API Gateway control plane or
   for CloudFront Functions compute and KeyValueStore size (spec §4.4), so
   no slice can declare them. They are added with the first slice that

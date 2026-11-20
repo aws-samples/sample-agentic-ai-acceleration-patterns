@@ -145,14 +145,22 @@ need() { local v; v="$(output "$1")"; [[ -n "$v" ]] || { echo "slice.sh: output 
 DRIVER_STACK="${STRESS_PREFIX}-driver"
 DRIVER_MARK="${STRESS_STATE_DIR}/platform-driver-owned"
 
-# True unless CloudFormation says the stack does not exist: an AWS error counts as "there", so
-# nothing is forgotten on a failed check.
-stack_exists() {
-  local err
-  if err="$(aws cloudformation describe-stacks --stack-name "$1" --query 'Stacks[0].StackStatus' --output text 2>&1 >/dev/null)"; then
+# stack_status NAME -> prints the stack's status, or `absent` when CloudFormation says it does not
+# exist; any other AWS error prints its code to stderr and fails, so an expired token is never
+# taken for "there" or for "absent".
+stack_status() {
+  local err out
+  if out="$(aws cloudformation describe-stacks --stack-name "$1" --query 'Stacks[0].StackStatus' --output text 2>&1)"; then
+    printf '%s\n' "$out"
     return 0
   fi
-  ! grep -q 'does not exist' <<<"$err"
+  err="$out"
+  if grep -q 'does not exist' <<<"$err"; then
+    echo absent
+    return 0
+  fi
+  echo "slice.sh: could not read the status of $1 ($(sed -n 's/.*An error occurred (\([A-Za-z0-9.]*\)).*/\1/p' <<<"$err" | head -n 1))" >&2
+  return 1
 }
 
 # driver_script deploy|teardown -> runs the shared driver's script for this prefix and prints its `stack=` lines.
@@ -182,14 +190,26 @@ case "$verb" in
       need_platform_inputs deploy
       need_region
       mkdir -p -m 700 "$STRESS_STATE_DIR"
-      if stack_exists "$DRIVER_STACK"; then
-        echo "deploy: platform mode: ${DRIVER_STACK} is already there and stays its owner's; no cell stack here, the cells are the control plane's"
-      else
-        echo "deploy: platform mode: ${DRIVER_STACK}, the k6 host (stress/driver/deploy.sh); no cell stack here, the cells are the control plane's"
-        # Mark first: a deploy that fails halfway still leaves a stack this slice must remove.
-        : >"$DRIVER_MARK"
-        driver_script deploy
-      fi
+      host="$(stack_status "$DRIVER_STACK")" || exit 1
+      case "$host" in
+        absent)
+          echo "deploy: platform mode: ${DRIVER_STACK}, the k6 host (stress/driver/deploy.sh); no cell stack here, the cells are the control plane's"
+          # Mark first: a deploy that fails halfway still leaves a stack this slice must remove.
+          : >"$DRIVER_MARK"
+          if ! driver_script deploy; then
+            # A deploy that failed before it made the stack leaves nothing to remove.
+            [[ "$(stack_status "$DRIVER_STACK" 2>/dev/null || echo unknown)" != absent ]] || rm -f "$DRIVER_MARK"
+            exit 1
+          fi
+          ;;
+        CREATE_COMPLETE | UPDATE_COMPLETE)
+          echo "deploy: platform mode: ${DRIVER_STACK} is already there and stays its owner's; no cell stack here, the cells are the control plane's"
+          ;;
+        *)
+          echo "slice.sh deploy: ${DRIVER_STACK} is ${host}: remove or repair it before a platform run" >&2
+          exit 1
+          ;;
+      esac
       echo "deploy: edge, identity and tenants are read from ${PLATFORM_MANIFEST_DIR}"
       exit 0
     fi
@@ -260,6 +280,10 @@ case "$verb" in
     fi
     need_region
     ensure_installed
+    if ! platform_mode; then
+      manifest="${STRESS_STATE_DIR}/manifest.json"
+      [[ -s "$manifest" ]] || { echo "slice.sh run: no ${manifest}; seed did not run" >&2; exit 1; }
+    fi
 
     # The sample's tier (agents, tenant limit, reserved concurrency) is what the scenarios read;
     # the runner's STRESS_TIER_JSON holds only the shared figures.
@@ -273,6 +297,7 @@ case "$verb" in
       env_args=(
         "MANIFEST=/opt/stress/inputs/manifest.json"
         "ENDPOINT=${EDGE_URL}/agents"
+        "AGENT_BACKEND=${EDGE_BACKEND}"
         "PLATFORM_API=${IDENTITY_API}"
         "APP_CLIENT_ID=${IDENTITY_CLIENT}"
         "ISSUER=${IDENTITY_ISSUER}"
@@ -281,7 +306,6 @@ case "$verb" in
       )
     else
       manifest="${STRESS_STATE_DIR}/manifest.json"
-      [[ -s "$manifest" ]] || { echo "slice.sh run: no ${manifest}; seed did not run" >&2; exit 1; }
       ident="/application-plane/shared/identity"
       platform_api="$(aws ssm get-parameter --name "${ident}/apiUrl" --query Parameter.Value --output text)"
       [[ "$platform_api" == */ ]] || platform_api="${platform_api}/"

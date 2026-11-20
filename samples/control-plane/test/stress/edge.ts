@@ -50,15 +50,15 @@ export function parseEdgeInputs(text: string | undefined, file: string): EdgeInp
   try {
     doc = JSON.parse(text) as Record<string, unknown>;
   } catch {
-    throw new Error(`${file}: not JSON`);
+    throw new Error(`${file} (written by the tenant-front-door slice): not JSON`);
   }
-  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) throw new Error(`${file}: not a JSON object`);
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) throw new Error(`${file} (written by the tenant-front-door slice): not a JSON object`);
   const edge = typeof doc.edgeUrl === 'string' ? doc.edgeUrl.replace(/\/$/, '') : '';
-  if (!EDGE_URL.test(edge)) throw new Error(`${file}: edgeUrl must be an https origin with no path`);
+  if (!EDGE_URL.test(edge)) throw new Error(`${file} (written by the tenant-front-door slice): edgeUrl must be an https origin with no path`);
   const registrar = typeof doc.registrarUrl === 'string' ? doc.registrarUrl.replace(/\/$/, '') : '';
-  if (!REGISTRAR_URL.test(registrar)) throw new Error(`${file}: registrarUrl must be the registrar's execute-api URL`);
+  if (!REGISTRAR_URL.test(registrar)) throw new Error(`${file} (written by the tenant-front-door slice): registrarUrl must be the registrar's execute-api URL`);
   const backend = doc.agentBackend ?? 'default';
-  if (typeof backend !== 'string' || !BACKEND.test(backend)) throw new Error(`${file}: agentBackend must match ${BACKEND}`);
+  if (typeof backend !== 'string' || !BACKEND.test(backend)) throw new Error(`${file} (written by the tenant-front-door slice): agentBackend must match ${BACKEND}`);
   return { edgeUrl: edge, registrarUrl: registrar, agentBackend: backend };
 }
 
@@ -91,17 +91,48 @@ export function probeToken(tenantId: string): string {
 
 /** The edge as PS-5 uses it; the unit tests give it a fake. */
 export interface Edge {
+  /** Loads what `setStatus` needs (credentials) before the first timed call, so no hop includes it. */
+  prepare?(): Promise<void>;
   /** The HTTP status the edge answers for the tenant's probe request (0: no answer). */
   probe(tenantId: string): Promise<number>;
-  /** `UpdateTenantRouteStatus`: the registrar's HTTP status (0: no answer). */
+  /** `UpdateTenantRouteStatus`: the registrar's HTTP status (0: no answer, or no credentials). */
   setStatus(tenantId: string, status: 'active' | 'suspended'): Promise<number>;
 }
 
 const elapsed = (started: bigint): number => Number(process.hrtime.bigint() - started) / 1e9;
 
+interface Credentials {
+  readonly accessKeyId: string;
+  readonly secretAccessKey: string;
+  readonly sessionToken?: string;
+}
+
+/** The caller's credentials as the AWS CLI resolves them, kept in memory only. */
+async function loadCredentials(): Promise<{ creds: Credentials; expiresAt: number } | undefined> {
+  try {
+    const out = await aws(['configure', 'export-credentials', '--format', 'process']);
+    if (typeof out.AccessKeyId !== 'string' || typeof out.SecretAccessKey !== 'string') return undefined;
+    const expires = typeof out.Expiration === 'string' ? Date.parse(out.Expiration) : Number.NaN;
+    return {
+      creds: { accessKeyId: out.AccessKeyId, secretAccessKey: out.SecretAccessKey, sessionToken: typeof out.SessionToken === 'string' ? out.SessionToken : undefined },
+      expiresAt: Number.isNaN(expires) ? Date.now() + 300_000 : expires,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /** The edge and registrar at the addresses in `inputs`. */
 export function liveEdge(inputs: EdgeInputs, region: string): Edge {
+  let cached: { creds: Credentials; expiresAt: number } | undefined;
+  const credentials = async (): Promise<Credentials | undefined> => {
+    if (cached === undefined || cached.expiresAt - Date.now() < 60_000) cached = await loadCredentials();
+    return cached?.creds;
+  };
   return {
+    async prepare() {
+      await credentials();
+    },
     async probe(tenantId) {
       try {
         const res = await fetch(`${inputs.edgeUrl}/agents/${inputs.agentBackend}/invocations`, {
@@ -118,32 +149,29 @@ export function liveEdge(inputs: EdgeInputs, region: string): Edge {
       }
     },
     async setStatus(tenantId, status) {
+      const creds = await credentials();
+      if (creds === undefined) return 0;
       const regionOfUrl = REGISTRAR_URL.exec(inputs.registrarUrl)?.[1] ?? region;
-      return signedPut(`${inputs.registrarUrl}/tenants/${encodeURIComponent(tenantId)}/status`, { status }, regionOfUrl);
+      return signedPut(`${inputs.registrarUrl}/tenants/${encodeURIComponent(tenantId)}/status`, { status }, regionOfUrl, creds);
     },
   };
 }
 
 /**
  * A SigV4-signed PUT to an API Gateway URL with the caller's own credentials (the registrar
- * allows its edge operator role). curl signs; the key pair goes to it on stdin, never in argv,
- * and only the HTTP status comes back.
+ * allows its edge operator role). curl (7.75 or later, for `--aws-sigv4`) signs; the key pair
+ * goes to it on stdin, never in argv, and only the HTTP status comes back (0: curl failed).
  */
-export async function signedPut(url: string, body: object, region: string): Promise<number> {
-  let creds: { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string };
-  try {
-    creds = await aws(['configure', 'export-credentials', '--format', 'process']);
-  } catch {
-    return 0;
-  }
-  if (creds.AccessKeyId === undefined || creds.SecretAccessKey === undefined) return 0;
-  const config = `user = "${creds.AccessKeyId}:${creds.SecretAccessKey}"\n${creds.SessionToken === undefined ? '' : `header = "x-amz-security-token: ${creds.SessionToken}"\n`}`;
+export function signedPut(url: string, body: object, region: string, creds: Credentials, curl = 'curl'): Promise<number> {
+  const config = `user = "${creds.accessKeyId}:${creds.secretAccessKey}"\n${creds.sessionToken === undefined ? '' : `header = "x-amz-security-token: ${creds.sessionToken}"\n`}`;
   return new Promise((resolve) => {
     const child = execFile(
-      'curl',
+      curl,
       ['-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '30', '-X', 'PUT', '--aws-sigv4', `aws:amz:${region}:execute-api`, '--config', '-', '-H', 'content-type: application/json', '--data-raw', JSON.stringify(body), url],
       (error, stdout) => resolve(error === null && /^\d{3}$/.test(stdout.trim()) ? Number(stdout.trim()) : 0),
     );
+    // curl may exit before it reads the config (a flag it does not know): the callback answers 0.
+    child.stdin?.on('error', () => undefined);
     child.stdin?.end(config);
   });
 }

@@ -74,6 +74,8 @@ describe('slice.json', () => {
     }
     // The record is written under the PS id: probe.js renames the slice's id with RECORD_SCENARIO.
     expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', 'probe.js'), 'utf8')).toContain("env('RECORD_SCENARIO', scenario)");
+    // Every response goes to the refusal tracker in platform mode, so a minute's counts are always written.
+    expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', 'probe.js'), 'utf8')).toMatch(/if \(PLATFORM\) \{\s+edgeRefusals\.track\(entry\.tenantId, r\.status\);/);
   });
 });
 
@@ -206,11 +208,12 @@ describe('slice.sh', () => {
         ['an edge URL with a path', { 'tenant-front-door.json': { ...EDGE, edgeUrl: 'https://stress.example.com/prod' } }, /edgeUrl must be an https origin/],
         ['an edge URL that is not https', { 'tenant-front-door.json': { ...EDGE, edgeUrl: 'http://stress.example.com' } }, /edgeUrl must be an https origin/],
         ['no edge URL', { 'tenant-front-door.json': { version: 1 } }, /edgeUrl must be an https origin with no path \(got 'nothing'\)/],
+        ['a bad agent backend', { 'tenant-front-door.json': { ...EDGE, agentBackend: 'A/b' } }, /agentBackend must match/],
         ['an identity API that is not execute-api', { 'identity.json': { ...IDENTITY, apiUrl: 'https://example.com/' } }, /apiUrl must be an execute-api URL/],
         ['an identity with no client', { 'identity.json': { ...IDENTITY, appClientId: '' } }, /appClientId is missing/],
         ['an identity with a bad pool', { 'identity.json': { ...IDENTITY, userPoolId: 'pool' } }, /userPoolId is missing/],
-        ['a manifest that is not an object', { 'control-plane.json': '[1]' }, /control-plane.json is not a JSON object/],
-        ['a control-plane manifest with no seeded list', { 'control-plane.json': { version: 1 } }, /control-plane.json: "seeded" must be an array/],
+        ['a manifest that is not an object', { 'control-plane.json': '[1]' }, /control-plane.json \(written by the control-plane slice\) is not a JSON object/],
+        ['a control-plane manifest with no seeded list', { 'control-plane.json': { version: 1 } }, /control-plane.json \(written by the control-plane slice\): "seeded" must be an array/],
       ])('refuses %s', (_name, change, pattern) => {
         withHome({ ...ALL, ...change }, (h) => {
           const r = run(SLICE_SH, platformEnv(h), verb);
@@ -350,6 +353,7 @@ describe('slice.sh', () => {
           expect(args.slice(1)).toEqual([
             'MANIFEST=/opt/stress/inputs/manifest.json',
             'ENDPOINT=https://stress.example.com/agents',
+            'AGENT_BACKEND=default',
             'PLATFORM_API=https://abc123.execute-api.eu-central-1.amazonaws.com/prod/',
             'APP_CLIENT_ID=client123abc',
             'ISSUER=https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_AbCdEf123',
@@ -380,6 +384,45 @@ describe('slice.sh', () => {
             'ISSUER=https://issuer.example.com/pool',
             'REGION=eu-central-1',
           ]);
+        });
+      });
+
+      it('passes the front door\'s agent backend to k6', () => {
+        withHome({ ...ALL, 'tenant-front-door.json': { ...EDGE, agentBackend: 'a001' } }, (h) => {
+          fs.mkdirSync(path.join(h, 'results'));
+          expect(run(script(), runEnv(h), 'run', 'PS-2').status).toBe(0);
+          expect(k6Args()).toContain('AGENT_BACKEND=a001');
+        });
+      });
+
+      it('refuses a k6 host in a state it cannot reuse, and an AWS error it cannot read', () => {
+        withHome(ALL, (h) => {
+          const stack = path.join(fake, 'stacks', 'StressTest-driver');
+          fs.mkdirSync(stack, { recursive: true });
+          const failing = path.join(fake, 'bin-failing');
+          fs.mkdirSync(failing, { recursive: true });
+          fs.writeFileSync(path.join(failing, 'aws'), '#!/usr/bin/env bash\necho "An error occurred (ExpiredToken) when calling the DescribeStacks operation" >&2\nexit 254\n', { mode: 0o755 });
+          const expired = run(script(), { ...env(h), PATH: `${failing}:${process.env.PATH}` }, 'deploy');
+          expect(expired.status).toBe(1);
+          expect(expired.stderr).toContain('could not read the status of StressTest-driver (ExpiredToken)');
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
+          expect(calls()).toBe('');
+        });
+      });
+
+      it('drops its ownership marker when the k6 host deploy failed before it made the stack', () => {
+        withHome(ALL, (h) => {
+          const driverDeploy = path.join(repo, 'stress', 'driver', 'deploy.sh');
+          const original = fs.readFileSync(driverDeploy, 'utf8');
+          fs.writeFileSync(driverDeploy, '#!/usr/bin/env bash\necho "missing tool" >&2\nexit 1\n', { mode: 0o755 });
+          try {
+            const r = run(script(), env(h), 'deploy');
+            expect(r.status).toBe(1);
+            expect(r.stderr).toContain('stress/driver/deploy.sh failed');
+            expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
+          } finally {
+            fs.writeFileSync(driverDeploy, original, { mode: 0o755 });
+          }
         });
       });
 
@@ -452,6 +495,58 @@ describe('slice.sh', () => {
           expect(r.status).toBe(0);
           expect(JSON.parse(fs.readFileSync(path.join(h, 'manifest.json'), 'utf8')).tenants).toHaveLength(2);
         });
+      });
+    });
+
+    describe('the edge-refusal lines (k6/edge-refusals.js)', () => {
+      // The file has no k6 import, so it runs here as it is, with its `export` keyword dropped.
+      type Tracker = { track: (tenant: string, status: number) => void };
+      type Loaded = { createEdgeRefusals: (now: () => number, progress: () => number, log: (l: string) => void) => Tracker };
+      const load = (): Loaded => {
+        const ctx: Record<string, unknown> = {};
+        vm.runInNewContext(`${fs.readFileSync(path.join(STRESS_DIR, 'k6', 'edge-refusals.js'), 'utf8').replace(/^export /gm, '')}\nthis.createEdgeRefusals = createEdgeRefusals;`, ctx);
+        return ctx as never;
+      };
+      const MINUTE = 60_000;
+
+      it('writes a minute\'s refusals when the next minute\'s first response arrives, even a success', () => {
+        const lines: string[] = [];
+        let now = 10 * MINUTE;
+        const { track } = load().createEdgeRefusals(() => now, () => 0.2, (l) => lines.push(l));
+        track('A', 503);
+        track('A', 503);
+        track('B', 403);
+        track('A', 200);
+        expect(lines).toEqual([]);
+        now += MINUTE;
+        track('A', 200);
+        expect(lines.map((l) => JSON.parse(l))).toEqual([
+          { kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 503, count: 2 },
+          { kind: 'edge_refusal', epochMinute: 10, tenantId: 'B', status: 403, count: 1 },
+        ]);
+        now += MINUTE;
+        track('A', 200);
+        expect(lines).toHaveLength(2);
+      });
+
+      it('writes after every response in the last 1 % of the scenario, a success included', () => {
+        const lines: string[] = [];
+        let progress = 0.5;
+        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, () => progress, (l) => lines.push(l));
+        track('A', 429);
+        expect(lines).toEqual([]);
+        progress = 0.995;
+        track('A', 200);
+        expect(lines.map((l) => JSON.parse(l))).toEqual([{ kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 429, count: 1 }]);
+        track('A', 200);
+        expect(lines).toHaveLength(1);
+      });
+
+      it('counts nothing for a success', () => {
+        const lines: string[] = [];
+        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, () => 1, (l) => lines.push(l));
+        track('A', 200);
+        expect(lines).toEqual([]);
       });
     });
 

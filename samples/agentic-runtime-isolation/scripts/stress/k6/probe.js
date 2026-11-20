@@ -42,6 +42,8 @@ import {
   warmSpacingMs,
 } from '../../../../../stress/k6/lib.js';
 
+import { createEdgeRefusals } from './edge-refusals.js';
+
 export {
   iterationSkipped,
   loadManifest,
@@ -59,6 +61,8 @@ export const SLICE = 'agentic-runtime-isolation';
 
 const SAMPLE = {
   sessionScope: env('SESSION_SCOPE', 'tenant'),
+  /** The agent every tenant calls unless AGENT_SPREAD spreads them; platform mode takes it from the front door's manifest. */
+  agent: env('AGENT_BACKEND', 'default'),
   agentSpread: env('AGENT_SPREAD', 'false') === 'true',
 };
 
@@ -117,37 +121,11 @@ export function summarize(data, scenario) {
 
 // -- refusals through the edge (platform mode) ----------------------------------
 
+// A 4xx or 5xx through the edge is one `edge_refusal` line per VU, tenant, status and minute
+// (edge-refusals.js); collect-platform.sh gives each its tenant and reason (P-7). It runs on every
+// response, so the last minute's counts are written too.
 const PLATFORM = env('STRESS_MODE', 'slice') === 'platform';
-let edgeRefusals = {};
-let edgeRefusalMinute = null;
-
-function flushEdgeRefusals() {
-  for (const key of Object.keys(edgeRefusals)) {
-    const [tenantId, status] = key.split('|');
-    console.log(JSON.stringify({ kind: 'edge_refusal', epochMinute: edgeRefusalMinute, tenantId, status: Number(status), count: edgeRefusals[key] }));
-  }
-  edgeRefusals = {};
-}
-
-/**
- * Platform mode: a 4xx or 5xx through the edge is one `edge_refusal` line per VU, tenant, status
- * and minute (stderr, kept in `<script>.k6-stdout.txt` like the library's own lines). No hop of
- * the slice's own logs holds it, so `collect-platform.sh` takes the tenant and the reason
- * (`http-<status>`) from these lines (P-7). Like the library's ledger, the last minute is
- * flushed after every request in the last 1 % of the scenario.
- */
-function noteEdgeRefusal(tenantId, status) {
-  const minute = Math.floor(Date.now() / 60000);
-  if (edgeRefusalMinute !== null && minute !== edgeRefusalMinute) {
-    flushEdgeRefusals();
-  }
-  edgeRefusalMinute = minute;
-  const key = `${tenantId}|${status}`;
-  edgeRefusals[key] = (edgeRefusals[key] || 0) + 1;
-  if (exec.scenario.progress >= 0.99) {
-    flushEdgeRefusals();
-  }
-}
+const edgeRefusals = createEdgeRefusals(Date.now, () => exec.scenario.progress, (line) => console.log(line));
 
 // -- tokens and conversations --------------------------------------------------
 
@@ -172,7 +150,7 @@ export function setupTokens(manifest, tier, opts = {}) {
     Object.assign({}, opts, {
       decorate: (entry) => ({
         conversationId: `stress${convRun}${String(entry.tenantIndex).padStart(6, '0')}`,
-        agent: SAMPLE.agentSpread ? tier.agents[entry.tenantIndex % tier.agents.length] : 'default',
+        agent: SAMPLE.agentSpread ? tier.agents[entry.tenantIndex % tier.agents.length] : SAMPLE.agent,
       }),
     }),
   );
@@ -334,8 +312,8 @@ export function probe(entry, kind, opts = {}) {
   const phase = opts.phase || 'main';
   const r = invoke(entry, promptOf(kind, entry, opts), { probe: kind, phase });
   countStatus(r.status, entry.tenantId);
-  if (PLATFORM && r.status >= 400) {
-    noteEdgeRefusal(entry.tenantId, r.status);
+  if (PLATFORM) {
+    edgeRefusals.track(entry.tenantId, r.status);
   }
   if (phase !== 'warm') {
     timed(r.ttfb, r.total, { probe: kind });
