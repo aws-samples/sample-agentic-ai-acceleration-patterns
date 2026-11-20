@@ -4,7 +4,7 @@
 import { App, Aspects, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { CellAccountStack } from './cell-account/cell-account.cdk';
-import { readJsonContext } from './shared/context';
+import { readJsonContext, readStackName } from './shared/context';
 import { DEFAULT_FLEET_NAME, validateFleetName } from './shared/fleet';
 import { TenantStack } from './tenant/tenant.cdk';
 
@@ -99,7 +99,9 @@ if (cellAccount !== undefined) {
   const vendorIdpClientIds = parseJsonContext<string[]>('vendorIdpClientIds');
   const vendorIdpRequiredScope = app.node.tryGetContext('vendorIdpRequiredScope') as string | undefined;
 
-  new TenantStack(app, 'control-plane-dev', {
+  // Optional: the stack's name, default control-plane-dev, for a deployer
+  // that names its stacks per environment or per test run.
+  new TenantStack(app, readStackName(app.node), {
     vendorIdpIssuerUrl: String(vendorIdpIssuerUrl),
     vendorIdpAudience: String(vendorIdpAudience),
     vendorIdpClientIds,

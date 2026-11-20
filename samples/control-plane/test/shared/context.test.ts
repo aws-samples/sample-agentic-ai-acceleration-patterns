@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import { App } from 'aws-cdk-lib';
-import { readJsonContext } from '../../src/shared/context';
+import { DEFAULT_STACK_NAME, readJsonContext, readStackName } from '../../src/shared/context';
 import { validateConcurrentBuildLimit } from '../../src/tenant/validation';
 
 /** How a context value reaches the stack: a CLI string or a cdk.json value (src/main.ts). */
@@ -26,5 +26,25 @@ describe('readJsonContext', () => {
     expect(read('')).toBeUndefined();
     expect(read('["arn:aws:iam::123456789012:policy/P"]')).toEqual(['arn:aws:iam::123456789012:policy/P']);
     expect(() => read('abc')).toThrow(/The key context value is not valid JSON/);
+  });
+});
+
+/** The control plane stack's name (src/main.ts `stackName`). */
+describe('readStackName', () => {
+  const read = (value: unknown) => readStackName(new App({ context: { stackName: value } }).node);
+
+  test('absent or empty is the default, control-plane-dev', () => {
+    expect(readStackName(new App().node)).toBe(DEFAULT_STACK_NAME);
+    expect(DEFAULT_STACK_NAME).toBe('control-plane-dev');
+    expect(read('')).toBe('control-plane-dev');
+  });
+
+  test('a CloudFormation stack name is taken as given', () => {
+    expect(read('TfdInteg-r1-control-plane')).toBe('TfdInteg-r1-control-plane');
+    expect(read(`a${'b'.repeat(127)}`)).toHaveLength(128);
+  });
+
+  test.each([['1abc'], ['a_b'], ['a.b'], [`a${'b'.repeat(128)}`], [42]])('refuses %p', (value) => {
+    expect(() => read(value)).toThrow(/Invalid stackName/);
   });
 });
