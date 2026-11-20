@@ -18,7 +18,7 @@
  * cell boundary.
  */
 
-import { LegacyStackSynthesizer, Stack, type StackProps } from 'aws-cdk-lib';
+import { LegacyStackSynthesizer, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -91,6 +91,10 @@ export class CellPoliciesStack extends Stack {
       description: 'For the role pair tenant role (tenantBuildManagedPolicyArns): invoke the tenant subscription methods of the cell Entitlements APIs only',
       document: cellTenantBuildPolicyDocument(),
     });
+    // An explicit DeletionPolicy (the same Delete CloudFormation applies anyway) lets an owner
+    // bring the policy back under the stack with `cdk import` when a deploy without it left
+    // the policy behind, attached to the role pair (README, step 1).
+    this.tenantBuildPolicy.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
     const reason =
       'Cell policies for a standalone cell account that holds only cells, the cell bootstrap and the owner stacks (spec §3.7, ADR-0006): ' +
