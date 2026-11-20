@@ -212,6 +212,15 @@
         }
       ]
     },
+    "integ": {
+      "name": "integ",
+      "description": "Deployment integration test: deploy, every step of integration-test.md, destroy (needs AWS_REGION)",
+      "steps": [
+        {
+          "exec": "scripts/integ.sh"
+        }
+      ]
+    },
     "package": {
       "name": "package",
       "description": "Creates the distribution package"
