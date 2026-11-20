@@ -474,9 +474,12 @@ with `busy`. The runner:
    first `fork` failed with `EAGAIN` on `microvm` and `agentcore`
    (S-18). On `agentcore` the runner then reads the job group's
    `memory.current` less `file` plus `shmem` (as the `nitro` watchdog
-   does, so the page cache of files in `/work` does not count) and
-   returns `tool_failed` rather than start the next job if it is not
-   below 32 MiB. Files in `/work` stay (below).
+   does, so the page cache of files in `/work` does not count). If it is
+   not below 32 MiB, the runner starts no further job and refuses every
+   later one with `dirty`, which the tool treats as a dead handle
+   (§4.1 step 3), so the takeover stops the session and the next start
+   gets a fresh one under the same id. 32 MiB is a design value: no spike
+   has read the job group after a sweep. Files in `/work` stay (below).
 4. Returns `exitCode`, `stdout`, `stderr` (together at most
    `maxOutputBytes`, stdout cut first, `truncated` flag), `durationMs`,
    `timedOut`, `memoryExceeded`, `bootId` and the nonce proof.
@@ -601,15 +604,15 @@ cannot lower the kernel's own limits instead (S-17).
 
 Job filter on `nitro` (ADR-0021). The runner installs the same kind of
 filter in every `nitro` job, returning `EPERM` for `semget`, `msgget`,
-`shmget` and `shmat`. The filter takes its architecture constant and its
+`shmget` and `shmat`. The filter has the same child check. It takes its architecture constant and its
 syscall numbers from the architecture of the runner image, which follows
 `nitro.instanceTypes` (§3.3): `AUDIT_ARCH_X86_64` with the x86_64 numbers
 for Intel types, `AUDIT_ARCH_AARCH64` with the aarch64 generic table for
 Graviton types. A port that changed only the constant would block the
 wrong calls, or kill every job. The runner holds one table per
 architecture, and `synth` refuses a `nitro.instanceTypes` entry whose
-architecture has no table. Only the x86_64 table has run (S-18, S-19). It
-has the same child check. In S-18 the three creates failed
+architecture has no table. Only the x86_64 table has run (S-18, S-19).
+In S-18 the three creates failed
 at once, nothing was charged, and the sweep and the next job were fine.
 On x86_64 the x32 ABI, whose numbers carry bit 30, is off in the `nitro`
 kernel (an unfiltered x32 call returns `ENOSYS`), and the filter kills any
@@ -631,8 +634,8 @@ that reason.
 
 Files in `/work` persist for the sandbox's life, so a tenant's second call
 can read what the first wrote. uid 1001 cannot signal the runner, open its
-file descriptors, or write outside `/work`, `/tmp` and, on `nitro` and
-`agentcore`, `/dev/shm`. The runner logs only
+file descriptors, or write outside `/work`, `/tmp`, `/var/tmp` (disk-backed,
+kept like `/work`) and, on `nitro` and `agentcore`, `/dev/shm`. The runner logs only
 sizes, exit code and duration, never code, input or output. The tool's log
 line (§3.8) is the record of a run; the runner's log is secondary, because
 on `nitro` and `agentcore` it shares a stream with whatever the code prints
@@ -661,14 +664,14 @@ One VPC in two AZs, created unless `vpc` is given.
 
 | Subnets | Route table | Used by |
 |---|---|---|
-| Tool | default route to one NAT gateway | the tool Lambda, the reaper, the drain; the ECS Managed Instances' primary ENIs |
+| Tool | default route to one NAT gateway | the tool Lambda, the reaper, the drain, the offboard function; the ECS Managed Instances' primary ENIs |
 | Sandbox | local only, no default route | `nitro` task ENIs, the `agentcore` runtime ENIs, the `microvm` VPC egress connector |
 
 Endpoints in the sandbox subnets, each with a security group and a policy.
 Interface endpoints use private DNS, which applies to the whole VPC, so
 anything in the tool subnets that calls ECR or Logs also reaches these
 endpoints. Their security groups therefore admit the sandbox groups and
-the instance group; the tool, reaper and drain call neither ECR nor Logs
+the instance group; the tool, reaper, drain and offboard function call neither ECR nor Logs
 APIs directly (their own logs go through the Lambda service). The policies
 name only the sample's repository and log groups. The instances pull the
 runner image from that repository, through these endpoints or the NAT,
@@ -863,8 +866,8 @@ Reuse rule, per call (the tool):
    another call won: go back to step 1 once. The winner stops the handle it
    replaced, if any, then starts and records `handle` (and `address` when
    the start returns it), then probes as in step 1.
-3. Run. A failed identity check, a `wrong_sandbox` refusal from the
-   runner, "not found", or a connection refusal marks
+3. Run. A failed identity check, a `wrong_sandbox` or `dirty` refusal
+   from the runner, "not found", or a connection refusal marks
    the row dead: go to step 2 with the version just read. A call that has
    already waited for a start in this invocation does not wait again after
    a takeover: it returns `sandbox_starting`. A changed `bootId` means the
@@ -991,8 +994,8 @@ Errors (tool error `code`, no stack, no tenant data):
 | `sandbox_failed` | yes, after `retryAfterSeconds` | the sandbox ended before it served, or died mid-run (§4.1 failed starts) |
 | `tool_failed` | no | any other fault (from `toolHandler` on the gateway entry, from the core handler on the standalone entry) |
 
-The runner's `wrong_sandbox` refusal never reaches a caller: the tool
-treats it as a dead handle (§4.1 step 3).
+The runner's `wrong_sandbox` and `dirty` refusals never reach a caller:
+the tool treats them as a dead handle (§4.1 step 3).
 
 A script that exits non-zero, times out or is killed is not a tool error: it
 returns a result with `exitCode`, `timedOut` and its output.
