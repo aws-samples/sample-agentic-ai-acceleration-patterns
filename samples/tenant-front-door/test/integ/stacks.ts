@@ -419,10 +419,15 @@ export class ControlPlaneSetupStack extends Stack {
       actions: ['ssm:GetParameter', 'ssm:PutParameter', 'ssm:DeleteParameter'],
       resources: [parameter(paramHook(names.applicationId))],
     }));
+    // Only what the leftover check and step 12 read: this run's tenant namespaces and the cells' probe parameters.
     access.addToPolicy(new iam.PolicyStatement({
-      sid: 'ReadApplicationPlane',
+      sid: 'ReadRunParameters',
       actions: ['ssm:GetParameter', 'ssm:GetParametersByPath'],
-      resources: [parameter('application-plane'), parameter('application-plane/*')],
+      resources: [
+        parameter(`application-plane/tenants/*/${names.applicationId}`),
+        parameter(`application-plane/tenants/*/${names.applicationId}/*`),
+        parameter('application-plane/cells/*/registrar-probe'),
+      ],
     }));
     access.addToPolicy(new iam.PolicyStatement({
       sid: 'ReadRunStacks',
@@ -451,9 +456,11 @@ export class ControlPlaneSetupStack extends Stack {
     // Step 22: the control plane's count of the skipped delete hook (control-plane R-46); GetMetricData takes no resource.
     access.addToPolicy(new iam.PolicyStatement({ sid: 'HookSkippedCount', actions: ['cloudwatch:GetMetricData'], resources: ['*'] }));
     const cp = inputs.controlPlaneAccount;
-    ackFindings(access, 'Reads of this run\'s parameters, stacks, log groups and roles by name prefix; logs:DescribeLogGroups and cloudwatch:GetMetricData take no resource.',
+    ackFindings(access, 'Reads of this run\'s tenant namespaces (tenant ids are minted during the run), the cells\' probe parameters, this run\'s stacks, log groups and roles by name prefix; logs:DescribeLogGroups and cloudwatch:GetMetricData take no resource.',
       'AwsSolutions-IAM5[Resource::*]',
-      `AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ssm:${inputs.region}:${cp}:parameter/application-plane/*]`,
+      `AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ssm:${inputs.region}:${cp}:parameter/application-plane/tenants/*/${names.applicationId}]`,
+      `AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ssm:${inputs.region}:${cp}:parameter/application-plane/tenants/*/${names.applicationId}/*]`,
+      `AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ssm:${inputs.region}:${cp}:parameter/application-plane/cells/*/registrar-probe]`,
       `AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:cloudformation:${inputs.region}:${cp}:stack/${names.prefix}-*]`,
       `AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:cloudformation:${inputs.region}:${cp}:stack/${names.fleet}-*]`,
       `AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:logs:${inputs.region}:${cp}:log-group:${names.stacks.cellA}-*]`,

@@ -165,6 +165,22 @@ describe('the integ app', () => {
     expect(doc).toContain(`"aws:PrincipalAccount":"${CP}"`);
   });
 
+  it('lets the driver access role read only this run\'s tenant namespaces and the cells\' probe parameters', () => {
+    const { stacks } = synth(BASE);
+    const policies = byName(stacks, names.stacks.controlPlaneSetup).findResources('AWS::IAM::Policy');
+    type Statement = { Sid?: string; Resource: unknown };
+    const statements = Object.values(policies).flatMap((p) => (p as { Properties: { PolicyDocument: { Statement: Statement[] } } })
+      .Properties.PolicyDocument.Statement);
+    const read = statements.find((s) => s.Sid === 'ReadRunParameters');
+    const resources = JSON.stringify(read?.Resource);
+    expect(resources).toContain(`:parameter/application-plane/tenants/*/${names.applicationId}"`);
+    expect(resources).toContain(`:parameter/application-plane/tenants/*/${names.applicationId}/*"`);
+    expect(resources).toContain(':parameter/application-plane/cells/*/registrar-probe"');
+    const all = JSON.stringify(statements);
+    expect(all).not.toMatch(/:parameter\/application-plane\/\*"/);
+    expect(all).not.toMatch(/:parameter\/application-plane"/);
+  });
+
   it('serves the stand-in agent route only behind its token check', () => {
     const { stacks } = synth(FULL);
     const t = byName(stacks, names.stacks.agentIngress);
