@@ -36,7 +36,13 @@ keep-alive HTTP/1.1 channel over that one socket. `ready` and `run` post
 the connection's, or a proof that does not match is an identity failure:
 `ended` in `ready`, a dead handle in `run`, and no job is sent. A runner
 that is not listening or answers with something unusable is `starting` in
-`ready`. `run` waits at most `timeoutMs` plus 5 s from the call (`no_answer`
+`ready`. In `run`, only an error before the job was sent is a dead handle
+(connect, `/hello`): once `/hello` has succeeded, any error on the `/run`
+post (a lost connection, an answer past the size limit, a timeout) is
+`no_answer`, because the job may have run and a rerun in a fresh sandbox
+would run the tenant's code twice (ADR-0044). The reason of a dead handle
+is a code (`connect_failed: ECONNREFUSED`), never the error text, which
+carries the task's address. `run` waits at most `timeoutMs` plus 5 s from the call (`no_answer`
 after that), reads at most `6 × maxOutputBytes + 64 KiB` (stdout and
 stderr are cut by bytes, then decoded and JSON-escaped), refuses a result
 whose run id or proof does not match, and returns a runner refusal as

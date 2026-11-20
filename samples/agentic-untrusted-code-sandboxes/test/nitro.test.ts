@@ -441,14 +441,14 @@ describe('run', () => {
     const nonce = newNonce();
     const { backend, runner, handle } = make(nonce);
     runner.connectError = new RunnerConnectionError('connect failed: ECONNREFUSED');
-    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'connect failed: ECONNREFUSED' });
+    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'connect_failed: ECONNREFUSED' });
   });
 
   test('a connect timeout on a vanished instance is a dead handle', async () => {
     const nonce = newNonce();
     const { backend, runner, handle } = make(nonce);
     runner.connectError = new RunnerTimeoutError('connect timed out');
-    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'connect timed out' });
+    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'connect_timeout' });
   });
 
   test('a handle with no address is dead before any connection', async () => {
@@ -475,18 +475,28 @@ describe('run', () => {
     expect(runner.closed).toBe(1);
   });
 
-  test('a connection lost mid-run is a dead handle', async () => {
+  test('a connection lost after /hello succeeded is no_answer, never a dead handle (the job may have run)', async () => {
     const nonce = newNonce();
     const { backend, runner, handle } = make(nonce);
     runner.run = 'reset';
-    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'connection lost' });
+    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'no_answer' });
+    expect(runner.requests.map((r) => r.path)).toEqual(['/hello', '/run']);
   });
 
-  test('an answer past the output limit is a dead handle', async () => {
+  test('an answer past the output limit is no_answer', async () => {
     const nonce = newNonce();
     const { backend, runner, handle } = make(nonce);
     runner.run = 'oversize';
-    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'the runner answer is larger than allowed' });
+    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'no_answer' });
+  });
+
+  test('a connect error reason is a code: the task address and port never reach the reason', async () => {
+    const nonce = newNonce();
+    const { backend, runner, handle } = make(nonce);
+    runner.connectError = new RunnerConnectionError('connect failed: connect ETIMEDOUT 10.0.12.34:8443');
+    const out = await backend.run(handle, jobFor(handle));
+    expect(out).toEqual({ kind: 'dead', reason: 'connect_failed: ETIMEDOUT' });
+    expect(JSON.stringify(out)).not.toMatch(/10\.0\.12\.34|8443/);
   });
 
   test.each([

@@ -156,6 +156,13 @@ describe('cluster and capacity provider', () => {
     });
   });
 
+  test('the provider enables Nitro Enclaves, which an ISOLATED_SANDBOX task needs to launch', () => {
+    const t = Template.fromStack(setup().stack);
+    t.hasResourceProperties('AWS::ECS::CapacityProvider', {
+      ManagedInstancesProvider: { InstanceLaunchTemplate: { NitroEnclavesEnabled: true } },
+    });
+  });
+
   test('instance primary ENIs sit in the tool subnets, with the instance group', () => {
     const { stack, vpc, backend } = setup();
     const t = Template.fromStack(stack);
@@ -295,7 +302,14 @@ describe('roles and statements', () => {
     const { stack, backend } = setup();
     const t = Template.fromStack(stack);
     t.hasResourceProperties('AWS::IAM::Role', {
-      AssumeRolePolicyDocument: { Statement: [{ Action: 'sts:AssumeRole', Effect: 'Allow', Principal: { Service: 'ecs-tasks.amazonaws.com' } }] },
+      AssumeRolePolicyDocument: {
+        Statement: [{
+          Action: 'sts:AssumeRole',
+          Effect: 'Allow',
+          Principal: { Service: 'ecs-tasks.amazonaws.com' },
+          Condition: { StringEquals: { 'aws:SourceAccount': ACCOUNT } },
+        }],
+      },
     });
     const policies = Object.values(t.findResources('AWS::IAM::Policy'));
     const doc = policies.find((p) => JSON.stringify(p.Properties.Roles).includes('TaskExecutionRole'))?.Properties.PolicyDocument;
