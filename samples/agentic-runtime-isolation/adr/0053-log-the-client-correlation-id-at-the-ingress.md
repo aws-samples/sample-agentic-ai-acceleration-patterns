@@ -15,7 +15,8 @@ that the load driver chose, on the driver's record and on each hop's log
 line. The ingress lines (`request authorised`, `request served`,
 `request admitted`, `request refused`, `token refused`) carry the verified
 `tenantId`, `backend` and `txn`, but nothing the client chose, so a driver
-record joins them only by tenant and time. A refusal at the authoriser has
+record joins them only by tenant and time; the stress slice matches
+refusals by count for want of it (ADR-0052). A refusal at the authoriser has
 no `txn` at all.
 
 ## Options considered

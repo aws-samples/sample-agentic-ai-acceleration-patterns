@@ -11,7 +11,7 @@ SPDX-License-Identifier: MIT-0
 > client correlation id (ADR-0053).
 > Last review 2026-11-20 (ADR-0053, client correlation id). Last green
 > integration run: run 21, 2026-11-20, eu-central-1, 62 of 62 steps (step
-> 25 SKIP on `agentcore-gateway` by design), commit `331e219`.
+> 25 SKIP on `agentcore-gateway` by design), commit `6fa8c38`.
 > History is in the [ADRs](./adr/) and the git log.
 
 Scope: the `SharedIngress` and `AgentBackend` constructs (one ingress, one

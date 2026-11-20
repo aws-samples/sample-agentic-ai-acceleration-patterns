@@ -10,7 +10,7 @@ SPDX-License-Identifier: MIT-0
 > `INTEG_DEPLOY_CONCURRENCY=2` (the API Gateway control-plane throttle trips
 > at the default 6), steps done 2,518 s after the start (deploy included),
 > key rotation 161 s, sweep of 147 log groups clean, teardown clean (commit
-> 331e219). The per-VM nonce told the microVMs apart on V2: B1 got its own
+> 6fa8c38). The per-VM nonce told the microVMs apart on V2: B1 got its own
 > unit and microVM, A1 resumed c1 on the same one, and session off gave two
 > microVMs for two requests. The run used a sandbox account and
 > `scripts/integ.sh` (the CDK CLI driver, ADR-0044) with six stacks
