@@ -422,7 +422,7 @@ async function sweep(seeded: boolean): Promise<number> {
   // With seeded, every deployment of the stress application goes, also one a lost manifest no longer lists.
   const targets = [...all.keys()].filter((t) => seeded || owned.has(t));
   // A DELETE_FAILED deployment takes another delete (removeAll): up to three rounds.
-  const stuck = await removeAll(f, targets, 3600);
+  const stuck = await removeAll(f, targets, buildLimit(), 3600);
   let status = stuck.length === 0 ? 0 : 1;
   if (stuck.length > 0) log(`sweep: ${stuck.length} deployments could not be removed; cells stay`);
   if (seeded && stuck.length === 0) {

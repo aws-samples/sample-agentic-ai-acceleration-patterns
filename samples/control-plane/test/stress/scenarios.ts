@@ -13,11 +13,13 @@ import { sleep } from './aws';
 import {
   assertPlaced,
   cellsOf,
+  CONFLICT_FAILURE,
   type CellState,
   type DeploymentState,
   deploymentsOf,
   type FleetEnv,
   onboardSeconds,
+  paced,
   type Placement,
   placeDeployment,
   removeAll,
@@ -40,23 +42,7 @@ const CELL_TIMEOUT_SECONDS = 3600;
 /** A wave of tenant builds at a build limit: rounds of about two minutes each, with margin. */
 const waveTimeout = (tenants: number, limit: number): number => 600 + Math.ceil(tenants / limit) * 240;
 const enc = encodeURIComponent;
-
-/** Runs `fn` over `items` with at most `n` at once. */
-async function pool<T, R>(items: readonly T[], n: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(n, items.length) }, async () => {
-      for (;;) {
-        const i = next;
-        next += 1;
-        if (i >= items.length) return;
-        out[i] = await fn(items[i]);
-      }
-    }),
-  );
-  return out;
-}
+const TERMINAL = /^(ACTIVE|[A-Z]+_FAILED)$/;
 
 /**
  * Places every tenant: first one alone when the application has no ACTIVE cell, so its
@@ -94,28 +80,53 @@ async function onboard(s: ScenarioEnv, tenants: readonly string[], hop: string):
       failed.push(first);
     }
   }
+  // The rest at most the build limit at a time (`paced`). A tenant refused with
+  // `InsufficientCapacityError` while a cell of the application is still being created is
+  // tried again once that cell is ACTIVE; one whose create failed on a transaction conflict
+  // is removed and created again (stress ADR-0013), at most twice.
   const full: string[] = [];
+  const timeout = CELL_TIMEOUT_SECONDS + waveTimeout(pending.length, s.buildLimit);
+  const tries = new Map<string, number>();
   for (let round = 0; pending.length > 0 && round < 12; round += 1) {
-    const results: Placement[] = await pool(pending, 25, (t) => placeDeployment(s, t));
+    const results = new Map<string, Placement>();
+    await paced(s, pending, s.buildLimit, timeout, async (t) => {
+      const r = await placeDeployment(s, t);
+      results.set(t, r);
+      return r === 'accepted' || r === 'exists';
+    }, (d) => d === undefined || TERMINAL.test(d.status));
     const retry: string[] = [];
-    pending.forEach((t, i) => {
-      if (results[i] === 'accepted' || results[i] === 'exists') placed.push(t);
-      else if (results[i] === 'full') retry.push(t);
-      else failed.push(t);
-    });
+    const all = await deploymentsOf(s);
+    for (const t of pending) {
+      const r = results.get(t);
+      const d = all.get(t);
+      if (r === 'full') {
+        retry.push(t);
+      } else if (r !== 'accepted' && r !== 'exists') {
+        failed.push(t);
+      } else if (d?.status === 'CREATE_FAILED' && CONFLICT_FAILURE.test(d.statusReason ?? '') && (tries.get(t) ?? 0) < 2) {
+        tries.set(t, (tries.get(t) ?? 0) + 1);
+        s.rec.count('CREATE_FAILED:retried');
+        await removeAll(s, [t], s.buildLimit, waveTimeout(1, s.buildLimit));
+        retry.push(t);
+      } else if (!placed.includes(t)) {
+        placed.push(t);
+      }
+    }
     if (retry.length === 0) break;
     const creating = (await cellsOf(s)).some((c) => c.status === 'CREATING');
-    if (!creating) {
-      full.push(...retry);
-      break;
+    const capacity = retry.filter((t) => results.get(t) === 'full');
+    if (capacity.length > 0 && !creating) {
+      full.push(...capacity);
+      pending = retry.filter((t) => !capacity.includes(t));
+    } else {
+      pending = retry;
     }
-    pending = retry;
-    await sleep(30_000);
+    if (pending.length > 0 && capacity.length > 0) await sleep(30_000);
   }
-  const states = await waitDeployments(s, placed, { timeoutSeconds: CELL_TIMEOUT_SECONDS + waveTimeout(placed.length, s.buildLimit) });
+  const states = await waitDeployments(s, placed, { timeoutSeconds: waveTimeout(placed.length, s.buildLimit) });
   for (const [t, d] of states) {
     if (d === undefined || d.status !== 'ACTIVE') {
-      s.rec.finding(`tenant ${t}: deployment ${d?.status ?? 'missing'}`);
+      s.rec.finding(`tenant ${t}: deployment ${d?.status ?? 'missing'} (${String(d?.statusReason ?? 'no reason').slice(0, 160)})`);
     } else {
       s.rec.sample(hop, onboardSeconds(d));
     }
@@ -133,7 +144,7 @@ async function assertFleet(s: ScenarioEnv, tenants: readonly string[]): Promise<
 
 /** Removes the tenants' deployments and waits until they are gone. */
 async function offboard(s: ScenarioEnv, tenants: readonly string[]): Promise<void> {
-  const stuck = await removeAll(s, tenants, waveTimeout(tenants.length, s.buildLimit));
+  const stuck = await removeAll(s, tenants, s.buildLimit, waveTimeout(tenants.length, s.buildLimit));
   if (stuck.length > 0) s.rec.finding(`${stuck.length} deployments still there after three deletes`);
 }
 
@@ -273,8 +284,9 @@ export async function buildLimitScaling(s: ScenarioEnv): Promise<void> {
     for (const limit of limits) {
       const seconds = await s.setBuildLimit(limit);
       s.rec.sample('set-build-limit', seconds);
-      await offboard(s, wave);
-      const r = await onboard({ ...s, buildLimit: limit }, wave, `onboard-at-${limit}`);
+      const at: ScenarioEnv = { ...s, buildLimit: limit };
+      await offboard(at, wave);
+      const r = await onboard(at, wave, `onboard-at-${limit}`);
       s.rec.sample(`wave-at-${limit}`, r.waveSeconds);
       s.log(`build limit ${limit}: ${r.placed.length} deployments in ${Math.round(r.waveSeconds)} s (${(r.placed.length / (r.waveSeconds / 60)).toFixed(1)} a minute)`);
       await assertFleet(s, wave);

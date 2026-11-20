@@ -84,6 +84,7 @@ export interface DeploymentState {
   readonly status: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly statusReason?: string;
   readonly accountId?: string;
 }
 
@@ -207,24 +208,74 @@ export function expectStatus(f: FleetEnv, r: CallResult, expected: number, what:
 }
 
 /**
- * Removes the tenants' deployments and waits until they are gone, deleting a `DELETE_FAILED`
- * one again, up to `rounds` times. Concurrent deletes in one cell can cancel the workflow's
- * terminal transaction (a DynamoDB `TransactionConflict` on the cell's count), and the
- * control plane answers that with `DELETE_FAILED`, which takes another delete (stress
- * ADR-0013). Each retried delete is counted as `DELETE_FAILED:retried`. Returns the tenants
- * whose deployment is still there.
+ * A `*_FAILED` status the control plane gives when a workflow's terminal DynamoDB
+ * transaction is cancelled by a concurrent one on the same cell (`TransactionConflict`); the
+ * build itself succeeded. Another try of the operation succeeds (stress ADR-0013).
  */
-export async function removeAll(f: FleetEnv, tenants: readonly string[], timeoutSeconds: number, rounds = 3): Promise<string[]> {
+export const CONFLICT_FAILURE = /TransactionCanceledException|TransactionConflict/;
+
+/** How often a paced wave reads the deployments. */
+const WAVE_POLL_MS = 10_000;
+
+/**
+ * Runs `start` for each tenant with at most `limit` operations in flight, an operation
+ * being in flight until `settled` says its deployment is. The control plane's builds do
+ * not queue past the concurrent build limit: CodeBuild refuses a `StartBuild` over it, and
+ * the workflow fails the operation after its retries (control-plane finding, stress
+ * ADR-0013). So the driver keeps every wave at the limit, as a client of the control plane
+ * must. Returns the tenants `start` refused.
+ */
+export async function paced(
+  f: FleetEnv,
+  tenants: readonly string[],
+  limit: number,
+  timeoutSeconds: number,
+  start: (tenant: string) => Promise<boolean>,
+  settled: (d: DeploymentState | undefined) => boolean,
+): Promise<string[]> {
+  const queue = [...tenants];
+  const inflight = new Set<string>();
+  const refused: string[] = [];
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  while (queue.length > 0 || inflight.size > 0) {
+    while (inflight.size < limit && queue.length > 0) {
+      const t = queue.shift()!;
+      if (await start(t)) inflight.add(t);
+      else refused.push(t);
+    }
+    if (inflight.size === 0) continue;
+    if (Date.now() > deadline) {
+      f.rec.finding(`${inflight.size + queue.length} operations not settled within ${timeoutSeconds} s`);
+      break;
+    }
+    await sleep(WAVE_POLL_MS);
+    const all = await deploymentsOf(f);
+    for (const t of [...inflight]) if (settled(all.get(t))) inflight.delete(t);
+  }
+  return refused;
+}
+
+/**
+ * Removes the tenants' deployments at most `limit` at a time and waits until they are
+ * gone. A deployment that ends `DELETE_FAILED` on a transaction conflict (`CONFLICT_FAILURE`)
+ * is deleted again, up to `rounds` times in all, each retry counted as
+ * `DELETE_FAILED:retried`; any other `DELETE_FAILED` is a finding with its reason. Returns
+ * the tenants whose deployment is still there.
+ */
+export async function removeAll(f: FleetEnv, tenants: readonly string[], limit: number, timeoutSeconds: number, rounds = 3): Promise<string[]> {
   let round = [...tenants];
   let stuck: string[] = [];
   for (let attempt = 1; attempt <= rounds && round.length > 0; attempt += 1) {
     if (attempt > 1) for (let i = 0; i < round.length; i += 1) f.rec.count('DELETE_FAILED:retried');
-    const removed = await Promise.all(round.map((t) => removeDeployment(f, t)));
-    const refused = round.filter((_, i) => !removed[i]);
+    const refused = await paced(f, round, limit, timeoutSeconds, (t) => removeDeployment(f, t), (d) => d === undefined || /_FAILED$/.test(d.status));
     if (refused.length > 0) f.rec.finding(`${refused.length} DeleteDeployment calls failed`);
-    const left = await waitDeployments(f, round, { gone: true, timeoutSeconds });
-    stuck = [...left].filter(([, d]) => d !== undefined).map(([t]) => t);
-    round = stuck;
+    const all = await deploymentsOf(f);
+    stuck = round.filter((t) => all.has(t));
+    const retry = stuck.filter((t) => all.get(t)!.status === 'DELETE_FAILED' && CONFLICT_FAILURE.test(all.get(t)!.statusReason ?? ''));
+    for (const t of stuck.filter((x) => !retry.includes(x))) {
+      f.rec.finding(`tenant ${t}: deployment ${all.get(t)!.status} (${String(all.get(t)!.statusReason ?? 'no reason').slice(0, 160)})`);
+    }
+    round = retry;
   }
   return stuck;
 }

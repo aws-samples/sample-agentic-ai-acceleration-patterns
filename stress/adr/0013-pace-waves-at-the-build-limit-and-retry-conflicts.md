@@ -2,7 +2,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# ADR-0013: Retry an ambiguous placement with its client token
+# ADR-0013: Pace waves at the build limit and retry conflicts
 
 - Status: Proposed
 - Date: 2026-11-20
@@ -23,6 +23,14 @@ ended `DELETE_FAILED` with "Tenant delete failed: DynamoDb.TransactionCanceledEx
 the workflow's terminal transaction, which releases the cell slot, met another delete's on
 the same cell item. Its tenant build had succeeded. A `DELETE_FAILED` deployment takes
 another delete (the control plane README, Teardown).
+
+The second run's build-limit scaling placed 20 deployments at once at a build limit of 5.
+CodeBuild does not queue builds over a project's concurrent build limit: it refuses the
+`StartBuild` with `AccountLimitExceededException` ("This build project has a limit of 5
+concurrent build(s)"). The workflow retried a few times, about 30 seconds apart, then
+failed the operation, so some deployments ended `CREATE_FAILED` and some deletes
+`DELETE_FAILED`. Control-plane ADR-0046 and the stack's comment say that excess builds
+queue.
 
 P-7 asks that every refusal names a tenant and a reason, and that a bare 500 is a finding.
 This 500 names its reason, and the driver knows its tenant.
@@ -46,12 +54,20 @@ the control-plane sample, outside the stress test; it needs its own review.
 
 ## Decision
 Option 1, and Option 3 goes to the control-plane owner as a finding. The same rule covers
-the delete path: the driver deletes a `DELETE_FAILED` deployment again, up to three times,
-and counts each retry under `requests` as `DELETE_FAILED:retried`. A deployment still there
-after three deletes fails the scenario.
+the workflow's terminal writes: a deployment that ends `CREATE_FAILED` or `DELETE_FAILED`
+with a `TransactionCanceledException` reason is removed and created again, or deleted
+again, at most twice, and each retry is counted under `requests` as
+`CREATE_FAILED:retried` or `DELETE_FAILED:retried`. A failure with any other reason fails
+the scenario at once.
+
+Every wave of creates and deletes keeps at most the build limit in flight, as any client
+must while the control plane does not queue builds. That makes build-limit scaling measure
+the onboarding rate at each limit, which is what spec §5.2 asks. The refused `StartBuild`
+goes to the control-plane owner as a finding: either the workflow waits and retries until a
+build slot is free, or ADR-0046 and the README say that a client must stay under the limit.
 
 ## Consequences
 The slice's records show `500:internal-server` requests, `ambiguous-placement` refusals
-and `DELETE_FAILED:retried` counts; the control-plane README's stress section says how to
+and `CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts; the control-plane README's stress section says how to
 read them. If the control plane adopts Option 3,
 they drop to zero and the special case can go.
