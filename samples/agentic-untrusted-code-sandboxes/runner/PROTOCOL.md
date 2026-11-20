@@ -211,9 +211,10 @@ The integration test makes one sandbox fail to start (spec §8
   `runHookPayload` wrapper and before it checks the payload shape, so the
   hook answers HTTP 200 `{}` with or without `nonceHash` and `tenant`; a
   body that is not JSON still answers HTTP 400. The runner claims nothing:
-  `ready` answers HTTP 503, a job is refused with `wrong_sandbox` (HTTP
-  403), a later `run` hook answers HTTP 200 `{}`, and the process exits 1
-  about half a second after the hook.
+  `ready` answers HTTP 503, a well-formed job is refused with
+  `wrong_sandbox` (HTTP 403), a later `run` hook (a second `failAtBoot`
+  included) answers HTTP 200 `{}` and changes nothing, and the process
+  exits 1 about half a second after the hook.
 
 The tool passes the hook only when its own environment has
 `RC_INTEG_OVERRIDES` = `1` and the tenant is the one named in
