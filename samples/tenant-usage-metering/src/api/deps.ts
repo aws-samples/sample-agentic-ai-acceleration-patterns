@@ -15,7 +15,7 @@ export interface AdminConfig {
   readonly fleetName: string;
   readonly recountWindowHours: number;
   readonly closeGraceMinutes: number;
-  /** The metering account and the accounts a bus is shared with: no cell may live there (spec §3.2). */
+  /** The metering account and the accounts a bus is shared with: no emitter may live there (spec §3.2). */
   readonly blockedAccountIds: ReadonlyArray<string>;
   readonly ingestPath: 'BUS' | 'DIRECT';
 }

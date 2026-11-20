@@ -21,7 +21,7 @@ import type { JobStore } from './job-store';
 import type { ErrorObject } from '../ingest/ingest';
 import type { ObjectStore } from '../recount/count';
 import { getItem, meterVersions } from '../shared/db';
-import type { BindingItem, EmitterItem, HourItem, JobCounts, JobItem, MeterVersionItem } from '../shared/items';
+import type { BindingItem, EmitterRoleItem, HourItem, JobCounts, JobItem, MeterVersionItem } from '../shared/items';
 import { versionAt } from '../shared/items';
 import { keys } from '../shared/keys';
 import { hoursBetween, iso, pastCloseGuard } from '../shared/time';
@@ -70,7 +70,7 @@ export class Readmission {
         if (object.caller === undefined || !Array.isArray(object.events)) {
           continue;
         }
-        const emitter = await getItem<EmitterItem>(db, tableName, keys.emitter(object.caller.accountId, object.caller.roleName), true);
+        const emitter = await getItem<EmitterRoleItem>(db, tableName, keys.emitterRole(object.caller.accountId, object.caller.roleName), true);
         const receivedAtMs = Date.parse(object.receivedAt);
         const byHour = new Map<string, EnrichedUsageEvent[]>();
         const tooLate: Array<{ index: number; reason: RefusalReason; event: unknown }> = [];
@@ -80,12 +80,14 @@ export class Readmission {
           }
           counts.processed++;
           const event = entry.event as UsageEvent;
-          if (emitter === undefined || emitter.cellId !== object.caller.cellId) {
+          if (emitter === undefined || emitter.emitterId !== object.caller.emitterId) {
             counts.refused++;
             continue;
           }
           const tenantId = typeof event?.tenantId === 'string' ? event.tenantId : '';
-          const binding = tenantId.length > 0 ? await getItem<BindingItem>(db, tableName, keys.binding(emitter.cellId, tenantId), true) : undefined;
+          const binding = tenantId.length > 0
+            ? await getItem<BindingItem>(db, tableName, keys.binding(emitter.emitterId, tenantId), true)
+            : undefined;
           const meterId = typeof event?.meterId === 'string' ? event.meterId : '';
           if (meterId.length > 0 && !versions.has(meterId)) {
             versions.set(meterId, await meterVersions(db, tableName, meterId, true));
@@ -117,7 +119,7 @@ export class Readmission {
             time: event.time,
             ...(event.dimensions !== undefined ? { dimensions: event.dimensions } : {}),
             applicationId: emitter.applicationId,
-            cellId: emitter.cellId,
+            emitterId: emitter.emitterId,
             emitterAccountId: object.caller.accountId,
             emitterRole: object.caller.roleName,
             receivedAt: object.receivedAt,

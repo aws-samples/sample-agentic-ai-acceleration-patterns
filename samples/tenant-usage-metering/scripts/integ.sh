@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT-0
 #
 # The integration test (integration-test.md): deploys the demo stack with a
-# local test cell, runs test/integ.metering.ts against it, and destroys the
+# local test emitter, runs test/integ.metering.ts against it, and destroys the
 # stack from an exit trap, so the destroy also runs when a step fails.
 #
 #   AWS_REGION=eu-central-1 npx projen integ
@@ -63,7 +63,7 @@ out="cdk.integ.out/${stack}"
 grace="${INTEG_LATE_GRACE_MINUTES:-6}"
 mkdir -p "$out"
 context=(-c "stackName=${stack}" -c "fleetName=${fleet}" -c "ingestPath=${ingest_path}" -c "publishServiceParameter=${publish}"
-  -c integLocalCell=true -c integHttpReceiver=true -c "lateGraceMinutes=${grace}")
+  -c integLocalEmitter=true -c integHttpReceiver=true -c "lateGraceMinutes=${grace}")
 
 teardown() {
   if [[ "${INTEG_KEEP_STACK:-0}" == 1 ]]; then

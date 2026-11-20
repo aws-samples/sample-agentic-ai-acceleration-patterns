@@ -13,7 +13,7 @@
  *
  * A bus with subscriber accounts is shared with them through AWS RAM under
  * the managed SubscribeOnly permission (spec §3.2, ADR-0006), after the
- * share guard has checked that none of them holds a cell.
+ * share guard has checked that none of them holds an emitter.
  */
 
 import { Aws, Duration, Stack, Validations } from 'aws-cdk-lib';

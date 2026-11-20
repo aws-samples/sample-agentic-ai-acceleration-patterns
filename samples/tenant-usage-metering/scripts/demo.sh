@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT-0
 #
 # End-to-end demo (README, End-to-end demo) against a stack deployed with
-# -c integLocalCell=true. Each call is checked; what the demo creates is
+# -c integLocalEmitter=true. Each call is checked; what the demo creates is
 # removed on exit, also on failure.
 #
 #   AWS_REGION=eu-central-1 bash scripts/demo.sh
@@ -19,7 +19,7 @@ output() {
 }
 api="$(output ApiUrl)"
 api="${api%/}"
-cell="$(output CellId)"
+emitter="$(output EmitterId)"
 account="$(aws sts get-caller-identity --query Account --output text)"
 
 # Each stand-in caller's signing key and session token go to curl in a
@@ -60,19 +60,19 @@ call() {
 
 cleanup() {
   echo "== cleanup"
-  call 200 "$reg_conf" DELETE "/cells/${cell}/tenants/${tenant}" >/dev/null || true
-  call 200 "$reg_conf" DELETE "/cells/${cell}/emitter" >/dev/null || true
+  call 200 "$reg_conf" DELETE "/emitters/${emitter}/tenants/${tenant}" >/dev/null || true
+  call 200 "$reg_conf" DELETE "/emitters/${emitter}" >/dev/null || true
   call 200 "$op_conf" DELETE "/meters/${meter}" >/dev/null || true
   remove_confs
 }
 trap cleanup EXIT
 
-echo "== 1 register the cell emitter"
-call 200 "$reg_conf" PUT "/cells/${cell}/emitter" \
+echo "== 1 register the emitter"
+call 200 "$reg_conf" PUT "/emitters/${emitter}" \
   "$(jq -nc --arg account "$account" '{applicationId: "demo-app", accountId: $account}')" | jq -e '.emitter.status == "ACTIVE"' >/dev/null
 
-echo "== 2 bind a tenant to the cell"
-call 200 "$reg_conf" PUT "/cells/${cell}/tenants/${tenant}" '{"applicationId":"demo-app","billingAccount":"demo-account"}' |
+echo "== 2 bind a tenant to the emitter"
+call 200 "$reg_conf" PUT "/emitters/${emitter}/tenants/${tenant}" '{"applicationId":"demo-app","billingAccount":"demo-account"}' |
   jq -e '.binding.status == "ACTIVE"' >/dev/null
 
 echo "== 3 create a meter"
@@ -87,7 +87,7 @@ results="$(call 200 "$em_conf" POST /usage-events "$(jq -nc --arg m "$meter" --a
   --arg e1 "$(uuidgen | tr 'A-Z' 'a-z')" --arg e2 "$(uuidgen | tr 'A-Z' 'a-z')" \
   '{events: [{eventId: $e1, tenantId: $t, meterId: $m, value: "1", time: $now}, {eventId: $e2, tenantId: "someone-else", meterId: $m, value: "1", time: $now}]}')")"
 echo "$results" | jq -c '.results'
-echo "$results" | jq -e '.results[0].result == "ACCEPTED" and .results[1].reason == "TENANT_NOT_IN_CELL"' >/dev/null
+echo "$results" | jq -e '.results[0].result == "ACCEPTED" and .results[1].reason == "TENANT_NOT_BOUND"' >/dev/null
 
 echo "== 5 the event's hour is tracked, OPEN, once Firehose writes the object (up to 90 s)"
 summary=""

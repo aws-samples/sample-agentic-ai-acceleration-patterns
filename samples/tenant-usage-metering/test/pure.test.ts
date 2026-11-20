@@ -33,7 +33,7 @@ const event = (overrides: Partial<EnrichedUsageEvent> = {}): EnrichedUsageEvent 
   value: '10',
   time: '2026-11-18T10:15:00Z',
   applicationId: 'demo-app',
-  cellId: '01JD00000000000000000000C1',
+  emitterId: '01JD00000000000000000000C1',
   emitterAccountId: '111122223333',
   emitterRole: 'demo-ue-01JD00000000000000000000C1',
   receivedAt: '2026-11-18T10:15:01Z',
@@ -63,14 +63,14 @@ describe('routes (spec §3.2)', () => {
   });
   test('registration writes are for the registrar only, and no operator route registers', () => {
     const registrar = ADMIN_ROUTES.filter((route) => route.callers.includes('registrar')).map((route) => route.operation).sort();
-    expect(registrar).toEqual(['DeleteCellEmitter', 'DeleteTenantBinding', 'PutCellEmitter', 'PutTenantBinding']);
+    expect(registrar).toEqual(['DeleteEmitter', 'DeleteTenantBinding', 'PutEmitter', 'PutTenantBinding']);
     expect(ADMIN_ROUTES.filter((route) => route.callers.includes('registrar') && route.callers.length > 1)).toHaveLength(0);
   });
   test('readers reach the two usage reads only', () => {
     expect(ADMIN_ROUTES.filter((route) => route.callers.includes('reader')).map((route) => route.operation).sort()).toEqual(['GetUsage', 'ListUsage']);
   });
   test('policy paths put * for labels', () => {
-    expect(policyPath({ operation: 'X', method: 'PUT', path: '/cells/{cellId}/tenants/{tenantId}', callers: [] })).toBe('PUT/cells/*/tenants/*');
+    expect(policyPath({ operation: 'X', method: 'PUT', path: '/emitters/{emitterId}/tenants/{tenantId}', callers: [] })).toBe('PUT/emitters/*/tenants/*');
   });
 });
 

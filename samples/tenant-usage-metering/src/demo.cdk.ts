@@ -7,8 +7,8 @@
  * (spec §6.4): a registrar, an operator and a reader. Every role trusts only
  * this account, and a principal there needs `sts:AssumeRole` on it.
  *
- * With `integLocalCell=true` (test only, standard §5.3) the stack also holds
- * one cell's emitter role, `<fleet>-ue-<cellId>`, and lets that cell be
+ * With `integLocalEmitter=true` (test only, standard §5.3) the stack also holds
+ * one emitter role, `<fleet>-ue-<emitterId>`, and lets that emitter be
  * registered in this account, so a one-account test can send usage.
  *
  * The stack writes the published parameter
@@ -33,8 +33,8 @@ import { acknowledgeWildcards } from './shared/nag';
 import { UsageSubscriber } from './subscriber/usage-subscriber';
 import { TenantUsageMetering } from './tenant-usage-metering';
 
-/** The cell id of the test emitter (a fixed ULID). */
-export const DEMO_CELL_ID = '01JD00000000000000000000C1';
+/** The id of the test emitter (a fixed ULID). */
+export const DEMO_EMITTER_ID = '01JD00000000000000000000C1';
 
 export const SERVICE_PARAMETER = '/application-plane/shared/metering/service';
 
@@ -43,10 +43,10 @@ export interface DemoContext {
   readonly ingestPath: IngestPath;
   readonly rawRetentionDays?: number;
   readonly lateGraceMinutes?: number;
-  readonly integLocalCell: boolean;
+  readonly integLocalEmitter: boolean;
   /** Write the published parameter; off for a second demo stack in the same account. */
   readonly publishServiceParameter: boolean;
-  /** TEST ONLY: an AWS_IAM stand-in billing API for the HTTP sink, invocable by the dispatcher only (needs integLocalCell). */
+  /** TEST ONLY: an AWS_IAM stand-in billing API for the HTTP sink, invocable by the dispatcher only (needs integLocalEmitter). */
   readonly integHttpReceiver: boolean;
 }
 
@@ -60,7 +60,7 @@ export function parseDemoContext(get: (key: string) => unknown): DemoContext {
     ingestPath,
     ...(retention !== undefined ? { rawRetentionDays: Number(retention) } : {}),
     ...(grace !== undefined ? { lateGraceMinutes: Number(grace) } : {}),
-    integLocalCell: String(get('integLocalCell') ?? 'false') === 'true',
+    integLocalEmitter: String(get('integLocalEmitter') ?? 'false') === 'true',
     publishServiceParameter: String(get('publishServiceParameter') ?? 'true') === 'true',
     integHttpReceiver: String(get('integHttpReceiver') ?? 'false') === 'true',
   };
@@ -89,7 +89,7 @@ export class TenantUsageMeteringDemoStack extends Stack {
       readerPrincipalArns: [reader.roleArn],
       ...(props.context.rawRetentionDays !== undefined ? { rawRetentionDays: props.context.rawRetentionDays } : {}),
       ...(props.context.lateGraceMinutes !== undefined ? { lateGraceMinutes: props.context.lateGraceMinutes } : {}),
-      testOnlyAllowCellsInMeteringAccount: props.context.integLocalCell,
+      testOnlyAllowEmittersInMeteringAccount: props.context.integLocalEmitter,
     });
 
     // The callers' own side of the grant (spec §6.1): an identity policy for each.
@@ -109,15 +109,15 @@ export class TenantUsageMeteringDemoStack extends Stack {
       );
     }
 
-    if (props.context.integLocalCell) {
-      const emitter = new iam.Role(this, 'DemoCellEmitter', {
-        roleName: emitterRoleName(props.context.fleetName, DEMO_CELL_ID),
+    if (props.context.integLocalEmitter) {
+      const emitter = new iam.Role(this, 'DemoEmitter', {
+        roleName: emitterRoleName(props.context.fleetName, DEMO_EMITTER_ID),
         assumedBy: account,
-        description: 'TEST ONLY: the emitter role of one cell, in the metering account (spec §6.1)',
+        description: 'TEST ONLY: one emitter role, in the metering account (spec §6.1)',
       });
       emitter.addToPolicy(this.metering.ingestStatement);
       new CfnOutput(this, 'EmitterRoleArn', { value: emitter.roleArn });
-      new CfnOutput(this, 'CellId', { value: DEMO_CELL_ID });
+      new CfnOutput(this, 'EmitterId', { value: DEMO_EMITTER_ID });
       // TEST ONLY: the credential of the integration test's HTTP sink.
       // Named per stack create: a deleted secret keeps its name for its recovery
       // window, so a fixed name would fail the next run's create.
@@ -243,7 +243,7 @@ export class TenantUsageMeteringDemoStack extends Stack {
 
     acknowledgeWildcards(this, (path) =>
       /\/Demo[A-Za-z]+\/DefaultPolicy\//.test(path)
-        ? 'The stand-in callers invoke API routes whose labels (cell, tenant) are chosen at run time; the API resource policy narrows each route to its callers (spec §3.2).'
+        ? 'The stand-in callers invoke API routes whose labels (emitter, tenant) are chosen at run time; the API resource policy narrows each route to its callers (spec §3.2).'
         : undefined,
     );
 

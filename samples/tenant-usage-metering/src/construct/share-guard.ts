@@ -4,16 +4,16 @@
 /**
  * The deploy-time bus share guard (ADR-0006, M-6): a custom resource that
  * reads the registry on Create and Update and fails the deploy when an
- * account the buses are shared with holds a registered cell
+ * account the buses are shared with holds a registered emitter
  * (src/guard/share-guard.ts). The AWS RAM shares depend on it, so a failed
  * check stops the deploy before a share changes, rather than shrinking it.
  *
  * The guard depends on the admin function, so the function's block list
- * (`PutCellEmitter` refuses cells in listed accounts) is live before the
+ * (`PutEmitter` refuses emitters in listed accounts) is live before the
  * check reads the registry.
  *
  * shortcut: the check reads the `list-by-type` index, which is eventually
- * consistent. A `PutCellEmitter` that succeeded just before the block list
+ * consistent. A `PutEmitter` that succeeded just before the block list
  * went live may not be in the index yet when the check reads it (index
  * propagation lag, normally under a second), and is not caught; the next
  * deploy that changes a list catches it. A stricter version would block the

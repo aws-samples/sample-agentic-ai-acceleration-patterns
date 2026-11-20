@@ -3,7 +3,7 @@
 
 /**
  * The integration test (standard §5): runs against a deployed demo stack
- * with `integLocalCell=true`, as the stand-in callers the stack outputs.
+ * with `integLocalEmitter=true`, as the stand-in callers the stack outputs.
  *
  *   npx ts-node test/integ.metering.ts <outputs.json>
  *
@@ -39,7 +39,7 @@ const registrar = as(outputs.RegistrarRoleArn);
 const operator = as(outputs.OperatorRoleArn);
 const reader = as(outputs.ReaderRoleArn);
 const emitter = as(outputs.EmitterRoleArn);
-const CELL = outputs.CellId;
+const EMITTER_ID = outputs.EmitterId;
 const ACCOUNT = outputs.EmitterRoleArn.split(':')[4];
 
 let checks = 0;
@@ -121,34 +121,34 @@ async function main(): Promise<void> {
   });
 
   // Registrations ----------------------------------------------------------------
-  const putEmitter = await call(registrar, 'PUT', `/cells/${CELL}/emitter`, {
+  const putEmitter = await call(registrar, 'PUT', `/emitters/${EMITTER_ID}`, {
     applicationId: 'demo-app',
     accountId: ACCOUNT,
     controlPlaneExecutionId: 'integ-exec-1',
     controlPlaneOperatorId: 'integ',
   });
-  check('registrar registers the cell emitter', putEmitter.status === 200 && putEmitter.body.emitter?.status === 'ACTIVE', putEmitter);
-  const again = await call(registrar, 'PUT', `/cells/${CELL}/emitter`, { applicationId: 'demo-app', accountId: ACCOUNT });
+  check('registrar registers the emitter', putEmitter.status === 200 && putEmitter.body.emitter?.status === 'ACTIVE', putEmitter);
+  const again = await call(registrar, 'PUT', `/emitters/${EMITTER_ID}`, { applicationId: 'demo-app', accountId: ACCOUNT });
   check(
-    'PutCellEmitter is idempotent',
+    'PutEmitter is idempotent',
     again.status === 200 && again.body.emitter?.activeFrom === putEmitter.body.emitter?.activeFrom,
     again,
   );
-  const moved = await call(registrar, 'PUT', `/cells/${CELL}/emitter`, { applicationId: 'other-app', accountId: ACCOUNT });
-  check('a cell never moves: 409 PLACEMENT_MISMATCH', moved.status === 409 && moved.body.reason === 'PLACEMENT_MISMATCH', moved);
-  const opRegisters = await call(operator, 'PUT', `/cells/${CELL}/emitter`, { applicationId: 'demo-app', accountId: ACCOUNT });
+  const moved = await call(registrar, 'PUT', `/emitters/${EMITTER_ID}`, { applicationId: 'other-app', accountId: ACCOUNT });
+  check('an emitter never moves: 409 PLACEMENT_MISMATCH', moved.status === 409 && moved.body.reason === 'PLACEMENT_MISMATCH', moved);
+  const opRegisters = await call(operator, 'PUT', `/emitters/${EMITTER_ID}`, { applicationId: 'demo-app', accountId: ACCOUNT });
   check('an operator cannot register (resource policy)', opRegisters.status === 403, opRegisters);
   for (const [tenantId, billingAccount] of [
     ['tenant-a', 'acct-a'],
     ['tenant-b', undefined],
   ] as const) {
-    const bind = await call(registrar, 'PUT', `/cells/${CELL}/tenants/${tenantId}`, {
+    const bind = await call(registrar, 'PUT', `/emitters/${EMITTER_ID}/tenants/${tenantId}`, {
       applicationId: 'demo-app',
       ...(billingAccount ? { billingAccount } : {}),
     });
     check(`registrar binds ${tenantId}`, bind.status === 200 && bind.body.binding?.status === 'ACTIVE', bind);
   }
-  const badBilling = await call(registrar, 'PUT', `/cells/${CELL}/tenants/tenant-b`, {
+  const badBilling = await call(registrar, 'PUT', `/emitters/${EMITTER_ID}/tenants/tenant-b`, {
     applicationId: 'demo-app',
     billingAccount: 'has space',
   });
@@ -240,7 +240,7 @@ async function main(): Promise<void> {
     'each event is judged alone',
     put.status === 200 &&
       JSON.stringify(results) ===
-        JSON.stringify(['ACCEPTED', 'ACCEPTED', 'ACCEPTED', 'ACCEPTED', 'TENANT_NOT_IN_CELL', 'UNKNOWN_METER', 'BAD_SHAPE']),
+        JSON.stringify(['ACCEPTED', 'ACCEPTED', 'ACCEPTED', 'ACCEPTED', 'TENANT_NOT_BOUND', 'UNKNOWN_METER', 'BAD_SHAPE']),
     put,
   );
   const resend = await call(emitter, 'POST', '/usage-events', { events: [batch[0]] });
@@ -389,7 +389,7 @@ async function main(): Promise<void> {
     });
 
   // RESEND_BLOCKED: a billing account set later makes revision 2 and resends --------------
-  const billB = await call(registrar, 'PUT', `/cells/${CELL}/tenants/tenant-b`, { applicationId: 'demo-app', billingAccount: 'acct-b' });
+  const billB = await call(registrar, 'PUT', `/emitters/${EMITTER_ID}/tenants/tenant-b`, { applicationId: 'demo-app', billingAccount: 'acct-b' });
   check('a new billing account starts a RESEND_BLOCKED job', billB.status === 200 && typeof billB.body.resendJobId === 'string', billB);
   const resendJob = await waitJob('RESEND_BLOCKED job', billB.body.resendJobId);
   check(
@@ -533,7 +533,7 @@ async function main(): Promise<void> {
   check('a reader reads usage', readerUsage.status === 200, readerUsage.status);
   const readerMeters = await call(reader, 'GET', '/meters');
   check('a reader cannot read meters', readerMeters.status === 403, readerMeters.status);
-  const unbind = await call(registrar, 'DELETE', `/cells/${CELL}/tenants/tenant-b`, undefined, {
+  const unbind = await call(registrar, 'DELETE', `/emitters/${EMITTER_ID}/tenants/tenant-b`, undefined, {
     'X-Control-Plane-Execution-Id': 'integ-exec-2',
   });
   check(
@@ -541,9 +541,9 @@ async function main(): Promise<void> {
     unbind.status === 200 && unbind.body.binding?.status === 'CLOSING' && unbind.body.binding.closedByExecutionId === 'integ-exec-2',
     unbind,
   );
-  const unbindAgain = await call(registrar, 'DELETE', `/cells/${CELL}/tenants/tenant-b`);
+  const unbindAgain = await call(registrar, 'DELETE', `/emitters/${EMITTER_ID}/tenants/tenant-b`);
   check('a second delete succeeds', unbindAgain.status === 200, unbindAgain);
-  const missing = await call(registrar, 'DELETE', `/cells/${CELL}/tenants/never-bound`);
+  const missing = await call(registrar, 'DELETE', `/emitters/${EMITTER_ID}/tenants/never-bound`);
   check('a delete of a missing binding succeeds', missing.status === 200, missing);
 
   process.stdout.write(`${JSON.stringify({ checks, passed: checks - failures, failures, seconds: Math.round((Date.now() - t0) / 1000) })}\n`);

@@ -197,7 +197,7 @@ describe('API (spec §3.2, §5)', () => {
       ArnNotLike: { 'aws:PrincipalArn': { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':iam::*:role/demo-ue-*']] } },
     });
     const registrarDeny = denies.find((s) => s.Sid === 'DenyRegistrarRoutesToOthers')!;
-    expect(registrarDeny.Resource).toEqual(expect.arrayContaining(['execute-api:/*/PUT/cells/*/emitter', 'execute-api:/*/DELETE/cells/*/tenants/*']));
+    expect(registrarDeny.Resource).toEqual(expect.arrayContaining(['execute-api:/*/PUT/emitters/*', 'execute-api:/*/DELETE/emitters/*/tenants/*']));
     expect(registrarDeny.Condition).toEqual({ ArnNotEquals: { 'aws:PrincipalArn': [REGISTRAR] } });
   });
 

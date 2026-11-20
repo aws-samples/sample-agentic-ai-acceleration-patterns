@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * The emitter snippet (spec §6.1, §6.3): what a cell's workload runs to send
- * usage. It runs under the cell's emitter role `<fleet>-ue-<cellId>`.
+ * The emitter snippet (spec §6.1, §6.3): what an emitter's workload runs to send
+ * usage. It runs under the emitter role `<fleet>-ue-<emitterId>`.
  *
  * - Each event gets a ULID `eventId` once, when it is recorded, and is
  *   stored as the exact bytes that are sent; a resend sends those bytes.
@@ -38,7 +38,7 @@ export interface UsageInput {
 }
 
 export interface EmitterOptions {
-  /** `METERING_API_URL`, the cell parameter (spec §3.4). */
+  /** `METERING_API_URL` (with the control plane, a cell parameter, spec §3.4). */
   readonly apiUrl: string;
   readonly region: string;
   readonly credentials?: AwsCredentialIdentityProvider;

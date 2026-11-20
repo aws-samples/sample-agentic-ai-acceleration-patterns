@@ -19,7 +19,7 @@ export const LOG_FIELD_ALLOWLIST: ReadonlySet<string> = new Set([
   'caller',
   'tenantId',
   'applicationId',
-  'cellId',
+  'emitterId',
   'meterId',
   'sinkId',
   'jobId',

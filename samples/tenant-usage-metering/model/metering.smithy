@@ -29,7 +29,7 @@ service TenantUsageMeteringService {
     resources: [
         Meter
         Sink
-        CellEmitter
+        Emitter
         TenantBinding
         MeteringHour
         Job
@@ -53,7 +53,7 @@ service TenantUsageMeteringService {
 /// event and refuses a bad one alone, as `BAD_SHAPE` or `BAD_TIME` (spec
 /// P-8). An event is an object with these string members (spec §4.8):
 /// - `eventId`: a ULID or a lowercase UUID, reused on every resend;
-/// - `tenantId`: a tenant bound to the caller's cell;
+/// - `tenantId`: a tenant bound to the calling emitter;
 /// - `meterId`: `[a-z0-9_.-]{1,64}`, a meter in effect at the event's hour;
 /// - `value`: a non-negative decimal, at most 12 integer and 6 fractional
 ///   digits; `COUNT` ignores it, `UNIQUE_COUNT` treats it as a string;
@@ -522,19 +522,19 @@ list IntervalList {
     member: Interval
 }
 
-resource CellEmitter {
+resource Emitter {
     identifiers: {
-        cellId: CellId
+        emitterId: EmitterId
     }
-    put: PutCellEmitter
-    read: GetCellEmitter
-    delete: DeleteCellEmitter
-    list: ListCellEmitters
+    put: PutEmitter
+    read: GetEmitter
+    delete: DeleteEmitter
+    list: ListEmitters
 }
 
-structure CellEmitterSummary with [ControlPlaneTrace] {
+structure EmitterSummary with [ControlPlaneTrace] {
     @required
-    cellId: CellId
+    emitterId: EmitterId
 
     @required
     applicationId: ApplicationId
@@ -569,21 +569,21 @@ structure CellEmitterSummary with [ControlPlaneTrace] {
     createdAt: IsoTimestamp
 }
 
-list CellEmitterSummaryList {
-    member: CellEmitterSummary
+list EmitterSummaryList {
+    member: EmitterSummary
 }
 
-/// Registers a cell's emitter role `<fleet>-ue-<cellId>`. 409
+/// Registers the emitter role `<fleet>-ue-<emitterId>`. 409
 /// `ACCOUNT_NOT_ALLOWED` in a subscriber account or the metering account
-/// (ADR-0006); 409 `PLACEMENT_MISMATCH` for a known cell with another
+/// (ADR-0006); 409 `PLACEMENT_MISMATCH` for a known emitter with another
 /// account or application.
 @idempotent
-@http(method: "PUT", uri: "/cells/{cellId}/emitter", code: 200)
-operation PutCellEmitter {
+@http(method: "PUT", uri: "/emitters/{emitterId}", code: 200)
+operation PutEmitter {
     input := with [ControlPlaneTrace] {
         @required
         @httpLabel
-        cellId: CellId
+        emitterId: EmitterId
 
         @required
         applicationId: ApplicationId
@@ -593,7 +593,7 @@ operation PutCellEmitter {
     }
     output := {
         @required
-        emitter: CellEmitterSummary
+        emitter: EmitterSummary
     }
     errors: [
         ConflictException
@@ -601,16 +601,16 @@ operation PutCellEmitter {
 }
 
 @readonly
-@http(method: "GET", uri: "/cells/{cellId}/emitter")
-operation GetCellEmitter {
+@http(method: "GET", uri: "/emitters/{emitterId}")
+operation GetEmitter {
     input := {
         @required
         @httpLabel
-        cellId: CellId
+        emitterId: EmitterId
     }
     output := {
         @required
-        emitter: CellEmitterSummary
+        emitter: EmitterSummary
     }
     errors: [
         ResourceNotFoundException
@@ -619,22 +619,22 @@ operation GetCellEmitter {
 
 /// Moves the emitter to `CLOSING`; succeeds on a missing or closing item.
 @idempotent
-@http(method: "DELETE", uri: "/cells/{cellId}/emitter", code: 200)
-operation DeleteCellEmitter {
+@http(method: "DELETE", uri: "/emitters/{emitterId}", code: 200)
+operation DeleteEmitter {
     input := with [ControlPlaneTraceHeaders] {
         @required
         @httpLabel
-        cellId: CellId
+        emitterId: EmitterId
     }
     output := {
-        emitter: CellEmitterSummary
+        emitter: EmitterSummary
     }
 }
 
 @readonly
 @paginated(inputToken: "nextToken", outputToken: "nextToken", pageSize: "maxResults", items: "emitters")
 @http(method: "GET", uri: "/emitters")
-operation ListCellEmitters {
+operation ListEmitters {
     input := {
         @httpQuery("nextToken")
         nextToken: PaginationToken
@@ -644,7 +644,7 @@ operation ListCellEmitters {
     }
     output := {
         @required
-        emitters: CellEmitterSummaryList
+        emitters: EmitterSummaryList
 
         nextToken: PaginationToken
     }
@@ -652,7 +652,7 @@ operation ListCellEmitters {
 
 resource TenantBinding {
     identifiers: {
-        cellId: CellId
+        emitterId: EmitterId
         tenantId: TenantId
     }
     put: PutTenantBinding
@@ -663,7 +663,7 @@ resource TenantBinding {
 
 structure TenantBindingSummary with [ControlPlaneTrace] {
     @required
-    cellId: CellId
+    emitterId: EmitterId
 
     @required
     tenantId: TenantId
@@ -701,19 +701,19 @@ list TenantBindingSummaryList {
     member: TenantBindingSummary
 }
 
-/// Binds a tenant to a cell. 409 `PLACEMENT_MISMATCH` when the cell has no
+/// Binds a tenant to an emitter. 409 `PLACEMENT_MISMATCH` when the emitter has no
 /// `ACTIVE` emitter (none, or one that is `CLOSING`) or is of another
 /// application. An absent `billingAccount` keeps
 /// the stored one. A newly set billing account starts a `RESEND_BLOCKED`
 /// job for the tenant and application (spec §4.7), returned as
 /// `resendJobId`.
 @idempotent
-@http(method: "PUT", uri: "/cells/{cellId}/tenants/{tenantId}", code: 200)
+@http(method: "PUT", uri: "/emitters/{emitterId}/tenants/{tenantId}", code: 200)
 operation PutTenantBinding {
     input := with [ControlPlaneTrace] {
         @required
         @httpLabel
-        cellId: CellId
+        emitterId: EmitterId
 
         @required
         @httpLabel
@@ -733,12 +733,12 @@ operation PutTenantBinding {
 }
 
 @readonly
-@http(method: "GET", uri: "/cells/{cellId}/tenants/{tenantId}")
+@http(method: "GET", uri: "/emitters/{emitterId}/tenants/{tenantId}")
 operation GetTenantBinding {
     input := {
         @required
         @httpLabel
-        cellId: CellId
+        emitterId: EmitterId
 
         @required
         @httpLabel
@@ -755,12 +755,12 @@ operation GetTenantBinding {
 
 /// Moves the binding to `CLOSING`; succeeds on a missing or closing item.
 @idempotent
-@http(method: "DELETE", uri: "/cells/{cellId}/tenants/{tenantId}", code: 200)
+@http(method: "DELETE", uri: "/emitters/{emitterId}/tenants/{tenantId}", code: 200)
 operation DeleteTenantBinding {
     input := with [ControlPlaneTraceHeaders] {
         @required
         @httpLabel
-        cellId: CellId
+        emitterId: EmitterId
 
         @required
         @httpLabel
@@ -773,12 +773,12 @@ operation DeleteTenantBinding {
 
 @readonly
 @paginated(inputToken: "nextToken", outputToken: "nextToken", pageSize: "maxResults", items: "bindings")
-@http(method: "GET", uri: "/cells/{cellId}/tenants")
+@http(method: "GET", uri: "/emitters/{emitterId}/tenants")
 operation ListTenantBindings {
     input := {
         @required
         @httpLabel
-        cellId: CellId
+        emitterId: EmitterId
 
         @httpQuery("nextToken")
         nextToken: PaginationToken

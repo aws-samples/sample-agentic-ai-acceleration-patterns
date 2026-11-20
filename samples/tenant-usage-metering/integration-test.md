@@ -14,9 +14,9 @@ step fails.
 
 The test is the reference implementation of the sample's wiring: it calls
 the API as each kind of caller (registrar, operator, reader, emitter) with
-SigV4, the way the control plane's hook, an operator and a cell would, and
-reads the buses through `UsageSubscriber`, the way a billing system
-would.
+SigV4, the way a registrar such as the control plane's hook, an operator
+and an emitter would, and reads the buses through `UsageSubscriber`, the
+way a billing system would.
 
 ## How to run it
 
@@ -53,10 +53,10 @@ INTEG_STACK_NAME=TenantUsageMeteringDirect INTEG_FLEET=demo2 INTEG_INGEST_PATH=D
 ## What it stands up
 
 One stack, `TenantUsageMetering` by default, from
-[`src/demo.cdk.ts`](src/demo.cdk.ts) with `-c integLocalCell=true`: the
-construct, stand-in registrar, operator and reader roles, one cell's
-emitter role in the same account, two reader queues on the usage bus
-through `UsageSubscriber` (one unfiltered, one filtered to meter
+[`src/demo.cdk.ts`](src/demo.cdk.ts) with `-c integLocalEmitter=true`: the
+construct, stand-in registrar, operator and reader roles, one emitter
+role in the same account, two reader queues on the usage bus through
+`UsageSubscriber` (one unfiltered, one filtered to meter
 `agent.tokens`), on `BUS` a reader queue on the ingest bus through
 `UsageSubscriber` with `stream: raw`, and the published parameter. With
 `-c integHttpReceiver=true` (set by `scripts/integ.sh`) it also holds a
@@ -71,9 +71,9 @@ of them.
 
 | Step | Checks |
 |---|---|
-| Registrations | `PutCellEmitter` is `ACTIVE` and idempotent; a moved cell is 409 `PLACEMENT_MISMATCH`; an operator cannot register (resource policy); two tenants bound; a bad `billingAccount` is 400 |
+| Registrations | `PutEmitter` is `ACTIVE` and idempotent; a moved emitter is 409 `PLACEMENT_MISMATCH`; an operator cannot register (resource policy); two tenants bound; a bad `billingAccount` is 400 |
 | Meters and sinks | a backdated `SUM` meter; a second create is 409 `ALREADY_EXISTS`; an `S3_EXPORT` sink; an `HTTP` sink that maps `billingAccount`, pointed at an endpoint that refuses; the test receiver refuses an unsigned call at the function URL (403 `AccessDenied`); an `AWS_IAM` sink to the receiver, with a repeated query key (`?tag=a&tag=b`) so a later `SENT` proves the signature covers it; an `AWS_IAM` sink to a host that is not a function URL or API Gateway is a 400; an `HTTP` sink with a secret outside the fleet prefix is a 400 |
-| Ingest | one batch judged event by event: four `ACCEPTED`, `TENANT_NOT_IN_CELL`, `UNKNOWN_METER`, `BAD_SHAPE`; an unchanged resend is `ACCEPTED`; a caller that is not an emitter role gets 403 |
+| Ingest | one batch judged event by event: four `ACCEPTED`, `TENANT_NOT_BOUND`, `UNKNOWN_METER`, `BAD_SHAPE`; an unchanged resend is `ACCEPTED`; a caller that is not an emitter role gets 403 |
 | Raw-stream reader | `BUS` only: the `stream: raw` `UsageSubscriber` receives the four accepted events; its dead-letter queue stays empty |
 | The count | after the hour closes and its grace passes: tenant-a counted once per event id (15.5), with its billing account; tenant-b counted without one; the hour `COUNTED` |
 | Export sink | both records reach the export bucket as `UsageRecorded` lines; the record shows the delivery `SENT` |
@@ -117,9 +117,10 @@ If the script stops before its teardown, delete the stack
 
 ## Test-only shortcuts
 
-- `integLocalCell=true` registers a cell in the metering account, which
-  `PutCellEmitter` refuses in a deployment (`testOnlyAllowCellsInMeteringAccount`).
-  A consumer runs emitters in cell accounts.
+- `integLocalEmitter=true` registers an emitter in the metering account,
+  which `PutEmitter` refuses in a deployment
+  (`testOnlyAllowEmittersInMeteringAccount`). A consumer runs emitters in
+  accounts other than the metering account.
 - The bus readers sit in the metering account, so the run creates no AWS
   RAM share. A consumer lists its subscriber accounts in
   `rawSubscriberAccountIds` or `usageSubscriberAccountIds` and attaches

@@ -49,11 +49,11 @@ export interface MeterCurrentItem {
   readonly latest: number;
 }
 
-/** `EMITTER#<account>#<role>` / `META` (spec §4.2). */
-export interface EmitterItem extends Audit, ControlPlaneIds, Registration {
+/** `ROLE#<account>#<role>` / `META` (spec §4.2). */
+export interface EmitterRoleItem extends Audit, ControlPlaneIds, Registration {
   readonly PK: string;
   readonly SK: 'META';
-  readonly cellId: string;
+  readonly emitterId: string;
   readonly applicationId: string;
   readonly accountId: string;
   readonly roleName: string;
@@ -61,22 +61,22 @@ export interface EmitterItem extends Audit, ControlPlaneIds, Registration {
   readonly expiresAt?: number;
 }
 
-/** `CELL#<cell>` / `META`: which emitter a cell has. A cell never moves. */
-export interface CellItem {
+/** `EMITTER#<emitterId>` / `META`: which role an emitter id has. An emitter never moves. */
+export interface EmitterItem {
   readonly PK: string;
   readonly SK: 'META';
-  readonly cellId: string;
+  readonly emitterId: string;
   readonly accountId: string;
   readonly roleName: string;
   readonly applicationId: string;
   readonly expiresAt?: number;
 }
 
-/** `CELL#<cell>` / `TENANT#<tenant>` and its lookup copy (spec §4.3). */
+/** `EMITTER#<emitterId>` / `TENANT#<tenant>` and its lookup copy (spec §4.3). */
 export interface BindingItem extends Audit, ControlPlaneIds, Registration {
   readonly PK: string;
   readonly SK: string;
-  readonly cellId: string;
+  readonly emitterId: string;
   readonly tenantId: string;
   readonly applicationId: string;
   readonly billingAccount?: string;

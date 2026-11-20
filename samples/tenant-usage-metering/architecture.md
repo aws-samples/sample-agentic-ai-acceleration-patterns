@@ -24,7 +24,7 @@ SPDX-License-Identifier: MIT-0
 > **Not exercised live:** `StartRecount` (it uses the same table actions
 > as `SINK_REDRIVE` and `RESEND_BLOCKED`, which are), `StartIngestRedrive`
 > with messages in the queue,
-> the close of an hour after `recountWindowHours`, a cell or a bus
+> the close of an hour after `recountWindowHours`, an emitter or a bus
 > subscriber in a second account (the AWS RAM shares and the share guard
 > of §4.1), and the hook script against a deployed API.
 
@@ -35,18 +35,18 @@ the decisions in [`adr/`](adr/README.md), and the threats in
 
 ## 1. Purpose
 
-One metering service that the vendor owns. Emitters in cells send usage
-events; the service admits an event only from a registered emitter and
-for a tenant the control plane placed in that emitter's cell, keeps every
-event in a replayable raw store, counts each hour from that store under a
-run-time meter catalog, and hands each usage record to the sinks and the
-usage bus.
+One metering service that the vendor owns. Emitters send usage events;
+the service admits an event only from a registered emitter and for a
+tenant a registrar bound to that emitter, keeps every event in a
+replayable raw store, counts each hour from that store under a run-time
+meter catalog, and hands each usage record to the sinks and the usage
+bus.
 
 ## 2. Actors and identity
 
 | Caller | Proves itself by | Reaches |
 |---|---|---|
-| Emitter | SigV4 as `<fleet>-ue-<cellId>`, path `/`, in any account | `POST /usage-events` |
+| Emitter | SigV4 as `<fleet>-ue-<emitterId>`, path `/`, in any account | `POST /usage-events` |
 | Registrar (`<fleet>-global-hook`) | SigV4 as a role in `registrarPrincipalArns` | the four registration writes |
 | Operator | SigV4 as a role in `operatorPrincipalArns` | every admin route but the registration writes |
 | Reader | SigV4 as a role in `readerPrincipalArns` | `GetUsage`, `ListUsage` |
@@ -75,7 +75,7 @@ Two layers check each route, from one table
 | Ingest subscriber | `AWS::EventsV2::Subscriber` to Firehose, batches of 500, 24 h and 185 attempts, SQS dead-letter queue | same |
 | Raw stream | Firehose, dynamic partitioning on the event hour into `raw/hour=…/` | same |
 | Bus shares | one AWS RAM resource share per bus with a non-empty subscriber list, managed permission `AWSRAMEventBridgeEventBusV2SubscribeOnly` | same |
-| Share guard | custom resource that reads the registry before the shares change and fails the deploy if a listed account holds a cell that can still send | [`src/guard/share-guard.function.ts`](src/guard/share-guard.function.ts) |
+| Share guard | custom resource that reads the registry before the shares change and fails the deploy if a listed account holds an emitter that can still send | [`src/guard/share-guard.function.ts`](src/guard/share-guard.function.ts) |
 | Table | DynamoDB `TableV2`, on demand, PITR, TTL, stream with both images, three sparse indexes | [`src/construct/table.ts`](src/construct/table.ts) |
 | Object tracker | Lambda on S3 notifications for `raw/`, `readmitted/` and `firehose-error/`; on-failure queue | [`src/tracker/`](src/tracker/) |
 | Recounter | Step Functions Standard, 25-minute timeout; one Lambda task (`count`, and `fail` on the catch path) | [`src/recount/`](src/recount/) |
@@ -144,15 +144,15 @@ organization can be listed; it accepts the resource share invitation
 before it can use the bus. Every subscriber account then attaches a
 `UsageSubscriber`.
 
-No account may hold cells and read a bus. The check runs at both ends:
-`PutCellEmitter` refuses a cell in a listed account or the metering
-account (`ACCOUNT_NOT_ALLOWED`), and the share guard, a custom resource
-that runs after the admin function's block list is updated and before the
-shares change, reads the registry and fails the deploy if any listed
-account holds a cell that can still send: an `ACTIVE` emitter, or a
-`CLOSING` one before its `closesAt`. A deleted cell stops counting at its
-close time (`closeGraceMinutes` after `DeleteCellEmitter`), so the
-refusal clears once those cells are deleted and closed. A subscriber
+No account may hold emitters and read a bus. The check runs at both
+ends: `PutEmitter` refuses an emitter in a listed account or the
+metering account (`ACCOUNT_NOT_ALLOWED`), and the share guard, a custom
+resource that runs after the admin function's block list is updated and
+before the shares change, reads the registry and fails the deploy if any
+listed account holds an emitter that can still send: an `ACTIVE` one, or
+a `CLOSING` one before its `closesAt`. A deleted emitter stops counting
+at its close time (`closeGraceMinutes` after `DeleteEmitter`), so the
+refusal clears once those emitters are deleted and closed. A subscriber
 created while its account was listed keeps delivering after the account
 is removed from the share; the vendor revokes it with EventBridge
 `RevokeResource`.
@@ -164,8 +164,8 @@ One table, `PK`/`SK` (spec §4):
 | Item | `PK` | `SK` |
 |---|---|---|
 | Meter version / head | `METER#<id>` | `V#<8-digit version>` / `CURRENT` |
-| Emitter / cell lookup | `EMITTER#<account>#<role>` / `CELL#<cell>` | `META` |
-| Binding / tenant lookup | `CELL#<cell>` / `TENANT#<tenant>` | `TENANT#<tenant>` / `APP#<app>#CELL#<cell>` |
+| Emitter / id lookup | `ROLE#<account>#<role>` / `EMITTER#<emitterId>` | `META` |
+| Binding / tenant lookup | `EMITTER#<emitterId>` / `TENANT#<tenant>` | `TENANT#<tenant>` / `APP#<app>#EMITTER#<emitterId>` |
 | Sink | `SINK#<id>` | `META` |
 | Hour / generation | `HOUR#<hour>` | `META` / `GEN` |
 | Job | `JOB#<ULID>` | `META` |
@@ -179,8 +179,8 @@ emitters, jobs for the `List*` operations).
 ## 6. Ingest
 
 1. The body is measured in bytes; over 1,048,576 is a 413.
-2. The caller ARN is reduced to `<fleet>-ue-<cellId>` and looked up; a
-   miss, a closed registration or a cell mismatch is a 403.
+2. The caller ARN is reduced to `<fleet>-ue-<emitterId>` and looked up; a
+   miss, a closed registration or an `emitterId` mismatch is a 403.
 3. The SSDK validates the batch (1 to 100 free JSON members).
 4. The per-emitter minute counter takes the whole batch; events over the
    limit are `RETRY`.
@@ -257,10 +257,10 @@ clock before each write.
 ([`src/shared/logger.ts`](src/shared/logger.ts)) that keeps only
 allow-listed fields and drops any value that looks like a URL, a header or
 a SigV4 parameter. `tenantId` is an allow-listed field. The lines the
-functions write name the cell, application, meter, sink, hour or job, and
-none names a tenant, because a batch, an hour and a delivery each span
-tenants. API Gateway access logs carry the caller ARN (for an emitter,
-`<fleet>-ue-<cellId>`) and the request id. The per-tenant view is the
+functions write name the emitter, application, meter, sink, hour or job,
+and none names a tenant, because a batch, an hour and a delivery each
+span tenants. API Gateway access logs carry the caller ARN (for an emitter,
+`<fleet>-ue-<emitterId>`) and the request id. The per-tenant view is the
 service's own output: every event in the raw and error objects carries its
 `tenantId`, and usage records are keyed by tenant (`GetUsage`,
 `ListUsage`).
@@ -313,7 +313,7 @@ tenant cost ≈ Σ over hours h:  share(t, h) × per-event cost(h)
 - **Unattributable remainder**: refused events and calls from unregistered
   roles, whose `tenantId` is only the emitter's claim, and the cost of
   jobs (re-admission, redrives, recounts). Refusals can be charged to the
-  emitter's cell, which the `error/` objects and the access log name; the
+  emitter, which the `error/` objects and the access log name; the
   rest is vendor overhead.
 
 Unit prices come from each service's pricing page; the README's cost
@@ -338,7 +338,7 @@ which CDK creates outside the stack.
   ARNs; a consumer reads the published parameter instead (integration-test.md,
   test-only shortcuts).
 - The share guard reads the `list-by-type` index, which is eventually
-  consistent. A `PutCellEmitter` that succeeded just before the block list
+  consistent. A `PutEmitter` that succeeded just before the block list
   went live may not be in the index when the guard reads it, and is missed
   for that propagation lag; the next deploy that changes a list catches it
   (§4.1, M-6).
