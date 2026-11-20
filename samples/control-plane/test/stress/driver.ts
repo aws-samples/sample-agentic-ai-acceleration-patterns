@@ -166,12 +166,21 @@ async function gather(a: CellAccountInput, regions: readonly string[], fleet: st
   const getRole = async (name: string): Promise<RoleState | undefined> => {
     try {
       const r = (await aws(['iam', 'get-role', '--role-name', name], { profile: a.profile })).Role;
+      const attached = (await aws(['iam', 'list-attached-role-policies', '--role-name', name], { profile: a.profile })).AttachedPolicies ?? [];
+      const inlineNames = ((await aws(['iam', 'list-role-policies', '--role-name', name], { profile: a.profile })).PolicyNames ?? []) as string[];
+      const inline = [];
+      for (const policy of inlineNames) {
+        const doc = await aws(['iam', 'get-role-policy', '--role-name', name, '--policy-name', policy], { profile: a.profile });
+        inline.push({ name: policy, document: doc.PolicyDocument });
+      }
       return {
         name,
         path: String(r.Path),
         arn: String(r.Arn),
         trust: r.AssumeRolePolicyDocument,
         boundaryArn: r.PermissionsBoundary?.PermissionsBoundaryArn,
+        attached: (attached as any[]).map((p) => String(p.PolicyArn)),
+        inline,
       };
     } catch (e) {
       if (e instanceof AwsError && e.errorName === 'NoSuchEntity') return undefined;
@@ -190,7 +199,7 @@ async function checkAccounts(): Promise<number> {
   let failed = 0;
   for (const a of accounts) {
     const state = await gather(a, regions, names().fleet);
-    const problems = accountProblems(state, { fleet: names().fleet, accountBaseStackArns: a.accountBaseStackArns });
+    const problems = accountProblems(state, { fleet: names().fleet, accountBaseStackArns: a.accountBaseStackArns, policySuffix: process.env.STRESS_CELL_POLICY_SUFFIX ?? '' });
     log(`account check ${a.label}: ${state.stacks.length} stacks, ${state.roles.length} roles in ${regions.join(', ')}: ${problems.length === 0 ? 'passed' : `${problems.length} problems`}`);
     for (const p of problems) log(`  ${a.label}: ${p}`);
     if (problems.length > 0) failed += 1;

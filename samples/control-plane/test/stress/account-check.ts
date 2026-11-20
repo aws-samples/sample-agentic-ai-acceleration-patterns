@@ -9,7 +9,8 @@
  * and on the owner's list by stack ARN) and cells (deployed under the cell bootstrap's
  * execution role). The check refuses anything else, a stack with another service role, a
  * default CDK bootstrap role (`cdk-hnb659fds-*`), a role pair on `/cell/` or under a cell
- * boundary, and a `/cell/` role that trusts a principal outside the account or a service
+ * boundary or holding a policy its stack did not give it, and a `/cell/` role that trusts a
+ * principal outside the account or a service
  * the cell does not use. Pure: the driver gathers the state with the stack list,
  * `iam:ListRoles` and `iam:GetRole`, and this decides.
  */
@@ -41,6 +42,10 @@ export interface RoleState {
   readonly trust: unknown;
   /** Only known for the roles the driver read with `iam:GetRole`. */
   readonly boundaryArn?: string;
+  /** Managed policy ARNs attached to the role; read for the role pair only. */
+  readonly attached?: readonly string[];
+  /** Inline policies by name with their documents; read for the role pair only. */
+  readonly inline?: readonly { readonly name: string; readonly document: unknown }[];
 }
 
 export interface AccountState {
@@ -55,6 +60,62 @@ export interface AccountState {
 export interface CheckInput {
   readonly fleet: string;
   readonly accountBaseStackArns: readonly string[];
+  /** `CELL_POLICY_SUFFIX` of the owner stacks: the owner policies carry it. Default none. */
+  readonly policySuffix?: string;
+}
+
+/** The owner policy the role pair stack attaches to each half (stress ADR-0012, control-plane ADR-0047). */
+const PAIR_POLICY = { cell: 'cell-build-policy', tenant: 'cell-tenant-build-policy' } as const;
+/** The inline policy the role pair stack gives each half: CDK's default policy of the role. */
+const PAIR_INLINE = { cell: /^RolesCellProvisioningRoleDefaultPolicy[0-9A-F]{8}$/, tenant: /^RolesTenantProvisioningRoleDefaultPolicy[0-9A-F]{8}$/ } as const;
+/** What that default policy grants: the control plane's SSM namespace grants (control-plane §6.2). */
+const PAIR_INLINE_ACTIONS: readonly string[] = [
+  'ssm:AddTagsToResource',
+  'ssm:DeleteParameter',
+  'ssm:GetParameter',
+  'ssm:GetParameters',
+  'ssm:GetParametersByPath',
+  'ssm:PutParameter',
+];
+
+/**
+ * Problems with what the role pair half holds beyond its own stack's set: a managed policy
+ * other than its owner policy, an inline policy other than the stack's default policy, or a
+ * default policy that grants anything but the SSM namespace actions on
+ * `/application-plane/` parameters.
+ */
+export function pairPolicyProblems(half: 'cell' | 'tenant', role: RoleState, s: AccountState, suffix = ''): string[] {
+  const problems: string[] = [];
+  const expected = `arn:${s.partition}:iam::${s.accountId}:policy/${PAIR_POLICY[half]}${suffix}`;
+  const attached = role.attached ?? [];
+  for (const arn of attached.filter((a) => a !== expected)) {
+    problems.push(`role pair ${half} role ${role.name} has a managed policy outside its stack's set (${arn.split(':policy/')[1] ?? arn})`);
+  }
+  if (!attached.includes(expected)) problems.push(`role pair ${half} role ${role.name} lacks ${PAIR_POLICY[half]}${suffix}`);
+  const inline = role.inline ?? [];
+  for (const p of inline) {
+    if (!PAIR_INLINE[half].test(p.name)) {
+      problems.push(`role pair ${half} role ${role.name} has an inline policy outside its stack's set (${p.name})`);
+      continue;
+    }
+    const prefix = `arn:${s.partition}:ssm:`;
+    for (const raw of asList((p.document as { Statement?: unknown } | null)?.Statement)) {
+      const st = (raw ?? {}) as { Effect?: string; Action?: unknown; NotAction?: unknown; Resource?: unknown; NotResource?: unknown };
+      if (st.Effect !== 'Allow') continue;
+      const actions = asList(st.Action).map(String);
+      const resources = asList(st.Resource).map(String);
+      const ok =
+        st.NotAction === undefined &&
+        st.NotResource === undefined &&
+        actions.length > 0 &&
+        actions.every((a) => PAIR_INLINE_ACTIONS.includes(a)) &&
+        resources.length > 0 &&
+        resources.every((r) => r.startsWith(prefix) && r.includes(`:${s.accountId}:parameter/application-plane/`));
+      if (!ok) problems.push(`role pair ${half} role ${role.name}: inline policy ${p.name} grants more than the SSM namespace actions`);
+    }
+  }
+  if (inline.length > 1) problems.push(`role pair ${half} role ${role.name} has ${inline.length} inline policies, its stack makes one`);
+  return problems;
 }
 
 const executionRoleArn = (s: AccountState, region: string): string =>
@@ -145,6 +206,7 @@ export function accountProblems(s: AccountState, input: CheckInput): string[] {
     if (role.boundaryArn !== undefined && CELL_BOUNDARY.test(role.boundaryArn)) {
       problems.push(`role pair ${half} role ${role.name} is under a cell boundary`);
     }
+    problems.push(...pairPolicyProblems(half as 'cell' | 'tenant', role, s, input.policySuffix ?? ''));
   }
   return problems;
 }

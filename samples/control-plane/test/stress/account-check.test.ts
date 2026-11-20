@@ -21,6 +21,26 @@ const role = (name: string, path: string, principal: unknown = { Service: 'lambd
   boundaryArn,
 });
 
+/** What the role pair stack gives each half: its owner policy and its SSM default policy. */
+function pairPolicies(half: 'cell' | 'tenant'): Pick<RoleState, 'attached' | 'inline'> {
+  const owner = half === 'cell' ? 'cell-build-policy' : 'cell-tenant-build-policy';
+  const name = half === 'cell' ? 'RolesCellProvisioningRoleDefaultPolicy800A5565' : 'RolesTenantProvisioningRoleDefaultPolicy11629580';
+  return {
+    attached: [`arn:aws:iam::${ACCOUNT}:policy/${owner}`],
+    inline: [{
+      name,
+      document: {
+        Version: '2012-10-17',
+        Statement: [{
+          Effect: 'Allow',
+          Action: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
+          Resource: `arn:aws:ssm:${REGION}:${ACCOUNT}:parameter/application-plane/shared/*`,
+        }],
+      },
+    }],
+  };
+}
+
 function healthy(): AccountState {
   return {
     accountId: ACCOUNT,
@@ -39,8 +59,8 @@ function healthy(): AccountState {
       role(`cdk-cell-deploy-role-${ACCOUNT}-${REGION}`, '/', { AWS: `arn:aws:iam::${ACCOUNT}:root` }),
     ],
     pair: {
-      cell: role(`${FLEET}-cell-provisioning`, '/', { AWS: `arn:aws:iam::${OTHER}:root` }),
-      tenant: role(`${FLEET}-tenant-provisioning`, '/', { AWS: `arn:aws:iam::${OTHER}:root` }),
+      cell: { ...role(`${FLEET}-cell-provisioning`, '/', { AWS: `arn:aws:iam::${OTHER}:root` }), ...pairPolicies('cell') },
+      tenant: { ...role(`${FLEET}-tenant-provisioning`, '/', { AWS: `arn:aws:iam::${OTHER}:root` }), ...pairPolicies('tenant') },
     },
   };
 }
@@ -114,6 +134,35 @@ describe('the cell account check (spec §3.7)', () => {
     }
     const otherBoundary = { ...s.pair.tenant!, boundaryArn: `arn:aws:iam::${ACCOUNT}:policy/owner-boundary` };
     expect(check({ ...s, pair: { ...s.pair, tenant: otherBoundary } })).toEqual([]);
+  });
+
+  it('refuses a managed or inline policy on the role pair outside its stack\'s set, and a missing owner policy', () => {
+    const s = healthy();
+    const admin = { ...s.pair.cell!, attached: [...s.pair.cell!.attached!, 'arn:aws:iam::aws:policy/AdministratorAccess'] };
+    expect(check({ ...s, pair: { ...s.pair, cell: admin } })).toEqual([
+      `role pair cell role ${FLEET}-cell-provisioning has a managed policy outside its stack's set (AdministratorAccess)`,
+    ]);
+    const none = { ...s.pair.tenant!, attached: [] };
+    expect(check({ ...s, pair: { ...s.pair, tenant: none } })).toEqual([`role pair tenant role ${FLEET}-tenant-provisioning lacks cell-tenant-build-policy`]);
+    const extra = { ...s.pair.cell!, inline: [...s.pair.cell!.inline!, { name: 'oops', document: { Statement: [] } }] };
+    expect(check({ ...s, pair: { ...s.pair, cell: extra } })).toEqual([
+      `role pair cell role ${FLEET}-cell-provisioning has an inline policy outside its stack's set (oops)`,
+      `role pair cell role ${FLEET}-cell-provisioning has 2 inline policies, its stack makes one`,
+    ]);
+    const wide = { ...s.pair.cell!, inline: [{ name: 'RolesCellProvisioningRoleDefaultPolicy800A5565', document: { Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Resource: '*' }] } }] };
+    expect(check({ ...s, pair: { ...s.pair, cell: wide } })).toEqual([
+      `role pair cell role ${FLEET}-cell-provisioning: inline policy RolesCellProvisioningRoleDefaultPolicy800A5565 grants more than the SSM namespace actions`,
+    ]);
+  });
+
+  it('expects the owner policies with the suffix', () => {
+    const s = healthy();
+    expect(accountProblems(s, { fleet: FLEET, accountBaseStackArns: BASE, policySuffix: '-w10' })).toEqual([
+      `role pair cell role ${FLEET}-cell-provisioning has a managed policy outside its stack's set (cell-build-policy)`,
+      `role pair cell role ${FLEET}-cell-provisioning lacks cell-build-policy-w10`,
+      `role pair tenant role ${FLEET}-tenant-provisioning has a managed policy outside its stack's set (cell-tenant-build-policy)`,
+      `role pair tenant role ${FLEET}-tenant-provisioning lacks cell-tenant-build-policy-w10`,
+    ]);
   });
 
   it('refuses a /cell/ role trusted from another account, by a federated principal, by anyone, or by a service the cell does not use', () => {
