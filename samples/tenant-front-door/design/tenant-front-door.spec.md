@@ -3003,4 +3003,8 @@ commands.
 
 ## 11. Open questions
 
-None is open.
+- **Q-6. Registrar control-plane reads have no retry.** Each control-plane
+  read the registrar makes (§3.4 step 2) has a 3 s limit and no retry, so
+  the first operator read after a quiet period can answer 503 "control
+  plane cannot be read". Follow-up: retry each read once within the
+  function's 30 s budget, and log which call failed.

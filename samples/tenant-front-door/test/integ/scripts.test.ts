@@ -10,6 +10,7 @@
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { integNames } from './inputs';
 import { SAMPLE_ROOT, ScriptHarness } from '../hooks/support';
@@ -434,5 +435,30 @@ exit 1
     expect(r.status).toBe(1);
     expect(r.output).toContain('the control plane\'s account already holds a control plane in eu-central-1');
     expect(npxCalls()).not.toContain('deploy');
+  });
+});
+
+describe('the driver\'s helpers (scripts/integ/lib.sh)', () => {
+  const LIB = path.join(SAMPLE_ROOT, 'scripts', 'integ', 'lib.sh');
+  let tmp: string;
+  beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tfd-lib-')); });
+  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  /** Runs SCRIPT after sourcing lib.sh, with TMP, BODY and HEAD in a fresh directory; stdout and stderr apart. */
+  const lib = (script: string) => spawnSync('bash', ['-c', `TMP="$1"; BODY="$TMP/body"; HEAD="$TMP/head"; : >"$BODY"; source "$2"\n${script}`, '_', tmp, LIB],
+    { env: { PATH: process.env.PATH, HOME: process.env.HOME }, encoding: 'utf8' });
+
+  it('as: a registrar 503 "control plane cannot be read" is retried with a note per retry and counted', () => {
+    const r = lib(`REGISTRAR=https://registrar.example.com/
+assume() { AK=a; SK=b; ST=c; }
+sleep() { :; }
+signed() {
+  local c; c=$(( $(cat "$TMP/calls" 2>/dev/null || echo 0) + 1 )); echo "$c" >"$TMP/calls"
+  if (( c < 3 )); then echo '{"message":"the control plane cannot be read; retry"}' >"$BODY"; echo 503; else echo '{}' >"$BODY"; echo 200; fi
+}
+st="$(as arn:aws:iam::111111111111:role/op PUT tenants/T1 '{}')"; echo "st:$st retries:$(registrar_retries)"`);
+    expect(r.stdout).toContain('st:200 retries:2');
+    expect(r.stderr).toContain('registrar 503 control plane unreadable on PUT tenants/T1, attempt 1 of 4');
+    expect(r.stderr).toContain('registrar 503 control plane unreadable on PUT tenants/T1, attempt 2 of 4');
+    expect(r.stderr).not.toContain('attempt 3 of 4');
   });
 });

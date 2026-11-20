@@ -136,22 +136,27 @@ signed() {
   : >"$BODY"
   curl "${args[@]}" "$2" <<<"$config" || echo 000
 }
-# as ROLE_ARN METHOD PATH [JSON]: one registrar call as the role.
 # as ROLE_ARN METHOD PATH [JSON]: one registrar call as ROLE_ARN. A 503 whose
 # body says the control plane cannot be read is retried up to three times,
-# 5 s apart, as the route hook and an operator do (spec §3.4 step 2): the
-# first read after the control plane's function has been idle can pass the
-# registrar's 3 s call limit (design/spikes.md, Integration run).
+# 5 s apart. The registrar's control-plane reads have a 3 s limit and no
+# retry, so the first operator read after a quiet period can answer it
+# (spec §11, Q-6). Each retry is noted on stderr and counted in
+# $TMP/registrar-retries for the run summary, so a run records how often it
+# happened. as runs in $(...), hence the file.
 as() {
   local st i
   assume "$1" || { echo 000; return; }
   for i in 1 2 3 4; do
     st="$(signed "$2" "${REGISTRAR}$3" "${4:-}")"
     [[ "$st" == 503 ]] && grep -q 'control plane cannot be read' "$BODY" 2>/dev/null && (( i < 4 )) || break
+    note "registrar 503 control plane unreadable on $2 $3, attempt $i of 4; retrying in 5 s" >&2
+    printf '%s %s\n' "$2" "$3" >>"$TMP/registrar-retries"
     sleep 5
   done
   echo "$st"
 }
+# registrar_retries: how many times as() retried in this run.
+registrar_retries() { [[ -f "$TMP/registrar-retries" ]] && wc -l <"$TMP/registrar-retries" | tr -d ' ' || echo 0; }
 
 # edge METHOD HOST PATH [TOKEN_VAR] [curl args...] -> status; headers in $HEAD, body in $BODY.
 edge() {
