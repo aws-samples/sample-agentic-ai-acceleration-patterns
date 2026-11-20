@@ -7,18 +7,19 @@ SPDX-License-Identifier: MIT-0
 A multi-tenant agentic application bills, tiers and limits its tenants on
 what they use: agent sessions, model tokens, tool calls, requests. This
 sample is one metering service the vendor owns. Every emitter sends one
-versioned usage event. The ingest door admits an event only from an
-emitter the control plane registered, and only for a tenant the control
-plane placed in that emitter's cell. Every admitted event lands in a
-replayable raw store. Each hour is counted from that store under a
-run-time meter catalog, so a recount gives the same records, and a late
-event gives an `ADJUSTMENT`, never a changed record. Records go to
-configured sinks (an HTTP billing API or an export bucket) and to a usage
-bus that billing and limit systems subscribe to.
+versioned usage event. The ingest door admits an event only from a
+registered emitter, and only for a tenant bound to that emitter. Every
+admitted event lands in a replayable raw store. Each hour is counted from
+that store under a run-time meter catalog, so a recount gives the same
+records, and a late event gives an `ADJUSTMENT`, never a changed record.
+Records go to configured sinks (an HTTP billing API or an export bucket)
+and to a usage bus that billing and limit systems subscribe to.
 
-The control plane's vendor hooks ([`control-plane`](../control-plane/),
-ADR-044) register cells and tenants, so onboarding and offboarding drive
-metering with no manual step.
+The service works with any application layout: one application in one
+account, several applications across many accounts, or cells. With the
+[`control-plane`](../control-plane/) sample, its vendor hooks (ADR-044)
+register cells and tenants, so onboarding and offboarding drive metering
+with no manual step.
 
 What it is NOT: telemetry (billing events never share the metrics or logs
 path), proof that an emitter reports honest quantities, tenant isolation
@@ -53,26 +54,60 @@ HTTPS (secret or SigV4) or the export bucket.
   bus with, dead-letter queue included. Each bus is shared through AWS RAM
   with the vendor accounts that read it.
 
+## Who may report usage
+
+The ingest door trusts two kinds of record. A registrar writes both: any
+system that knows where tenants are served, signing as a role in
+`registrarPrincipalArns`.
+
+- An **emitter** is one IAM role in one AWS account that signs usage
+  events for one application. The API calls the unit behind the role a
+  cell and keys it by `cellId`, a ULID the registrar picks. The role is
+  named `<fleet>-ue-<cellId>` and holds a policy from `ingestStatement`.
+- A **tenant binding** lets one emitter report usage for one tenant. A
+  tenant may be bound to many emitters.
+
+An event counts only when it is signed by a registered emitter and its
+tenant is bound to that emitter. The body cannot name another emitter or
+tenant: identity comes from the signature.
+
+A cell here is any part of your system that runs in one account under one
+role. You do not need a cell-based design:
+
+| Your layout | Emitters | Tenant bindings |
+|---|---|---|
+| One pooled application in one account | one | every tenant, to that emitter |
+| One application across several accounts | one per account | each tenant, to the emitters of the accounts that serve it |
+| Several applications | one per application and account | each tenant, per application it uses |
+| One account per tenant (silo) | one per tenant account | that tenant, to its emitter |
+| The [`control-plane`](../control-plane/) sample | one per cell | each deployment, to its cell |
+
+Without the control plane, the registrar is usually the deploy pipeline
+(it registers an emitter when it creates the role) and the onboarding
+service (it binds a tenant when the tenant is placed). Rules that apply in
+every layout:
+
+- An emitter never moves to another account or application; register a
+  new one instead.
+- No emitter may sit in the metering account, or in an account that reads
+  a bus (`ACCOUNT_NOT_ALLOWED`).
+- `fleetName` is only the role-name prefix; pick any name when there is no
+  control plane.
+
 ## How it works
 
-1. **Register.** A cell's emitter is the IAM role that the cell's
-   workload signs its usage events with; it is the only identity the
-   ingest door accepts for that cell. The cell create step creates the
-   role in the cell's account with a policy from `ingestStatement`. The
-   system that places tenants in cells, signing as a role in
-   `registrarPrincipalArns`, calls `PutCellEmitter` when a cell is
-   created, to register that role, and `PutTenantBinding` when a tenant
-   is placed in a cell, so the role may report usage for that tenant.
-   Deletes close the registration at once; events timed before the close
-   are still admitted for a grace period (spec §3.4, §4.2). (With the
-   [`control-plane`](../control-plane/) sample, a global vendor hook
-   makes these calls: `PutCellEmitter` on `CELL_CREATE`,
-   `PutTenantBinding` on `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE`,
-   both in `PRE`, and the deletes in `POST`.)
+1. **Register.** The registrar calls `PutCellEmitter` when an emitter's
+   role is created, and `PutTenantBinding` when a tenant is placed on it.
+   Deletes close a registration at once; events timed before the close
+   are still admitted for `closeGraceMinutes` (spec §3.4, §4.2). With the
+   [`control-plane`](../control-plane/) sample, a global vendor hook makes
+   these calls: `PutCellEmitter` on `CELL_CREATE`, `PutTenantBinding` on
+   `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE`, both in `PRE`, and the
+   deletes in `POST`.
 2. **Define meters.** An operator creates meters (`COUNT`, `SUM`, `MAX`,
    `UNIQUE_COUNT`) and sinks. A change writes a new version that counts
    from the next whole hour (ADR-0004).
-3. **Emit.** The workload in a cell runs under the cell's emitter role,
+3. **Emit.** The workload runs under its emitter role,
    `<fleet>-ue-<cellId>`, where `<fleet>` is the `fleetName` the stack was
    deployed with. It sends usage with the `UsageEmitter` client in
    [`scripts/emit-usage.ts`](scripts/emit-usage.ts), a code snippet to
@@ -103,7 +138,7 @@ npx cdk deploy TenantUsageMetering -c fleetName=demo
 | Context | Default | Meaning |
 |---|---|---|
 | `stackName` | `TenantUsageMetering` | the demo stack's name, so two stacks can sit in one account |
-| `fleetName` | `demo` | the control plane's fleet name; emitter roles are `<fleet>-ue-<cellId>` |
+| `fleetName` | `demo` | the emitter role-name prefix (the control plane's fleet name, when used); emitter roles are `<fleet>-ue-<cellId>` |
 | `ingestPath` | `BUS` | `BUS` (ingest bus, ADR-0002) or `DIRECT` (Firehose) |
 | `lateGraceMinutes` | `15` | how long after an hour ends it is first counted |
 | `rawRetentionDays` | `400` | raw object lifetime |
@@ -149,10 +184,11 @@ subscriber. A deploy fails when a listed account holds a cell that can
 still send; a deleted cell stops counting at its close time
 (architecture.md §4.1).
 
-Then give `<fleet>-global-hook` a policy from `metering.registrarStatement`
-and each cell's emitter role a policy from `metering.ingestStatement`, and
-register [`scripts/control-plane/metering-hook.sh`](scripts/control-plane/metering-hook.sh)
-as a global hook on the five events of spec §3.4. Cells send usage with
+Then give each registrar role a policy from `metering.registrarStatement`
+and each emitter role a policy from `metering.ingestStatement`. With the
+control plane, the registrar is `<fleet>-global-hook`: register
+[`scripts/control-plane/metering-hook.sh`](scripts/control-plane/metering-hook.sh)
+as a global hook on the five events of spec §3.4. Emitters send usage with
 [`scripts/emit-usage.ts`](scripts/emit-usage.ts).
 
 ## Deployment integration test
@@ -298,10 +334,10 @@ a month, and with PITR each month adds about $6 to the monthly bill.
 ## Security notes
 
 - Identity comes from the SigV4 signature, never the body (P-2). An
-  emitter speaks for the tenants its cell holds, and only within the
+  emitter speaks for the tenants bound to it, and only within the
   registration's intervals.
-- The control plane is the source of truth for placement; only its hook
-  role may register (P-3).
+- The registrar is the source of truth for placement; only a role in
+  `registrarPrincipalArns` may register (P-3).
 - Explicit-deny resource policies on the API, the buckets, the buses, the
   table and the dead-letter queue keep every store to its writers, whatever
   an identity policy in the account allows (M-24).
