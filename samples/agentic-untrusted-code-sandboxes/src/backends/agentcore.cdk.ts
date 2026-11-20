@@ -31,6 +31,13 @@ export const SID = {
   roleLogStreams: 'LogStreamsOfThisRuntime',
   roleSessionObjects: 'SessionFilesOwnPrefix',
   roleSessionList: 'SessionFilesList',
+  endpointS3Layers: 'EcrImageLayers',
+  endpointS3Sessions: 'SessionFileObjects',
+  endpointS3SessionsList: 'SessionFileList',
+  endpointEcrToken: 'EcrAuthorizationToken',
+  endpointEcrPull: 'EcrPullRunnerImage',
+  endpointLogs: 'LogsOfThisRuntime',
+  endpointLogStreams: 'LogStreamsOfThisRuntime',
 } as const;
 
 export class AgentcoreBackendResources extends Construct implements BackendConstruct {
@@ -244,6 +251,71 @@ export class AgentcoreBackendResources extends Construct implements BackendConst
 
   public endpointClients(): ec2.ISecurityGroup[] {
     return [this.securityGroup];
+  }
+
+  /**
+   * What this backend needs in each sandbox endpoint's policy (spec §3.7): the ECR layer bucket, the runner
+   * repository, this runtime's log groups and, with `sessionFiles`, the sessions prefix of the input bucket.
+   * The core merges the statements per endpoint, because the Logs endpoint is shared with `nitro` (ADR-0051).
+   */
+  public endpointStatements(endpoint: SandboxEndpoint): iam.PolicyStatement[] {
+    const anyone = [new iam.AnyPrincipal()];
+    switch (endpoint) {
+      case 's3-gateway': {
+        const statements = [new iam.PolicyStatement({
+          sid: SID.endpointS3Layers,
+          principals: anyone,
+          actions: ['s3:GetObject'],
+          resources: [`arn:${Aws.PARTITION}:s3:::prod-${Aws.REGION}-starport-layer-bucket/*`],
+        })];
+        if (this.ctx.settings.agentcoreSessionFiles) {
+          // The endpoint admits every `sessions/*` key; the runtime role separates sessions (spec §3.7).
+          statements.push(
+            new iam.PolicyStatement({
+              sid: SID.endpointS3Sessions,
+              principals: anyone,
+              actions: ['s3:GetObject', 's3:PutObject'],
+              resources: [this.ctx.inputBucket.arnForObjects('sessions/*')],
+            }),
+            new iam.PolicyStatement({
+              sid: SID.endpointS3SessionsList,
+              principals: anyone,
+              actions: ['s3:ListBucket'],
+              resources: [this.ctx.inputBucket.bucketArn],
+              conditions: { StringLike: { 's3:prefix': ['sessions/*'] } },
+            }),
+          );
+        }
+        return statements;
+      }
+      case 'ecr-api':
+      case 'ecr-dkr':
+        return [
+          // Account-wide by design: the action takes no resource and is useless without a pull grant (spec §3.7).
+          new iam.PolicyStatement({ sid: SID.endpointEcrToken, principals: anyone, actions: ['ecr:GetAuthorizationToken'], resources: ['*'] }),
+          new iam.PolicyStatement({
+            sid: SID.endpointEcrPull,
+            principals: anyone,
+            actions: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'],
+            resources: [this.ctx.runnerRepository!.repositoryArn],
+          }),
+        ];
+      case 'logs':
+        return [
+          new iam.PolicyStatement({
+            sid: SID.endpointLogs,
+            principals: anyone,
+            actions: ['logs:CreateLogGroup', 'logs:DescribeLogStreams'],
+            resources: [this.runtimeLogGroupArn()],
+          }),
+          new iam.PolicyStatement({
+            sid: SID.endpointLogStreams,
+            principals: anyone,
+            actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+            resources: [`${this.runtimeLogGroupArn()}:log-stream:*`],
+          }),
+        ];
+    }
   }
 
   public environment(): Record<string, string> {
