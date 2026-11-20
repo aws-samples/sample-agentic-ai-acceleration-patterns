@@ -50,8 +50,9 @@ connection, and a retry after the first attempt reached the runner could run
 the tenant's code twice. A failed attempt is an error for the caller (the
 last row of the table). The client keeps no pooled connection, because with no
 retry a socket the service closed while the function was frozen would fail the
-first call after a thaw; it costs one TLS handshake per job. It waits at most `timeoutMs` + 5 s for the answer and
-its body together, then aborts the call and returns `no_answer`. It returns:
+first call after a thaw; it costs one TLS handshake per job. It waits at most
+`timeoutMs` + 5 s for the answer and its body together, then aborts the call
+and returns `no_answer`. It returns:
 
 | Answer | Outcome |
 |---|---|

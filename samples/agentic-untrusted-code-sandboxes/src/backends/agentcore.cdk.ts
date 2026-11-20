@@ -221,8 +221,8 @@ export class AgentcoreBackendResources extends Construct implements BackendConst
   /**
    * The tool role may invoke and stop any session of the runtime. IAM has no session-id condition for either
    * action (S-8), so the tenant-to-session mapping is code: `sessionIdFor(tenantId)` in the run-time class,
-   * which refuses a handle that names another session (ADR-0050). The endpoint-qualified ARN is listed too,
-   * because both actions authorize against it as well as the runtime.
+   * which refuses a handle whose session id is not derived from its own tenant (ADR-0050). The endpoint-qualified
+   * ARN is listed too, because it is not measured which of the two ARNs each action authorizes against.
    */
   public toolStatements(): iam.PolicyStatement[] {
     return [new iam.PolicyStatement({

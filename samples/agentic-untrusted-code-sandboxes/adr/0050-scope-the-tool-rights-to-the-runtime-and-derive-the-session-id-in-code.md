@@ -40,7 +40,8 @@ and keep running, for a check the backend class already makes.
 
 Option 1. The tool role holds `bedrock-agentcore:InvokeAgentRuntime` and
 `StopRuntimeSession` on the runtime ARN and on `<runtime ARN>/runtime-endpoint/*`,
-because both actions authorize against the endpoint ARN as well. The reaper
+because it is not measured which of the two ARNs each action authorizes
+against (see Consequences). The reaper
 role (which `offboardTenant` runs as) holds `StopRuntimeSession` on the same
 two ARNs. The tool tenant role and the drain role hold nothing for this
 backend: the tenant role carries the `nitro` start and stop grants only, and

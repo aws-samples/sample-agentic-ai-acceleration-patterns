@@ -44,9 +44,9 @@ container configuration only. With no tag from the core, this backend builds a
 `DockerImageAsset` of `runnerPath()` for `linux/arm64` and copies it into the
 runner repository as `runner-arm64-<asset hash>` with `cdk-ecr-deployment`,
 setting `imageArch` to `arm64` because that library copies only `amd64`
-unless told otherwise. The runtime depends on the copy. With a tag from the core, the core owns the
-copy, and the runtime (returned by `drainOrder()`) must be ordered after it by
-the core; this backend has nothing to depend on.
+unless told otherwise. The runtime depends on the copy. With a tag from the
+core, the core owns the copy, and the runtime (returned by `drainOrder()`)
+must be ordered after it by the core; this backend has nothing to depend on.
 
 ## Consequences
 

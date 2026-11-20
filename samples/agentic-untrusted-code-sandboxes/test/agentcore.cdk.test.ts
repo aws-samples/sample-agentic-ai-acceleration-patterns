@@ -200,8 +200,17 @@ describe('the runtime (spec §3.3, §3.4, ADR-0015)', () => {
     const a = make('a1');
     const b = make('b2');
     expect(a.runtimeName).not.toBe(b.runtimeName);
-    const names = Object.values(Template.fromStack(stack).findResources('AWS::Logs::DeliverySource')).map((r) => (r as { Properties: { Name: string } }).Properties.Name);
-    expect(new Set(names).size).toBe(2);
+    const both = Template.fromStack(stack);
+    const nameOf = (type: string, key: string) => Object.values(both.findResources(type))
+      .map((r) => (r as { Properties: Record<string, string> }).Properties[key]);
+    for (const [type, key] of [
+      ['AWS::Logs::DeliverySource', 'Name'], ['AWS::Logs::DeliveryDestination', 'Name'],
+      ['AWS::Logs::LogGroup', 'LogGroupName'], ['AWS::Logs::ResourcePolicy', 'PolicyName'],
+    ]) {
+      const names = nameOf(type, key);
+      expect(names).toHaveLength(2);
+      expect(new Set(names).size).toBe(2);
+    }
   });
 
   test('a core-made image copy is used as is, and this backend makes none', () => {

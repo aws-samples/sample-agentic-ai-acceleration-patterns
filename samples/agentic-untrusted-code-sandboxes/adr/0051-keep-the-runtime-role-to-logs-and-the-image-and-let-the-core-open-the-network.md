@@ -72,7 +72,8 @@ to the ECR and Logs endpoint groups and to the S3 prefix list.
 ## Consequences
 
 The trust condition names `runtime/<runtimeName>-*`, the shape the CDK
-`Runtime` construct writes for the role it creates; AWS documents the wider
+`Runtime` construct writes for the role it creates (`<runtimeName>*`), narrowed
+here by the `-` that precedes the id the service appends; AWS documents the wider
 `<account>:*` form, and no spike ran either. If a runtime fails to start with
 the narrow form, the fallback is the documented form with the account
 condition kept, and this record is superseded. The runtime name is checked
