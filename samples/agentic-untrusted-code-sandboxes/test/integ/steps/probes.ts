@@ -13,9 +13,11 @@ import { sleep } from '../aws';
 import { insights } from '../cloud';
 import { type Backend, TENANT } from '../common';
 import { type Ctx, type CallResult } from '../ctx';
+import { INPUT_AT_CAP, INPUT_OVER_CAP, inputAtCap, sha256Hex } from '../fixtures';
 import { presignUrl } from '../sigv4';
 import { type Unit } from '../steps';
 import { attempt, field } from './basic';
+import { MAX_INPUT_BYTES_CAP, MAX_OUTPUT_BYTES_CAP } from '../../../src/props';
 
 const { a: A, b: B } = TENANT;
 
@@ -30,12 +32,22 @@ const blocked = (out: Record<string, unknown>, name: string): boolean => {
   return a.ok === false && (a.err === 'PermissionError' || a.errno === 1);
 };
 
+/** The Lambda response limit (6 MB); the tool's answer must stay under it. */
+const LAMBDA_RESPONSE_BYTES = 6_000_000;
+
 export async function limits(c: Ctx, u: Unit): Promise<void> {
   const backend = backendOf(u);
-  const big = await c.call('run-code', A, { code: 'print(1)', input: 'big6.bin', backend }, { once: true });
-  c.rec.check(`a 6 MiB input returns input_too_large (got ${big.outcome.kind === 'error' ? big.outcome.code : big.outcome.kind})`, big.outcome.kind === 'error' && big.outcome.code === 'input_too_large');
-  const print = await c.probe('run-code', A, backend, 'limits', { mode: 'print' });
-  c.rec.check(`a 1 MiB print returns truncated (got ${String(print.call.result?.truncated)})`, print.call.result?.truncated === true);
+  // The run-code instance sets maxInputBytes and maxOutputBytes to their caps (test/integ.sandboxes.ts).
+  const over = await c.call('run-code', A, { code: 'print(1)', input: INPUT_OVER_CAP, backend }, { once: true });
+  c.rec.check(`an input one byte over maxInputBytes returns input_too_large (got ${over.outcome.kind === 'error' ? over.outcome.code : over.outcome.kind})`, over.outcome.kind === 'error' && over.outcome.code === 'input_too_large');
+  const at = await c.probe('run-code', A, backend, 'limits', { mode: 'input' }, { input: INPUT_AT_CAP });
+  c.rec.check(`an input of exactly maxInputBytes is read back whole (size ${String(field(at.out, 'size'))}, exit ${String(at.call.result?.exitCode)})`,
+    at.call.result?.exitCode === 0 && field(at.out, 'size') === MAX_INPUT_BYTES_CAP && field(at.out, 'sha256') === sha256Hex(inputAtCap()));
+  const ctl = await c.probe('run-code', A, backend, 'limits', { mode: 'control', bytes: MAX_OUTPUT_BYTES_CAP });
+  const r = ctl.call.result;
+  const size = r === undefined ? 0 : Buffer.byteLength(JSON.stringify(r));
+  c.rec.check(`a print of maxOutputBytes control bytes returns truncated under ${LAMBDA_RESPONSE_BYTES} bytes (truncated ${String(r?.truncated)}, ${size} bytes)`,
+    r?.truncated === true && size > 0 && size < LAMBDA_RESPONSE_BYTES && r.stdout.length > 0 && r.stdout.split('\u0001').join('') === '');
 
   const lock = await c.probe('run-code', A, backend, 'limits', { mode: 'shm_write' });
   const mp = attempt(lock.out, 'mp_lock');
@@ -66,10 +78,31 @@ const seen = (o: unknown): string => {
   const r = (o ?? {}) as { status?: number; error?: string };
   return r.status !== undefined ? String(r.status) : (r.error ?? 'none');
 };
-const failedProbe = (o: unknown): boolean => {
+/** The probe error that means the TCP connect completed (test/integ/hostile/_lib.py): the path is open. */
+export const CONNECTED = 'ProbeConnected';
+
+/** True when a probe's request did not get through: an error before the connect completed, or a refusal status. */
+export const failedProbe = (o: unknown): boolean => {
   const r = (o ?? {}) as { status?: number; error?: string; outcome?: string };
-  return r.error !== undefined || (r.status !== undefined && r.status >= 400);
+  return (r.error !== undefined && r.error !== CONNECTED) || (r.status !== undefined && r.status >= 400);
 };
+
+/** True when a probe got no connection at all: an error, and not one raised after a completed connect. */
+export const noConnection = (o: unknown): boolean => {
+  const r = (o ?? {}) as { error?: string };
+  return r.error !== undefined && r.error !== CONNECTED;
+};
+
+/**
+ * A no-egress attempt fails: no connection was made, or (the presigned PUT only, which the endpoint policy refuses)
+ * the answer is a refusal status. An HTTP answer of any status from any other probe means the connection completed.
+ */
+export function egressFailed(name: string, o: unknown): boolean {
+  const r = (o ?? {}) as { outcome?: string | number; error?: string };
+  if (r.outcome === 'connected') return false;
+  if (typeof r.outcome === 'number') return name === 'put_presigned' && r.outcome >= 400;
+  return noConnection(r) || r.outcome === 'refused';
+}
 
 export async function noCredentials(c: Ctx, u: Unit): Promise<void> {
   const backend = backendOf(u);
@@ -86,7 +119,7 @@ export async function noCredentials(c: Ctx, u: Unit): Promise<void> {
       c.rec.check(`the MicroVM metadata path iam/security-credentials/ gives 404, with or without the token flow (got ${seen(role)}, ${String(withToken.status)})`,
         (role.status === 404 || withToken.status === 404) && role.status !== 200 && withToken.status !== 200);
     } else {
-      c.rec.check(`IMDS on nitro gives no answer within the script's timeout (got ${seen(role)})`, role.error !== undefined);
+      c.rec.check(`IMDS on nitro gives no connection within the script's timeout (got ${seen(role)})`, noConnection(role));
       c.rec.check(`the ECS credentials path gives 404 (got ${seen(out.ecs_credentials_path)})`, ((out.ecs_credentials_path ?? {}) as { status?: number }).status === 404);
     }
   }
@@ -121,10 +154,7 @@ export async function noEgress(c: Ctx, u: Unit): Promise<void> {
   const names = ['https_name', 'tcp_public_ip', 'put_presigned', ...(peer.peer_ip ? ['tcp_peer'] : []), ...(peer.peer_url ? ['https_peer'] : [])];
   for (const n of names) {
     const r = (out[n] ?? {}) as { outcome?: string | number; error?: string; ms?: number };
-    // An HTTP answer, whatever its status, means the connection completed; only the presigned PUT may be refused by status (the endpoint policy).
-    const answered = typeof r.outcome === 'number' && n !== 'put_presigned';
-    const failed = !answered && (r.error !== undefined || (typeof r.outcome === 'number' && r.outcome >= 400) || (typeof r.outcome === 'string' && r.outcome !== 'connected' && !/^2/.test(r.outcome)));
-    c.rec.check(`${n} fails (got ${r.error ?? String(r.outcome)})`, failed && r.outcome !== 'connected');
+    c.rec.check(`${n} fails before a connection is made (got ${r.error ?? String(r.outcome)})`, egressFailed(n, r));
     c.rec.check(`${n} fails within 3 s (took ${String(r.ms)} ms)`, typeof r.ms === 'number' && r.ms <= 3000);
   }
   c.rec.check('the IP-literal TCP connect did not complete', ((out.tcp_public_ip ?? {}) as { outcome?: string }).outcome !== 'connected');
@@ -134,7 +164,7 @@ export async function noEgress(c: Ctx, u: Unit): Promise<void> {
   c.rec.check('the hostile job ran and reported', Object.keys(bad.out).length > 0);
   for (const n of reads) {
     const o = (bad.out[n] ?? {}) as { error?: string };
-    c.rec.check(`the hostile job's ${n} fails (got ${seen(bad.out[n])})`, n === 'post_internet' ? o.error !== undefined : failedProbe(bad.out[n]));
+    c.rec.check(`the hostile job's ${n} fails (got ${seen(bad.out[n])})`, n === 'post_internet' ? noConnection(o) : failedProbe(bad.out[n]));
   }
   c.rec.check('the hostile job leaked nothing', field(bad.out, 'leaked') === false);
   c.rec.check(`the time cap kills the hostile job (timedOut ${String(bad.call.result?.timedOut)})`, bad.call.result?.timedOut === true);

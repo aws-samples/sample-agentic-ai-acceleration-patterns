@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix } from './common';
 import { Ctx, TOKEN_REUSE_MS } from './ctx';
 import { HOSTILE_DIR, MAX_CODE_BYTES, PROBES, probeCode } from './hostile';
-import { checkLeftovers, namesLogGroup, newPolicyFindings, policyFindings } from './leftovers';
+import { checkLeftovers, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes } from './leftovers';
 import { claimsFor, mint, signJws } from './mint.function';
 import { formatRecord, median, Recorder } from './record';
 import { runPhase } from './runner';
@@ -18,6 +18,7 @@ import { matrix, SPEC_TABLE_ORDER, STEPS, unitKey, validateSteps, type StepSpec 
 import { collectHandles, sameKeys } from './steps/basic';
 import { neededQuotaGb } from './steps/build';
 import { DRIVER_STEPS, IMPLS } from './steps/index';
+import { CONNECTED, egressFailed, failedProbe, noConnection } from './steps/probes';
 import { lastJsonLine, parseFunctionResponse, parseGatewayResponse } from './tool-result';
 
 describe('step order and matrix', () => {
@@ -314,6 +315,15 @@ describe('the leftover comparison', () => {
     expect(policyFindings({}, [{ name: 'mine', document: arn }], cdkArn, new Set(['mine']))[0].known).toBeUndefined();
     expect(policyFindings({}, [{ name: 'mine', document: arn }], undefined)).toEqual([]);
   });
+  test('a blank runtime or image name gives no log group prefix, so nothing outside the run is listed', () => {
+    expect(serviceLogPrefixes({ runtimeNames: ['rt', ''], imageNames: [' ', 'img'] })).toEqual([
+      { kind: 'runtime', prefix: '/aws/bedrock-agentcore/runtimes/rt-' },
+      { kind: 'runtime', prefix: undefined },
+      { kind: 'image', prefix: undefined },
+      { kind: 'image', prefix: '/aws/lambda-microvms/img' },
+    ]);
+    expect(serviceLogPrefixes({ runtimeNames: [], imageNames: [] })).toEqual([]);
+  });
 });
 
 describe('the hostile probes', () => {
@@ -365,6 +375,57 @@ describe('the hostile probes', () => {
       expect(seen[field].status ?? seen[field].outcome).toBeUndefined();
       for (const v of Object.values(seen)) if (typeof v === 'object' && v !== null && v.ms !== undefined) expect(v.ms).toBeLessThan(3_500);
     }
+  });
+
+  test('a request whose connect completes is never read as blocked, however slow; a connect that does not complete is', () => {
+    const lib = `CONFIG = {}\n${readFileSync(path.join(HOSTILE_DIR, '_lib.py'), 'utf8')}`;
+    const script = [
+      'def kind(url, t=1):',
+      '    try:',
+      '        http("GET", url, timeout=t)',
+      '        return "answered"',
+      '    except BaseException as e:',
+      '        return type(e).__name__',
+      'srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(8)',
+      'print(kind("http://127.0.0.1:%d/" % srv.getsockname()[1]))',
+      'gone = socket.socket(); gone.bind(("127.0.0.1", 0)); port = gone.getsockname()[1]; gone.close()',
+      'print(kind("http://127.0.0.1:%d/" % port))',
+      'socket.socket.connect = lambda *a: time.sleep(5)',
+      't0 = time.time(); print(kind("http://127.0.0.1:%d/" % port)); print(time.time() - t0 < 2)',
+    ].join('\n');
+    const lines = execFileSync('python3', ['-I', '-S', '-B', '-c', `${lib}\n${script}`], { encoding: 'utf8', timeout: 15_000 }).trim().split('\n');
+    expect(lines).toEqual([CONNECTED, 'ConnectionRefusedError', 'ProbeDeadline', 'True']);
+  });
+
+  test('the checks count a completed connect as open, and only a failed connect (or a refused presigned PUT) as blocked', () => {
+    expect(failedProbe({ error: CONNECTED })).toBe(false);
+    expect(failedProbe({ error: 'ProbeDeadline' })).toBe(true);
+    expect(failedProbe({ status: 403 })).toBe(true);
+    expect(failedProbe({ status: 200 })).toBe(false);
+    expect(noConnection({ error: CONNECTED })).toBe(false);
+    expect(noConnection({ error: 'ConnectionRefusedError' })).toBe(true);
+    expect(noConnection({ status: 404 })).toBe(false);
+    expect(egressFailed('https_name', { error: CONNECTED })).toBe(false);
+    expect(egressFailed('https_name', { outcome: 403 })).toBe(false);
+    expect(egressFailed('https_name', { error: 'gaierror' })).toBe(true);
+    expect(egressFailed('put_presigned', { outcome: 403 })).toBe(true);
+    expect(egressFailed('put_presigned', { outcome: 200 })).toBe(false);
+    expect(egressFailed('tcp_public_ip', { outcome: 'connected' })).toBe(false);
+    expect(egressFailed('tcp_public_ip', { error: 'timeout' })).toBe(true);
+    expect(egressFailed('tcp_public_ip', {})).toBe(false);
+  });
+
+  test('the limits probe reads an input back whole and prints control bytes at the size it is given', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'rc-limits-'));
+    const data = Buffer.from([0, 1, 2, 255, 10, 13]);
+    writeFileSync(path.join(dir, 'input'), data);
+    const input = probeCode('limits', { mode: 'input' }).replace('/work/input', path.join(dir, 'input'));
+    expect(lastJsonLine(execFileSync('python3', ['-I', '-S', '-B', '-c', input], { encoding: 'utf8' }))).toEqual({
+      sha256: createHash('sha256').update(data).digest('hex'), size: data.length,
+    });
+    const control = execFileSync('python3', ['-I', '-S', '-B', '-c', probeCode('limits', { mode: 'control', bytes: 4096 })]);
+    expect(control.length).toBe(4096);
+    expect(control.every((b) => b === 1)).toBe(true);
   });
 
   test('the probes build the metadata address from parts and print no secret', () => {

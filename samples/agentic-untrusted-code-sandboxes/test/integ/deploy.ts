@@ -89,7 +89,7 @@ export async function serviceNames(aws: Aws, resources: readonly OwnedResource[]
     const g = await aws.agentcoreControl.send(new GetAgentRuntimeCommand({ agentRuntimeId: r.physicalId.split('/').pop() ?? r.physicalId })).catch(() => undefined);
     if (g?.agentRuntimeName) runtimeNames.push(g.agentRuntimeName);
   }
-  const imageNames = resources.filter((x) => x.type === 'AWS::Lambda::MicrovmImage').map((x) => x.physicalId.split('/').pop() ?? x.physicalId);
+  const imageNames = resources.filter((x) => x.type === 'AWS::Lambda::MicrovmImage').map((x) => x.physicalId.split('/').pop() ?? x.physicalId).filter((n) => n !== '');
   return { runtimeNames, imageNames };
 }
 

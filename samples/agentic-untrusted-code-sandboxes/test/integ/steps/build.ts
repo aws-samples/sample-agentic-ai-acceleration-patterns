@@ -12,6 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { GetParameterCommand } from '@aws-sdk/client-ssm';
 import { type Aws } from '../aws';
+import { logsPoliciesNeeded } from '../common';
 import { run } from '../deploy';
 import { policySnapshot } from '../leftovers';
 import { type Recorder } from '../record';
@@ -45,7 +46,10 @@ export async function preconditions(aws: Aws, rec: Recorder): Promise<{ policyBa
   const have = quota.Quota?.Value ?? 0;
   rec.check(`the MicroVM memory quota ${MICROVM_QUOTA_CODE} is at least ${neededQuotaGb()} GB (is ${have})`, have >= neededQuotaGb());
   const policies = await policySnapshot(aws);
-  rec.check(`a free CloudWatch Logs resource policy slot exists (${Object.keys(policies).length} of ${LOGS_POLICY_LIMIT} used)`, Object.keys(policies).length < LOGS_POLICY_LIMIT);
+  const used = Object.keys(policies).length;
+  const needed = logsPoliciesNeeded();
+  // A deploy that runs out of slots fails after the VPC and the AgentCore runtime are up (8 to 9 min), so check them all here.
+  rec.check(`${needed} free CloudWatch Logs resource policy slots exist, one per dnsFirewall instance and one per agentcore backend (${used} of ${LOGS_POLICY_LIMIT} used)`, LOGS_POLICY_LIMIT - used >= needed);
   const docker = await run('docker', ['info'], 'docker.log').catch(() => ({ code: 1, tail: '', log: '' }));
   rec.check('docker answers (the runner image is built at synth, ADR-0024)', docker.code === 0);
   if (!existsSync(path.join(PRODUCER_DIR, 'node_modules'))) {

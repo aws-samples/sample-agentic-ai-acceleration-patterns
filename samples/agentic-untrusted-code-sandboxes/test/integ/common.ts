@@ -16,6 +16,22 @@ export const INSTANCE_BACKENDS: Readonly<Record<Instance, readonly Backend[]>> =
   'run-code-files': ['agentcore'],
 };
 
+/** Whether each instance turns `dnsFirewall` on. */
+export const INSTANCE_DNS_FIREWALL: Readonly<Record<Instance, boolean>> = {
+  'run-code': true,
+  'run-code-files': false,
+};
+
+/**
+ * CloudWatch Logs resource policies the integration stack creates: one per
+ * instance with `dnsFirewall` (query-log delivery) and one per `agentcore`
+ * backend (usage-log delivery). The account allows 10 per Region (spec §3.9).
+ */
+export function logsPoliciesNeeded(): number {
+  const instances = Object.keys(INSTANCE_BACKENDS) as Instance[];
+  return instances.reduce((n, i) => n + (INSTANCE_DNS_FIREWALL[i] ? 1 : 0) + (INSTANCE_BACKENDS[i].includes('agentcore') ? 1 : 0), 0);
+}
+
 /** The `RunCodeToolTarget` name of each instance; the MCP tool name is `<target>___run_code`. */
 export const TOOL_TARGET: Readonly<Record<Instance, string>> = {
   'run-code': 'run-code',

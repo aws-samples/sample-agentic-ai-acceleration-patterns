@@ -12,8 +12,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { createIntegApp } from '../integ.sandboxes';
+import { logsPoliciesNeeded } from './common';
 import { backendOutputKey, outputKey } from './ctx';
+import { MAX_INPUT_BYTES_CAP, MAX_OUTPUT_BYTES_CAP } from '../../src/props';
+import { createIntegApp } from '../integ.sandboxes';
 
 function synth(): { stack: Stack; template: Template; outputs: Record<string, unknown> } {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'rc-agent-'));
@@ -69,5 +71,22 @@ describe('the integration app', () => {
   test('the second instance has the firewall off and session files on', () => {
     const groups = Object.values(template.findResources('AWS::Route53Resolver::FirewallRuleGroup'));
     expect(groups).toHaveLength(1);
+  });
+
+  test('the Logs resource policies of the template are the number the precheck asks to be free', () => {
+    expect(logsPoliciesNeeded()).toBe(3);
+    expect(Object.keys(template.findResources('AWS::Logs::ResourcePolicy'))).toHaveLength(logsPoliciesNeeded());
+  });
+
+  test('the run-code instance has the input and output sizes at their caps', () => {
+    const fns = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .filter(([id]) => /^RunCode(?!Files)/.test(id))
+      .map(([, r]) => (r.Properties.Environment?.Variables ?? {}) as Record<string, string>)
+      .filter((v) => v.MAX_INPUT_BYTES !== undefined);
+    expect(fns.length).toBeGreaterThan(0);
+    for (const v of fns) {
+      expect(v.MAX_INPUT_BYTES).toBe(String(MAX_INPUT_BYTES_CAP));
+      expect(v.MAX_OUTPUT_BYTES).toBe(String(MAX_OUTPUT_BYTES_CAP));
+    }
   });
 });

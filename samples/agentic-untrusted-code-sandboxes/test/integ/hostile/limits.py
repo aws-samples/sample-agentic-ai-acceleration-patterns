@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: MIT-0
 #
 # Step limits. CONFIG["mode"] picks one probe:
-#   print      write 1 MiB to stdout (the tool must report truncated)
+#   input      read /work/input whole and report its size and SHA-256
+#   control    write CONFIG["bytes"] 0x01 bytes to stdout (six JSON bytes each;
+#              the tool must report truncated and answer under the Lambda limit)
 #   shm_write  multiprocessing.Lock(), then leave a file in /dev/shm
 #   shm_check  report whether that file survived (nitro and agentcore: gone)
 #   microvm    the job filter's blocked and allowed calls, and Seccomp mode
@@ -11,8 +13,14 @@ import ctypes
 import multiprocessing
 import socket
 
-if CONFIG["mode"] == "print":
-    sys.stdout.write("x" * (1 << 20))
+if CONFIG["mode"] == "input":
+    with open("/work/input", "rb") as f:
+        data = f.read()
+    R["size"] = len(data)
+    R["sha256"] = hashlib.sha256(data).hexdigest()
+    done()
+elif CONFIG["mode"] == "control":
+    sys.stdout.write("\x01" * CONFIG["bytes"])
     sys.stdout.flush()
 elif CONFIG["mode"] == "shm_write":
     attempt("mp_lock", lambda: bool(multiprocessing.Lock()))

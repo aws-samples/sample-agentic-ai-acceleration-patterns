@@ -47,7 +47,33 @@ PROBE_TIMEOUT = 2
 
 
 class ProbeDeadline(socket.timeout):
-    """A request still open after its time: the path gave no answer."""
+    """No TCP connect within the deadline: the path gave no answer, which a blocked path must give."""
+
+
+class ProbeConnected(Exception):
+    """The TCP connect completed, then no answer came in time (or the request failed): the path is open, never blocked."""
+
+
+def _bounded(fn, timeout):
+    """Runs fn in a thread for at most `timeout` seconds. Returns (True, value), (False, error), or None when still running."""
+    box = []
+
+    def go():
+        try:
+            box.append((True, fn()))
+        except BaseException as e:  # noqa: BLE001 - handed to the caller
+            box.append((False, e))
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout)
+    return box[0] if box else None
+
+
+def _connect(url, timeout):
+    u = urllib.parse.urlsplit(url)
+    port = u.port or (443 if u.scheme == "https" else 80)
+    socket.create_connection((u.hostname, port), timeout=timeout).close()
 
 
 def _request(method, url, headers, body, timeout):
@@ -62,28 +88,24 @@ def _request(method, url, headers, body, timeout):
 def http(method, url, headers=None, body=None, timeout=PROBE_TIMEOUT):
     """One HTTP request; returns (status, bytes). A refusal status is data, not an error.
 
-    The whole request gets at most PROBE_TIMEOUT seconds, however many addresses the name has
-    (urllib's timeout is per address). A request still open then is a timeout, which a blocked
-    path must give: the probes stay well inside the run timeout on a sandbox with no route.
-    shortcut: a request slower than the timeout is read as blocked; pass a larger timeout for an
-    allowed path, and raise PROBE_TIMEOUT if a leak could take longer to show.
+    Two phases, each bounded to `timeout` seconds however many addresses the name has (urllib's
+    timeout is per address). First a TCP connect to the URL's host and port: a lookup or connect
+    that fails, or does not complete in time (ProbeDeadline), means the path is blocked. Only then
+    the request itself: if it gives no answer in time, or fails after the connect, it raises
+    ProbeConnected, which no check counts as blocked. So a slow but open path (a cold TLS
+    handshake through a NAT, a slow endpoint) never passes a negative check by its slowness.
     """
-    box = []
-
-    def go():
-        try:
-            box.append(_request(method, url, headers, body, timeout))
-        except BaseException as e:  # noqa: BLE001 - handed to the caller
-            box.append(e)
-
-    t = threading.Thread(target=go, daemon=True)
-    t.start()
-    t.join(timeout)
-    if not box:
-        raise ProbeDeadline("probe deadline")
-    if isinstance(box[0], BaseException):
-        raise box[0]
-    return box[0]
+    first = _bounded(lambda: _connect(url, timeout), timeout)
+    if first is None:
+        raise ProbeDeadline("no connect within the deadline")
+    if not first[0]:
+        raise first[1]
+    second = _bounded(lambda: _request(method, url, headers, body, timeout), timeout)
+    if second is None:
+        raise ProbeConnected("connected, then no answer within the deadline")
+    if not second[0]:
+        raise ProbeConnected("connected, then " + type(second[1]).__name__)
+    return second[1]
 
 
 def imds_credentials():
