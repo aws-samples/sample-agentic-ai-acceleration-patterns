@@ -80,3 +80,9 @@ the job, so the handle is dead and the tool starts a new sandbox. An
 unreadable or slow lookup (3 s bound), a MicroVM still running, `TERMINATING`
 (it may still serve), a `TERMINATED` one with no `terminatedAt` and one that
 ended inside the margin or after the request left all stay `no_answer`.
+
+Note 2026-11-20: the `dead` reason and the stop line's reason carry the
+platform's `stateReason` as a short code (`terminated: <code>`, lowercase
+letters, digits and `_`, at most 48 characters; `terminated_before_call` when
+the platform gives none), because the reason is a Contributor Insights key and
+`stateReason` is free text. The 3 s lookup is counted in the tool budget test.

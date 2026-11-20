@@ -154,8 +154,11 @@ describe('the endpoints the core builds for the backend (spec §3.7)', () => {
   test('ECR: the token on * and the pull on the runner repository only', () => {
     const statements = policyOf(synth(), '.ecr.api');
     expect(statements).toHaveLength(2);
+    for (const s of statements) expect(s).toMatchObject({ Effect: 'Allow', Principal: { AWS: '*' } });
+    expect(statements[0]).toMatchObject({ Sid: 'AuthorizationToken', Action: 'ecr:GetAuthorizationToken', Resource: '*' });
     expect(statements[1].Action).toEqual(['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer']);
     expect(text(statements[1].Resource)).toContain('RunnerRepository');
+    expect(text(statements[1].Resource)).not.toContain('*');
   });
 
   test('Logs: this runtime\'s group prefix only', () => {
@@ -164,6 +167,11 @@ describe('the endpoints the core builds for the backend (spec §3.7)', () => {
     const name = (runtime.Properties as Json).AgentRuntimeName as string;
     const statements = policyOf(t, '.logs');
     expect(statements).toHaveLength(1);
+    expect(statements[0]).toMatchObject({
+      Effect: 'Allow',
+      Principal: { AWS: '*' },
+      Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents', 'logs:DescribeLogStreams'],
+    });
     expect(text(statements[0].Resource)).toBe(`arn:aws:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/bedrock-agentcore/runtimes/${name}-*`);
   });
 

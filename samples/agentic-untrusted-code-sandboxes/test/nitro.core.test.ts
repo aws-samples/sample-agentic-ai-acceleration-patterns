@@ -65,7 +65,11 @@ describe('nitro inside the core construct', () => {
   test('the Logs endpoint policy names the task log group, and the task group reaches the Logs endpoint group only', () => {
     const endpoints = Object.values(t.findResources('AWS::EC2::VPCEndpoint')).filter((e) => JSON.stringify(e.Properties.ServiceName).includes('logs'));
     expect(endpoints).toHaveLength(1);
-    expect(JSON.stringify(endpoints[0].Properties.PolicyDocument)).toContain(nitro.logGroupName);
+    const statements = endpoints[0].Properties.PolicyDocument.Statement as Json[];
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toMatchObject({ Sid: 'LogsnitroGroups', Effect: 'Allow', Principal: { AWS: '*' }, Action: ['logs:CreateLogStream', 'logs:PutLogEvents'] });
+    expect(JSON.stringify(statements[0].Resource)).toContain(`log-group:${nitro.logGroupName}:*`);
+    expect(Array.isArray(statements[0].Resource)).toBe(false);
 
     const taskGroup = stack.getLogicalId(nitro.taskSecurityGroup.node.defaultChild as CfnResource);
     const endpointGroups = (endpoints[0].Properties.SecurityGroupIds as Json[]).map((g) => JSON.stringify(g));

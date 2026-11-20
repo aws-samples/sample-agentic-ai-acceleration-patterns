@@ -38,7 +38,7 @@ import type {
 import { NO_ANSWER_MARGIN_MS } from '../backend';
 import { BACKEND_ENV } from '../env';
 import {
-  decodeNonce, proofMatches, resultProof, sessionIdFor, TENANT_ID_PATTERN,
+  BOOT_ID_PATTERN, decodeNonce, proofMatches, resultProof, sessionIdFor, TENANT_ID_PATTERN,
   type Refusal, type RefusalCode, type RunResult,
 } from '../protocol';
 
@@ -47,7 +47,6 @@ export const AGENTCORE_START_CAP_MS = 30_000;
 
 const REFUSAL_CODES: readonly RefusalCode[] = ['wrong_sandbox', 'busy', 'dirty', 'tool_failed'];
 
-const BOOT_ID = /^[0-9a-f]{32}$/;
 
 export class AgentcoreBackend implements SandboxBackend {
   public readonly name = 'agentcore' as const;
@@ -238,7 +237,7 @@ function asRefusal(body: object): Refusal | undefined {
   const b = body as Record<string, unknown>;
   if (typeof b.error !== 'string' || b.v !== 1) return undefined;
   if (!REFUSAL_CODES.includes(b.error as RefusalCode)) return undefined;
-  if (b.bootId !== undefined && (typeof b.bootId !== 'string' || !BOOT_ID.test(b.bootId))) return undefined;
+  if (b.bootId !== undefined && (typeof b.bootId !== 'string' || !BOOT_ID_PATTERN.test(b.bootId))) return undefined;
   return { v: 1, error: b.error as RefusalCode, ...(b.bootId === undefined ? {} : { bootId: b.bootId }) };
 }
 
@@ -248,7 +247,7 @@ function asResult(body: object): RunResult | undefined {
   if (!Number.isInteger(b.exitCode) || typeof b.stdout !== 'string' || typeof b.stderr !== 'string') return undefined;
   if (typeof b.truncated !== 'boolean' || typeof b.timedOut !== 'boolean' || typeof b.memoryExceeded !== 'boolean') return undefined;
   if (typeof b.durationMs !== 'number' || !Number.isFinite(b.durationMs)) return undefined;
-  if (typeof b.bootId !== 'string' || !BOOT_ID.test(b.bootId)) return undefined;
+  if (typeof b.bootId !== 'string' || !BOOT_ID_PATTERN.test(b.bootId)) return undefined;
   return {
     v: 1,
     runId: b.runId,

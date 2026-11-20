@@ -53,6 +53,7 @@ import {
   isRefusal,
   nonceHash,
   NONCE_HASH_ENV,
+  BOOT_ID_PATTERN,
   PROTOCOL_VERSION,
   proofMatches,
   resultProof,
@@ -325,7 +326,7 @@ function asResult(body: unknown): RunResult | undefined {
   const ok = b.v === PROTOCOL_VERSION && typeof b.runId === 'string' && Number.isInteger(b.exitCode)
     && typeof b.stdout === 'string' && typeof b.stderr === 'string' && typeof b.truncated === 'boolean'
     && typeof b.durationMs === 'number' && typeof b.timedOut === 'boolean' && typeof b.memoryExceeded === 'boolean'
-    && typeof b.bootId === 'string' && /^[0-9a-f]{32}$/.test(b.bootId) && typeof b.proof === 'string';
+    && typeof b.bootId === 'string' && BOOT_ID_PATTERN.test(b.bootId) && typeof b.proof === 'string';
   return ok ? (body as RunResult) : undefined;
 }
 
@@ -662,7 +663,7 @@ export class NitroBackend implements SandboxBackend {
       return { kind: 'unavailable', reason: `unusable /hello answer (HTTP ${reply.status})` };
     }
     const hello = body as Partial<HelloResponse>;
-    if (hello.v !== PROTOCOL_VERSION || typeof hello.bootId !== 'string' || !/^[0-9a-f]{32}$/.test(hello.bootId)) {
+    if (hello.v !== PROTOCOL_VERSION || typeof hello.bootId !== 'string' || !BOOT_ID_PATTERN.test(hello.bootId)) {
       return { kind: 'unavailable', reason: 'unusable /hello answer' };
     }
     // The fingerprint the runner reports must be the one of the connection we hold, and the proof must cover it.
