@@ -40,10 +40,11 @@ runtime-isolation deployment for up to `maxTenants` tenants.
 
 - Onboarding rate and time to ready, from `CreateDeployment` to the first
   served request through the edge.
-- Latency per hop under load: edge, router, cell origin, ingress, Runtime,
-  tools.
+- Latency per hop under load: edge, router, ingress, Runtime and tools
+  for agent calls; edge, router and cell origin for `/api/*`.
 - Isolation under load end to end: every request checks the tenant at the
-  edge, at the cell, at the ingress and at the vended credential.
+  layers its path crosses (§5.3): the edge, the cell, the ingress and the
+  vended credential.
 - Churn under load: route updates seen at the edge within a measured time;
   suspended and removed tenants refused at the edge, never at an origin.
 - The shared quota that gives out first at each tier, with the tenant it
@@ -148,9 +149,17 @@ it first shows.
 Every cell trusts the same issuer, the stress identity. The front door's
 edge stack is in `us-east-1`, as its specification requires; everything
 else is in `eu-central-1`. The driver host sits in the platform account,
-so it never shares an account with a cell build.
+so it never shares an account with a cell build. The picture shows
+`large`; at `small` there is one cell account with one cell, and agent
+calls go from the edge straight to that cell's ingress (§3.3, stress
+ADR-0016).
 
 ### 3.3 Paths
+
+"Front-door spec" and "front-door ADR" below mean
+[`samples/tenant-front-door/design/tenant-front-door.spec.md`](../samples/tenant-front-door/design/tenant-front-door.spec.md)
+and the records in
+[`samples/tenant-front-door/adr/`](../samples/tenant-front-door/adr/).
 
 **Onboarding** (one tenant, through the control plane):
 
@@ -158,25 +167,47 @@ so it never shares an account with a cell build.
    for the stress application.
 2. The control plane places the deployment. If the cell is new, its cell
    script runs first: it deploys one runtime-isolation cell (ingress,
-   agents, tool targets) from the repository at a pinned commit, and
-   registers the cell route with the route registrar.
+   agents, tool targets) from the repository at a pinned commit. The
+   front door's global post hook then registers the cell route
+   (`PutCellRoute`) with the route registrar (front-door ADR-0017).
 3. The tenant script runs: tenant-identity `CreateTenant` with the
-   control-plane tenant id, `PutTenantSubscription` on the cell ingress's
-   Entitlements API, `PutTenantRoute` on the route registrar.
+   control-plane tenant id, then `PutTenantSubscription` on the cell
+   ingress's Entitlements API. The tenant script does not call
+   `PutTenantRoute`: the front door's global post hook writes the tenant
+   route once the deployment's event has run (front-door ADR-0017,
+   front-door spec §3.2).
 4. The driver creates the tenant's users with tenant-identity `CreateUser`
    and polls through the edge until the first `report` is served.
 
-**Request** (one prompt):
+**Request** (one prompt). At `small` the tier has one cell, and the
+front door's `agentIngress` input is that cell's ingress (stress
+ADR-0016). The edge sends `/agents/*` straight to it; the router's
+per-cell origin applies to `/api/*` only (front-door spec §3.3 step 7):
 
 ```
-k6 ─► CloudFront ─► tenant router ─► cell origin ─► ingress authoriser
+k6 ─► CloudFront ─► tenant router ─► ingress authoriser
    ─► TVM ─► Runtime agent ─► tools gateway ─► tool
 ```
 
-The router reads the tenant from the token and sets the route hint; the
-cell checks the hint against the verified token; the ingress takes the
-tenant from the token; the agent reports the tenant on its transaction
-token and on its vended credential.
+The router reads the tenant from the token, refuses an unknown or
+suspended tenant, sets the route hint and strips `/agents` from the path
+(front-door ADR-0019). The ingress verifies the token and takes the
+tenant from it; the agent reports the tenant on its transaction token and
+on its vended credential. The ingress does not echo the route hint
+(§5.3).
+
+An `/api/*` request takes the router's cell origin instead:
+
+```
+k6 ─► CloudFront ─► tenant router ─► cell origin (origin access control)
+```
+
+The cell checks the route hint against the verified token (front-door
+spec §3.5).
+
+`medium` and `large` have more than one cell, and the front door has one
+`agentIngress`. Per-cell agent routing for those tiers is Q-7; no run
+above `small` starts until it is decided.
 
 **Churn** (during load): `CreateDeployment`, `UpdateTenantRouteStatus` to
 suspended and back, and `DeleteDeployment`, each on a tenant the steady
@@ -239,6 +270,26 @@ is stopped when it exits.
 
 With one slice named, the runner is that sample's stress test. With all of
 them, it is the platform run.
+
+In the platform run the front door deploys in two phases, because its
+`agentIngress` input is the first cell's ingress, which exists only
+after the control plane builds that cell (stress ADR-0016). The route
+hook must be in place before that build, or the first cell's route is
+never registered (front-door spec §3.2):
+
+1. Phase one, before any cell: the edge stack and the main stack (edge
+   and registrar), with `agentIngress` unset, so `/agents/*` answers 404
+   (front-door spec §3.3 step 3). Then the same app again with
+   `registrarUrl`, read from the edge parameter, which adds the
+   `RouteHookAccess` stack in the control plane's account (front-door
+   ADR-0027), and the global hooks registered with the control plane.
+2. The control plane builds the first cell; the hook registers its route.
+3. Phase two: a front-door stack update with `agentIngress` set to that
+   cell's ingress, `registrarUrl` kept.
+
+The runner times phase two as part of the front-door slice's `deploy`
+(P-6). It is a CloudFront distribution change in `us-east-1`, on every
+run at `small`.
 
 The lock is per prefix on the runner's host. A second run from another host
 against the same accounts is not detected; one run per set of accounts at a
@@ -371,16 +422,19 @@ Each slice's `budget` fills its column; the runner sums per account.
 ### 5.1 Platform scenarios
 
 Run in this order in `platform` mode. PS-5 and PS-7 run inside PS-2.
+Agent calls go from the edge straight to the ingress; at `small` that is
+the one cell's ingress (§3.3, stress ADR-0016). Scenarios above `small`
+wait for Q-7.
 
 | Id | Shape | What it stresses | Watch |
 |---|---|---|---|
 | PS-1 onboarding | the tier's onboarding at `buildLimit`; at `large`, where the fleet is a fixture, PS-1 is timed on PS-5's creates | control plane, CodeBuild, tenant scripts, tenant-identity platform throttle, registrar | deployments per minute; time from `CreateDeployment` to the first served request; build failures by cause |
-| PS-2 steady through the edge | runtime-isolation S1 shape through CloudFront, across every cell | every hop | latency per hop; edge overhead; router compute utilisation |
-| PS-3 herd through the edge | S2 shape: cold ingress instances in every cell, 0 to the peak rate in 5 s | cold starts in every cell at once, per-account quotas | refusals by tenant and cell; STS and Lambda throttles by account |
+| PS-2 steady through the edge | runtime-isolation S1 shape through CloudFront to the cell's ingress | every hop of the agent path (§3.3) | latency per hop; edge overhead; router compute utilisation |
+| PS-3 herd through the edge | S2 shape: cold ingress instances in the cell, 0 to the peak rate in 5 s | cold starts behind the edge, per-account quotas | refusals by tenant; STS and Lambda throttles by account |
 | PS-4 noisy neighbour | S3 shape: one tenant at 10x its limit | the per-tenant limit behind the edge (`single` mode limits at the origin) | that tenant refused; every other tenant on its cell served |
 | PS-5 churn under load | during PS-2: create, suspend, resume and delete the churn count of tenants | control-plane writes reaching the edge and the cells | time to routable; time to suspended (503 at the edge); time to removed (403 at the edge); no request for a removed tenant at an origin |
-| PS-6 long streams | S5 shape through CloudFront | streaming through the edge | first byte at the client against first byte at the ingress; broken streams |
-| PS-7 cross-cell probes | during PS-2: a token whose payload names a tenant in another cell, a client route header, a direct call to a cell origin | the router, the route hint check, origin access control | every probe refused at the cell or the origin, never served |
+| PS-6 long streams | S5 shape through CloudFront to the ingress, with no hop between them | streaming through the edge | first byte at the client against first byte at the ingress; broken streams |
+| PS-7 cross-cell probes | during PS-2: a token whose payload names another tenant (in another cell when the tier has more than one), a client route header, a direct `/api/*` call to a cell origin (once the cell serves one, §5.3), and a direct call to the ingress with another tenant's token and with the tenant's own | the router, the route hint check, origin access control, the ingress's own token check | every probe refused at the edge, the cell, the origin or the ingress, never served for another tenant; a direct call to the ingress with the tenant's own token is served, because the ingress is public by design (front-door spec §1.2) |
 | PS-8 peak | S6 shape at the tier's peak for 60 s | the shared quotas at their limit | the first quota that gives out, per account; every refusal attributed |
 
 ### 5.2 Slice scenarios
@@ -396,14 +450,28 @@ Each slice keeps scenarios of its own for `slice` mode:
 
 ### 5.3 Isolation assertions
 
-Every request through the edge checks four things (P-1):
+Every request through the edge checks the layers its path crosses (P-1):
 
-| Layer | Check | Failure means |
-|---|---|---|
-| Edge | the response's route hint names the token's tenant | the router routed on something other than the token |
-| Cell | the cell lists the tenant | a tenant reached a cell that does not host it |
-| Ingress and agent | `tokenTenant` and the unit prefix are the tenant's | the wrong grant or unit reached the Runtime |
-| Credential | `read <A>` succeeds, `read <B>` is `AccessDeniedException` | the vended credential is not scoped |
+| Layer | Path | Check | Failure means |
+|---|---|---|---|
+| Edge | `/api/*` | the response's route hint names the token's tenant | the router routed on something other than the token |
+| Cell | `/api/*` | the cell lists the tenant | a tenant reached a cell that does not host it |
+| Ingress and agent | `/agents/*` | `tokenTenant` and the unit prefix are the tenant's | the wrong grant or unit reached the Runtime |
+| Credential | `/agents/*` | `read <A>` succeeds, `read <B>` is `AccessDeniedException` | the vended credential is not scoped |
+
+Limitation: on `/agents/*` the edge check is limited. The router sets the
+route hint on the request, but the ingress does not echo it, so the
+driver cannot read which tenant the edge routed for. The agent path
+asserts the token's tenant at the ingress and the credential check
+instead, and an edge that routed on something other than the token shows
+up only as a mismatch there. The change that removes the limit is an
+ingress that echoes the route hint it received (stress ADR-0016).
+
+The `/api/*` rows need a cell API origin that echoes the hint. The
+stress cell needs a cell API origin in any case: the front door writes a
+tenant route only for a cell whose route names the API domain from the
+cell script's `frontDoorApiDomain` output (front-door spec §3.2, §3.4),
+and the stress cell script emits none yet (stress ADR-0016).
 
 ## 6. Observability
 
@@ -414,8 +482,8 @@ sends `x-correlation-id`, and each hop logs it (stress ADR-0005).
 |---|---|
 | Client to edge | k6 timings |
 | Router | CloudFront Functions `FunctionComputeUtilization`; the router's log line |
-| Edge to cell origin | CloudFront real-time or standard logs (`time-taken`, origin latency) |
-| Cell origin | the origin's log line |
+| Edge to origin | CloudFront real-time or standard logs (`time-taken`, origin latency); the origin is the ingress for agent calls and the cell origin for `/api/*` |
+| Cell origin | the origin's log line (`/api/*` only) |
 | Ingress, Runtime, tools | runtime-isolation `request served` and `tool admitted` lines |
 | Onboarding | control-plane deployment status times; CodeBuild build durations |
 
@@ -445,6 +513,7 @@ correlation id.
 | 6 | A correlation header, logged at every hop | the runtime-isolation ingress and the front door each log it; a change to both samples | stress ADR-0005 |
 | 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair and a scoped cell bootstrap | the cell build would otherwise act as an account administrator; see below | stress ADR-0006, stress ADR-0011, control-plane ADR-0047 |
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios | stress ADR-0007 |
+| 9 | At `small`, the front door's one `agentIngress` is the one cell's ingress; per-cell agent routing for `medium` and `large` is Q-7 | the front door routes only `/api/*` per cell, so agent calls cannot reach a per-cell ingress through the router | stress ADR-0016 |
 
 Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
 the account's CDK bootstrap roles. Each cell account carries one bootstrap,
@@ -503,8 +572,9 @@ Q-5.
 | # | Question | Needed by |
 |---|---|---|
 | Q-1 | How long does one cell take to deploy from a CodeBuild cell script (expected about 8 minutes on Runtime V2), and does `BUILD_GENERAL1_SMALL` (3 GB) hold the synth? | W-5 |
-| Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
+| Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? Answered no: its test runs the agent route against a stand-in ingress (front-door ADR-0024), so the first platform run at `small` is the first to drive the real ingress through the edge | W-7 |
 | Q-3 | Does the platform run keep the `large` fleet in every account between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
 | Q-5 | Does the request path work in a standalone cell account with every role on `/cell/` (authoriser, TVM `sts:AssumeRole` of a `/cell/` tenant role, the model call, tools)? Proven by the first platform run at `small` | W-9 |
 | Q-6 | Does runtime-isolation's package entry export what the stress cell app needs (`RuntimeIsolationDemoStack`, `parseDemoContext`, `bundleAgent`)? The path spike imports them from `src/` by path | W-5 |
+| Q-7 | How do agent calls reach a per-cell ingress at `medium` and `large`, where there is more than one cell and the front door has one `agentIngress` (stress ADR-0016)? Candidates: (a) a per-cell origin Lambda behind origin access control in each stress cell, in front of its ingress, which adds a hop and must stream the response for PS-6; (b) a front-door change for per-cell agent origins. Decided by a new stress ADR | before the first `medium` run |
