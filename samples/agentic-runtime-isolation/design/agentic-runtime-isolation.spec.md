@@ -4,8 +4,8 @@ SPDX-License-Identifier: MIT-0
 -->
 # Specification: Agentic Runtime Isolation
 
-> **Status (2026-11-11):** implemented; verified by integration run 19
-> (60/60, eu-central-1, commit 4fec24a). `architecture.md` describes the
+> **Status (2026-11-20):** implemented; verified by integration run 21
+> (62/62, eu-central-1, commit 331e219). `architecture.md` describes the
 > implemented state. Decisions are cited inline as `(ADR-00NN)`; the index
 > is `adr/README.md`.
 

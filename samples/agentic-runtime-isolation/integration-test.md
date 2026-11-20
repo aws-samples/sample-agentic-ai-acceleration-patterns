@@ -114,13 +114,16 @@ table the script prints holds 62 steps.
 
 ## Runtime and cost
 
-A run takes **about 45 minutes** and costs **about $3 per run** at on-demand
-rates, mostly AgentCore Runtime session time and the Gateways across six
-stacks. The deploy takes about 8 minutes: each Runtime runs on platform
+A run takes **about 45 minutes** at the default deploy concurrency of 6 and
+about an hour at 2, and costs **about $3 per run** at on-demand rates,
+mostly AgentCore Runtime session time and the Gateways across six stacks.
+The deploy takes about 8 minutes at 6 and about 21 minutes at 2
+(`INTEG_DEPLOY_CONCURRENCY=2`); use 2 where six REST APIs created at once
+trip the API Gateway control-plane throttle. Each Runtime runs on platform
 version V2 (ADR-0050), which builds a snapshot at create, about 3.5 minutes
-per Runtime. The teardown takes about 7 minutes, and the service keeps each
-V2 snapshot for up to 8 hours after it. Last green integration run: run 20,
-2026-11-13, eu-central-1, 60/60 steps (step 25 SKIP on `agentcore-gateway`
+per Runtime. The teardown takes 7 to 16 minutes, and the service keeps each
+V2 snapshot for up to 8 hours after it. Last green integration run: run 21,
+2026-11-20, eu-central-1, 62/62 steps (step 25 SKIP on `agentcore-gateway`
 by design); timings and coverage are in the
 [`architecture.md` status block](./architecture.md).
 

@@ -589,7 +589,8 @@ tag and no other tag key, and scopes data by `${aws:PrincipalTag/TenantId}`
 AWS_PROFILE=<profile> AWS_REGION=eu-central-1 npx projen integ
 ```
 
-A run takes about 45 minutes and costs about $3 at on-demand rates;
+A run takes about 45 minutes (about an hour at a deploy concurrency of 2)
+and costs about $3 at on-demand rates;
 [integration-test.md](./integration-test.md) describes what it stands up,
 its steps and its knobs.
 
