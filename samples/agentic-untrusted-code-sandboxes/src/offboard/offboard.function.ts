@@ -2,13 +2,33 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * Lambda entry of the offboardTenant (spec §5.2).
- *
- * Placeholder so the handler tree and its tests have a
- * real entry (ADR-0023). The owner replaces the body; the file
- * path is fixed by HANDLERS in src/handler-entry.ts.
+ * Lambda entry of `offboardTenant` (spec §5.2, ADR-0035). The vendor's
+ * tenant delete script invokes it with IAM and `{ "tenantId": "…" }`. It
+ * runs as the reaper role. A bad `tenantId` or a sandbox that could not be
+ * stopped is a Lambda error, because the caller is a script that must not
+ * go on as if the tenant were gone.
  */
 
-export async function handler(_event: unknown): Promise<never> {
-  throw new Error('not built yet');
+import { assertTenantId, offboardTenant, type OffboardDeps, type OffboardResult } from './offboard';
+import { loadConfig } from '../tool/config';
+import { loadBackends, registryClient } from '../tool/deps';
+import { Logger } from '../tool/log';
+
+let deps: OffboardDeps | undefined;
+
+function build(): OffboardDeps {
+  const config = loadConfig();
+  return {
+    config,
+    backends: loadBackends(config),
+    registry: registryClient(config.table),
+    log: new Logger(undefined, config.perTenantMetrics),
+    now: Date.now,
+  };
+}
+
+export async function handler(event: { readonly tenantId?: unknown } | undefined): Promise<OffboardResult> {
+  assertTenantId(event?.tenantId);
+  deps ??= build();
+  return offboardTenant(event.tenantId, deps);
 }

@@ -2,13 +2,50 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * Lambda entry of the drain custom resource (spec §5.3).
+ * Lambda entry of the drain custom resource (spec §5.3, ADR-0034). It is the
+ * `onEvent` handler of a CloudFormation custom resource provider, so it
+ * returns the physical resource id and the provider sends the response; a
+ * thrown error fails the resource and the stack delete with it.
  *
- * Placeholder so the handler tree and its tests have a
- * real entry (ADR-0023). The owner replaces the body; the file
- * path is fixed by HANDLERS in src/handler-entry.ts.
+ * Create and Update do nothing. Delete stops every sandbox, waits until none
+ * is live, and runs each backend's cleanup (ADR-0034).
  */
 
-export async function handler(_event: unknown): Promise<never> {
-  throw new Error('not built yet');
+import type { Context } from 'aws-lambda';
+import { drain, type DrainDeps } from './drain';
+import { loadConfig } from '../tool/config';
+import { loadBackends, registryClient } from '../tool/deps';
+import { Logger } from '../tool/log';
+
+/** Left for the provider to answer in, before the Lambda's own time runs out. */
+const MARGIN_MS = 30_000;
+const PHYSICAL_ID = 'untrusted-code-sandboxes-drain';
+
+export interface DrainEvent {
+  readonly RequestType: 'Create' | 'Update' | 'Delete';
+  readonly PhysicalResourceId?: string;
+}
+
+export interface DrainResponse {
+  readonly PhysicalResourceId: string;
+}
+
+function build(): DrainDeps {
+  const config = loadConfig();
+  return {
+    config,
+    backends: loadBackends(config),
+    registry: registryClient(config.table),
+    log: new Logger(undefined, config.perTenantMetrics),
+    now: Date.now,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  };
+}
+
+export async function handler(event: DrainEvent, context?: Pick<Context, 'getRemainingTimeInMillis'>): Promise<DrainResponse> {
+  const physicalId = event.PhysicalResourceId ?? PHYSICAL_ID;
+  if (event.RequestType !== 'Delete') return { PhysicalResourceId: physicalId };
+  const limit = context === undefined ? Number.POSITIVE_INFINITY : Date.now() + context.getRemainingTimeInMillis() - MARGIN_MS;
+  await drain(build(), limit);
+  return { PhysicalResourceId: physicalId };
 }

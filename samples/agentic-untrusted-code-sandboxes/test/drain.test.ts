@@ -1,0 +1,156 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: MIT-0
+
+import { harness, maintenanceDeps, seedSandbox, type Harness } from './harness';
+import { drain, DRAIN_BOUND_MS } from '../src/drain/drain';
+import { handler } from '../src/drain/drain.function';
+
+const A = 'tenant-a';
+const B = 'tenant-b';
+
+function deps(h: Harness) {
+  return { ...maintenanceDeps(h), sleep: h.clock.sleep };
+}
+
+/** Makes a backend's sandboxes take `ms` of clock time to end after their stop, as a task does. */
+function slowStop(h: Harness, name: 'microvm' | 'nitro' | 'agentcore', ms: number) {
+  const b = h.backends.get(name)!;
+  const pending = new Map<string, number>();
+  jest.spyOn(b, 'stop').mockImplementation(async (handle) => {
+    if (!pending.has(handle.handle)) pending.set(handle.handle, h.clock.t + ms);
+  });
+  const realList = b.list.bind(b);
+  jest.spyOn(b, 'list').mockImplementation(async function* () {
+    for (const [handle, at] of pending) if (h.clock.t >= at) b.kill(handle);
+    yield* realList();
+  });
+  return pending;
+}
+
+describe('the drain', () => {
+  test('stops every sandbox a row names, with one line each from the drain, and every orphan', async () => {
+    const h = harness({ backends: ['microvm', 'nitro'] });
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', A);
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'nitro', B);
+    await seedSandbox(h, 'FAILED', { retryAt: h.clock.t }, 'microvm', 'tenant-c');
+    await h.backends.get('nitro')!.start('tenant-d', 'A'.repeat(43), { tenantId: 'tenant-d', accessKeyId: 'k', secretAccessKey: 's', sessionToken: 't' });
+    const out = await drain(deps(h));
+    expect(out).toEqual({ rowsStopped: 2, orphansStopped: 1 });
+    for (const b of h.backends.values()) expect([...b.sandboxes.values()].every((s) => !s.live)).toBe(true);
+    const lines = h.events('sandbox_stopped');
+    expect(lines.map((l) => [l.tenantId, l.reason, l.orphan === true, l.by])).toEqual([
+      [A, 'drain', false, 'drain'], [B, 'drain', false, 'drain'], ['tenant-d', 'orphan', true, 'drain'],
+    ]);
+  });
+
+  test('a sandbox with a FAILED or STOPPING row is stopped but earns no second line', async () => {
+    const h = harness();
+    await seedSandbox(h, 'STOPPING');
+    await drain(deps(h));
+    expect(h.backends.get('microvm')!.sandboxes.get('fake-1')!.live).toBe(false);
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
+  test('waits until the platform lists none live, polling, and stops a straggler again after a minute', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    await seedSandbox(h, 'READY', {}, 'nitro');
+    const pending = slowStop(h, 'nitro', 90_000);
+    const began = h.clock.t;
+    await drain(deps(h));
+    expect(h.clock.t - began).toBeGreaterThanOrEqual(90_000);
+    expect(h.clock.t - began).toBeLessThan(100_000);
+    expect(pending.size).toBe(1);
+    // first stop, then a second one after RESTOP_MS (60 s) while it was still listed
+    expect(h.backends.get('nitro')!.stop).toHaveBeenCalledTimes(2);
+  });
+
+  test('fails loudly when a sandbox is still live at the bound, and never runs cleanup', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    await seedSandbox(h, 'READY', {}, 'nitro');
+    jest.spyOn(h.backends.get('nitro')!, 'stop').mockResolvedValue();
+    const cleanup = jest.fn();
+    h.backends.get('nitro')!.cleanup = cleanup;
+    const began = h.clock.t;
+    await expect(drain(deps(h))).rejects.toThrow(/1 sandbox\(es\) still live at the deadline/);
+    expect(h.clock.t - began).toBeLessThanOrEqual(DRAIN_BOUND_MS);
+    expect(h.clock.t - began).toBeGreaterThan(DRAIN_BOUND_MS - 6000);
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  test('the Lambda\'s own remaining time shortens the bound', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    await seedSandbox(h, 'READY', {}, 'nitro');
+    jest.spyOn(h.backends.get('nitro')!, 'stop').mockResolvedValue();
+    const began = h.clock.t;
+    await expect(drain(deps(h), began + 20_000)).rejects.toThrow(/still live/);
+    expect(h.clock.t - began).toBeLessThanOrEqual(20_000);
+  });
+
+  test('runs each backend\'s cleanup after every sandbox is gone, with a deadline', async () => {
+    const h = harness({ backends: ['microvm', 'nitro'] });
+    await seedSandbox(h, 'READY', {}, 'nitro');
+    const order: string[] = [];
+    const nitro = h.backends.get('nitro')!;
+    jest.spyOn(nitro, 'stop').mockImplementation(async (handle) => {
+      order.push('stop');
+      nitro.kill(handle.handle);
+    });
+    nitro.cleanup = jest.fn(async (deadline: number) => {
+      order.push(`cleanup ${deadline - h.clock.t}`);
+    });
+    await drain(deps(h));
+    expect(order).toEqual(['stop', `cleanup ${DRAIN_BOUND_MS}`]);
+    expect(h.backends.get('microvm')!.cleanup).toBeUndefined();
+  });
+
+  test('a registry table that is already gone is no rows; the sweep still runs', async () => {
+    const h = harness();
+    await h.backends.get('microvm')!.start(A, 'A'.repeat(43), { tenantId: A, accessKeyId: 'k', secretAccessKey: 's', sessionToken: 't' });
+    h.db.hook = (op) => {
+      if (op === 'scan') {
+        const e = new Error('gone');
+        e.name = 'ResourceNotFoundException';
+        throw e;
+      }
+    };
+    expect(await drain(deps(h))).toEqual({ rowsStopped: 0, orphansStopped: 1 });
+    expect(h.events('drain_registry_gone')).toHaveLength(1);
+  });
+
+  test('any other registry error stops the drain', async () => {
+    const h = harness();
+    h.db.hook = (op) => {
+      if (op === 'scan') throw new Error('AccessDenied');
+    };
+    await expect(drain(deps(h))).rejects.toThrow('AccessDenied');
+  });
+
+  test('with nothing running it finishes at once and logs its totals', async () => {
+    const h = harness();
+    expect(await drain(deps(h))).toEqual({ rowsStopped: 0, orphansStopped: 0 });
+    expect(h.events('drain')).toEqual([expect.objectContaining({ rowsStopped: 0, orphansStopped: 0 })]);
+    expect(h.clock.t).toBe(1_700_000_000_000);
+  });
+
+  test('a row a call updated first is still stopped, with no line from the drain', async () => {
+    const h = harness();
+    await seedSandbox(h, 'READY');
+    h.db.hook = (op) => {
+      if (op === 'update') {
+        h.db.hook = undefined;
+        h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.version = 9;
+      }
+    };
+    const out = await drain(deps(h));
+    expect(out.rowsStopped).toBe(0);
+    expect(h.backends.get('microvm')!.sandboxes.get('fake-1')!.live).toBe(false);
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+});
+
+describe('the custom resource entry', () => {
+  test.each(['Create', 'Update'] as const)('%s does nothing and returns the physical id', async (RequestType) => {
+    await expect(handler({ RequestType })).resolves.toEqual({ PhysicalResourceId: 'untrusted-code-sandboxes-drain' });
+    await expect(handler({ RequestType, PhysicalResourceId: 'kept' })).resolves.toEqual({ PhysicalResourceId: 'kept' });
+  });
+});

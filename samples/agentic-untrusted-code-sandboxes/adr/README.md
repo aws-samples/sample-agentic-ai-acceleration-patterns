@@ -30,6 +30,11 @@
 | [0024](0024-keep-the-runner-in-one-directory-and-copy-its-image-into-the-construct-repository.md) | Keep the runner in one directory and copy its image into the construct repository | Proposed | 2026-11-20 |
 | [0025](0025-pin-the-runner-wire-protocol-and-the-backend-interface.md) | Pin the runner wire protocol and the backend interface | Proposed | 2026-11-20 |
 | [0026](0026-run-the-python-tests-and-the-tree-checks-in-the-projen-build.md) | Run the Python tests and the tree checks in the projen build | Proposed | 2026-11-20 |
+| [0032](0032-return-tool-errors-as-values-and-write-the-registry-in-one-order.md) | Return tool errors as values, and write the registry in one order | Proposed | 2026-11-20 |
+| [0033](0033-write-one-run-line-and-one-stop-line-with-fixed-fields.md) | Write one run line and one stop line, with fixed fields | Proposed | 2026-11-20 |
+| [0034](0034-list-sandboxes-before-scanning-rows-and-drain-to-a-deadline.md) | List sandboxes before scanning rows, and drain to a deadline | Proposed | 2026-11-20 |
+| [0035](0035-offboard-by-row-and-keep-a-row-whose-stop-failed.md) | Offboard by row, and keep a row whose stop failed | Proposed | 2026-11-20 |
+| [0036](0036-test-the-registry-against-an-in-memory-engine-with-real-conditions.md) | Test the registry against an in-memory engine with real conditions | Proposed | 2026-11-20 |
 | [0037](0037-name-the-backend-in-the-runner-environment-and-pin-the-runner-images.md) | Name the backend in the runner environment, and pin the runner images | Proposed | 2026-11-20 |
 | [0038](0038-prepare-the-job-child-as-uid-1001-and-set-the-address-space-cap-last.md) | Prepare the job child as uid 1001, and set the address space cap last | Proposed | 2026-11-20 |
 | [0039](0039-read-the-open-points-of-the-runner-protocol-one-way.md) | Read the open points of the runner protocol one way | Proposed | 2026-11-20 |

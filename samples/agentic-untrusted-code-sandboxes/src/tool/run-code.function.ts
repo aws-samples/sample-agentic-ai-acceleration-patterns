@@ -2,13 +2,20 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * Lambda entry of the run_code tool (spec §4.1, §5.1).
+ * Lambda entry of `runCodeFunction`, the standalone entry (spec §3.2,
+ * ADR-0017). The vendor's own API invokes it with IAM and passes the
+ * `tenantId` it verified with its own identity provider; this function
+ * trusts that field, so who may invoke it is the vendor's to limit
+ * (threat T-82). The gateway entry is `src/gateway/`, which calls the same
+ * `runCode` with the tenant from the signed context.
  *
- * Placeholder so the handler tree and its tests have a
- * real entry (ADR-0023). The owner replaces the body; the file
- * path is fixed by HANDLERS in src/handler-entry.ts.
+ * It returns the output, or `{ error, retryAfterSeconds? }`: a tool error is
+ * a value, not a Lambda error, so the caller sees the code (spec §5.1).
  */
 
-export async function handler(_event: unknown): Promise<never> {
-  throw new Error('not built yet');
+import { runCode } from './run-code';
+import type { RunCodeRequest, RunCodeResult } from './types';
+
+export async function handler(event: unknown): Promise<RunCodeResult> {
+  return runCode(event as RunCodeRequest);
 }
