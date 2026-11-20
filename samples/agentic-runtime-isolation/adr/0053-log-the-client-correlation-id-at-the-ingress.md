@@ -44,13 +44,12 @@ Option 1. Each ingress function (the `api-gateway` authoriser and
 integration function, and the `agentcore-gateway` interceptor) reads
 `x-correlation-id` through `correlationIdOf` (`src/shared/headers.ts`) and
 logs it as `correlationId` on every line that function writes for the
-request. The value is
-kept only when it is 1 to 64 characters of `[A-Za-z0-9-]`; any other value
-is dropped whole, never trimmed or escaped, so a log line never holds client
-text outside that alphabet. The value decides nothing: it is not an
-authoriser identity source, not a metric dimension, not forwarded to the
-Runtime, and not part of the session id. A request without the header logs
-no field.
+request. The value is kept only when it is 1 to 64 characters of
+`[A-Za-z0-9-]`; any other value is dropped whole, never trimmed or escaped,
+so a log line never holds client text outside that alphabet. The value
+decides nothing: it is not an authoriser identity source, not a metric
+dimension, not forwarded to the Runtime, and not part of the session id. A
+request without the header logs no field.
 
 ## Consequences
 Easier: a client, the stress driver or a support desk, joins its own

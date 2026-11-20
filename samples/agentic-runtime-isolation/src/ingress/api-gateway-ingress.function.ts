@@ -89,8 +89,8 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
   const authorizer = (event.requestContext?.authorizer ?? {}) as Record<string, unknown>;
   const authorizedTenant = typeof authorizer.tenantId === 'string' ? authorizer.tenantId : undefined;
   const authorizedBackend = typeof authorizer.backend === 'string' ? authorizer.backend : undefined;
-  // ADR-0053: the client's correlation id, on every line of this request
-  // when it has the accepted shape; never used for a decision.
+  // ADR-0053: the client's correlation id, on every line this function
+  // writes for the request when it has the accepted shape; never used for a decision.
   const correlationId = correlationIdOf(event.headers);
   type Extra = Omit<RequestMetrics, 'tenantId' | 'ingress' | 'status' | 'ingressDurationMs'>;
   // One EMF record per request, emitted once, at the end, so IngressDurationMs
