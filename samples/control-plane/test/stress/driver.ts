@@ -26,7 +26,7 @@ import * as path from 'node:path';
 import { type AccountState, accountProblems, type RoleState, type StackState } from './account-check';
 import { ControlPlaneApi, operatorToken } from './api';
 import { aws, AwsError, sleep } from './aws';
-import { cellsOf, deploymentsOf, type FleetEnv, removeDeployment, waitDeployments } from './fleet';
+import { cellsOf, deploymentsOf, type FleetEnv, removeAll } from './fleet';
 import { allTenants, emptyManifest, type Manifest, manifestPath, readManifest, writeManifest } from './manifest';
 import {
   APPLICATION_ID,
@@ -119,7 +119,14 @@ function loadManifest(): Manifest {
 }
 
 /** Polls a record's Get until `done` says so, at most `seconds`. */
-async function pollRecord(api: ControlPlaneApi, hop: string, p: string, tenant: string, done: (status: number, body: any) => boolean, seconds = 300): Promise<boolean> {
+async function pollRecord(
+  api: ControlPlaneApi,
+  hop: string,
+  p: string,
+  tenant: string,
+  done: (status: number, body: any) => boolean,
+  seconds = 300,
+): Promise<boolean> {
   const deadline = Date.now() + seconds * 1000;
   while (Date.now() < deadline) {
     const r = await api.call(hop, 'GET', p, tenant, undefined, [404]);
@@ -150,11 +157,22 @@ async function gather(a: CellAccountInput, regions: readonly string[], fleet: st
     }
   }
   const listed = await aws(['iam', 'list-roles'], { profile: a.profile });
-  const roles: RoleState[] = ((listed.Roles ?? []) as any[]).map((r) => ({ name: String(r.RoleName), path: String(r.Path), arn: String(r.Arn), trust: r.AssumeRolePolicyDocument }));
+  const roles: RoleState[] = ((listed.Roles ?? []) as any[]).map((r) => ({
+    name: String(r.RoleName),
+    path: String(r.Path),
+    arn: String(r.Arn),
+    trust: r.AssumeRolePolicyDocument,
+  }));
   const getRole = async (name: string): Promise<RoleState | undefined> => {
     try {
       const r = (await aws(['iam', 'get-role', '--role-name', name], { profile: a.profile })).Role;
-      return { name, path: String(r.Path), arn: String(r.Arn), trust: r.AssumeRolePolicyDocument, boundaryArn: r.PermissionsBoundary?.PermissionsBoundaryArn };
+      return {
+        name,
+        path: String(r.Path),
+        arn: String(r.Arn),
+        trust: r.AssumeRolePolicyDocument,
+        boundaryArn: r.PermissionsBoundary?.PermissionsBoundaryArn,
+      };
     } catch (e) {
       if (e instanceof AwsError && e.errorName === 'NoSuchEntity') return undefined;
       throw e;
@@ -231,7 +249,8 @@ async function unregister(): Promise<number> {
   };
   // Every account the application was registered in, also one no longer in the file.
   const listed = await api.listAll('list-accounts', '/accounts', 'accounts');
-  const accounts = new Set([...c.accounts.map((a) => a.accountId), ...listed.items.filter((a) => (a.applicationIds ?? []).includes(APPLICATION_ID)).map((a) => String(a.accountId))]);
+  const registered = listed.items.filter((a) => (a.applicationIds ?? []).includes(APPLICATION_ID)).map((a) => String(a.accountId));
+  const accounts = new Set([...c.accounts.map((a) => a.accountId), ...registered]);
   for (const id of accounts) await gone(`/accounts/${id}`, 'account');
   await gone(`/applications/${APPLICATION_ID}`, 'application');
   log(status === 0 ? 'unregister: no account or application left' : 'unregister: something is left');
@@ -304,7 +323,13 @@ async function run(scenario: string): Promise<number> {
   if (fn === undefined) throw new Error(`unknown scenario ${scenario}`);
   const c = await connect();
   const rec = new Recorder();
-  const s: ScenarioEnv = { ...fleetEnv(c, rec), tier: tier(), manifest: loadManifest(), buildLimit: buildLimit(), setBuildLimit: setBuildLimitCommand };
+  const s: ScenarioEnv = {
+    ...fleetEnv(c, rec),
+    tier: tier(),
+    manifest: loadManifest(),
+    buildLimit: buildLimit(),
+    setBuildLimit: setBuildLimitCommand,
+  };
   try {
     await fn(s);
   } catch (e) {
@@ -394,16 +419,8 @@ async function sweep(seeded: boolean): Promise<number> {
   const owned = new Set([...transient, ...(seeded && m !== undefined ? m.seeded : [])]);
   // With seeded, every deployment of the stress application goes, also one a lost manifest no longer lists.
   const targets = [...all.keys()].filter((t) => seeded || owned.has(t));
-  // A DELETE_FAILED deployment takes another delete (a build that failed on a throttle or a
-  // transient error): up to three rounds.
-  let stuck: string[] = [];
-  let round = targets;
-  for (let attempt = 1; attempt <= 3 && round.length > 0; attempt += 1) {
-    await Promise.all(round.map((t) => removeDeployment(f, t)));
-    const left = await waitDeployments(f, round, { gone: true, timeoutSeconds: 3600 });
-    stuck = [...left].filter(([, d]) => d !== undefined).map(([t]) => t);
-    round = stuck;
-  }
+  // A DELETE_FAILED deployment takes another delete (removeAll): up to three rounds.
+  const stuck = await removeAll(f, targets, 3600);
   let status = stuck.length === 0 ? 0 : 1;
   if (stuck.length > 0) log(`sweep: ${stuck.length} deployments could not be removed; cells stay`);
   if (seeded && stuck.length === 0) {

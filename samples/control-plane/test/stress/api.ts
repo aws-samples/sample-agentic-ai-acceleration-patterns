@@ -56,17 +56,17 @@ function password(): string {
 export async function operatorToken(userPoolId: string, clientId: string): Promise<string> {
   const username = 'stress-operator';
   try {
-    await aws(['cognito-idp', 'admin-create-user', ], {
+    await aws(['cognito-idp', 'admin-create-user'], {
       input: { UserPoolId: userPoolId, Username: username, MessageAction: 'SUPPRESS' },
     });
   } catch (e) {
     if (!(e instanceof AwsError) || e.errorName !== 'UsernameExistsException') throw e;
   }
   const secret = password();
-  await aws(['cognito-idp', 'admin-set-user-password', ], {
+  await aws(['cognito-idp', 'admin-set-user-password'], {
     input: { UserPoolId: userPoolId, Username: username, Password: secret, Permanent: true },
   });
-  const out = await aws(['cognito-idp', 'admin-initiate-auth', ], {
+  const out = await aws(['cognito-idp', 'admin-initiate-auth'], {
     input: { UserPoolId: userPoolId, ClientId: clientId, AuthFlow: 'ADMIN_USER_PASSWORD_AUTH', AuthParameters: { USERNAME: username, PASSWORD: secret } },
   });
   const token = out?.AuthenticationResult?.IdToken;

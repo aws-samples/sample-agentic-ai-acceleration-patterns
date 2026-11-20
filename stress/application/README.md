@@ -12,9 +12,11 @@ stress test can build cells in it ([spec](../../docs/stress-test.spec.md)
 This folder replaces the policies of the two spikes in
 [`../spikes/`](../spikes/), which stay as the record of their runs.
 
-The control-plane application with its cell and tenant scripts, and the
-cell app that deploys runtime-isolation, are work item W-5. They build on
-what is here: the `/cell/` path aspect and the cell synth context.
+It also holds the stress application (W-5, spec §3.1): the control-plane
+application whose cell scripts deploy one runtime-isolation cell through the
+role pair and the cell bootstrap, and whose tenant scripts subscribe one
+tenant on its cell. The control-plane slice
+(`samples/control-plane/scripts/stress/`) registers it and runs it.
 
 | File | What it is |
 |---|---|
@@ -25,6 +27,9 @@ what is here: the `/cell/` path aspect and the cell synth context.
 | [`owner-app.ts`](./owner-app.ts), [`probe-app.ts`](./probe-app.ts) | the CDK apps the scripts run |
 | [`deploy-owner.sh`](./deploy-owner.sh), [`bootstrap-cell.sh`](./bootstrap-cell.sh) | steps 1 and 2 below |
 | [`probe-deploy.sh`](./probe-deploy.sh), [`probes.sh`](./probes.sh), [`probe-remove.sh`](./probe-remove.sh) | step 3 below |
+| [`role-pair.ts`](./role-pair.ts), [`role-pair-app.ts`](./role-pair-app.ts), [`deploy-role-pair.sh`](./deploy-role-pair.sh) | step 4 below: control-plane's role pair, as plain CloudFormation |
+| [`cell-app.ts`](./cell-app.ts), [`cell-stack.ts`](./cell-stack.ts) | the stress application's cell: the runtime-isolation demo stack for the cell bootstrap |
+| [`scripts/cell/`](./scripts/cell/create.sh), [`scripts/tenant/`](./scripts/tenant/create.sh), [`scripts/lib.sh`](./scripts/lib.sh) | the stress application's cell and tenant scripts |
 
 ## The policies
 
@@ -34,6 +39,7 @@ what is here: the `/cell/` path aspect and the cell synth context.
 | `cell-permissions-boundary` | the same execution role, as its boundary | the same deploy-time services and IAM role writes; it assumes no role and holds none of the run-time calls. It denies a role without the workload boundary, any IAM role write, `iam:PassRole` or `sts:AssumeRole` outside `role/cell/*`, `iam:PassRole` to any other service, other service-linked roles, boundary removal, users, access keys, policy writes, Lambda function URLs with `AuthType NONE`, SSM writes to `/application-plane/shared/identity/*` and `/cdk-bootstrap/cell/*`, and changes to the API Gateway account setting |
 | `cell-workload-boundary` | every role a cell creates (ADR-0011) | the run-time services, read of the cell asset bucket, `sts:AssumeRole` on `role/cell/*` only; denies every IAM action, `sts:AssumeRole` outside `role/cell/*`, resource-policy and sharing writes (Lambda permissions and function URLs, KMS key policies and grants, CloudWatch Logs resource policies, subscription filters, destinations, account policies, log deliveries and export tasks, DynamoDB resource policies and table exports, SSM, AgentCore and X-Ray resource policies), Lambda function URLs with `AuthType NONE`, the owner's parameters and the API Gateway account setting |
 | `cell-build-policy` | the role pair's cell role, through control-plane's `cellBuildManagedPolicyArns` (control-plane ADR-0047) | `sts:AssumeRole` on `cdk-cell-deploy-role-*`, `cdk-cell-file-publishing-role-*` and `cdk-cell-image-publishing-role-*` of the account and Region; not the lookup role |
+| `cell-tenant-build-policy` | the role pair's tenant role, through control-plane's `tenantBuildManagedPolicyArns` (ADR-0012) | `execute-api:Invoke` on `GET`, `PUT` and `DELETE` `/entitlements/tenants/*` of the account's APIs in the Region: a cell's tenant subscriptions, not its plans, agents or tools |
 
 The tests in [`../test/cell-policies.test.ts`](../test/cell-policies.test.ts)
 pin every deny, the `iam:PassRole`, boundary and service-linked-role
@@ -100,11 +106,22 @@ export AWS_PROFILE=<cell account profile> AWS_REGION=eu-central-1
    `probes passed: <n> failed: 0`; `probe-remove.sh` ends with
    `no probe leftovers`. "Probe the policies" below says what they check.
 
-The control-plane role pair (`CellAccountStack`, with
-`cellBuildManagedPolicyArns` set to the `cell-build-policy` ARN) comes next.
-It needs the control plane's account and handshake, so its steps belong to
-the control-plane slice (W-5, W-11); it stays on `/`, without a cell
-boundary.
+4. Deploy the control-plane role pair: control-plane's own
+   `CellAccountStack`, `<fleet>-cell-account`, as plain CloudFormation with
+   your credentials (the CDK's legacy synthesizer, no service role, no CDK
+   bootstrap). Its two roles stay on `/` without a cell boundary; the cell
+   role gets `cell-build-policy` and the tenant role
+   `cell-tenant-build-policy`. The fleet name is the control-plane slice's
+   `STRESS_PREFIX` in lower case, and the trust names the platform account:
+
+   ```bash
+   STRESS_FLEET_NAME=<fleet> CONTROL_PLANE_ACCOUNT_ID=<platform account id> application/deploy-role-pair.sh
+   ```
+
+   It installs `samples/control-plane`'s dependencies when they are missing,
+   because the stack is that sample's code. Then give the control-plane
+   slice the account: its id, a profile with read access, and the stack ARNs
+   of `CellPolicies` and `CellAccountBase` (the slice's README).
 
 To change a policy, edit `cell-policies.ts` and run step 1 again: the
 managed policies get a new version in place. `CELL_POLICY_SUFFIX` (for
@@ -164,6 +181,30 @@ probe stacks, and only stacks tagged `stress:part=cell-policy-probe`.
 | workload boundary | `ssm:PutParameter` under `/application-plane/shared/identity/` and `/cdk-bootstrap/cell/`; `apigateway:PATCH` `/account` | denied |
 | workload boundary | `lambda:AddPermission` on a cell function; `lambda:CreateFunctionUrlConfig` with `AuthType NONE`; `logs:PutResourcePolicy`; `dynamodb:PutResourcePolicy`; `kms:PutKeyPolicy` | denied |
 | workload boundary | `sts:AssumeRole` of a `/cell/` tenant role, as the TVM does | allowed |
+
+## The stress application
+
+The control-plane slice registers it as the application `stress` (spec §3.1,
+§3.3), with an S3 source: the repository at the run's commit, as one zip with
+runtime-isolation's generated Smithy code (ADR-0014). Every script runs in
+the platform account's control-plane CodeBuild projects, under the cell
+account's role pair, and logs ids and timings only.
+
+| Script | Runs as | Does |
+|---|---|---|
+| `scripts/cell/create.sh` (and `update.sh`) | the role pair cell role | installs the runtime-isolation sample, synthesises `cell-app.ts` (every role on `/cell/` under the workload boundary, qualifier `cell`) and deploys `StressCell-<cell id>` through `CDKToolkit-cell`; publishes the stack name and the Entitlements API base URL under `/application-plane/cells/<cell id>/` |
+| `scripts/cell/delete.sh` | the role pair cell role, then the cell bootstrap's deploy role | deletes the cell stack under the bootstrap's execution role, the role that created it, with no install or synth; removes the cell's parameters |
+| `scripts/tenant/create.sh` (and `update.sh`) | the role pair tenant role | `PutTenantSubscription` for the tenant on its cell's Entitlements API, SigV4, with the agents and tools of the tenant parameters `AGENTS` and `TOOLS` (default `default` and none); records the tenant, cell and subscription version under `/application-plane/tenants/<tenant id>/stress` (ADR-0012) |
+| `scripts/tenant/delete.sh` | the role pair tenant role | `DeleteTenantSubscription` and the record |
+
+The cell is the runtime-isolation demo stack with the `api-gateway` ingress
+and the TVM, `publishParameters` off, so cells in one account do not
+overwrite each other's parameters. The cell parameter `CELL_POLICY_SUFFIX`
+carries the owner stacks' policy suffix (`STRESS_CELL_POLICY_SUFFIX` of the
+slice). `cell-app.ts` loads one copy of the CDK: the cell script installs
+only the runtime-isolation sample and runs the app with `NODE_PATH` set to its
+`node_modules`, and the app refuses to run when this package's `aws-cdk-lib`
+would load too.
 
 ## Results
 

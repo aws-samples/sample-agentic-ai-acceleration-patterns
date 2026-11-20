@@ -116,6 +116,14 @@ export class Recorder {
     this.refused.set(k, (this.refused.get(k) ?? 0) + 1);
   }
 
+  /**
+   * An outcome that is not one HTTP call, counted under `requests` by `key`: a deployment
+   * delete that ended `DELETE_FAILED` and was deleted again (`DELETE_FAILED:retried`).
+   */
+  count(key: string): void {
+    this.requests.set(key, (this.requests.get(key) ?? 0) + 1);
+  }
+
   /** A latency that is not one HTTP call: a deployment's onboarding, a cell's create. */
   sample(hop: string, seconds: number): void {
     const samples = this.hops.get(hop) ?? [];

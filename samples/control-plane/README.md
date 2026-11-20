@@ -762,6 +762,14 @@ driver is [`test/stress/`](./test/stress/), the scripts
 stay outside the repository and hold no token or password. `--remove-fixtures`
 also deregisters the accounts and the application and destroys both stacks.
 
+Concurrent placements and deletes on one cell meet each other in DynamoDB.
+The control plane answers a cancelled placement transaction with a 500
+"Deployment placement failed ambiguously" and a cancelled delete with
+`DELETE_FAILED`. The driver retries both, a placement with its client token,
+and the records show them as `500:internal-server` requests with
+`ambiguous-placement` refusals and as `DELETE_FAILED:retried` counts
+([stress ADR-0013](../../stress/adr/0013-retry-an-ambiguous-placement-with-its-client-token.md)).
+
 ## End-to-end demo
 
 The sample scripts provision a deliberately tiny cell: the cell scripts in

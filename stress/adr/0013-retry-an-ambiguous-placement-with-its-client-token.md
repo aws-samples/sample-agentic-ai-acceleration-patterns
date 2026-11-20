@@ -18,6 +18,12 @@ retargeting it (control-plane spec §7; `repository.test.ts` pins it). The contr
 that case is a client retry with the same `clientToken`, which replays the outcome instead
 of placing twice.
 
+The same run's build-limit scaling removed 20 deployments of one cell at once. Some of them
+ended `DELETE_FAILED` with "Tenant delete failed: DynamoDb.TransactionCanceledException":
+the workflow's terminal transaction, which releases the cell slot, met another delete's on
+the same cell item. Its tenant build had succeeded. A `DELETE_FAILED` deployment takes
+another delete (the control plane README, Teardown).
+
 P-7 asks that every refusal names a tenant and a reason, and that a bare 500 is a finding.
 This 500 names its reason, and the driver knows its tenant.
 
@@ -39,9 +45,13 @@ Pros: no 500 at all; a cancelled transaction did not apply. Cons: a change to a 
 the control-plane sample, outside the stress test; it needs its own review.
 
 ## Decision
-Option 1, and Option 3 goes to the control-plane owner as a finding.
+Option 1, and Option 3 goes to the control-plane owner as a finding. The same rule covers
+the delete path: the driver deletes a `DELETE_FAILED` deployment again, up to three times,
+and counts each retry under `requests` as `DELETE_FAILED:retried`. A deployment still there
+after three deletes fails the scenario.
 
 ## Consequences
-The slice's records show `500:internal-server` requests and `ambiguous-placement`
-refusals; the stress README says how to read them. If the control plane adopts Option 3,
+The slice's records show `500:internal-server` requests, `ambiguous-placement` refusals
+and `DELETE_FAILED:retried` counts; the control-plane README's stress section says how to
+read them. If the control plane adopts Option 3,
 they drop to zero and the special case can go.

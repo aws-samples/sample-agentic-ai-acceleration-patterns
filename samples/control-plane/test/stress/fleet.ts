@@ -205,3 +205,26 @@ export function expectStatus(f: FleetEnv, r: CallResult, expected: number, what:
   f.rec.finding(`${what}: HTTP ${r.status}${r.errorType === undefined ? '' : ` (${r.errorType})`}, expected ${expected}`);
   return false;
 }
+
+/**
+ * Removes the tenants' deployments and waits until they are gone, deleting a `DELETE_FAILED`
+ * one again, up to `rounds` times. Concurrent deletes in one cell can cancel the workflow's
+ * terminal transaction (a DynamoDB `TransactionConflict` on the cell's count), and the
+ * control plane answers that with `DELETE_FAILED`, which takes another delete (stress
+ * ADR-0013). Each retried delete is counted as `DELETE_FAILED:retried`. Returns the tenants
+ * whose deployment is still there.
+ */
+export async function removeAll(f: FleetEnv, tenants: readonly string[], timeoutSeconds: number, rounds = 3): Promise<string[]> {
+  let round = [...tenants];
+  let stuck: string[] = [];
+  for (let attempt = 1; attempt <= rounds && round.length > 0; attempt += 1) {
+    if (attempt > 1) for (let i = 0; i < round.length; i += 1) f.rec.count('DELETE_FAILED:retried');
+    const removed = await Promise.all(round.map((t) => removeDeployment(f, t)));
+    const refused = round.filter((_, i) => !removed[i]);
+    if (refused.length > 0) f.rec.finding(`${refused.length} DeleteDeployment calls failed`);
+    const left = await waitDeployments(f, round, { gone: true, timeoutSeconds });
+    stuck = [...left].filter(([, d]) => d !== undefined).map(([t]) => t);
+    round = stuck;
+  }
+  return stuck;
+}

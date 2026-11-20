@@ -20,7 +20,7 @@ import {
   onboardSeconds,
   type Placement,
   placeDeployment,
-  removeDeployment,
+  removeAll,
   waitDeployments,
 } from './fleet';
 import type { Manifest } from './manifest';
@@ -64,7 +64,14 @@ async function pool<T, R>(items: readonly T[], n: number, fn: (item: T) => Promi
  * `InsufficientCapacityError` while a cell of the application is still being created is
  * tried again once that cell is ACTIVE (a new cell takes no placement until then).
  */
-async function onboard(s: ScenarioEnv, tenants: readonly string[], hop: string): Promise<{ placed: string[]; full: string[]; failed: string[]; waveSeconds: number }> {
+interface Onboarded {
+  readonly placed: string[];
+  readonly full: string[];
+  readonly failed: string[];
+  readonly waveSeconds: number;
+}
+
+async function onboard(s: ScenarioEnv, tenants: readonly string[], hop: string): Promise<Onboarded> {
   const started = Date.now();
   const placed: string[] = [];
   const failed: string[] = [];
@@ -126,12 +133,8 @@ async function assertFleet(s: ScenarioEnv, tenants: readonly string[]): Promise<
 
 /** Removes the tenants' deployments and waits until they are gone. */
 async function offboard(s: ScenarioEnv, tenants: readonly string[]): Promise<void> {
-  const removed = await pool(tenants, 25, (t) => removeDeployment(s, t));
-  const notRemoved = tenants.filter((_, i) => !removed[i]);
-  if (notRemoved.length > 0) s.rec.finding(`${notRemoved.length} DeleteDeployment calls failed`);
-  const left = await waitDeployments(s, tenants, { gone: true, timeoutSeconds: waveTimeout(tenants.length, s.buildLimit) });
-  const stuck = [...left].filter(([, d]) => d !== undefined).length;
-  if (stuck > 0) s.rec.finding(`${stuck} deployments still there after delete`);
+  const stuck = await removeAll(s, tenants, waveTimeout(tenants.length, s.buildLimit));
+  if (stuck.length > 0) s.rec.finding(`${stuck.length} deployments still there after three deletes`);
 }
 
 /**
