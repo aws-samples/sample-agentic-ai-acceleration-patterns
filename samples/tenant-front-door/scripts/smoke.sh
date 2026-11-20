@@ -25,7 +25,7 @@ cd "$(dirname "$0")/.."
 export AWS_REGION="${AWS_REGION:-eu-central-1}"
 REGION="$AWS_REGION"
 APPLICATION_ID=tfd-smoke
-FLEET=control-plane
+FLEET=tfd-smoke
 CELL_ID=01KAF5M0000000000000000C01
 IDENTITY_PREFIX=/application-plane/shared/identity
 PARAM_EDGE=/application-plane/shared/front-door/edge
@@ -56,16 +56,20 @@ deploy() {
   identity
   local t0 t
   t0=$(date +%s); "${SMOKE_APP[@]}" >/dev/null
-  npx cdk deploy TfdSmoke-support --app "${SMOKE_APP[*]}" --require-approval never --outputs-file /dev/null >"$TMP/support.log" 2>&1 || { tail -30 "$TMP/support.log"; exit 1; }
-  echo "support stack: $(elapsed "$t0") s"
-  local role secret
-  role="$(out TfdSmoke-support EdgeOperatorRoleArn)"; secret="$(out TfdSmoke-support VendorIdpSecretArn)"
+  npx cdk deploy TfdSmoke-support TfdSmoke-control-plane --app "${SMOKE_APP[*]}" --require-approval never --concurrency 2 >"$TMP/support.log" 2>&1 || { tail -30 "$TMP/support.log"; exit 1; }
+  echo "support and control plane stacks: $(elapsed "$t0") s"
+  local role cp
+  role="$(out TfdSmoke-support EdgeOperatorRoleArn)"
+  cp="$(jq -nc --arg u "$(out TfdSmoke-control-plane ApiUrl)" --arg a "$(aws sts get-caller-identity --query Account --output text)" --arg r "$REGION" \
+    --arg t "$(out TfdSmoke-control-plane TokenUrl)" --arg c "$(out TfdSmoke-control-plane ClientId)" --arg s "$(out TfdSmoke-control-plane ClientSecretArn)" \
+    '{apiUrl: $u, accountId: $a, region: $r, vendorIdp: {tokenUrl: $t, clientId: $c, clientSecretArn: $s}}')"
   t=$(date +%s)
   npx cdk deploy --all --require-approval never \
     --context appDomain="$SMOKE_APP_DOMAIN" \
     --context hostedZone="{\"zoneId\":\"$SMOKE_ZONE_ID\",\"zoneName\":\"$SMOKE_ZONE_NAME\"}" \
     --context applicationId="$APPLICATION_ID" \
-    --context controlPlane="{\"apiUrl\":\"https://control-plane.example.com/\",\"accountId\":\"$(aws sts get-caller-identity --query Account --output text)\",\"region\":\"$REGION\",\"vendorIdp\":{\"tokenUrl\":\"https://idp.example.com/oauth2/token\",\"clientId\":\"tfd-smoke\",\"clientSecretArn\":\"$secret\"}}" \
+    --context controlPlane="$cp" \
+    --context dedicatedDomains="${SMOKE_DEDICATED_DOMAINS:-false}" \
     --context fleet="$FLEET" \
     --context edgeOperatorRoleArn="$role" \
     --context issuer="{\"clientId\":\"$APP_CLIENT_ID\",\"scopes\":\"openid\",\"authorizeEndpoint\":\"https://issuer.example.com/oauth2/authorize\",\"tokenEndpoint\":\"https://issuer.example.com/oauth2/token\",\"logoutEndpoint\":\"https://issuer.example.com/logout\"}" \
@@ -239,15 +243,15 @@ run_checks() {
   check "POST without body hash refused 403" 403 "$st"
   check "that 403 is Lambda's, not the router's" yes "$(grep -q '"status":403' "$BODY" && echo no || echo yes)"
 
-  echo "4. registrar with no control plane"
+  echo "4. registrar against the stand-in control plane (no cell record)"
   st="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "${registrar}tenants/${A}/status" -H 'Content-Type: application/json' --data-raw '{"status":"suspended"}')"
   check "unsigned registrar call 403" 403 "$st"
   load_sigv4 "$(out TfdSmoke-support EdgeOperatorRoleArn)"
   st="$(signed PUT "${registrar}cells/${CELL_ID}" "{\"apiDomain\":\"${cell_domain}\"}")"
-  check "operator PutCellRoute 503 (control plane unreadable)" 503 "$st"
+  check "operator PutCellRoute for a cell the control plane does not hold 403" 403 "$st"
   t0=$(date +%s)
   st="$(signed PUT "${registrar}tenants/${B}/status" '{"status":"suspended"}')"
-  check "operator suspends b with no control plane (ADR-0025) 200" 200 "$st"
+  check "operator suspends b without a control-plane read (ADR-0025) 200" 200 "$st"
   wait_for "b suspended at the edge 503" 503 B_TOKEN
   note "suspension propagation: first 503 of a run of five at ${WAIT_FIRST:-never} s after the call"
   st="$(edge GET /api/whoami A_TOKEN)"; check "a still served 200" 200 "$st"

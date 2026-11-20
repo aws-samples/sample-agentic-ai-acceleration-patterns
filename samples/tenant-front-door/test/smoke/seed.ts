@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   if (mode === 'put') {
     const [cellId, account, apiDomain, ...tenants] = rest;
     const cell = toStoredId(cellId);
-    const now = Date.now();
+    const now = process.env.SEED_DT === undefined ? Date.now() : Number(process.env.SEED_DT);
     const puts: Record<string, string> = { [cellKey(cell)]: encodeEntry(cellEntry({ ac: account, o: apiDomain })) };
     for (const t of tenants) {
       const [id, name] = t.split('=');
