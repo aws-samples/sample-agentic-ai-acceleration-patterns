@@ -379,7 +379,7 @@ class Executor:
         # A reader still running after its join was cut short: the sandbox is not clean, and the pipes stay open for it.
         alive = any(t.is_alive() for t in (out, err, writer, monitor))
         clean = clean and not alive
-        if not alive:
+        if not alive:  # shortcut: a live reader keeps its pipe open (a leaked fd), because the sandbox is replaced as dirty
             for pipe in (proc.stdout, proc.stderr):
                 pipe.close()
         returncode = proc.returncode if proc.returncode is not None else -signal.SIGKILL
