@@ -60,8 +60,14 @@ const puts = () => h.awsCalls().filter((c) => c[1] === 'put-parameter').map((c) 
 describe('the scripts', () => {
   const scripts = [
     ...['cell', 'tenant'].flatMap((d) => ['create.sh', 'update.sh', 'delete.sh'].map((f) => path.join(APP, d, f))),
-    path.join(APP, 'plain', 'noop.sh'), path.join(APP, 'lib', 'registrar.sh'), PROBE_HOOK,
+    path.join(APP, 'plain', 'noop.sh'), path.join(APP, 'shared', 'registrar.sh'), PROBE_HOOK,
   ];
+  it('every script the source zip carries is tracked by git, so a clean clone stages the same zip', () => {
+    const tracked = spawnSync('git', ['ls-files', '--', 'test/integ/app', 'test/integ/hooks'], { cwd: SAMPLE_ROOT, encoding: 'utf8' });
+    expect(tracked.status).toBe(0);
+    const files = tracked.stdout.split('\n').filter(Boolean).map((f) => path.join(SAMPLE_ROOT, f));
+    for (const file of scripts) expect(files).toContain(file);
+  });
   it.each(scripts)('%s runs under set -euo pipefail and never traces', (file) => {
     const source = fs.readFileSync(file, 'utf8');
     if (!file.endsWith('registrar.sh')) expect(source).toMatch(/^set -euo pipefail$/m);

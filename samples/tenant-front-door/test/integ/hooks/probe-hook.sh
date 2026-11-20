@@ -25,8 +25,8 @@ set -euo pipefail
 : "${CELL_ID:?CELL_ID env var is required}"
 : "${AWS_REGION:?AWS_REGION env var is required}"
 [[ "$PHASE $HOOK_SCOPE" == 'POST GLOBAL' ]] || { echo "tfd-probe is a global POST hook, got ${PHASE} ${HOOK_SCOPE}"; exit 1; }
-# shellcheck source=../app/lib/registrar.sh
-source "$(dirname "${BASH_SOURCE[0]}")/../app/lib/registrar.sh"
+# shellcheck source=../app/shared/registrar.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../app/shared/registrar.sh"
 
 if ! err="$(aws ssm get-parameter --name "/application-plane/applications/${APPLICATION_ID}/shared/front-door-hook" --query Parameter.Value --output text 2>&1 >/dev/null)"; then
   if [[ "$err" == *ParameterNotFound* ]]; then

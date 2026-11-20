@@ -22,8 +22,8 @@ set -euo pipefail
 : "${APPLICATION_ID:?APPLICATION_ID env var is required}"
 : "${CELL_ID:?CELL_ID env var is required}"
 : "${OUTPUTS_FILE:?OUTPUTS_FILE env var is required}"
-# shellcheck source=../lib/registrar.sh
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/registrar.sh"
+# shellcheck source=../shared/registrar.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../shared/registrar.sh"
 
 if [[ "${PARAM_TFD_CELL_PROBE:-off}" == step12 ]]; then
   [[ "${PARAM_TFD_CELL_PROBE_PEER:-}" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "TFD_CELL_PROBE_PEER must be a cell id"; exit 1; }

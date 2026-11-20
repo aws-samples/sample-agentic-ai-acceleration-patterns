@@ -188,7 +188,7 @@ describe('the integ inputs', () => {
 
   it('stages the hook and application scripts at their repository paths', () => {
     const dir = stageSource();
-    for (const f of ['hooks/route-hook.sh', 'test/integ/hooks/probe-hook.sh', 'test/integ/app/cell/create.sh', 'test/integ/app/tenant/update.sh']) {
+    for (const f of ['hooks/route-hook.sh', 'test/integ/hooks/probe-hook.sh', 'test/integ/app/cell/create.sh', 'test/integ/app/tenant/update.sh', 'test/integ/app/shared/registrar.sh']) {
       expect(fs.existsSync(`${dir}/samples/tenant-front-door/${f}`)).toBe(true);
     }
   });

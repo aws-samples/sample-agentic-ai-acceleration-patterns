@@ -18,8 +18,8 @@ set -euo pipefail
 
 : "${APPLICATION_ID:?APPLICATION_ID env var is required}"
 : "${TENANT_ID:?TENANT_ID env var is required}"
-# shellcheck source=../lib/registrar.sh
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/registrar.sh"
+# shellcheck source=../shared/registrar.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../shared/registrar.sh"
 NAMESPACE="/application-plane/tenants/${TENANT_ID}/${APPLICATION_ID}"
 
 case "${PARAM_TFD_PROBE:-off}" in
