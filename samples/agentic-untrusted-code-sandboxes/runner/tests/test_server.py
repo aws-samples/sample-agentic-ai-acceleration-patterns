@@ -111,6 +111,15 @@ class AgentcoreTest(unittest.TestCase):
         self.assertEqual(run(sb, signed(NONCE), SESSION), (500, {"v": 1, "error": "tool_failed"}))
         self.assertIsNone(sb.nonce)
 
+    def test_microvm_claim_failure_ends_the_start(self):
+        def broken():
+            raise OSError("cgroup")
+        sb = server.Sandbox("microvm", broken)
+        hook = json.dumps({"nonceHash": wire.nonce_hash(NONCE), "tenant": JOB["tenantId"]}).encode()
+        self.assertEqual(sb.hook(hook), (200, {}))
+        self.assertTrue(sb.boot_failed.is_set())  # the runner exits and the MicroVM start fails at once
+        self.assertEqual(run(sb, signed(NONCE))[1]["error"], "tool_failed")
+
     def test_dirty_after_a_job_that_did_not_drain(self):
         sb, fake = make("agentcore")
         fake.left_dirty = True
@@ -343,6 +352,25 @@ class HttpTest(unittest.TestCase):
         finally:
             if conn is not None:
                 conn.close()
+            stop(srv)
+
+
+    def test_nitro_tls_refuses_a_client_that_offers_only_tls_1_2(self):
+        from runner.runner import tls_context
+        sb, _ = make("nitro")
+        context, sb.fingerprint = tls_context()
+        port = free_port()
+        srv = server.serve(sb, port, "jobs", host="127.0.0.1", tls=context)
+        try:
+            client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client.check_hostname = False
+            client.verify_mode = ssl.CERT_NONE
+            client.maximum_version = ssl.TLSVersion.TLSv1_2
+            with self.assertRaises(ssl.SSLError):
+                socket.create_connection(("127.0.0.1", port), timeout=5).close()
+                with client.wrap_socket(socket.create_connection(("127.0.0.1", port), timeout=5)):
+                    pass
+        finally:
             stop(srv)
 
 

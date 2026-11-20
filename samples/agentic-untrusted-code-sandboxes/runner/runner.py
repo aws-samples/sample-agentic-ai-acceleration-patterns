@@ -75,7 +75,7 @@ def tls_context():
     try:
         os.write(fd, made.stdout)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
         context.load_cert_chain("/proc/self/fd/%d" % fd)
     finally:
         os.close(fd)

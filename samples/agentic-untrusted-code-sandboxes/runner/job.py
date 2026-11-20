@@ -29,6 +29,9 @@ WORK = "/work"
 SWEEP_DIRS = ("/tmp", "/dev/shm")  # nosec B108 - the sweep deletes uid 1001 files here (spec 3.5 step 3)
 CGROUP_ROOT = "/sys/fs/cgroup"
 SWEEP_DEADLINE_S = 5.0
+# One budget for everything after a job ends: the kill, the sweep and the thread joins (M-2).
+# The tool waits timeoutMs + 5 s, so the answer comes with 2 s to spare.
+POST_JOB_DEADLINE_S = 3.0
 READ_CHUNK = 65536
 CPU_LIMIT_SLACK_MS = 100
 PR_SET_NO_NEW_PRIVS = 38
@@ -355,26 +358,37 @@ class Executor:
 
     def _collect(self, job, proc, started, oom_before, out, err, writer, monitor, done) -> dict:
         timed_out = False
+        stuck = False
         try:
             proc.wait(timeout=job.timeout_ms / 1000.0)
+            deadline = time.monotonic() + POST_JOB_DEADLINE_S
         except subprocess.TimeoutExpired:
             timed_out = True
+            deadline = time.monotonic() + POST_JOB_DEADLINE_S
             self._kill_group(proc.pid)
-            proc.wait()
+            try:
+                proc.wait(timeout=POST_JOB_DEADLINE_S)
+            except subprocess.TimeoutExpired:
+                stuck = True  # a process that survives SIGKILL (uninterruptible sleep): the sandbox is not clean
         duration_ms = int((time.monotonic() - started) * 1000)
         done.set()
         self._kill_group(proc.pid)
-        clean = self.sweep()
+        clean = self.sweep(deadline) and not stuck
         for t in (out, err, writer, monitor):
-            t.join(timeout=SWEEP_DEADLINE_S)
-        for pipe in (proc.stdout, proc.stderr):
-            pipe.close()
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+        # A reader still running after its join was cut short: the sandbox is not clean, and the pipes stay open for it.
+        alive = any(t.is_alive() for t in (out, err, writer, monitor))
+        clean = clean and not alive
+        if not alive:  # shortcut: a live reader keeps its pipe open (a leaked fd), because the sandbox is replaced as dirty
+            for pipe in (proc.stdout, proc.stderr):
+                pipe.close()
+        returncode = proc.returncode if proc.returncode is not None else -signal.SIGKILL
         exceeded = self._exceeded.is_set() or self._oom_kills() > oom_before
-        timed_out = timed_out or cpu_limit_hit(proc.returncode, exceeded, duration_ms, job.timeout_ms)
+        timed_out = timed_out or cpu_limit_hit(returncode, exceeded, duration_ms, job.timeout_ms)
         log("job_done", code_bytes=len(job.code), input_bytes=len(job.input), stdout_bytes=len(out.data),
-            stderr_bytes=len(err.data), exit_code=proc.returncode, duration_ms=duration_ms,
+            stderr_bytes=len(err.data), exit_code=returncode, duration_ms=duration_ms,
             timed_out=timed_out, memory_exceeded=exceeded, clean=clean)
-        return {"exitCode": proc.returncode, "stdout": bytes(out.data), "stderr": bytes(err.data),
+        return {"exitCode": returncode, "stdout": bytes(out.data), "stderr": bytes(err.data),
                 "cut": out.cut or err.cut, "durationMs": duration_ms, "timedOut": timed_out,
                 "memoryExceeded": exceeded, "clean": clean}
 
@@ -442,38 +456,46 @@ class Executor:
                 pass
         return pids
 
-    def sweep(self) -> bool:
+    def sweep(self, deadline: Optional[float] = None) -> bool:
         """Kill every uid 1001 process, delete its files in /tmp and /dev/shm, remove its SysV objects, reap.
 
-        Returns False when uid 1001 processes outlived the deadline.
+        With deadline (a monotonic time) all three steps share it; without, each step has its own
+        SWEEP_DEADLINE_S. Returns False when uid 1001 processes outlived the deadline or a step
+        did not finish.
         """
-        deadline = time.monotonic() + SWEEP_DEADLINE_S
+        kill_deadline = deadline if deadline is not None else time.monotonic() + SWEEP_DEADLINE_S
+        # With the budget spent, the kill loop may exit on no pids; the walk and the SysV step then give
+        # False, so a cut sweep is never clean.
         while True:
             pids = self._kill_uid()
             reap()
             if not pids:
                 break
-            if time.monotonic() > deadline:
+            if time.monotonic() > kill_deadline:
                 log("sweep_incomplete", processes=len(pids))
                 return False
             time.sleep(0.005)
         files, walked = 0, True
-        walk_deadline = time.monotonic() + SWEEP_DEADLINE_S  # one budget for every directory
+        walk_deadline = deadline if deadline is not None else time.monotonic() + SWEEP_DEADLINE_S  # one budget for every directory
         for top in self.sweep_dirs:
             if os.path.isdir(top):
                 count, done = remove_owned(top, self.uid, walk_deadline)
                 files, walked = files + count, walked and done
-        sysv = self._sweep_sysv()
+        sysv = self._sweep_sysv(deadline)
         reap()
         log("sweep", files=files, sysv=sysv, walked=walked)
         return walked and sysv >= 0 and not uid_pids(self.uid)
 
-    def _sweep_sysv(self) -> int:
+    def _sweep_sysv(self, deadline: Optional[float] = None) -> int:
+        timeout = SWEEP_DEADLINE_S if deadline is None else deadline - time.monotonic()
+        if timeout <= 0:
+            log("sysv_sweep_failed")
+            return -1
         try:
             done = subprocess.run([self.python, "-I", "-S", "-c", SYSV_SWEEP % (self.uid, self.uid)], user=self.uid, group=self.uid,
                                   extra_groups=[], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, env={"PATH": JOB_PATH}, cwd="/",
-                                  timeout=SWEEP_DEADLINE_S, check=True)
+                                  timeout=timeout, check=True)
             return int(done.stdout.decode("ascii").strip() or "0")
         except (OSError, subprocess.SubprocessError, ValueError):
             log("sysv_sweep_failed")

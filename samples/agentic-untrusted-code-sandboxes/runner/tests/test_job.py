@@ -4,6 +4,7 @@
 
 import os
 import signal
+import subprocess
 import tempfile
 import threading
 import time
@@ -99,6 +100,76 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(self.executor("agentcore", job_group=self.group)._oom_kills(), 3)
         self.assertEqual(self.executor("nitro", task_group=self.group)._oom_kills(), 3)
         self.assertEqual(self.executor("microvm")._oom_kills(), 0)
+
+
+class SweepDeadlineTest(unittest.TestCase):
+    def test_everything_after_a_job_shares_three_seconds(self):
+        self.assertLessEqual(jb.POST_JOB_DEADLINE_S, 3.0)  # the tool waits timeoutMs + 5 s
+        with tempfile.TemporaryDirectory() as d:
+            ex = jb.Executor("microvm", sz.Sizing("microvm", 1024 * MIB), FakeFilter(), uid=os.getuid() + 100000, sweep_dirs=(d,))
+            with mock.patch.object(jb.subprocess, "run") as run:
+                self.assertFalse(ex.sweep(time.monotonic() - 1))  # nothing is left of the budget: no SysV sweep starts
+                run.assert_not_called()
+                run.return_value = mock.Mock(stdout=b"0")
+                self.assertTrue(ex.sweep(time.monotonic() + 3))
+                self.assertLessEqual(run.call_args.kwargs["timeout"], 3.0)
+
+
+class PostJobBudgetTest(unittest.TestCase):
+    """The kill, the sweep and the joins after a job share POST_JOB_DEADLINE_S (M-2)."""
+
+    def executor(self):
+        return jb.Executor("microvm", sz.Sizing("microvm", 1024 * MIB), FakeFilter(), uid=os.getuid() + 100000)
+
+    def collect(self, ex, proc, readers, budget=0.3, timeout_ms=60000):
+        job = mock.Mock(timeout_ms=timeout_ms, code=b"", input=b"")
+        job.max_output = 10
+        started = time.monotonic()
+        threads = [mock.Mock(is_alive=mock.Mock(return_value=alive), data=b"", cut=False, join=mock.Mock()) for alive in readers]
+        with mock.patch.object(jb, "POST_JOB_DEADLINE_S", budget), mock.patch.object(jb, "log"), \
+                mock.patch.object(ex, "_oom_kills", return_value=0), mock.patch.object(ex, "_kill_group"):
+            result = ex._collect(job, proc, started, 0, threads[0], threads[1], threads[2], threads[3], threading.Event())
+        return result, threads
+
+    def finished(self):
+        proc = mock.Mock(returncode=0)
+        proc.wait.return_value = 0
+        return proc
+
+    def test_the_sweep_gets_the_shared_deadline(self):
+        ex = self.executor()
+        with mock.patch.object(ex, "sweep", return_value=True) as sweep:
+            before = time.monotonic()
+            result, threads = self.collect(ex, self.finished(), [False] * 4)
+        deadline = sweep.call_args.args[0]
+        self.assertLessEqual(deadline - before, 0.4)
+        self.assertTrue(result["clean"])
+        for t in threads:
+            self.assertLessEqual(t.join.call_args.kwargs["timeout"], 0.3)  # what is left of the budget, not 5 s
+
+    def test_a_reader_that_outlives_its_join_makes_the_sandbox_unclean(self):
+        ex = self.executor()
+        with mock.patch.object(ex, "sweep", return_value=True):
+            result, _ = self.collect(ex, self.finished(), [False, True, False, False])
+        self.assertFalse(result["clean"])
+
+    def test_a_process_that_survives_the_kill_is_bounded_and_unclean(self):
+        ex = self.executor()
+        proc = mock.Mock(returncode=None)
+        proc.wait.side_effect = [subprocess.TimeoutExpired("x", 1), subprocess.TimeoutExpired("x", 1)]
+        with mock.patch.object(ex, "sweep", return_value=True):
+            result, _ = self.collect(ex, proc, [False] * 4, timeout_ms=1000)
+        self.assertEqual(proc.wait.call_args_list[1].kwargs["timeout"], 0.3)
+        self.assertFalse(result["clean"])
+        self.assertTrue(result["timedOut"])
+        self.assertEqual(result["exitCode"], -signal.SIGKILL)
+
+    def test_the_kill_loop_ends_at_the_deadline(self):
+        ex = self.executor()
+        with mock.patch.object(ex, "_kill_uid", return_value=[4242]), mock.patch.object(jb, "reap"), mock.patch.object(jb, "log"):
+            started = time.monotonic()
+            self.assertFalse(ex.sweep(time.monotonic() + 0.1))
+        self.assertLess(time.monotonic() - started, 1.0)
 
 
 class RemoveOwnedTest(unittest.TestCase):
