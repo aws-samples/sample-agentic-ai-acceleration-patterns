@@ -39,7 +39,7 @@ Option 2.
 | connection refused, DNS failure, host or network unreachable, connect timeout (the request never left) | `dead` (`connection_failed`) |
 | any other failure, a reset, a socket or a TLS failure included (the safe side) | `no_answer` |
 | the proxy's 502, "application not responding or auto-resume failed" | `no_answer`, unless the ended-before-the-call finding below holds |
-| no answer, or a connection lost after the request left, when `GetMicrovm` shows the MicroVM `TERMINATED` with a `terminatedAt` more than 2 s before the request left (the margin covers a platform clock ahead of the caller's by up to 2 s) | `dead` (the platform's `stateReason`) |
+| no answer, or a connection lost after the request left, when `GetMicrovm` shows the MicroVM `TERMINATED` with a `terminatedAt` more than 2 s before the request left (the margin covers a caller clock ahead of the platform's by up to 2 s) | `dead` (the platform's `stateReason`) |
 | a stored address that is not a MicroVM endpoint of the image's Region (`https://<id>.lambda-microvm.<region>.on.aws`) | `dead` (`bad_address`); no token is made and nothing is sent |
 | the proxy's 400, 403, 429, 500 | an error that names the status and never the token or the nonce |
 | token request or lookup finds the MicroVM missing or ended | `dead` (`not_found`) |

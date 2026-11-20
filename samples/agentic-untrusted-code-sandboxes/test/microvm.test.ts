@@ -568,6 +568,7 @@ describe('run', () => {
 
     test.each([
       ['it ended inside the 2 s margin', ended({ terminatedAt: new Date(Date.now() - 1000) })],
+      ['it ended 1.5 s before the request', ended({ terminatedAt: new Date(Date.now() - 1500) })],
       ['it ended after the request left', ended({ terminatedAt: new Date(Date.now() + 1000) })],
       ['TERMINATED carries no end time', ended()],
       ['TERMINATING (it may still serve)', ended({ terminatedAt: longAgo() }, 'TERMINATING')],
@@ -578,6 +579,13 @@ describe('run', () => {
       expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
       fetchMock.mockRejectedValueOnce(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }));
       expect(await backend().run(handleOf(nonce), jobFor(nonce))).toEqual({ kind: 'no_answer' });
+    });
+
+    test('a MicroVM that ended 2.5 s before the request is dead, and no timer is left armed', async () => {
+      aws.on(GetMicrovmCommand).resolves(ended({ terminatedAt: new Date(Date.now() - 2500) }));
+      fetchMock.mockResolvedValueOnce(reply(502, ''));
+      expect((await backend().run(handleOf(nonce), jobFor(nonce))).kind).toBe('dead');
+      expect(jest.getTimerCount()).toBe(0);
     });
 
     test('an unreadable or slow lookup stays no answer', async () => {
