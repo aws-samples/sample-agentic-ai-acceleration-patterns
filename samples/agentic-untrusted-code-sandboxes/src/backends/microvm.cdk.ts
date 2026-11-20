@@ -73,7 +73,8 @@ export class MicrovmBackendResources extends Construct implements BackendConstru
     });
     const sandboxSubnets = ctx.vpc.selectSubnets(ctx.sandboxSubnets);
     this.operatorRole = new iam.Role(this, 'ConnectorOperatorRole', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com', { conditions: { StringEquals: { 'aws:SourceAccount': stack.account } } }),
+      // No aws:SourceAccount condition (ADR-0068): the connector service refuses a role whose trust carries it.
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       description: 'Lets Lambda manage the network interfaces of the microvm egress connector',
     });
     this.operatorRole.addToPolicy(new iam.PolicyStatement({

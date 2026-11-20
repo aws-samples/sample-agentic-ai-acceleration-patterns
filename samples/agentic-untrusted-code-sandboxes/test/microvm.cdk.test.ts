@@ -155,12 +155,12 @@ describe('microvm resources', () => {
 
   test('the connector operator role: Lambda trust, interface creation in the sandbox subnets, tags only on managed interfaces', () => {
     const operator = Object.entries(template.findResources('AWS::IAM::Role')).find(([id]) => id.includes('ConnectorOperatorRole'))![1];
-    expect(operator.Properties.AssumeRolePolicyDocument.Statement).toEqual([expect.objectContaining({
+    // No aws:SourceAccount here (ADR-0068): the connector service cannot assume a role whose trust carries it. The build role keeps it.
+    expect(operator.Properties.AssumeRolePolicyDocument.Statement).toEqual([{
       Action: 'sts:AssumeRole',
       Effect: 'Allow',
       Principal: { Service: 'lambda.amazonaws.com' },
-      Condition: { StringEquals: { 'aws:SourceAccount': ACCOUNT } },
-    })]);
+    }]);
     const policy = Object.entries(template.findResources('AWS::IAM::Policy')).find(([id]) => id.includes('ConnectorOperatorRole'))![1];
     const st = policy.Properties.PolicyDocument.Statement as Record<string, any>[];
     expect(st.map((s) => s.Sid)).toEqual(['CreateConnectorInterfaces', 'TagConnectorInterfaces']);

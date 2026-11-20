@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-20
+- Amended by: ADR-0068
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
