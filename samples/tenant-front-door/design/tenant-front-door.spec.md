@@ -2441,7 +2441,10 @@ The edge parameter's name is fixed (§6.4), so the edge account holds no
 other front door in that Region during a run: the driver refuses to
 start when the parameter exists. The control plane creates a fixed
 parameter of its own, so its account holds no other control plane in
-that Region either. The test reuses the `tenant-identity` shared pool in
+that Region either: before it deploys, the driver reads that account
+through its CDK bootstrap lookup role, read only, and refuses to start
+when that parameter exists or when a stack of the run's id is in either
+account. The test reuses the `tenant-identity` shared pool in
 both topologies it needs: `shared-pool` and `shared-pool-multi-tenant`,
 whose users hold the `tenants` token of step 5. It never changes or
 removes either. Its tenants carry the control plane's tenant ids, which
@@ -2510,7 +2513,8 @@ The test's other shortcuts, none of them taken by the sample's own code:
   puts `b`'s route again.
 - A driver access role in the control plane's account writes the front
   door hook parameter (steps 22 and 24) and reads what the leftover check
-  and step 22's skip count need there.
+  and step 22's skip count need there: the run's stacks, this run's
+  tenant namespaces and the cells' probe parameters.
 - The checks of steps 3 and 18 that need a browser and the issuer's own
   sign-in (no CSP violation on the callback, the issuer's sign-in form,
   the SPA's exchange) are reported as skipped. They are run by hand
@@ -2521,6 +2525,12 @@ The test's other shortcuts, none of them taken by the sample's own code:
 - `host` mode deploys with `tenantRequestsPer5Min` 100 and
   `ipRequestsPer5Min` 50, so step 17 reaches the per-host rate in
   seconds.
+- The driver reads stack outputs the sample does not publish: the test
+  app adds `Integ*` outputs to the main and edge logging stacks (the
+  route table, the router, the registrar's and the sweeper's log groups,
+  the sweeper's function and table) and to `RouteHookAccess`, and reads
+  the `shared-pool-multi-tenant` deployment's `ApiUrl`, which publishes
+  no parameters.
 - The rotation check below is not part of the driver's run.
 
 
@@ -2742,9 +2752,12 @@ the whole run.
     `host` mode `x-host-header` agrees with it, and an `/assets/*` load
     on `a.<appDomain>` names `a` (host). Requests to
     `login.<appDomain>` leave the field empty (host). The registrar's API access
-    log, in `eu-central-1`, names the edge account and the control
-    plane's account on the refused calls of steps 11 to 13, and the registrar log names the global hook
-    role on the writes of steps 2 and 13.
+    log, in `eu-central-1`, names the edge account on the refused calls
+    of steps 11 and 13 and the control plane's account on those of step
+    12; in `host` mode, which skips steps 12 and 13, it names the edge
+    account on step 11's. The registrar log names the global hook role on
+    the writes of step 2 and of step 13 (single), each counted within that
+    step's own time window.
 16. Delete `b`'s deployment: `front-door-pre` removes `b`'s route before
     the delete script runs, and once the deployment is gone `b`'s token
     returns 403, because its entry is gone. The registrar log names the
@@ -2769,9 +2782,10 @@ the whole run.
     `x-tfd-rate-rule: ip`, the old per-IP value still applies at the
     edge: the test waits out the 5-minute rate window and repeats the
     check, with at most 3 retries (4 checks in total), and fails after
-    the last. Each check allows up to 5 minutes of sending plus the
-    5-minute wait, so the step can take about 40 minutes at worst. It
-    reports the time from the stack update to the passing check. It then asserts
+    the last. Each check allows up to 5 minutes of sending, and each
+    retry follows a 5-minute wait, so the step can take about 35 minutes
+    at worst. It reports the stack update's time and the time from the
+    end of the update to the passing check. It then asserts
     `b` is served. Through
     `cloudfront:TestFunction` with
     `Host: <appDomain>`, the router answers 404.
@@ -2796,7 +2810,7 @@ the whole run.
     ended. After a fresh sign-in the sign-in host's `Location` is
     `https://a.<appDomain>/` with no `code` and no `state`.
     `login.<appDomain>/logout` returns the static signed-out page.
-19. An application without a front door. Register `demo-plain`, which
+19. An application without a front door. Register `plain-<run id>`, which
     has no `RouteHookAccess` stack and whose scripts write no outputs,
     and create a deployment of `a` in it: its cell and its deployment
     reach `ACTIVE` with `front-door-post` in `lastGlobalHooks`, and the
@@ -2845,10 +2859,10 @@ the whole run.
     deletes `c`'s deployment (`front-door-pre` removes the entry, and
     after 90 s `c`'s token gets 403) and creates it again: the new entry
     is `active`, and `c`'s token is served by cell A (AR-31). The test
-    breaks the parameter again and deletes `c`'s
-    deployment, which skips the hook again; the edge operator role's
-    `DeleteTenantRoute` for `c` answers 200, and after 90 s `c`'s token
-    gets 403. The test restores the parameter.
+    breaks the parameter again, deletes `c`'s
+    deployment, which skips the hook again, and restores the parameter;
+    the edge operator role's `DeleteTenantRoute` for `c` answers 200, and
+    after 90 s `c`'s token gets 403.
 23. `/agents/*` on the `tenant-only` distribution (ADR-0019), in
     `test/integ.single.ts` and, for the rewrite and the 404 cases,
     again in `test/integ.host.ts`. S-5 ran on a standard distribution,
@@ -2891,10 +2905,21 @@ the whole run.
     `RouteHookAccess`, which keeps its hook parameter; delete that
     parameter; then destroy everything else the test deployed,
     in both accounts, the control plane and the operator role included,
-    except the shared identity pool. The leftover
+    except the shared identity pool, from which the test deletes only its
+    own tenants. Each part is done, skipped or failed: it is skipped only
+    when the resource is absent (CloudFormation's "does not exist", or the
+    service's own not-found error) or the run's state shows it was never
+    made, and any other error fails it. The driver checks its credentials
+    before the first part and, when they are gone, stops and names
+    `scripts/integ.sh teardown <run id> <mode>`, which resumes the
+    teardown. While any part in or for the control plane's account has
+    failed, the setup and support stacks stay, because they hold the
+    driver's access role and the vendor IdP a rerun needs. The leftover
     check also finds no registrar certificate for `<dd>` or
     `probe.<dd>` (step 14), no
-    hook parameter and no stand-in stack (step 1).
+    hook parameter, no stand-in stack (step 1) and, through `GetTenant`,
+    none of the run's tenants in either `tenant-identity` deployment; a
+    read that fails with anything but a not-found error fails the check.
 
 Rotation check, optional and run on its own against a `host` mode front
 door: run the three rotation updates of §4.1 and check that a `state`

@@ -40,7 +40,10 @@ Two non-production accounts:
 - The **control plane's account**, CDK-bootstrapped in your Region to
   trust the edge account, so the driver deploys into it with the edge
   account's credentials. It must hold no other control plane in that
-  Region.
+  Region. Before it deploys, the driver reads this account, read only,
+  through its CDK bootstrap lookup role, and refuses to start when a
+  control plane (`/control-plane/tenant-api-url`) or a stack of the run's
+  id is there.
 
 Once, with credentials for the control plane's account:
 
@@ -71,6 +74,7 @@ start it from a shell that outlives it (`nohup`, `tmux`).
 | `TFD_INTEG_RUN_ID` | new per run | `[a-z0-9]{1,10}`; names every stack, role, policy and application of the run |
 | `TFD_IDENTITY_REGION` | `AWS_REGION` | The Region of the `tenant-identity` deployments |
 | `TFD_ISSUER_DOMAIN` | reserved example endpoints | A Cognito domain for the front door's `issuer` input |
+| `TFD_CDK_QUALIFIER` | `hnb659fds` | The control plane's account's CDK bootstrap qualifier, for the preflight's lookup role |
 | `TFD_INTEG_KEEP` | unset | `1` skips the teardown; run `scripts/integ.sh teardown <run id> <mode>` after |
 
 `scripts/integ.sh plan [single|host]` prints the run's names, its deploy
@@ -134,10 +138,25 @@ Last green run: none yet.
 
 ## After an interruption
 
-The driver saves the run's ids in `.integ/<run id>/state.env`. Run
-`scripts/integ.sh teardown <run id> <mode>` with the same environment:
-it runs every teardown part, skips what is gone and ends with the
-leftover check. By hand, look for stacks named `TfdInteg-<run id>-*` and
+The driver saves the run's ids, and which deploy phase it reached, in
+`.integ/<run id>/state.env`. Run `scripts/integ.sh teardown <run id>
+<mode>` with the same environment: it runs every teardown part and ends
+with the leftover check. Each part reports `done`, `skipped` or
+`FAILED`. A part is skipped only when its resource is absent
+(CloudFormation's "does not exist", or the service's own not-found
+error) or the state shows it was never made; any other error, such as
+expired credentials or access denied, fails it, and a rerun tries it
+again. Before the first part the driver checks its credentials; when
+they are gone it stops at once and prints the teardown command to run
+once they are refreshed. While any part in or for the control plane's
+account has failed, the driver keeps `<p>-cp-setup` and `<p>-support`,
+because they hold its access role and the vendor IdP a rerun needs.
+`scripts/integ.sh leftovers <run id> <mode>` runs the leftover check
+alone: it exits 1 when something is left and 2 when a read failed, since
+then it cannot say the accounts are clean. It also reads the run's
+tenants in both `tenant-identity` deployments with `GetTenant`; a
+tenant still there (for example in `DELETING`) is reported, and a
+teardown rerun sends `DeleteTenant` again. By hand, look for stacks named `TfdInteg-<run id>-*` and
 `tfdi-<run id>-*` in both accounts (and in `us-east-1` of the edge
 account), the parameter
 `/application-plane/applications/tfd-<run id>/shared/front-door-hook` in
@@ -156,5 +175,7 @@ id>` are expected leftovers of the CDK custom resources.
 | Hooks and scripts from an S3 zip, read through a bucket policy | Registers the hooks from the repository at a commit (spec §5.2) |
 | The cells' origins are deployed ahead of the cells | Lets each cell script deploy its cell's origin |
 | The pair roles hold a probe policy, and the demo application's scripts call the registrar on a test parameter | Nothing: a pair role never calls the registrar |
-| A driver access role in the control plane's account writes the hook parameter | Nothing: only `RouteHookAccess` writes it |
+| A driver access role in the control plane's account writes the hook parameter, and reads the run's stacks, tenant namespaces and cell probe parameters | Nothing: only `RouteHookAccess` writes it |
+| The driver reads stack outputs the sample does not publish: the main stack's `Integ*` outputs, which the test app adds from the construct's properties and its construct tree (route table, routing endpoint, router function, registrar and sweeper log groups, sweeper function and table), the edge logging stack's `IntegEdgeLog*`, `RouteHookAccess`'s `IntegHookPolicyArn` and `IntegHookParameterName`, and `TenantIdentity-shared-pool-multi-tenant`'s `ApiUrl` | Reads the edge parameter `/application-plane/shared/front-door/edge` for the registrar URL and the distribution, takes `routeTableArn`, `routingEndpoint` and `distributionId` from the `TenantFrontDoor` construct in its own CDK app, adds the `RouteHookAccess` policy through its own control-plane deploy, and reads `tenant-identity`'s published parameters (`/application-plane/shared/identity/*`), which only the `shared-pool` deployment publishes |
+| The preflight reads the control plane's account through its CDK bootstrap lookup role | Nothing: a deployer knows what its own accounts hold |
 | Browser and issuer sign-in checks of steps 3 and 18 are run by hand | Runs them as part of its release checks |
