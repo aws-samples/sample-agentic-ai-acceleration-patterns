@@ -270,7 +270,7 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
       expect(st.Effect).toBe('Deny');
       expect(st.Resource).toBe('*');
       expect(list(st.Action)).toEqual([...RESOURCE_POLICY_WRITE_ACTIONS]);
-      for (const a of ['lambda:AddPermission', 'lambda:CreateFunctionUrlConfig', 'kms:PutKeyPolicy', 'kms:CreateGrant', 'logs:PutResourcePolicy', 'logs:PutSubscriptionFilter', 'dynamodb:PutResourcePolicy', 'bedrock-agentcore:PutResourcePolicy']) {
+      for (const a of ['lambda:AddPermission', 'lambda:CreateFunctionUrlConfig', 'kms:PutKeyPolicy', 'kms:CreateGrant', 'logs:PutResourcePolicy', 'logs:PutSubscriptionFilter', 'dynamodb:PutResourcePolicy', 'bedrock-agentcore:PutResourcePolicy', 'logs:PutDeliverySource', 'logs:CreateDelivery', 'logs:UpdateDeliveryConfiguration', 'logs:CreateExportTask', 'dynamodb:ExportTableToPointInTime']) {
         expect(list(st.Action)).toContain(a);
       }
       expect(p.sid('DenyPublicFunctionUrls')).toEqual(PUBLIC_URL_DENY);

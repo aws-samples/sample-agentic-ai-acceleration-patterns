@@ -31,7 +31,7 @@ what is here: the `/cell/` path aspect and the cell synth context.
 |---|---|---|
 | `cell-execution-policy` | the cell bootstrap's CloudFormation execution role | the services a cell deploys (API Gateway, Application Auto Scaling, AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM), IAM read, read of the `cdk-cell-assets-*` bucket, IAM role writes on `role/cell/*`, `iam:CreateRole` and `iam:PutRolePermissionsBoundary` there only with the workload boundary, `iam:PassRole` of `role/cell/*` to Lambda and AgentCore only, and the two service-linked roles (`ops.apigateway.amazonaws.com`, `runtime-identity.bedrock-agentcore.amazonaws.com`) |
 | `cell-permissions-boundary` | the same execution role, as its boundary | the same deploy-time services and IAM role writes; it assumes no role and holds none of the run-time calls. It denies a role without the workload boundary, any IAM role write, `iam:PassRole` or `sts:AssumeRole` outside `role/cell/*`, `iam:PassRole` to any other service, other service-linked roles, boundary removal, users, access keys, policy writes, Lambda function URLs with `AuthType NONE`, SSM writes to `/application-plane/shared/identity/*` and `/cdk-bootstrap/cell/*`, and changes to the API Gateway account setting |
-| `cell-workload-boundary` | every role a cell creates (ADR-0011) | the run-time services, read of the cell asset bucket, `sts:AssumeRole` on `role/cell/*` only; denies every IAM action, `sts:AssumeRole` outside `role/cell/*`, resource-policy and sharing writes (Lambda permissions and function URLs, KMS key policies and grants, CloudWatch Logs resource policies, subscription filters and destinations, DynamoDB, SSM and AgentCore resource policies), Lambda function URLs with `AuthType NONE`, the owner's parameters and the API Gateway account setting |
+| `cell-workload-boundary` | every role a cell creates (ADR-0011) | the run-time services, read of the cell asset bucket, `sts:AssumeRole` on `role/cell/*` only; denies every IAM action, `sts:AssumeRole` outside `role/cell/*`, resource-policy and sharing writes (Lambda permissions and function URLs, KMS key policies and grants, CloudWatch Logs resource policies, subscription filters, destinations, log deliveries and export tasks, DynamoDB resource policies and table exports, SSM and AgentCore resource policies), Lambda function URLs with `AuthType NONE`, the owner's parameters and the API Gateway account setting |
 | `cell-build-policy` | the role pair's cell role, through control-plane's `cellBuildManagedPolicyArns` (control-plane ADR-0047) | `sts:AssumeRole` on `cdk-cell-deploy-role-*`, `cdk-cell-file-publishing-role-*` and `cdk-cell-image-publishing-role-*` of the account and Region; not the lookup role |
 
 The tests in [`../test/cell-policies.test.ts`](../test/cell-policies.test.ts)
@@ -232,6 +232,12 @@ license headers: 0. IAM least privilege: 0 critical, 6 high, 3 medium,
   paths, KMS use), invoke any cell function, and create or delete cell
   resources with the service grants (`lambda:CreateFunction` needs a passed
   role, which it cannot pass). That is the role pair's scope (ADR-0006).
+- A compromised workload role can still send data out of the account: by
+  calling a resource in another account whose own resource policy allows it
+  (the `lambda:*`, `dynamodb:*` and `bedrock-agentcore:*` grants are on `*`),
+  or from a function that runs outside a VPC and reaches the internet. An
+  `aws:ResourceAccount` deny would close the first, but could break the
+  Bedrock model calls, so it is not set.
 - A new service in a cell that receives a passed role, or a cell role that
   needs any IAM permission or a resource-policy write, needs both
   boundaries changed before its first deploy (ADR-0011).
