@@ -112,3 +112,25 @@ Option 3 loses the agreement check.
   on origins becomes a cost problem.
 
 Spike S-7 passed 2026-11-13 (eu-central-1): a cloudfront-js-2.0 function decoded a real `tenant-identity` shared-pool access token (1,184 bytes) with `TestFunction` at 13 % compute utilisation, 14 % with a forged client `x-tenant-route` header, which it replaced with the lower-cased claim. A malformed token, no token and a token with its signature segment removed each got 401 at 9-10 %. The decode code is 1.9 KB of the 10 KB function limit. The measurement covers the decode and header handling only; the three KeyValueStore reads are measured in S-1. Create took 1 s and teardown, function and throwaway tenant, finished 32 s after the start.
+
+Note 2026-11-20: CloudFront Functions can now make network calls with
+`cf.fetch()`
+([What's New](https://aws.amazon.com/about-aws/whats-new/2026/11/cloudfront-functions-network-calls/),
+[blog](https://aws.amazon.com/blogs/networking-and-content-delivery/introducing-network-calls-in-amazon-cloudfront-functions/)).
+This adds a fourth option: the router sends the token to an
+authorisation origin and routes only on its verdict, with no Lambda@Edge.
+A function can call only an origin configured on the same distribution,
+and each call costs $0.10 per million on top of the function invocation.
+It does not change the decision:
+
+- The cell must still verify the token, because a cell in a
+  tenant-owned account cannot trust that the edge did (Option 2's cons).
+  An edge check would run the verification twice and add a round trip
+  to every request, against one refusal per forged token today.
+- Unknown and suspended tenants are already refused at the edge from
+  KeyValueStore with no network call (P-7, ADR-0003). A live lookup there
+  would put the control plane, or a reader in front of it, on the
+  distribution as an origin, and make every request depend on it.
+- Revisit when forged-token load on origins becomes a cost problem (the
+  existing trigger above): an edge check with `cf.fetch()` is then the
+  first option to try, before Lambda@Edge.
