@@ -126,12 +126,12 @@ warm-up tenant builds the cell alone and waits for phase two, so PS-1
 does not time it, and the cell account is registered with `maxCells` 1
 at `small`, so a placement during the build is refused rather than
 claiming a second cell (spec §3.5). The edge check on `/agents/*`
-cannot read a route
-hint; spec §5.3 asserts the token's tenant at the ingress and the vended
-credential instead, and sees an edge fault only as a wrong admit or
-refusal. The change that removes the limit is an ingress that echoes the
-hint it received; Option 1 would bring it too. A `medium` or `large`
-platform run cannot start until Q-7 is decided. A direct call to the
+cannot read a route hint; spec §5.3 asserts the token's tenant at the
+ingress and the vended credential instead, and sees an edge fault only
+as a wrong admit or refusal. The change that removes the limit is an
+ingress that echoes the hint it received; Option 1 would bring it too.
+A `medium` or `large` platform run cannot start until Q-7 is decided. A
+direct call to the
 ingress with a valid token is served, by design (front-door spec §1.2),
 so PS-7 there refuses a token whose payload names another tenant and
 serves the tenant's own.
