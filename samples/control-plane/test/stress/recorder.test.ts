@@ -61,3 +61,15 @@ describe('reasonOf', () => {
     expect(reasonOf(409, 'not a type!')).toBe('conflict');
   });
 });
+
+describe('an ambiguous placement (stress ADR-0013)', () => {
+  it('is a refusal attributed to its tenant, and any other 500 is not', () => {
+    const rec = new Recorder();
+    const body = { message: 'Deployment placement failed ambiguously: Transaction cancelled' };
+    rec.observe('create', { status: 500, errorType: 'InternalServerError', body, seconds: 1 }, 'T1');
+    rec.observe('create', { status: 500, errorType: 'InternalServerError', body: { message: 'something else' }, seconds: 1 }, 'T2');
+    rec.observe('list', { status: 500, errorType: 'InternalServerError', body, seconds: 1 }, NO_TENANT);
+    const r = rec.toRecord(ID, 's');
+    expect(r.refusals).toEqual({ byTenantReason: [{ tenant: 'T1', reason: 'ambiguous-placement', count: 1 }], unattributed: 2 });
+  });
+});

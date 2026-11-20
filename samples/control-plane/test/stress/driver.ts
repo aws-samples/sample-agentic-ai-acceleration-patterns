@@ -394,12 +394,19 @@ async function sweep(seeded: boolean): Promise<number> {
   const owned = new Set([...transient, ...(seeded && m !== undefined ? m.seeded : [])]);
   // With seeded, every deployment of the stress application goes, also one a lost manifest no longer lists.
   const targets = [...all.keys()].filter((t) => seeded || owned.has(t));
-  await Promise.all(targets.map((t) => removeDeployment(f, t)));
-  const left = await waitDeployments(f, targets, { gone: true, timeoutSeconds: 3600 });
-  const stuck = [...left].filter(([, d]) => d !== undefined).map(([t]) => t);
+  // A DELETE_FAILED deployment takes another delete (a build that failed on a throttle or a
+  // transient error): up to three rounds.
+  let stuck: string[] = [];
+  let round = targets;
+  for (let attempt = 1; attempt <= 3 && round.length > 0; attempt += 1) {
+    await Promise.all(round.map((t) => removeDeployment(f, t)));
+    const left = await waitDeployments(f, round, { gone: true, timeoutSeconds: 3600 });
+    stuck = [...left].filter(([, d]) => d !== undefined).map(([t]) => t);
+    round = stuck;
+  }
   let status = stuck.length === 0 ? 0 : 1;
-  if (stuck.length > 0) log(`sweep: ${stuck.length} deployments could not be removed`);
-  if (seeded) {
+  if (stuck.length > 0) log(`sweep: ${stuck.length} deployments could not be removed; cells stay`);
+  if (seeded && stuck.length === 0) {
     const cells = await cellsOf(f);
     for (const cell of cells) {
       const r = await f.api.call('delete-cell', 'DELETE', `/cells/${cell.cellId}`, '-', undefined, [404]);
@@ -491,6 +498,14 @@ async function main(argv: readonly string[]): Promise<number> {
       return sweep(arg === '--seeded');
     case 'cell-leftovers':
       return cellLeftovers();
+    case 'status': {
+      // Counts only: the stress application's deployments and cells by status.
+      const f = fleetEnv(await connect(), new Recorder());
+      const count = (xs: { status: string }[]): string =>
+        Object.entries(xs.reduce<Record<string, number>>((a, x) => ({ ...a, [x.status]: (a[x.status] ?? 0) + 1 }), {})).map(([k, v]) => `${k} ${v}`).join(', ') || 'none';
+      log(`deployments: ${count([...(await deploymentsOf(f)).values()])}; cells: ${count(await cellsOf(f))}`);
+      return 0;
+    }
     default:
       throw new Error(`unknown command ${String(command)}`);
   }

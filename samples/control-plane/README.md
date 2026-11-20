@@ -713,6 +713,55 @@ takes its own fleet name, so two runs can share the accounts and the Region.
 See [integration-test.md](./integration-test.md) for the second account's
 bootstrap, what the run stands up in each account, its steps and its knobs.
 
+## Platform stress slice
+
+The sample is a slice of the repository's platform stress test
+([`docs/stress-test.spec.md`](../../docs/stress-test.spec.md),
+[`stress/`](../../stress/README.md)). The slice deploys a control plane of its
+own in the platform account, `<STRESS_PREFIX>-control-plane` with the fleet
+name `<STRESS_PREFIX>` in lower case and `concurrentBuildLimit` from
+`STRESS_BUILD_LIMIT` (default 50, [ADR-0046](./adr/0046-make-the-concurrent-build-limit-a-prop.md)),
+beside `<STRESS_PREFIX>-cp-setup`, a throwaway vendor IdP and the script
+source. It registers the stress application
+([`stress/application/`](../../stress/application/README.md)), whose cell
+scripts deploy one `agentic-runtime-isolation` cell into a standalone cell
+account through the account's role pair and cell bootstrap, and whose tenant
+scripts subscribe one tenant on its cell. Before every run it checks each cell
+account (spec §3.7) and refuses one that holds anything but the cell
+bootstrap, the role pair, the owner's listed account-base stacks and cells.
+
+Each cell account's owner first deploys the owner stacks, the cell bootstrap
+and the role pair there (`stress/application/README.md`, steps 1, 2 and 4).
+The run then needs a cell accounts file outside the repository:
+
+```json
+{ "accounts": [{ "label": "cell-account-1", "accountId": "<id>", "profile": "<a CLI profile with read access>",
+  "accountBaseStackArns": ["<CellPolicies stack ARN>", "<CellAccountBase stack ARN>"] }] }
+```
+
+```bash
+export AWS_REGION=eu-central-1 STRESS_PREFIX=StressCp STRESS_CELL_ACCOUNTS=<the file>
+cd ../../stress
+./run.sh run --tier small --slices control-plane --remove-fixtures
+```
+
+The platform account's CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL`
+builds must hold the build limit times two (the cell and tenant projects; the
+service default is 1). Scenarios: `PS-1` (the seeded tenants onboarded at the
+build limit; the first deployment creates the cell, whose build time answers
+spec Q-1), `placement-race` (twice as many `CreateDeployment` calls as free
+slots, at once, on a nearly full fleet), `read-rate` (`ListDeployments`,
+`GetDeployment` and `ListCells` at the tier's steady rate while deployments
+are placed and tenants updated) and `build-limit-scaling` (the seeded tenants
+onboarded again at build limits 5, 20 and 50). Each asserts that a deployment
+names its tenant and a cell of the application in a cell account, that no cell
+goes over `maxTenants`, that a refused tenant has no deployment, and that the
+tenant build's record in the cell account names the tenant and the cell. The
+driver is [`test/stress/`](./test/stress/), the scripts
+[`scripts/stress/`](./scripts/stress/slice.sh); the manifest and the source zip
+stay outside the repository and hold no token or password. `--remove-fixtures`
+also deregisters the accounts and the application and destroys both stacks.
+
 ## End-to-end demo
 
 The sample scripts provision a deliberately tiny cell: the cell scripts in

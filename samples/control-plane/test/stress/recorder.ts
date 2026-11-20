@@ -49,6 +49,24 @@ export interface ResultRecordJson {
   };
 }
 
+/**
+ * Server errors the control plane answers with a reason a client acts on (P-7): a placement
+ * whose outcome it cannot tell, which the driver retries with the same client token (stress
+ * ADR-0013). They are attributed to their tenant with this reason; every other 5xx is not.
+ */
+/** The control plane's message for a placement whose transaction outcome it cannot tell (spec §7). */
+export const AMBIGUOUS_PLACEMENT = /^Deployment placement failed ambiguously/;
+
+const ATTRIBUTABLE_SERVER_ERRORS: readonly { readonly message: RegExp; readonly reason: string }[] = [
+  { message: AMBIGUOUS_PLACEMENT, reason: 'ambiguous-placement' },
+];
+
+function attributableServerError(r: CallResult): string | undefined {
+  if (r.status !== 500 || r.errorType !== 'InternalServerError') return undefined;
+  const message = String(r.body?.message ?? '');
+  return ATTRIBUTABLE_SERVER_ERRORS.find((e) => e.message.test(message))?.reason;
+}
+
 /** The tenant of a fleet-wide call (ListCells, ListDeployments by application). */
 export const NO_TENANT = '-';
 
@@ -72,7 +90,9 @@ export class Recorder {
    * One API call. A status of 400 or more is a refusal, attributed to its tenant and the
    * Smithy error type (P-7). A server error, or a refusal of a call that is for no tenant,
    * names no tenant a person can act on: it is unattributed and a finding. A status the
-   * caller expected (`expected`) is counted by status and reason but is no refusal.
+   * caller expected (`expected`) is counted by status and reason but is no refusal. A
+   * server error with a reason a client acts on (`ATTRIBUTABLE_SERVER_ERRORS`) is a refusal
+   * attributed to its tenant.
    */
   observe(hop: string, r: CallResult, tenant: string, expected = false): void {
     const ok = expected || (r.status >= 200 && r.status < 400);
@@ -81,6 +101,12 @@ export class Recorder {
     this.requests.set(key, (this.requests.get(key) ?? 0) + 1);
     this.sample(hop, r.seconds);
     if (ok) return;
+    const known = r.status >= 500 && tenant !== NO_TENANT ? attributableServerError(r) : undefined;
+    if (known !== undefined) {
+      const k = `${tenant}\u0000${known}`;
+      this.refused.set(k, (this.refused.get(k) ?? 0) + 1);
+      return;
+    }
     if (r.status >= 500 || tenant === NO_TENANT) {
       this.unattributed += 1;
       this.findings.push(`${hop}${tenant === NO_TENANT ? '' : ` for tenant ${tenant}`}: HTTP ${r.status} (${reason})`);

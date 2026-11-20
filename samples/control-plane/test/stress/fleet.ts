@@ -8,10 +8,11 @@
  * record; nothing here prints a value.
  */
 
+import { randomUUID } from 'node:crypto';
 import { type CallResult, ControlPlaneApi } from './api';
 import { aws, sleep } from './aws';
 import type { CellAccountInput } from './plan';
-import { NO_TENANT, type Recorder } from './recorder';
+import { AMBIGUOUS_PLACEMENT, NO_TENANT, type Recorder } from './recorder';
 
 export interface FleetEnv {
   readonly api: ControlPlaneApi;
@@ -32,20 +33,32 @@ const enc = encodeURIComponent;
 export const adminEmailOf = (tenant: string): string => `success+${tenant.toLowerCase()}@simulator.amazonses.com`;
 
 /**
- * One `CreateDeployment`, retried on a lost claim race (control-plane ADR-0031), a throttle
- * or a transport failure: `accepted` (202), `exists` (the tenant has one), `full`
- * (`InsufficientCapacityError`, which never clears by waiting) or `failed`.
+ * One `CreateDeployment`, retried on a lost claim race (control-plane ADR-0031), an
+ * ambiguous placement (a 500 the control plane answers when a placement transaction is
+ * cancelled without a failed condition, such as a DynamoDB `TransactionConflict` between
+ * concurrent claims on one cell: control-plane spec §7 never retargets it), a throttle or a
+ * transport failure. Every attempt carries the same client token, so a retry after an
+ * ambiguous outcome replays it instead of placing twice (stress ADR-0013). Returns
+ * `accepted` (202), `exists` (the tenant has one), `full` (`InsufficientCapacityError`,
+ * which never clears by waiting) or `failed`.
  */
 export async function placeDeployment(f: FleetEnv, tenant: string, hop = 'create-deployment'): Promise<Placement> {
+  const clientToken = randomUUID().replace(/-/g, '');
   for (let attempt = 1; attempt <= 6; attempt += 1) {
     const r = await f.api.call(hop, 'POST', `/tenants/${enc(tenant)}/deployments`, tenant, {
       applicationId: f.applicationId,
       adminEmail: adminEmailOf(tenant),
+      clientToken,
     });
     if (r.status === 202) return 'accepted';
     if (r.errorType === 'InsufficientCapacityError') return 'full';
-    if (r.status === 409 && /already/i.test(String(r.body?.message ?? ''))) return 'exists';
-    const retryable = r.status === 0 || r.status === 429 || r.status === 503 || (r.status === 409 && /claim race/i.test(String(r.body?.message ?? '')));
+    if (r.status === 409 && /already/i.test(String(r.body?.message ?? ''))) return attempt === 1 ? 'exists' : 'accepted';
+    const retryable =
+      r.status === 0 ||
+      r.status === 429 ||
+      r.status === 503 ||
+      (r.status === 409 && /claim race/i.test(String(r.body?.message ?? ''))) ||
+      (r.status === 500 && AMBIGUOUS_PLACEMENT.test(String(r.body?.message ?? '')));
     if (!retryable) return 'failed';
     await sleep(500 * 2 ** attempt + Math.floor(Math.random() * 250));
   }
