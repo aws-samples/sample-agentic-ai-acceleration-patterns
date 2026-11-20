@@ -69,7 +69,6 @@ export async function loadEdgeRows(
         skipped.add(r.id);
         continue;
       }
-      skipped.delete(r.id);
       rows.set(r.id, { id: r.id, status, resultType: r.resultType ?? '', tenant: r.tenant ?? '', seconds });
     }
   }

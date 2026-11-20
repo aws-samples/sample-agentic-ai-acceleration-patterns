@@ -105,10 +105,11 @@ tenant (ADR-0010). The slice adds no correlation header. Every response
 carries `x-amz-cf-id`, and CloudFront's standard log carries the same value
 as `x-edge-request-id`, so `collect` joins each request to its edge log line
 on it. In three live runs 6,682 of 6,682, 6,681 of 6,681 and 6,681 of 6,681
-requests joined. The same join gives the edge's own time (`time-taken`) as the `edge` hop and
-shows that every router refusal is a `FunctionGeneratedResponse`. The origin
-is joined by its counts, not per request: the cell's log counts by status
-must equal the number of requests the driver saw reach it.
+requests joined. The same join gives the edge's own time (`time-taken`) as
+the `edge` hop and shows that every router refusal is a
+`FunctionGeneratedResponse`. The origin is joined by its counts, not per
+request: the cell's log counts by status must equal the number of requests
+the driver saw reach it.
 
 `collect` writes more than the late `refusals` and `cost` fields of the
 contract: it adds the `edge` hop to `latency`, and the router's highest
