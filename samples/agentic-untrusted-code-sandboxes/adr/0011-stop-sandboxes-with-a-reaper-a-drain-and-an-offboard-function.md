@@ -4,7 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
-- Amended by: ADR-0015, ADR-0019, ADR-0020
+- Amended by: ADR-0015, ADR-0019, ADR-0020 (and a 2026-11-20 note)
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -62,3 +62,9 @@ Note 2026-11-18: amended by ADR-0015. The drain waits until every task is `STOPP
 Note 2026-11-19: amended by ADR-0019. An idle ECS managed instance blocks the capacity provider delete. So once every task has stopped the drain deregisters the cluster's container instances with `force`, which on ECS Managed Instances terminates them, and waits until EC2 shows each one `terminated`. S-16 measures how long that takes and whether a minimum above 0 starts a replacement first.
 
 Note 2026-11-19: amended by ADR-0020. S-16 measured the drain: a forced deregister ended each instance in 17 to 30 s, no replacement started, and the stack delete then succeeded first time in 38 s. The capacity provider has no minimum-instances setting, so the sample keeps no warm instance.
+
+Note 2026-11-20: `offboardTenant` runs as the reaper role, with stop
+actions only, not as the drain role. The drain role can deregister a
+`nitro` container instance with `force`, which ends every tenant's task
+on it; an offboard call needs only to stop one tenant's sandboxes (spec
+§3.1, §3.6, §5.2; threat model T-73).

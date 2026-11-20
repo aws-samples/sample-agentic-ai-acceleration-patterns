@@ -473,8 +473,10 @@ with `busy`. The runner:
    still count against `RLIMIT_NPROC`, and without this the next job's
    first `fork` failed with `EAGAIN` on `microvm` and `agentcore`
    (S-18). On `agentcore` the runner then reads the job group's
-   `memory.current` and returns `tool_failed` rather than start the next
-   job if it is not below 32 MiB. Files in `/work` stay (below).
+   `memory.current` less `file` plus `shmem` (as the `nitro` watchdog
+   does, so the page cache of files in `/work` does not count) and
+   returns `tool_failed` rather than start the next job if it is not
+   below 32 MiB. Files in `/work` stay (below).
 4. Returns `exitCode`, `stdout`, `stderr` (together at most
    `maxOutputBytes`, stdout cut first, `truncated` flag), `durationMs`,
    `timedOut`, `memoryExceeded`, `bootId` and the nonce proof.
