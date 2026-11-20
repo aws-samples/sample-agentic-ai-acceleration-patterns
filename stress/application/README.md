@@ -208,6 +208,50 @@ would load too.
 
 ## Results
 
+### W-5: the role pair, the account check, Q-1 and the control-plane slice
+
+Run 2026-11-20, `eu-central-1`, platform account and cell accounts A and B as
+above, fleet `stressw5`, `CELL_POLICY_SUFFIX=-w10`.
+
+| Step | Account A | Account B |
+|---|---|---|
+| `deploy-owner.sh` again, adding `cell-tenant-build-policy` | 37 s | 32 s |
+| `deploy-role-pair.sh` (`stressw5-cell-account`) | 52 s | 49 s |
+| `PutAccount` handshake through the pair | `ACTIVE` | not registered (`small` uses one cell account) |
+| Account check, with the owner's account-base list | passed (6 stacks) | passed (6 stacks) |
+| Account check, with `CellBoundaryProbe` and `CellWorkloadProbe` deployed (`probe-deploy.sh`), then removed (`probe-remove.sh`, no leftovers) | - | refused: `stack CellBoundaryProbe (eu-central-1) is not a kind a cell account may hold` |
+| Account check, with a list that leaves out the two `*-spike` account-base stacks | refused: both `*-spike` stacks are tagged account-base but not on the list | refused, the same |
+
+The workload probe stack deploys through the cell bootstrap, so the check
+counts it as a cell; only the boundary probe is refused. The unit tests in
+`samples/control-plane/test/stress/account-check.test.ts` cover the cases no
+live account should be put into: a `cdk-hnb659fds-*` role, a role pair on
+`/cell/` or under either cell boundary, a `/cell/` role trusted from another
+account, a federated principal, `*` or an unused service, a stack with
+another service role, and a stack ARN from another Region or a recreated stack.
+
+Q-1, one cell built by the control plane's cell CodeBuild project into cell
+account A (`BUILD_GENERAL1_SMALL`), in three runs: the first slice run by hand
+and the runner's runs 1 and 2. The in-build lines come from the cell build's
+log, which goes with the control plane stack, so run 1's were not kept:
+
+| | By hand | Runner run 1 | Runner run 2 |
+|---|---|---|---|
+| `CreateDeployment` to the cell `ACTIVE` (the cell record's own times) | 471 s | 469 s | 456 s |
+| Install of the runtime-isolation sample (`npm ci`) | 21 s | - | 22 s |
+| Synth of `cell-app.ts` | 11 s | - | 11 s |
+| `cdk deploy` through `CDKToolkit-cell` | 405 s | - | 405 s |
+| Container memory, peak of total | 1,971 of 3,831 MiB | - | 1,914 of 3,831 MiB |
+| Cell stack create (CloudFormation events) | 390 s | 404 s | 392 s |
+| Cell stack delete by `scripts/cell/delete.sh` (CloudFormation events) | 517 s | 521 s | 520 s |
+
+`BUILD_GENERAL1_SMALL` holds the synth with half its memory to spare. The
+cell's 27 roles are on `/cell/` under the workload boundary (the synth), and
+the cell deploys with the role pair's cell role and `cell-build-policy` alone,
+without the bootstrap's lookup role.
+
+### W-10: the cell policies and probes
+
 Run 2026-11-20 in the two standalone non-production cell accounts (A and B)
 the path spike used, in `us-west-2` with `CELL_POLICY_SUFFIX=-w10r`, beside
 other cell stacks those accounts hold in `eu-central-1`. Stacks are per
