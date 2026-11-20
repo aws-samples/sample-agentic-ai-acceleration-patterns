@@ -2802,7 +2802,7 @@ the whole run.
     reach `ACTIVE` with `front-door-post` in `lastGlobalHooks`, and the
     route table is unchanged.
 20. The shared role outside its operation. The test registers a third
-    global hook, `tfd-probe` (`test/hooks/probe-hook.sh`, `POST` on
+    global hook, `tfd-probe` (`test/integ/hooks/probe-hook.sh`, `POST` on
     `CELL_UPDATE` and `DEPLOYMENT_UPDATE`), whose id sorts after
     `front-door-post`, so it runs after it (control-plane R-45). It acts
     only for an application with a front door hook parameter and calls

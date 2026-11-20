@@ -332,6 +332,9 @@ esac
       zoneName: 'integ-placeholder.example.com',
       identity: { userPoolId: 'stub', appClientId: 'stub', region: 'eu-central-1' },
     });
+    // ipRequestsPer5Min is a host-mode input: the front door refuses it in single mode (§3.6).
+    expect(context.ipRequestsPer5Min).toBeUndefined();
+    expect(context.tenantRequestsPer5Min).toBeUndefined();
     const npx = fs.readFileSync(path.join(dir.dir, 'npx.log'), 'utf8');
     expect(npx).toContain(`deploy --exclusively TfdInteg-${RUN}-support`);
     expect(npx).toContain('test/integ.single.ts');

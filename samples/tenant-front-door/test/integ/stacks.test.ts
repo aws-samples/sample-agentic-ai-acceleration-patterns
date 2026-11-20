@@ -108,6 +108,13 @@ describe('the integ app', () => {
     expect(accounts[names.stacks.main]).toBe(EDGE);
   });
 
+  it('takes host mode\'s lowered rates, with the per-IP rule raised above the per-host one for step 17', () => {
+    const { stacks } = synth({ ...FULL, tenantRequestsPer5Min: 100, ipRequestsPer5Min: 1000 }, 'host');
+    const doc = JSON.stringify(byName(stacks, names.stacks.edge).toJSON());
+    expect(doc).toContain('"Limit":100');
+    expect(doc).toContain('"Limit":1000');
+  });
+
   it('drops the sweeper outputs and grants once dedicatedDomains is off (step 14)', () => {
     const testRole = { ...TEST_ROLE, sweeperFunctionArn: undefined, sweeperTableArn: undefined, sweeperLogGroupArn: undefined };
     const { stacks } = synth({ ...FULL, dedicatedDomains: false, testRole });

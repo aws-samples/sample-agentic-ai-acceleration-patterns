@@ -124,6 +124,7 @@ IDENTITY_API="$(aws ssm get-parameter --region "$IDENTITY_REGION" --name /applic
 IDENTITY_POOL="$(aws ssm get-parameter --region "$IDENTITY_REGION" --name /application-plane/shared/identity/userPoolId --query Parameter.Value --output text)"
 IDENTITY_CLIENT="$(aws ssm get-parameter --region "$IDENTITY_REGION" --name /application-plane/shared/identity/appClientId --query Parameter.Value --output text)"
 # host mode lowers the per-host rate so step 17 reaches it in seconds; the per-IP rate stays below it until then.
+# single mode sets neither: ipRequestsPer5Min is a host-mode input, and the cells keep the default origin rate.
 TENANT_RATE=2000; IP_RATE=500
 [[ "$MODE" == host ]] && { TENANT_RATE=100; IP_RATE=50; }
 
@@ -149,12 +150,12 @@ preflight() {
   EXTERNAL_ID="tfd-integ-$(rand_chars 'a-z0-9' 24)"
   jq -n --arg run "$RUN_ID" --arg edge "$EDGE_ACCOUNT" --arg cp "$CP_ACCOUNT" --arg r "$REGION" --arg p "$DRIVER_PRINCIPAL" \
     --arg d "$APP_DOMAIN" --arg z "$ZONE_ID" --arg zn "$ZONE_NAME" --arg dd "$DD" --arg pool "$IDENTITY_POOL" --arg client "$IDENTITY_CLIENT" \
-    --arg ir "$IDENTITY_REGION" --arg issuer "${TFD_ISSUER_DOMAIN:-}" --argjson tr "$TENANT_RATE" --argjson ir2 "$IP_RATE" '{
+    --arg ir "$IDENTITY_REGION" --arg issuer "${TFD_ISSUER_DOMAIN:-}" --arg mode "$MODE" --argjson tr "$TENANT_RATE" --argjson ir2 "$IP_RATE" '{
       runId: $run, edgeAccount: $edge, controlPlaneAccount: $cp, region: $r, driverPrincipalArn: $p,
       appDomain: $d, hostedZoneId: $z, zoneName: $zn, dedicatedDomain: $dd,
-      identity: {userPoolId: $pool, appClientId: $client, region: $ir},
-      tenantRequestsPer5Min: $tr, ipRequestsPer5Min: $ir2}
-      + (if $issuer == "" then {} else {issuerDomain: $issuer} end)' >"$RUN_DIR/context.json"
+      identity: {userPoolId: $pool, appClientId: $client, region: $ir}}
+      + (if $issuer == "" then {} else {issuerDomain: $issuer} end)
+      + (if $mode == "host" then {tenantRequestsPer5Min: $tr, ipRequestsPer5Min: $ir2} else {} end)' >"$RUN_DIR/context.json"
   : >"$RUN_DIR/state.env"
   state_set EXTERNAL_ID "$EXTERNAL_ID"
   printf 'kind\tname\tseconds\tresult\n' >"$RUN_DIR/times.tsv"
