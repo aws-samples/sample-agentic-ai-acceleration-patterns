@@ -194,21 +194,26 @@ describe('start', () => {
     expect(input.overrides?.taskRoleArn).toBeUndefined();
   });
 
-  test('the integration test hook adds the runner\'s fail-at-boot variable, and only when asked', async () => {
+  test('the integration test hook adds the runner\'s fail-at-boot variable only when asked and only on a function that honours the hooks', async () => {
     const nonce = newNonce();
     ecsMock.on(RunTaskCommand).resolves({ tasks: [{ taskArn: TASK }] });
-    const { backend } = make(nonce);
+    const hooks = { ...ENV, RC_INTEG_OVERRIDES: '1' };
+    const withHooks = make(nonce, undefined, hooks).backend;
+    const plain = make(nonce).backend;
     const envOf = () => ecsMock.commandCalls(RunTaskCommand).at(-1)?.args[0].input.overrides?.containerOverrides?.[0].environment;
-    await backend.start('tenant-a', nonce, creds('tenant-a'), { failAtBoot: true });
-    expect(envOf()).toEqual([
-      { name: 'RUNNER_NONCE_HASH', value: nonceHash(nonce) },
-      { name: 'RUNNER_FAIL_AT_BOOT', value: '1' },
-    ]);
-    await backend.start('tenant-a', nonce, creds('tenant-a'), { failAtBoot: false });
-    expect(envOf()).toEqual([{ name: 'RUNNER_NONCE_HASH', value: nonceHash(nonce) }]);
-    await backend.start('tenant-a', nonce, creds('tenant-a'), {});
-    await backend.start('tenant-a', nonce, creds('tenant-a'));
-    expect(envOf()).toEqual([{ name: 'RUNNER_NONCE_HASH', value: nonceHash(nonce) }]);
+    const hashOnly = [{ name: 'RUNNER_NONCE_HASH', value: nonceHash(nonce) }];
+    await withHooks.start('tenant-a', nonce, creds('tenant-a'), { failAtBoot: true });
+    expect(envOf()).toEqual([...hashOnly, { name: 'RUNNER_FAIL_AT_BOOT', value: '1' }]);
+    await withHooks.start('tenant-a', nonce, creds('tenant-a'), { failAtBoot: false });
+    expect(envOf()).toEqual(hashOnly);
+    await withHooks.start('tenant-a', nonce, creds('tenant-a'), {});
+    await withHooks.start('tenant-a', nonce, creds('tenant-a'));
+    expect(envOf()).toEqual(hashOnly);
+    // a production function (hooks not set, or set to another value) never sends it, even when asked
+    await plain.start('tenant-a', nonce, creds('tenant-a'), { failAtBoot: true });
+    expect(envOf()).toEqual(hashOnly);
+    await make(nonce, undefined, { ...ENV, RC_INTEG_OVERRIDES: 'true' }).backend.start('tenant-a', nonce, creds('tenant-a'), { failAtBoot: true });
+    expect(envOf()).toEqual(hashOnly);
   });
 
   test('RunTask is signed with the tenant credentials, not the ambient ones', async () => {

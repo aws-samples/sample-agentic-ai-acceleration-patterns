@@ -368,8 +368,12 @@ export class NitroBackend implements SandboxBackend {
             name: cfg.containerName,
             environment: [
               { name: NONCE_HASH_ENV, value: nonceHash(nonce) },
-              // Test hook of the integration test (ADR-0058): the runner exits at boot, which is a failed start.
-              ...(options?.failAtBoot === true ? [{ name: TEST_HOOK_ENV.RUNNER_FAIL_AT_BOOT, value: '1' }] : []),
+              // Test hook of the integration test (ADR-0058): sent only when the tool asks and this function
+              // honours the hooks (RC_INTEG_OVERRIDES = 1), so a production deployment never sends it. The runner
+              // exits at boot, which is a failed start.
+              ...(options?.failAtBoot === true && this.env[TEST_HOOK_ENV.RC_INTEG_OVERRIDES] === '1'
+                ? [{ name: TEST_HOOK_ENV.RUNNER_FAIL_AT_BOOT, value: '1' }]
+                : []),
             ],
           }],
         },
