@@ -220,14 +220,20 @@ case "$verb" in
     fi
     if [ "$fixtures" -eq 1 ]; then
       if [ "$status" -ne 0 ]; then
-        echo "teardown: cells or registrations are left; the stacks stay so a rerun can reach them" >&2
+        echo "teardown: deployments, cells, tenants or registrations are left; the stacks stay so a rerun can reach them" >&2
       else
         # The REST API's CloudWatch role is retained on destroy. Its name is read from the
-        # stack first, since CloudFormation shortens the stack part of a long role name.
+        # stack first, since CloudFormation shortens the stack part of a long role name, and
+        # added to the names earlier deploys of the prefix left (each deploy makes a new one).
         if stack_exists "$CP_STACK"; then
-          aws cloudformation describe-stack-resources --stack-name "$CP_STACK" \
+          if found="$(aws cloudformation describe-stack-resources --stack-name "$CP_STACK" \
             --query "StackResources[?ResourceType=='AWS::IAM::Role' && contains(LogicalResourceId, 'ApiCloudWatchRole')].PhysicalResourceId" \
-            --output text | tr '\t' '\n' | grep -v -e '^$' -e '^None$' > "$cw_roles" || true
+            --output text)"; then
+            { cat "$cw_roles"; tr '\t' '\n' <<< "$found"; } | grep -v -e '^$' -e '^None$' | sort -u > "${cw_roles}.new" || true
+            mv "${cw_roles}.new" "$cw_roles"
+          else
+            echo "teardown: could not read the CloudWatch role of ${CP_STACK}; it may be counted as a leftover" >&2
+          fi
         fi
         for stack in "$CP_STACK" "$SETUP_STACK"; do
           if stack_exists "$stack"; then

@@ -1328,6 +1328,7 @@ application's cells (threat T5, the highest-consequence open item).
   shortened by CloudFormation for a long prefix), which the CDK retains on
   destroy because the account's API Gateway setting may still point at it.
   `teardown --fixtures` reads its name from the stack before the destroy,
+  keeps it in `$STRESS_HOME/<STRESS_PREFIX>/cloudwatch-roles` across runs,
   then lists it and does not count it. Delete one only when the account
   setting names another role.
 - **Builds over the concurrent build limit are refused, not queued.**

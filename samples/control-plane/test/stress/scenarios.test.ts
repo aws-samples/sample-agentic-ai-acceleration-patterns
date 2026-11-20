@@ -26,8 +26,10 @@ const CELL = { cellId: 'C1', applicationId: 'stress', accountId: '2', status: 'A
 
 const ok = (status: number, body: any = {}, errorType?: string): CallResult => ({ status, body, errorType, seconds: 0.01 });
 
-// The control plane's two UpdateTenant conflicts (updateConflict, src/tenant/tenant.ts).
+// The control plane's UpdateTenant conflicts (updateConflict and staleUpdateFailure,
+// src/tenant/tenant.ts).
 const UPDATING = 'Tenant T1 is UPDATING; retry the request once it has finished';
+const STALE = 'Tenant T1 changed after this request read it; re-read and retry the request';
 const DELETE_FAILED =
   'Tenant T1 is DELETE_FAILED; it can be re-applied from ACTIVE or UPDATE_FAILED only, so a retry cannot succeed and the remedy is a delete';
 
@@ -79,6 +81,13 @@ describe('readRate', () => {
     const { s, updates } = fakeEnv(() => (++n % 2 === 0 ? ok(409, { message: UPDATING }, 'ConflictError') : ok(202)));
     await readRate(s);
     expect(updates()).toBeGreaterThan(1);
+    expect(s.rec.findings).toEqual([]);
+  });
+
+  it('takes the ConflictError for a write that raced another one', async () => {
+    let n = 0;
+    const { s } = fakeEnv(() => (++n % 2 === 0 ? ok(409, { message: STALE }, 'ConflictError') : ok(202)));
+    await readRate(s);
     expect(s.rec.findings).toEqual([]);
   });
 

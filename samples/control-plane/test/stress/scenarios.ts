@@ -200,14 +200,15 @@ export async function placementRace(s: ScenarioEnv): Promise<void> {
 }
 
 /**
- * Whether an UpdateTenant answer is the 409 for a tenant still in flight (`CREATING` or
- * `UPDATING`, usually from the scenario's last write), which ends in a state the update
- * admits. The control plane's message names the status (`updateConflict`,
- * src/tenant/tenant.ts); its 409 for `CREATE_FAILED`, `DELETING` or `DELETE_FAILED` says a
- * retry cannot succeed, and the scenario's write did not run because the tenant is broken.
+ * Whether an UpdateTenant answer is a 409 a retry can clear: the tenant is still in flight
+ * (`CREATING` or `UPDATING`, usually from the scenario's last write), or another write was
+ * accepted between this request's read and its own write (`staleUpdateFailure`). The
+ * control plane's 409 for `CREATE_FAILED`, `DELETING` or `DELETE_FAILED` (`updateConflict`,
+ * src/tenant/tenant.ts) says a retry cannot succeed: the tenant is broken and is a finding.
  */
-const inFlightConflict = (r: CallResult): boolean =>
-  r.status === 409 && r.errorType === 'ConflictError' && / is (CREATING|UPDATING);/.test(String(r.body?.message ?? ''));
+const retryableConflict = (r: CallResult): boolean =>
+  r.status === 409 && r.errorType === 'ConflictError' &&
+  !String(r.body?.message ?? '').includes('a retry cannot succeed');
 
 /**
  * Read rate under writes (spec §5.2): ListDeployments by tenant, GetDeployment and ListCells
@@ -261,8 +262,8 @@ export async function readRate(s: ScenarioEnv): Promise<void> {
       })(),
     );
     // A record write every tenth tick: UpdateTenant runs the record event (no build). A
-    // ConflictError (409) on a tenant in flight is expected, no refusal; any other 409 is a
-    // finding below (inFlightConflict).
+    // ConflictError (409) a retry can clear is expected, no refusal; a 409 that says a retry
+    // cannot succeed is a finding below (retryableConflict).
     if (i % 10 === 0) {
       const w = tenants[writeIndex % tenants.length];
       writeIndex += 1;
@@ -272,7 +273,7 @@ export async function readRate(s: ScenarioEnv): Promise<void> {
   }
   await Promise.all(inflight);
   const written = await Promise.all(updates);
-  for (const r of written) if (!inFlightConflict(r)) expectStatus(s, r, 202, 'UpdateTenant');
+  for (const r of written) if (!retryableConflict(r)) expectStatus(s, r, 202, 'UpdateTenant');
   const landed = written.filter((r) => r.status === 202).length;
   if (landed === 0) s.rec.finding(`no UpdateTenant write was accepted (${written.length} sent): the reads ran under no writes`);
   const results = await writes;
