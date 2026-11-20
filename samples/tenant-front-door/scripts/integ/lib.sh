@@ -83,8 +83,11 @@ destroy_one() { # STACK-SELECTOR LABEL
 cp_cdk() {
   local label="$1" account="$2"
   shift 2
-  ( cd "$CONTROL_PLANE_DIR" && CDK_DEFAULT_ACCOUNT="$account" CDK_DEFAULT_REGION="$REGION" \
-      npx cdk "$@" --output "$RUN_DIR/cdk.out.${label}" ) >"$RUN_DIR/logs/${label}.log" 2>&1
+  # The CDK CLI sets CDK_DEFAULT_ACCOUNT to the credentials' account for the app it starts,
+  # so the target account is set inside the app command (the control plane's cdk.json app).
+  ( cd "$CONTROL_PLANE_DIR" && npx cdk "$@" --output "$RUN_DIR/cdk.out.${label}" \
+      --app "env CDK_DEFAULT_ACCOUNT=$account CDK_DEFAULT_REGION=$REGION npx ts-node -P tsconfig.json --prefer-ts-exts src/main.ts" \
+  ) >"$RUN_DIR/logs/${label}.log" 2>&1
 }
 
 # stack_out STACK KEY: an output of one of this run's stacks in the edge account.
