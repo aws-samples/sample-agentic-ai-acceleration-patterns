@@ -105,7 +105,7 @@ describe('ingest door (spec §3.2, §5)', () => {
         await handler(
           request(
             { events: [good('01JD0000000000000000000001')] },
-            'arn:aws:sts::444455556666:assumed-role/demo-ue-01JD00000000000000000000C2/s',
+            'arn:aws:sts::444455556666:assumed-role/demo-ue-01JD00000000000000000000E2/s',
           ),
         )
       ).statusCode,

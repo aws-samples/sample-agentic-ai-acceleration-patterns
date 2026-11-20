@@ -157,11 +157,11 @@ describe('bus share guard (ADR-0006)', () => {
     ddb
       .on(QueryCommand)
       .resolvesOnce({ Items: [emitter(VENDOR_A, 'E1')], LastEvaluatedKey: { PK: 'x' } })
-      .resolvesOnce({ Items: [emitter(ACCOUNT, 'E2'), emitter(VENDOR_B, 'C3')] });
+      .resolvesOnce({ Items: [emitter(ACCOUNT, 'E2'), emitter(VENDOR_B, 'E3')] });
     const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
     expect(await offendingEmitters(db, 'table', [VENDOR_A, VENDOR_B], NOW)).toEqual([
       { accountId: VENDOR_A, emitterId: 'E1', status: 'ACTIVE' },
-      { accountId: VENDOR_B, emitterId: 'C3', status: 'ACTIVE' },
+      { accountId: VENDOR_B, emitterId: 'E3', status: 'ACTIVE' },
     ]);
     const calls = ddb.commandCalls(QueryCommand);
     expect(calls).toHaveLength(2);

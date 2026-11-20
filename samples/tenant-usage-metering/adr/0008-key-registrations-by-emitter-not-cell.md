@@ -11,10 +11,10 @@ The admin API, its ids and the table keys named the registration unit after
 the control plane's cell: `/cells/{cellId}/emitter`, `CellEmitter`,
 `CELL#<cellId>`, `TENANT_NOT_IN_CELL`. The role-keyed item was
 `EMITTER#<account>#<role>`. The service therefore read as usable only with
-the control plane. Deployers outside it have other layouts: one
-pooled application in one account, or many applications across many
-accounts. For them the unit that signs usage is one IAM role in one account
-for one application, and "cell" is a word they would have to map onto it.
+the control plane. Deployers outside it have other layouts: one pooled
+application in one account, or many applications across many accounts.
+For them the unit that signs usage is one IAM role in one account for one
+application, and "cell" is a word they would have to map onto it.
 
 ## Options considered
 ### Option 1: Keep the cell names and explain the mapping in the docs

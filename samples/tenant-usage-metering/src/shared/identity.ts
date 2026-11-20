@@ -83,7 +83,7 @@ export function emitterFromCallerArn(userArn: string | undefined | null, fleet: 
   };
 }
 
-/** The registry key of an emitter (spec §4.2). */
+/** The role-keyed registry item of an emitter, `ROLE#<account>#<role>` (spec §4.2). */
 export function emitterRoleKey(accountId: string, roleName: string): { PK: string; SK: string } {
   return { PK: `ROLE#${accountId}#${roleName}`, SK: 'META' };
 }
