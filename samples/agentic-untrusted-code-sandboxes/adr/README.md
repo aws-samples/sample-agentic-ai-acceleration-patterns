@@ -69,3 +69,4 @@
 | [0063](0063-bound-the-answer-by-its-json-size-and-the-input-by-the-runner-limit.md) | Bound the answer by its JSON size and the input by the runner's limit | Proposed | 2026-11-20 |
 | [0064](0064-read-an-unframed-request-as-empty-and-bound-the-work-after-a-job.md) | Read an unframed request as empty and bound the work after a job | Proposed | 2026-11-20 |
 | [0065](0065-require-an-explicit-endpoint-choice-with-a-supplied-vpc.md) | Require an explicit endpoint choice with a supplied VPC | Proposed | 2026-11-20 |
+| [0066](0066-mark-the-integration-app-in-module-state-not-in-context.md) | Mark the integration app in module state, not in context | Proposed | 2026-11-20 |

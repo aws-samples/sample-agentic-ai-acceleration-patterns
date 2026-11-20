@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-20
+- Amended by: ADR-0066
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -52,3 +53,5 @@ the integration stack does not test that the schedule fires; the schedule
 rule is covered by the construct's synth tests. Revisit if a second test
 needs another override: add it to `overrides.ts` and to the list in
 `integration-test.md`, "Test-only shortcuts".
+
+Note 2026-11-20: amended by ADR-0066. The guard is a mark in module state, not the context key `rcIntegTest`.
