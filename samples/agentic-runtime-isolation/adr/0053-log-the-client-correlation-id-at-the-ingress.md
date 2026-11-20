@@ -16,9 +16,8 @@ line. The ingress lines (`request authorised`, `request served`,
 `request admitted`, `request refused`, `token refused`) carry the verified
 `tenantId`, `backend` and `txn` where they have them, but nothing the
 client chose, so a driver record joins them only by tenant and time; the
-stress slice matches refusals by count for want of it (ADR-0052). A refusal
-at the authoriser has no `txn`, and a `token refused` line no `tenantId`
-either.
+stress slice matches refusals by count for want of it (ADR-0052). An
+authoriser refusal has no `txn`, and a `token refused` line no `tenantId`.
 
 ## Options considered
 ### Option 1: Log a client `x-correlation-id` header, shape-checked, as a field
@@ -54,15 +53,15 @@ dimension, not forwarded to the Runtime, and not part of the session id. A
 request without the header logs no field.
 
 ## Consequences
-Easier: a client (the stress driver, a support desk) joins its own
-record to the ingress lines on one field, for refusals and served requests
-alike. Harder: the ingress logs hold one client-chosen value; its alphabet
-and length bound what it can carry (threat model T-109, M-87). A request
+Easier: a client (the stress driver, a support desk) joins its own record
+to the ingress lines on one field, for refusals and served requests alike.
+Harder: the ingress logs hold one client-chosen value; its alphabet and
+length bound what it can carry (threat model T-109, M-87). A request
 answered from the authoriser cache logs no authoriser line, so its id
 appears on the integration function's line only; lines written by the
 shared modules a function calls (the limiter, the mint, SDK retries) carry
 no `correlationId` and join by `tenantId` and time; a delegated hop
 (ADR-0048) carries no client header, so it joins its caller by `txn`, not
 by `correlationId`. Revisit if a trace context reaches every hop, the load
-driver, CloudFront Functions and the Runtime included, without sampling,
-or if the Runtime starts to forward client headers.
+driver, CloudFront Functions and the Runtime included, without sampling, or
+if the Runtime starts to forward client headers.

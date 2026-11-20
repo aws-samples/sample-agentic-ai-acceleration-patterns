@@ -510,10 +510,13 @@ plugin. No finding is in code the branch added or changed.
 
 Run on branch `stress/w8-ingress-correlation-id` (ADR-0053) after
 `npx projen build` (45 suites, 941 tests). ProtoShield v0.18.0 with every
-plugin. No finding is in code the branch added or changed.
+plugin, ASH v3.1.2 in local mode (grype, syft, opengrep and cfn-nag not
+installed). No finding is in code the branch added or changed.
 
 | Scanner | Finding | File | Outcome |
 |---|---|---|---|
 | ProtoShield (Semgrep, CDK NAG, Checkov, Secrets, License headers) | 0 | - | - |
 | ProtoShield (IAM least privilege) | 3 high, 1 medium: `resources: ['*']` in the KMS key policies (`kms:GetPublicKey` and `kms:Sign` on the token signer, `kms:Sign` on the tool-context key); X-Ray | `src/shared/token-signer.cdk.ts`, `src/tools-gateway.cdk.ts`, `src/backend/agentcore-runtime.cdk.ts` | As in the 2026-11-04 review: a KMS key policy applies to its own key and `*` is the only resource it accepts; X-Ray accepted (ADR-0014) |
-| ProtoShield (CVE) | minimatch, glob | `package-lock.json` | Accepted in the 2026-11-04 review (transitive build- and test-time dependencies) |
+| ProtoShield (CVE) | minimatch, glob | `package-lock.json` | Accepted in the 2026-11-04 review (transitive build- and test-time dependencies); ASH npm-audit reports 0 |
+| ASH (detect-secrets) | 1 on the base32 alphabet constant of the stress probe | `scripts/stress/k6/probe.js` | False positive: a constant, not a secret; suppressed with a reason in `.ash/.ash.yaml` |
+| ASH (bandit, CDK NAG, Checkov, Semgrep) | 0 beyond the suppressions above | - | - |
