@@ -21,7 +21,8 @@ def instructions(path):
     """The Dockerfile's instructions, comments dropped and continuation lines joined."""
     with open(path, encoding="utf-8") as f:
         text = f.read().replace("\\\n", " ")
-    return [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    lines = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    return [line.split(None, 1)[0].upper() + line[len(line.split(None, 1)[0]):] for line in lines]  # keywords are case-insensitive
 
 
 def copied(path, prefix=""):
@@ -50,7 +51,9 @@ def imported_modules(entry="runner.py"):
             queue.append(module + ".py")
         for names in re.findall(r"^\s*from runner import \(?([\w, \n]+?)\)?\s*(?:#.*)?$", source, re.M):
             queue.extend(n.strip().split(" as ")[0] + ".py" for n in names.split(",") if n.strip())
-        for module in re.findall(r"^\s*import runner\.(\w+)", source, re.M):
+        for names in re.findall(r"^\s*from runner import \(([^)]*)\)", source, re.M):
+            queue.extend(n.strip().split(" as ")[0] + ".py" for n in names.replace("\n", " ").split(",") if n.strip())
+        for module in re.findall(r"^\s*import [^#\n]*?\brunner\.(\w+)", source, re.M):
             queue.append(module + ".py")
         assert not re.search(r"^\s*(from \. import|import importlib|__import__)", source, re.M), "an import form the walk does not follow: " + name
     return seen
