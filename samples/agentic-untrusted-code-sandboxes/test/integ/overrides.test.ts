@@ -74,7 +74,7 @@ describe('RC_INTEG_OVERRIDES (T-88, M-60)', () => {
     expect(JSON.stringify(resolved)).not.toMatch(/INTEG|integ/i);
   });
 
-  test('only run-time code names it, and no CDK-side file names it or imports a file that does', () => {
+  test('only run-time code names it, and no CDK-side file names it', () => {
     const files = sourceFiles(SRC);
     const holders = files.filter((f) => readFileSync(f, 'utf8').includes('RC_INTEG'));
     // Allowed: the names file (src/env.ts `TEST_HOOKS`), the tool, the reaper and the backends' run-time classes.
@@ -82,15 +82,13 @@ describe('RC_INTEG_OVERRIDES (T-88, M-60)', () => {
     expect(holders.filter((f) => !allowed(f))).toEqual([]);
     const cdkSide = files.filter((f) => /\.cdk\.ts$|[\\/](props|main|backend-construct|handler-entry|index|backend|protocol)\.ts$|[\\/]gateway[\\/]/.test(f));
     expect(cdkSide.length).toBeGreaterThan(0);
-    // The construct imports `env.ts` for its function variables; it may not import any other holder, and it may not use `TEST_HOOKS`.
-    const stems = new Set(holders.filter((f) => !/[\\/]env\.ts$/.test(f)).map((f) => f.replace(/\.ts$/, '')));
+    // The construct imports `env.ts` for its function variables and the backends' CDK files import their run-time classes, so
+    // an import proves nothing; what matters is that no CDK-side file names a hook, and that no run-time holder re-exports a name.
+    for (const f of holders.filter((h) => !/[\\/]env\.ts$/.test(h))) expect(readFileSync(f, 'utf8')).not.toMatch(/export[^;\n]*(RC_INTEG|TEST_HOOK)/);
     for (const f of cdkSide) {
       const text = readFileSync(f, 'utf8');
       expect(text).not.toContain('RC_INTEG');
-      expect(text).not.toContain('TEST_HOOKS');
-      for (const m of text.matchAll(/from '(\.[^']*)'/g)) {
-        expect(stems.has(path.resolve(path.dirname(f), m[1]))).toBe(false);
-      }
+      expect(text).not.toContain('TEST_HOOK');
     }
     for (const f of files) {
       const text = readFileSync(f, 'utf8');

@@ -48,8 +48,10 @@ Before it deploys, the driver checks, and fails early naming the cause:
 - a CloudWatch Logs resource policy slot is free (10 per Region, not
   adjustable), for the DNS Firewall instance;
 - tenant-identity's user pool is published, and Docker answers;
-- the producer's dependencies are installed (the driver runs `npm ci` in
-  `samples/agentic-runtime-isolation` once, for the sample agent bundle).
+- the producer's dependencies and generated Smithy sources exist (the driver
+  runs `npm ci` and `smithy build` in `samples/agentic-runtime-isolation`
+  once, for the sample agent bundle and the synth; the Smithy CLI must be on
+  the path).
 
 | Variable | Default | Effect |
 |---|---|---|

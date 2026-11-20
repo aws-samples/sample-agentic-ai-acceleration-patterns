@@ -93,10 +93,12 @@ export interface IntegAppOptions {
   readonly prefix?: string;
   /** The bundled sample agent directory (`app.js`); the driver builds it, a unit test passes a stub. */
   readonly agentCodePath: string;
+  /** Extra app context; a unit test passes `aws:cdk:bundling-stacks: []` to skip esbuild. */
+  readonly context?: Record<string, unknown>;
 }
 
 export function createIntegApp(options: IntegAppOptions): App {
-  const app = new App({ context: { [INTEG_CONTEXT_KEY]: true } });
+  const app = new App({ context: { [INTEG_CONTEXT_KEY]: true, ...options.context } });
   const prefix = options.prefix ?? stackPrefix();
   const account = process.env.CDK_DEFAULT_ACCOUNT;
   const region = process.env.CDK_DEFAULT_REGION;
@@ -174,8 +176,7 @@ export function createIntegApp(options: IntegAppOptions): App {
     o('OffboardFunction', required(view.offboardFunction, 'offboardFunction').functionName);
     const reaper = findFunction(instances[name], /reaper/i, 'reaper');
     o('ReaperFunction', reaper.functionName);
-    const tool = findFunction(targets[name], /./, 'gateway tool');
-    o('ToolFunction', tool.functionName);
+    o('ToolFunction', targets[name].function.functionName);
     for (const backend of INSTANCE_BACKENDS[name]) {
       const b = required(view.backends[backend], `backend ${backend}`);
       for (const [key, value] of Object.entries(b.outputs())) out(backendOutputKey(name, backend, key), value);
@@ -191,14 +192,13 @@ export function createIntegApp(options: IntegAppOptions): App {
   out(outputKey('run-code', 'RunCodeFunction'), required(runCode.runCodeFunction, 'runCodeFunction (standalone)').functionName);
   // TEST ONLY: the two switches of threat T-88, on the run-code instance's reaper and tool functions only.
   enableIntegOverrides(findFunction(instances['run-code'], /reaper/i, 'reaper'));
-  enableIntegOverrides(findFunction(targets['run-code'], /./, 'gateway tool'), { failStartTenant: TENANT.e });
+  enableIntegOverrides(targets['run-code'].function, { failStartTenant: TENANT.e });
   enableIntegOverrides(required(runCode.runCodeFunction, 'runCodeFunction') as lambda.Function, { failStartTenant: TENANT.e });
 
   // Query-log group of the firewall instance, for the dns and dns-platform steps.
-  const queryLogs = instances['run-code'].node.findAll().filter((n): n is logs.LogGroup => n instanceof logs.LogGroup && /query/i.test(n.node.path));
-  if (queryLogs.length !== 1) throw new Error(`expected one query-log group under RunCode (found ${queryLogs.length})`);
-  out('QueryLogGroup', queryLogs[0].logGroupName);
-  out('QueryLogGroupArn', queryLogs[0].logGroupArn);
+  const firewall = required(instances['run-code'].dnsFirewall, 'dnsFirewall (the run-code instance turns it on)');
+  out('QueryLogGroup', firewall.queryLogGroup.logGroupName);
+  out('QueryLogGroupArn', firewall.queryLogGroup.logGroupArn);
 
   // The standalone step: a role with the invoke grant through the construct's own method, and one with none.
   const vendor = new iam.Role(stack, 'VendorRole', { assumedBy: new iam.AccountRootPrincipal(), description: 'integration test: holds the run-code invoke grant (grantInvokeRunCode)' });
@@ -208,7 +208,7 @@ export function createIntegApp(options: IntegAppOptions): App {
   out('NoGrantRoleArn', nogrant.roleArn);
 
   // The no-egress presigned PUT goes to a bucket the endpoint policies do not name.
-  const outside = new s3.Bucket(stack, 'OutsideBucket', { removalPolicy: RemovalPolicy.DESTROY, autoDeleteObjects: true, blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL, enforceSSL: true, encryption: s3.BucketEncryption.S3_MANAGED });
+  const outside = new s3.Bucket(stack, 'Outside', { removalPolicy: RemovalPolicy.DESTROY, autoDeleteObjects: true, blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL, enforceSSL: true, encryption: s3.BucketEncryption.S3_MANAGED });
   out('OutsideBucket', outside.bucketName);
   // The presigned PUT handed to the hostile code is signed by a role that may put under integ/ in that bucket and nothing else.
   const presign = new iam.Role(stack, 'PresignRole', { assumedBy: new iam.AccountRootPrincipal(), description: 'integration test: signs the no-egress presigned PUT' });

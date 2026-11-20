@@ -53,6 +53,11 @@ export async function preconditions(aws: Aws, rec: Recorder): Promise<{ policyBa
     const ci = await run('npm', ['ci'], 'producer-npm-ci.log', process.env, PRODUCER_DIR);
     rec.check(`npm ci in agentic-runtime-isolation (exit ${ci.code})`, ci.code === 0);
   }
+  if (!existsSync(path.join(PRODUCER_DIR, 'src', 'smithy'))) {
+    rec.note('generating the producer\'s Smithy sources (smithy build); the integration app imports them');
+    const sm = await run('smithy', ['build'], 'producer-smithy.log', process.env, PRODUCER_DIR).catch(() => ({ code: 1, tail: '', log: '' }));
+    rec.check(`smithy build in agentic-runtime-isolation (exit ${sm.code}; the Smithy CLI must be on the path)`, sm.code === 0);
+  }
   return { policyBaseline: policies };
 }
 
