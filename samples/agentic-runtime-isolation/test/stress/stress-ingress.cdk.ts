@@ -219,6 +219,7 @@ export class StressIngressStack extends Stack {
     new CfnOutput(this, 'StageName', { value: STAGE_NAME });
     new CfnOutput(this, 'IngressLogGroupName', { value: ingressLogs.logGroupName });
     new CfnOutput(this, 'AuthorizerFunctionName', { value: authorizerFn.functionName });
+    new CfnOutput(this, 'AuthorizerLogGroupName', { value: authorizerFn.logGroup.logGroupName });
     new CfnOutput(this, 'IngressFunctionName', { value: ingressFn.functionName });
     const interceptors: string[] = [];
     for (const [name, gateway] of Object.entries(this.ingress.toolsGateways)) {

@@ -57,7 +57,7 @@ SCALE="${STRESS_SCALE:-small}"
 [[ "$SCALE" =~ ^(small|medium|large)$ ]] || { echo "STRESS_SCALE must be small, medium or large (got '${SCALE}')" >&2; exit 1; }
 PREFIX="${STRESS_PREFIX:-RuntimeIsolationStress}"
 [[ "$PREFIX" =~ ^[A-Za-z][A-Za-z0-9]{0,39}$ ]] || { echo "STRESS_PREFIX must be 1 to 40 letters and digits, starting with a letter" >&2; exit 1; }
-STATE_DIR="${HOME}/.runtime-isolation-stress/${PREFIX}"
+STATE_DIR="${STRESS_STATE_DIR:-${HOME}/.runtime-isolation-stress/${PREFIX}}"
 OUTPUTS="${STATE_DIR}/outputs.json"
 MANIFEST="${STATE_DIR}/manifest.json"
 # Lines of tenants and users created but not yet in the manifest; merged on
@@ -293,7 +293,7 @@ echo "subscribe: $(jq '[.tenants[] | select(.active)] | length' "$MANIFEST") act
 job_create_user() { # TENANT_ID LABEL
   local st
   job_init
-  st="$(retry '429' platform POST "platform/tenants/$1/users" "$(jq -nc --arg e "success+${2}@simulator.amazonses.com" '{email: $e}')")"
+  st="$(retry '429|503' platform POST "platform/tenants/$1/users" "$(jq -nc --arg e "success+${2}@simulator.amazonses.com" '{email: $e}')")"
   echo "CreateUser ${st}" >>"$STATUSES"
   [[ "$st" == 201 ]] && jq -c --arg t "$1" '{tenantId: $t, user: .user.username}' "$BODY" >>"$PENDING"
   : >"$BODY"
@@ -301,6 +301,8 @@ job_create_user() { # TENANT_ID LABEL
 }
 START=$SECONDS
 USERS_WANTED=0
+# CreateUser writes to Cognito too: 503 is its throttle (ADR-0037), so it is paced as CreateTenant is and retried.
+INTERVAL_MS=250
 while IFS=$'\t' read -r idx id have; do
   for ((n = have + 1; n <= USERS_PER; n++)); do
     USERS_WANTED=$((USERS_WANTED + 1))

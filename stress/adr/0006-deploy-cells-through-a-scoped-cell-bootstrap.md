@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0011
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -101,3 +102,14 @@ roles get a second boundary without IAM writes (TVM roles still need
 a compromised cell build can change any cell in its account, which is the
 role pair's scope. Revisit if the CDK bootstrap gains per-stack execution
 roles, or if cells move to a deploy path without the CDK.
+
+Note 2026-11-20: ADR-0011 keeps the cell permissions boundary on the
+execution role only and gives every role a cell creates the cell workload
+boundary, which allows no IAM action and `sts:AssumeRole` on `role/cell/*`
+only. The execution role may create or re-bound a role only with the
+workload boundary, assumes no role, and passes `/cell/` roles to Lambda and
+AgentCore only. The pre-run check refuses a role pair under either
+boundary. The shipped policies, the `/cell/` aspect, the cell bootstrap
+script and the probes are in
+[`stress/application/`](../application/README.md), whose README records
+their probe runs in both cell accounts.
