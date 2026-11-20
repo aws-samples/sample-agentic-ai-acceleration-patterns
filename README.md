@@ -27,6 +27,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
   - [Agentic runtime isolation: the agent platform at scale](#agentic-runtime-isolation-the-agent-platform-at-scale)
   - [Per-Tenant Encrypted Ingestion for Agentic Applications](#per-tenant-encrypted-ingestion-for-agentic-applications)
   - [Tenant Memory Isolation through AgentCore Gateway](#tenant-memory-isolation-through-agentcore-gateway)
+  - [Tenant usage metering for agentic applications](#tenant-usage-metering-for-agentic-applications)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -42,6 +43,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 | [Agentic runtime isolation: the agent platform at scale](./samples/agentic-runtime-isolation/) | A pooled agent platform on Amazon Bedrock AgentCore: one ingress verifies the tenant token, resolves the agent and tool grant from an entitlement store, mints a 5-minute transaction token and invokes the agent's Runtime (a fresh microVM session per request by default, one per tenant or per user with session mapping) with tenant-scoped credentials, while a tools gateway (one by default, more optional) checks each call with a per-tool interceptor and then AgentCore Policy. With `agentDelegation` on the `api-gateway` ingress, an agent hands the transaction to another agent through that ingress, which re-issues the token for the next hop. |
 | [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/) | One drop zone and pipeline for every tenant's documents, each tenant's encrypted with its own AWS KMS key, kept apart by key policy and identity-policy ABAC rather than code, validated by a deployer-extensible chain before it lands, in a vendor-owned or tenant-owned key tier, with cryptographic offboarding. |
 | [Tenant Memory Isolation through AgentCore Gateway](./samples/tenant-memory-isolation/) | One pooled AgentCore Memory that tenants reach only through an AgentCore Gateway with the native Memory connector: Cedar in `ENFORCE` binds every write and recall to the token's `tenant_id`, each tenant's facts live in the namespace equal to its tenant id, and a resource policy denies every data operation outside the Gateway's role. |
+| [Tenant usage metering for agentic applications](./samples/tenant-usage-metering/) | One metering service the vendor owns: emitters admitted by their SigV4 role and the control plane's placement of tenants in cells, a replayable raw store, hourly recounts under a run-time meter catalog with `ADJUSTMENT` records for late events, configured sinks and a usage bus with a subscriber construct. |
 
 ## The Cell-Based Control Plane
 
@@ -169,6 +171,24 @@ claim decides where a tenant writes and what it recalls. It ships as the
 contract; the demo bundles a synthetic one.
 
 [Tenant Memory Isolation through AgentCore Gateway](./samples/tenant-memory-isolation/)
+
+## Tenant usage metering for agentic applications
+
+A multi-tenant agentic application bills and limits its tenants on what
+they use, and that usage is produced in every cell, in the vendor's
+accounts and in tenants' own. When each part reports on its own, counts
+drift, any emitter can claim usage for any tenant, and a new meter is a
+redeploy.
+
+This sample is one metering service. An emitter signs its usage events as
+its cell's role; the ingest door admits an event only when the control
+plane's vendor hooks placed that tenant in that cell. Every admitted event
+lands in a replayable raw store, each hour is recounted from it under a
+run-time meter catalog, and a late event gives an `ADJUSTMENT` record, never
+a changed one. Records go to HTTP or export sinks and to a usage bus that
+readers attach to through the `UsageSubscriber` construct.
+
+[Tenant usage metering for agentic applications](./samples/tenant-usage-metering/)
 
 ## Contributing a sample
 
