@@ -473,14 +473,22 @@ describe('handleRequest', () => {
     });
 
     it('a backend failure line carries it', async () => {
-      const failing: InvokeBackend = {
-        invoke: async () => {
-          throw new TypeError('boom');
-        },
-        transportHeaders: () => ({}),
-      } as unknown as InvokeBackend;
-      await handleRequest(await withId('run1-7-a5'), writer().out, deps(failing));
+      await handleRequest(await withId('run1-7-a5'), writer().out, deps(new FakeBackend([], new TypeError('boom'))));
       expect(lines().find((l) => l.message === 'backend invoke failed')).toMatchObject({ correlationId: 'run1-7-a5' });
+    });
+
+    it('a stream interrupted line carries it', async () => {
+      const breaking: InvokeBackend = {
+        invoke: async () => ({
+          contentType: 'text/event-stream',
+          body: (async function* () {
+            yield Buffer.from('data: a\n\n');
+            throw new TypeError('reset');
+          })(),
+        }),
+      };
+      await handleRequest(await withId('run1-7-a6'), writer().out, deps(breaking));
+      expect(lines().find((l) => l.message === 'stream interrupted')).toMatchObject({ correlationId: 'run1-7-a6' });
     });
 
     it('an id of any other shape is dropped, never trimmed, and changes nothing else', async () => {
@@ -493,7 +501,8 @@ describe('handleRequest', () => {
         const served = lines().find((l) => l.message === 'request served');
         expect(served.correlationId).toBeUndefined();
         if (bad.length > 0) {
-          expect(logs.join('\n')).not.toContain(bad);
+          expect(lines().some((l) => Object.values(l).includes(bad))).toBe(false);
+          expect(logs.join('\n')).not.toContain(JSON.stringify(bad).slice(1, -1));
         }
       }
     });

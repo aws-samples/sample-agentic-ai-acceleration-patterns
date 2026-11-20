@@ -178,14 +178,15 @@ issue_token() {
 
 urlencode() { jq -sRr @uri; }
 
-# tamper TOKEN_VAR -> the token with one signature character changed (never printed by callers).
+# tamper TOKEN_VAR [POS] -> the token with the signature character at POS (default 5)
+# changed (never printed by callers).
 # A middle character: the last base64url character of an RS256 signature
 # carries padding bits, so changing it may leave the signature bytes intact.
 tamper() {
-  local t="${!1}" head sig c
-  head="${t%.*}"; sig="${t##*.}"; c="${sig:5:1}"
+  local t="${!1}" pos="${2:-5}" head sig c
+  head="${t%.*}"; sig="${t##*.}"; c="${sig:pos:1}"
   if [[ "$c" == A ]]; then c=B; else c=A; fi
-  printf '%s.%s%s%s' "$head" "${sig:0:5}" "$c" "${sig:6}"
+  printf '%s.%s%s%s' "$head" "${sig:0:pos}" "$c" "${sig:pos+1}"
 }
 
 # narrow REFRESH_VAR TENANT_ID SCOPE OUT_VAR -> sets NARROW_STATUS, and OUT_VAR on 200 (RFC 8693, tenant-identity ADR-0009).

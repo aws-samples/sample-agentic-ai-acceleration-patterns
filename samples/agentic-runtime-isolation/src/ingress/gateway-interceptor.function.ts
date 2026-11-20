@@ -23,8 +23,10 @@
  * fault (a target not named after its backend), so this module warns once
  * per cold start to make it visible in the logs.
  *
- * Logs carry header NAMES never, and values never: only the verified
- * tenantId, the session prefix, a status and a reason (P-9, spike V-7).
+ * Logs carry header NAMES never, and header values never with one exception:
+ * the client's `x-correlation-id`, logged as `correlationId` only in its
+ * accepted shape (ADR-0053). Otherwise only the verified tenantId, the
+ * session prefix, a status and a reason (P-9, spike V-7).
  *
  * Cost metering (P-10, ADR-0017) on this ingress is request-side only. A
  * REQUEST interceptor returns before the Gateway invokes the Runtime and

@@ -109,8 +109,8 @@ target per agent, which the agent added after the deploy does not get.
 | 8b-metrics | per-tenant `ModelOutputTokens` for tenant A on `api-gateway`; none on `agentcore-gateway` |
 | 10 | destroy from the exit trap (also on failure) and verify nothing is left |
 
-That is 36 rows; the 22 per-ingress rows run on both all-on stacks, so the
-table the script prints holds 58 steps.
+That is 38 rows; the 24 per-ingress rows run on both all-on stacks, so the
+table the script prints holds 62 steps.
 
 ## Runtime and cost
 

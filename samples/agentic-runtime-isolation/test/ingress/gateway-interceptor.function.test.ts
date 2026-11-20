@@ -340,6 +340,14 @@ describe('intercept', () => {
     expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted').correlationId).toBeUndefined();
   });
 
+  it('the pipeline failed line carries the client correlation id (ADR-0053)', async () => {
+    const d = deps();
+    jest.spyOn(d.pipeline, 'validate').mockRejectedValue(new TypeError('boom'));
+    const out = await intercept(event({ 'x-correlation-id': 'run1-2-c3' }, body), d);
+    expect((out.http as any).transformedGatewayResponse.statusCode).toBe(502);
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'pipeline failed')).toMatchObject({ correlationId: 'run1-2-c3' });
+  });
+
   it('exports a handler', () => {
     expect(typeof handler).toBe('function');
   });

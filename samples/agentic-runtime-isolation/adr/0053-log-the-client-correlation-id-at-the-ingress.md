@@ -43,8 +43,8 @@ id is missing on exactly the requests a stress run counts.
 Option 1. Each ingress function (the `api-gateway` authoriser and
 integration function, and the `agentcore-gateway` interceptor) reads
 `x-correlation-id` through `correlationIdOf` (`src/shared/headers.ts`) and
-logs it as `correlationId` on every line that function writes for the
-request. The value is kept only when it is 1 to 64 characters of
+logs it as `correlationId` on every line the function's handler writes for
+the request. The value is kept only when it is 1 to 64 characters of
 `[A-Za-z0-9-]`; any other value is dropped whole, never trimmed or escaped,
 so a log line never holds client text outside that alphabet. The value
 decides nothing: it is not an authoriser identity source, not a metric

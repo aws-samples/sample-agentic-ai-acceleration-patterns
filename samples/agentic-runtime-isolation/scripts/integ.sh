@@ -694,8 +694,10 @@ run_all_on() { # SUFFIX
   note "all refused"
   end_step
 
-  begin "6c ${INGRESS}" "client correlation id (ADR-0053): a well-formed id is logged as correlationId on the ${REQUEST_LINE:-request} line; a malformed one is dropped and the request still served"
-  since="$(( $(date +%s) * 1000 - 1000 ))"
+  begin "6c ${INGRESS}" "client correlation id (ADR-0053): a well-formed id is logged as correlationId on the ${REQUEST_LINE} line; a malformed one is dropped and the request still served"
+  # Start the window on a fresh second, so no earlier step's tenant-A line is in it.
+  sleep 1
+  since="$(( $(date +%s) * 1000 ))"
   local cid_bad="integ_${RUN}_badcorr" cid_good="integ-${RUN}-corr"
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" report)" "" "" "$cid_bad")"; check "malformed id: HTTP 200 (got ${status})" eq "$status" 200
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" report)" "" "" "$cid_good")"; check "well-formed id: HTTP 200 (got ${status})" eq "$status" 200
@@ -707,9 +709,8 @@ run_all_on() { # SUFFIX
   check "the malformed id is in no line of the ${REQUEST_LINE} log group" eq "$(log_lines "$REQUEST_LOGS" "$since" "\"${cid_bad}\"" | wc -l | tr -d ' ')" 0
   if [[ "$INGRESS" == api-gateway ]]; then
     # A token step 6 never sent, so the authoriser runs rather than answering from its cache.
-    local sig="${A1_ACCESS##*.}" flip
-    if [[ "${sig:9:1}" == A ]]; then flip=B; else flip=A; fi
-    TAMPERED_C="${A1_ACCESS%.*}.${sig:0:9}${flip}${sig:10}"
+    local TAMPERED_C
+    TAMPERED_C="$(tamper A1_ACCESS 9)"
     status="$(invoke "$ENDPOINT" TAMPERED_C "$(body "$C1" report)" "" "" "${cid_good}-r")"; check "tampered with an id: 401|403 (got ${status})" status_is "401|403" "$status"
     check "the authoriser's token refused line carries the id" \
       wait_log "$AUTHORIZER_LOGS" "$since" "\"${cid_good}-r\"" ".message == \"token refused\" and .correlationId == \"${cid_good}-r\""

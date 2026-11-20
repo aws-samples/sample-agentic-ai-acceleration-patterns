@@ -341,6 +341,18 @@ describe('authorize on /{backend}/delegations (ADR-0048)', () => {
     expect(logs.filter((l) => l.includes('delegation refused') && l.includes('token_invalid'))).toHaveLength(3);
   });
 
+  it('the delegation refused and admitted lines carry the client correlation id (ADR-0053)', async () => {
+    const withId = (authorization: string, id: string) => {
+      const e = event(authorization);
+      return { ...e, headers: { ...e.headers, 'x-correlation-id': id } };
+    };
+    await authorizer.authorize(withId('Bearer an-identity-token', 'run1-9-d1'), deps());
+    expect(JSON.parse(logs.find((l) => l.includes('delegation refused'))!)).toMatchObject({ correlationId: 'run1-9-d1' });
+    logs = [];
+    await authorizer.authorize(withId('Bearer caller-token', 'run1-9-d2'), deps());
+    expect(JSON.parse(logs.find((l) => l.includes('delegation admitted'))!)).toMatchObject({ correlationId: 'run1-9-d2' });
+  });
+
   it('an undeclared target is delegation_not_declared before any lookup; a declared target without an entry is Deny (404 in the log); the three delegation refusals carry their public reason', async () => {
     const undeclared = await authorizer.authorize(event('Bearer caller-token', '/nobody/delegations', 'nobody'), deps());
     expect(effectOf(undeclared)).toBe('Deny');

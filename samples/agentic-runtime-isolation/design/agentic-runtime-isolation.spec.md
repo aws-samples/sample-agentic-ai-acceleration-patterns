@@ -286,10 +286,11 @@ transaction token's id), `grantSize` (entries in `scope`) and `mint`
 `tenantId`, `user` (the identity provider's `sub`), `agent`, `txn`,
 `gateway`, `target`, `tool` and `decision` (ADR-0040), and each tool writes
 `tool served` with `tenantId`, `txn`, duration and bytes. `txn` joins one
-agent request to every tool call it made. Every line the ingress functions
-write for a request also carries `correlationId` when the client sent an
-`x-correlation-id` of 1 to 64 characters of `[A-Za-z0-9-]` (ADR-0053); it
-joins the client's own record to the ingress lines and decides nothing.
+agent request to every tool call it made. Every line an ingress function's
+handler writes for a request also carries `correlationId` when the client
+sent an `x-correlation-id` of 1 to 64 characters of `[A-Za-z0-9-]`
+(ADR-0053); it joins the client's own record to the ingress lines and
+decides nothing.
 
 **P-10. Every request's cost is attributable to its tenant.** The ingress
 meters, per tenant, what each billed service charges for: ingress requests,
@@ -1981,6 +1982,11 @@ Steps 11 to 25 run between step 9-registry and step 10.
 5. `session` on: A1 resumes `c1`: same microVM.
 6. No token, a tampered token, an ID token: 401 or 403 by ingress (§5.1). A
    malformed `conversationId`: 400 or 403.
+6c. Client correlation id (ADR-0053): a well-formed `x-correlation-id` is
+   logged as `correlationId` on `request served` (`api-gateway`) or
+   `request admitted` (`agentcore-gateway`); a malformed one is in neither
+   log group and the request is still served; on `api-gateway` the
+   authoriser's `token refused` line for a tampered token carries it (P-9).
 7. Grants: for each row of the expected grants table, the agent
    reports `scope`, `tenant_id`, `agent`, `aud` and `act.sub` equal to the
    expected values.
