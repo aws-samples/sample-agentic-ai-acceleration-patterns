@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT-0
 
 The stress test of the `api-gateway` ingress, as a slice of the platform stress
 test ([ADR-0052](../../adr/0052-run-the-stress-test-as-a-slice-of-the-platform-stress-contract.md),
-[`docs/stress-test.spec.md`](../../../../docs/stress-test.spec.md) §3.4). The plan, the pass
-criteria and the implementation contract are in
+[`docs/stress-test.spec.md`](../../../../docs/stress-test.spec.md) §3.4).
+The plan, the pass criteria and the implementation contract are in
 [`design/agentic-runtime-isolation.stress-test.md`](../../design/agentic-runtime-isolation.stress-test.md);
 the scripts follow [`scripts/CONVENTIONS.md`](../CONVENTIONS.md): statuses and
 timings on stdout, never a token, a credential or a header value.
@@ -84,8 +84,11 @@ State lives in `$STRESS_HOME/$STRESS_PREFIX/agentic-runtime-isolation/`
 (default `~/.aaa-stress/<prefix>/agentic-runtime-isolation/`): `outputs.json`
 (stack outputs), `manifest.json` (tenant ids, names and user names; never a
 token or a password), `timings.txt` (deploy and destroy seconds, and the driver
-host's ready seconds) and `pending.jsonl`. Without `STRESS_STATE_DIR` the
-scripts use `~/.runtime-isolation-stress/<prefix>/` instead, for a run by hand.
+host's ready seconds), `pending.jsonl` and, until a teardown's leftover check
+passes, `teardown-log-groups` (the log groups the stacks owned and the CDK
+provider functions' groups, so a rerun handles them after their stacks are
+gone). Without `STRESS_STATE_DIR` the scripts use
+`~/.runtime-isolation-stress/<prefix>/` instead, for a run by hand.
 
 ## By hand, step by step
 

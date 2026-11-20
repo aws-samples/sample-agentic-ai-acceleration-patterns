@@ -145,6 +145,10 @@ describe('slice.sh', () => {
     const run = spawnSync('bash', [SLICE_SH, 'run', 'S1'], { env: sliceEnv('small', { AWS_REGION: 'eu-central-1' }), encoding: 'utf8' });
     expect(run.status).toBe(2);
     expect(run.stderr).toContain('STRESS_RESULTS is not set');
+    // k6.sh and lib.js need STRESS_COMMIT; run checks it before S2's recipe changes anything.
+    const noCommit = spawnSync('bash', [SLICE_SH, 'run', 'S2'], { env: sliceEnv('small', { AWS_REGION: 'eu-central-1', STRESS_RESULTS: os.tmpdir() }), encoding: 'utf8' });
+    expect(noCommit.status).toBe(2);
+    expect(noCommit.stderr).toContain('slice.sh run: STRESS_COMMIT is not set');
     const collect = spawnSync('bash', [SLICE_SH, 'collect'], { env: sliceEnv('small', { AWS_REGION: 'eu-central-1', STRESS_RESULTS: os.tmpdir() }), encoding: 'utf8' });
     expect(collect.status).toBe(2);
     expect(collect.stderr).toContain('STRESS_COMMIT is not set');
@@ -169,7 +173,7 @@ describe('slice.sh', () => {
     const results = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-s2-'));
     try {
       const r = spawnSync('bash', [SLICE_SH, 'run', 'S2'], {
-        env: sliceEnv('small', { AWS_REGION: 'eu-central-1', STRESS_RESULTS: results }),
+        env: sliceEnv('small', { AWS_REGION: 'eu-central-1', STRESS_RESULTS: results, STRESS_COMMIT: 'abc1234' }),
         encoding: 'utf8',
       });
       expect(r.status).toBe(2);
@@ -215,6 +219,195 @@ describe('slice.sh', () => {
       expect(teardown('large', '--fixtures')).toBe('teardown.sh [--tenants]');
       expect(teardown('small', '--fixtures')).toBe('teardown.sh [--tenants]');
     });
+  });
+});
+
+/**
+ * teardown.sh against a stubbed account: `aws` and `npx` on PATH read and change a folder of
+ * fake stacks and log groups, and the shared driver's teardown.sh is a stub that removes the
+ * driver stack and leaves its S3 auto-delete handler's log group behind, as the real one does.
+ */
+(hasJq ? describe : describe.skip)('teardown.sh (log groups across a rerun, ADR-0052)', () => {
+  const AWS_STUB = `#!/usr/bin/env bash
+set -u
+F="$FAKE"
+svc="$1"; op="$2"; shift 2
+name="" query="" prefix="" lg=""
+while (( $# )); do
+  case "$1" in
+    --stack-name) name="$2"; shift 2 ;;
+    --query) query="$2"; shift 2 ;;
+    --log-group-name-prefix) prefix="$2"; shift 2 ;;
+    --log-group-name) lg="$2"; shift 2 ;;
+    --stack-status-filter) shift; while (( $# )) && [[ "$1" != --* ]]; do shift; done ;;
+    *) shift ;;
+  esac
+done
+touch "$F/logs.txt"
+case "$svc $op" in
+  "cloudformation describe-stacks")
+    [[ -d "$F/stacks/$name" ]] || { echo "Stack with id $name does not exist" >&2; exit 254; }
+    if [[ "$query" == *StackStatus* ]]; then echo CREATE_COMPLETE; else echo None; fi ;;
+  "cloudformation list-stacks")
+    names=""
+    for d in "$F"/stacks/*/; do
+      [[ -d "$d" ]] || continue
+      n="$(basename "$d")"
+      if [[ "$query" == *-ingress* || "$n" == *-agents-* ]]; then names="\${names:+\${names}$(printf '\\t')}$n"; fi
+    done
+    echo "$names" ;;
+  "cloudformation list-stack-resources")
+    d="$F/stacks/$name"
+    [[ -d "$d" ]] || exit 254
+    case "$query" in
+      *AWS::Logs::LogGroup*) if [[ -f "$d/loggroups" ]]; then paste -sd '\\t' "$d/loggroups"; fi ;;
+      *AWS::Lambda::Function*) if [[ -f "$d/functions" ]]; then cat "$d/functions"; fi ;;
+    esac ;;
+  "logs describe-log-groups")
+    if [[ "$query" == *"logGroupName=="* ]]; then grep -Fx -- "$prefix" "$F/logs.txt" || true
+    else awk -v p="$prefix" 'index($0, p) == 1' "$F/logs.txt" | paste -sd '\\t' -; fi ;;
+  "logs delete-log-group")
+    grep -Fxq -- "$lg" "$F/logs.txt" || exit 254
+    grep -Fxv -- "$lg" "$F/logs.txt" >"$F/logs.new" || true
+    mv "$F/logs.new" "$F/logs.txt"
+    echo "$lg" >>"$F/deleted.txt" ;;
+esac
+exit 0
+`;
+  const NPX_STUB = `#!/usr/bin/env bash
+F="$FAKE"
+if [[ "$1" == cdk && "$2" == synth ]]; then
+  out=""
+  while (( $# )); do [[ "$1" == --output ]] && out="$2"; shift; done
+  mkdir -p "$out"
+  for d in "$F"/stacks/*/; do [[ -d "$d" ]] && echo '{}' >"$out/$(basename "$d").template.json"; done
+  exit 0
+fi
+if [[ "$1" == cdk && "$4" == destroy ]]; then
+  s="$5"
+  if [[ -e "$F/fail-destroy-$s" ]]; then echo "Error: $s DELETE_FAILED"; exit 1; fi
+  if [[ -f "$F/stacks/$s/loggroups" && ! -e "$F/leak" ]]; then
+    grep -Fxv -f "$F/stacks/$s/loggroups" "$F/logs.txt" >"$F/logs.new" || true
+    mv "$F/logs.new" "$F/logs.txt"
+  fi
+  rm -r "$F/stacks/$s"
+  exit 0
+fi
+exit 1
+`;
+  const DRIVER_STUB = `#!/usr/bin/env bash
+rm -r "$FAKE/stacks/\${STRESS_PREFIX}-driver"
+echo "/aws/lambda/\${STRESS_PREFIX}-driver-CustomS3AutoDeleteObjectsCustomRes-abc" >>"$FAKE/logs.txt"
+echo "stack=\${STRESS_PREFIX}-driver destroy_seconds=1"
+`;
+  const P = 'StressT';
+  const PROVIDER_GROUP = `/aws/lambda/${P}-driver-CustomS3AutoDeleteObjectsCustomRes-abc`;
+  const OWNED_GROUP = `${P}-ingress-AccessLogs-xyz`;
+  let root: string;
+  let fake: string;
+  let state: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'teardown-rerun-'));
+    const scripts = path.join(root, 'samples', 'sample', 'scripts');
+    fs.mkdirSync(path.join(scripts, 'stress'), { recursive: true });
+    fs.copyFileSync(path.join(STRESS_DIR, 'teardown.sh'), path.join(scripts, 'stress', 'teardown.sh'));
+    fs.copyFileSync(path.join(STRESS_DIR, '..', 'lib.sh'), path.join(scripts, 'lib.sh'));
+    fs.mkdirSync(path.join(root, 'stress', 'driver'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'stress', 'driver', 'teardown.sh'), DRIVER_STUB, { mode: 0o755 });
+    fs.mkdirSync(path.join(root, 'bin'));
+    fs.writeFileSync(path.join(root, 'bin', 'aws'), AWS_STUB, { mode: 0o755 });
+    fs.writeFileSync(path.join(root, 'bin', 'npx'), NPX_STUB, { mode: 0o755 });
+    fake = path.join(root, 'fake');
+    state = path.join(root, 'state');
+    fs.mkdirSync(path.join(fake, 'stacks'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'home'));
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  function stack(name: string, files: { functions?: string[]; loggroups?: string[] }) {
+    const d = path.join(fake, 'stacks', name);
+    fs.mkdirSync(d);
+    if (files.functions) fs.writeFileSync(path.join(d, 'functions'), files.functions.join('\n') + '\n');
+    if (files.loggroups) fs.writeFileSync(path.join(d, 'loggroups'), files.loggroups.join('\n') + '\n');
+  }
+  function teardown() {
+    return spawnSync('bash', [path.join(root, 'samples', 'sample', 'scripts', 'stress', 'teardown.sh')], {
+      env: {
+        PATH: `${path.join(root, 'bin')}:${process.env.PATH}`,
+        HOME: path.join(root, 'home'),
+        AWS_REGION: 'eu-central-1',
+        STRESS_SCALE: 'small',
+        STRESS_PREFIX: P,
+        STRESS_STATE_DIR: state,
+        FAKE: fake,
+      },
+      encoding: 'utf8',
+    });
+  }
+  const logs = () => fs.readFileSync(path.join(fake, 'logs.txt'), 'utf8').split('\n').filter((l) => l);
+  const deleted = () => (fs.existsSync(path.join(fake, 'deleted.txt')) ? fs.readFileSync(path.join(fake, 'deleted.txt'), 'utf8').split('\n').filter((l) => l) : []);
+  const LIST = () => path.join(state, 'teardown-log-groups');
+
+  it("removes a destroyed driver's provider log group on the rerun after a later destroy failed", () => {
+    stack(`${P}-driver`, {
+      functions: [
+        `CustomS3AutoDeleteObjectsCustomResourceProviderHandler9D90184F\t${P}-driver-CustomS3AutoDeleteObjectsCustomRes-abc`,
+        `HostReady1A2B3C4D\t${P}-driver-HostReady-1`,
+      ],
+    });
+    stack(`${P}-ingress`, {
+      functions: [`AWS679f53fac002430cb0da5b7982bd22872D164C4C\t${P}-ingress-AWS679f53fac002430cb0da5b7982-def`],
+      loggroups: [OWNED_GROUP],
+    });
+    fs.writeFileSync(path.join(fake, 'logs.txt'), `${OWNED_GROUP}\n`);
+    fs.writeFileSync(path.join(fake, `fail-destroy-${P}-ingress`), '');
+
+    const first = teardown();
+    expect(first.status).toBe(1);
+    expect(first.stderr).toContain(`FAILED: destroy ${P}-ingress`);
+    expect(fs.existsSync(path.join(fake, 'stacks', `${P}-driver`))).toBe(false);
+    expect(logs()).toContain(PROVIDER_GROUP);
+    expect(fs.readFileSync(LIST(), 'utf8').split('\n').filter((l) => l)).toEqual([
+      `owned ${OWNED_GROUP}`,
+      `provider ${PROVIDER_GROUP}`,
+      `provider /aws/lambda/${P}-ingress-AWS679f53fac002430cb0da5b7982-def`,
+    ]);
+
+    fs.rmSync(path.join(fake, `fail-destroy-${P}-ingress`));
+    const rerun = teardown();
+    expect(rerun.stderr).toBe('');
+    expect(rerun.status).toBe(0);
+    expect(rerun.stdout).toContain('CDK provider function log groups: 2 functions, 1 groups removed');
+    expect(rerun.stdout).toContain('leftovers: none');
+    expect(logs()).toEqual([]);
+    expect(deleted()).toEqual([PROVIDER_GROUP]);
+    expect(fs.existsSync(LIST())).toBe(false);
+  });
+
+  it('reports a log group a destroyed stack owned as a leak, never deletes it, and keeps reporting it on a rerun', () => {
+    stack(`${P}-ingress`, { loggroups: [OWNED_GROUP] });
+    fs.writeFileSync(path.join(fake, 'logs.txt'), `${OWNED_GROUP}\n`);
+    fs.writeFileSync(path.join(fake, 'leak'), '');
+
+    const first = teardown();
+    expect(first.status).toBe(1);
+    expect(first.stderr).toContain(`log group ${OWNED_GROUP} (the stack owned it: a construct leak, ADR-0019)`);
+    expect(fs.existsSync(LIST())).toBe(true);
+
+    const rerun = teardown();
+    expect(rerun.status).toBe(1);
+    expect(rerun.stdout).toContain('finishing the leftover check of an earlier teardown');
+    expect(rerun.stderr).toContain(`log group ${OWNED_GROUP} (the stack owned it: a construct leak, ADR-0019)`);
+    expect(logs()).toEqual([OWNED_GROUP]);
+    expect(deleted()).toEqual([]);
+    expect(fs.existsSync(LIST())).toBe(true);
+  });
+
+  it('has nothing to do with no stacks and no list from an earlier teardown', () => {
+    const r = teardown();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('nothing to destroy');
   });
 });
 

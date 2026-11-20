@@ -15,7 +15,9 @@
 # outside the stacks (ADR-0047) and the log groups of the CDK provider
 # functions, which no stack owns (ADR-0052), and fails if a stack, a log group
 # the stacks owned, a Runtime log group or a registry parameter with this
-# prefix is still there.
+# prefix is still there. The log-group lists are kept in
+# $STRESS_STATE_DIR/teardown-log-groups until that check passes, so a rerun
+# also handles the groups of stacks an earlier teardown already destroyed.
 #
 # The seeded tenants are kept for the next run (§8.2: Cognito bills per
 # monthly active user). With --tenants, they are deleted first, at 2 a second
@@ -165,18 +167,27 @@ mapfile -t LIVE_AGENTS < <(aws cloudformation list-stacks --output text \
 # LogRetention singleton, a provider framework's handlers): the CDK gives it no log group of
 # its own, so Lambda creates `/aws/lambda/<function>` outside the stack when it runs, on the
 # destroy too. Those groups, and only those, are removed (ADR-0052, "Teardown").
+# Both lists persist in the state folder (`owned <name>` and `provider <name>` lines,
+# de-duplicated) and are read back on a rerun: a stack an earlier, failed teardown destroyed
+# is no longer there to list, and its provider groups would otherwise fail the leftover check
+# on every rerun. The file is removed once the leftover check passes.
+LOG_GROUPS="${STATE_DIR}/teardown-log-groups"
 OWNED_LOGS="${MAIN_TMP}/owned-log-groups"
 PROVIDER_LOGS="${MAIN_TMP}/provider-log-groups"
-: >"$OWNED_LOGS"
-: >"$PROVIDER_LOGS"
 PROVIDER_ID='CustomResourceProvider|^AWS679f53fac002430cb0da5b7982bd2287|^LogRetentionaae0aa3c5b4d4f87b02d85b201efdd8a|framework(onEvent|onTimeout|isComplete)'
-log_groups_of() { # STACK -> appends to OWNED_LOGS and PROVIDER_LOGS
+log_groups_of() { # STACK -> merges its groups into LOG_GROUPS
+  local found="${MAIN_TMP}/found-log-groups"
+  : >"$found"
   aws cloudformation list-stack-resources --stack-name "$1" \
     --query "StackResourceSummaries[?ResourceType=='AWS::Logs::LogGroup'].PhysicalResourceId" --output text 2>/dev/null \
-    | tr '\t' '\n' | grep -v -e '^$' -e '^None$' >>"$OWNED_LOGS" || true
+    | tr '\t' '\n' | grep -v -e '^$' -e '^None$' | sed 's/^/owned /' >>"$found" || true
   aws cloudformation list-stack-resources --stack-name "$1" \
     --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]" --output text 2>/dev/null \
-    | awk -F'\t' -v re="$PROVIDER_ID" '$1 ~ re && $2 != "" && $2 != "None" { print "/aws/lambda/" $2 }' >>"$PROVIDER_LOGS" || true
+    | awk -F'\t' -v re="$PROVIDER_ID" '$1 ~ re && $2 != "" && $2 != "None" { print "provider /aws/lambda/" $2 }' >>"$found" || true
+  [[ -s "$found" ]] || return 0
+  touch "$LOG_GROUPS"
+  sort -u "$LOG_GROUPS" "$found" >"${LOG_GROUPS}.new"
+  mv "${LOG_GROUPS}.new" "$LOG_GROUPS"
 }
 
 # leftovers: removes the provider functions' log groups and the Runtime log groups a late line
@@ -184,6 +195,12 @@ log_groups_of() { # STACK -> appends to OWNED_LOGS and PROVIDER_LOGS
 # parameter of this slice is still there.
 leftovers() {
   local removed=0 rt g lp left left_stacks left_params err LEFT=""
+  : >"$OWNED_LOGS"
+  : >"$PROVIDER_LOGS"
+  if [[ -s "$LOG_GROUPS" ]]; then
+    awk '$1 == "owned" && NF == 2 { print $2 }' "$LOG_GROUPS" >"$OWNED_LOGS"
+    awk '$1 == "provider" && NF == 2 { print $2 }' "$LOG_GROUPS" >"$PROVIDER_LOGS"
+  fi
   while read -r rt; do
     [[ -n "$rt" && "$rt" != None ]] || continue
     for g in $(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
@@ -240,6 +257,7 @@ leftovers() {
     [[ -z "$left_params" || "$left_params" == None ]] || LEFT="${LEFT}; parameters ${left_params}"
   fi
   [[ -z "$LEFT" ]] || fail "leftovers after teardown${LEFT}"
+  rm -f "$LOG_GROUPS"
   echo "leftovers: none (stacks, log groups, agent runtimes, registry parameters)"
 }
 RUNTIME_LOG_PREFIX="/aws/bedrock-agentcore/runtimes/"
@@ -253,7 +271,13 @@ exists "${PREFIX}-driver" && DRIVER=true
 STACKS+=("${LIVE_AGENTS[@]}")
 exists "${PREFIX}-ingress" && STACKS+=("${PREFIX}-ingress")
 if (( ${#STACKS[@]} == 0 )) && [[ "$DRIVER" == false ]]; then
-  echo "stacks: none with prefix ${PREFIX}; nothing to destroy"
+  if [[ -s "$LOG_GROUPS" ]]; then
+    # An earlier teardown destroyed the stacks and died before its leftover check.
+    echo "stacks: none with prefix ${PREFIX}; finishing the leftover check of an earlier teardown"
+    leftovers
+  else
+    echo "stacks: none with prefix ${PREFIX}; nothing to destroy"
+  fi
   (( TENANTS_LEFT == 0 )) || fail "${TENANTS_LEFT} tenants were not deleted; they stay in the manifest, rerun with --tenants"
   exit 0
 fi

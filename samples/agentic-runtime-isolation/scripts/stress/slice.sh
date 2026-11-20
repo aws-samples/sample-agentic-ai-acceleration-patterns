@@ -173,7 +173,7 @@ case "$verb" in
       S7) k6_file=s7-eviction.js ;;
       *) echo "slice.sh run: unknown scenario ${scenario} (S1 to S7)" >&2; exit 2 ;;
     esac
-    need_var run STRESS_RESULTS
+    need_var run STRESS_RESULTS STRESS_COMMIT
     # S2 is a cold-ingress test on warm conversations: it reuses the ones S1 opened in this run
     # (the run id names them). Without them every tenant opens a new Runtime session at the
     # herd rate, which tests the Runtime's session-creation quota instead (plan F-2).

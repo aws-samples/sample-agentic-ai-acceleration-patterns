@@ -2,13 +2,14 @@
 
 The load half of the stress test in
 [design/agentic-runtime-isolation.stress-test.md](../../../design/agentic-runtime-isolation.stress-test.md)
-(§5 Phase 2, §6, §8.3). `slice.sh run`, through `stress/driver/k6.sh`, copies this folder,
-the shared library [`stress/k6/`](../../../../../stress/k6/README.md) (token pool and
-refresh, pacing, the correlation header, the result record) and the seed manifest to the
-driver host and runs one scenario; the pass table is computed by `collect.sh`, not here,
-from the records and the hops' logs. Written for k6 v1.x (ES modules, `k6/execution`);
-`k6 inspect` of S1 to S7 passes on k6 v2.4 on the driver host, and `slice.sh run` runs
-them against an ingress (ADR-0052).
+(§5 Phase 2, §6, §8.3). `slice.sh run`, through `stress/driver/k6.sh`, copies
+this folder, the shared library [`stress/k6/`](../../../../../stress/k6/README.md)
+(token pool and refresh, pacing, the correlation header, the result record) and
+the seed manifest to the driver host and runs one scenario; the pass table is
+computed by `collect.sh`, not here, from the records and the hops' logs. Written
+for k6 v1.x (ES modules, `k6/execution`); `k6 inspect` of S1 to S7 passes on k6
+v2.4 on the driver host, and `slice.sh run` runs them against an ingress
+(ADR-0052).
 
 | File | Does |
 |---|---|
@@ -28,10 +29,10 @@ tenant at 20 new conversations a second overall. The timed scenario starts
 after it. Thresholds: `isolation_mismatch` and `positive_control_fail` count 0;
 one always-passing `tenant_429{tenant:<id>}` per tenant the scenario uses, so
 the summary keeps each tenant's 429 count; and in S3 `steady_sent` at least
-95 % of `steady_expected`.
-`handleSummary` writes `summary.json` (without `setup_data`) and the text
-summary to stdout, and, when `STRESS_RESULTS` is set, the scenario's result
-record (`agentic-runtime-isolation.S<n>.json`, stress spec §4.3).
+95 % of `steady_expected`. `handleSummary` writes `summary.json` (without
+`setup_data`) and the text summary to stdout, and, when `STRESS_RESULTS` is
+set, the scenario's result record (`agentic-runtime-isolation.S<n>.json`,
+stress spec §4.3).
 
 ## Environment
 
