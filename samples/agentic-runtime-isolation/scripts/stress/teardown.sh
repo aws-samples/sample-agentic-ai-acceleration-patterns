@@ -15,9 +15,11 @@
 # outside the stacks (ADR-0047) and the log groups of the CDK provider
 # functions, which no stack owns (ADR-0052), and fails if a stack, a log group
 # the stacks owned, a Runtime log group or a registry parameter with this
-# prefix is still there. The log-group lists are kept in
-# $STRESS_STATE_DIR/teardown-log-groups until that check passes, so a rerun
-# also handles the groups of stacks an earlier teardown already destroyed.
+# prefix is still there. What that check needs (the log-group lists, the
+# Runtime ids, the REST API id and the registry prefix) is written to
+# $STRESS_STATE_DIR/teardown-state before any destroy and kept until the check
+# passes, so a rerun also checks what the stacks an earlier teardown already
+# destroyed left behind.
 #
 # The seeded tenants are kept for the next run (§8.2: Cognito bills per
 # monthly active user). With --tenants, they are deleted first, at 2 a second
@@ -167,15 +169,24 @@ mapfile -t LIVE_AGENTS < <(aws cloudformation list-stacks --output text \
 # LogRetention singleton, a provider framework's handlers): the CDK gives it no log group of
 # its own, so Lambda creates `/aws/lambda/<function>` outside the stack when it runs, on the
 # destroy too. Those groups, and only those, are removed (ADR-0052, "Teardown").
-# Both lists persist in the state folder (`owned <name>` and `provider <name>` lines,
-# de-duplicated) and are read back on a rerun: a stack an earlier, failed teardown destroyed
-# is no longer there to list, and its provider groups would otherwise fail the leftover check
-# on every rerun. The file is removed once the leftover check passes.
-LOG_GROUPS="${STATE_DIR}/teardown-log-groups"
+# Both lists persist in the state file (`owned <name>` and `provider <name>` lines) with the
+# Runtime ids, the REST API id and the registry prefix collected below (`runtime <id>`,
+# `restapi <id>`, `registry <path>`), all de-duplicated and written before any destroy. A
+# rerun reads them back: a stack an earlier, failed teardown destroyed is no longer there to
+# list, so without them its provider groups would fail the leftover check on every rerun,
+# and its Runtime log groups, agent runtimes, execution log group and registry parameters
+# would go unchecked. The file is removed once the leftover check passes.
+STATE="${STATE_DIR}/teardown-state"
 OWNED_LOGS="${MAIN_TMP}/owned-log-groups"
 PROVIDER_LOGS="${MAIN_TMP}/provider-log-groups"
 PROVIDER_ID='CustomResourceProvider|^AWS679f53fac002430cb0da5b7982bd2287|^LogRetentionaae0aa3c5b4d4f87b02d85b201efdd8a|framework(onEvent|onTimeout|isComplete)'
-log_groups_of() { # STACK -> merges its groups into LOG_GROUPS
+remember() { # FILE of `<kind> <value>` lines -> merged into STATE
+  [[ -s "$1" ]] || return 0
+  touch "$STATE"
+  sort -u "$STATE" "$1" >"${STATE}.new"
+  mv "${STATE}.new" "$STATE"
+}
+log_groups_of() { # STACK -> merges its groups into STATE
   local found="${MAIN_TMP}/found-log-groups"
   : >"$found"
   aws cloudformation list-stack-resources --stack-name "$1" \
@@ -184,31 +195,35 @@ log_groups_of() { # STACK -> merges its groups into LOG_GROUPS
   aws cloudformation list-stack-resources --stack-name "$1" \
     --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]" --output text 2>/dev/null \
     | awk -F'\t' -v re="$PROVIDER_ID" '$1 ~ re && $2 != "" && $2 != "None" { print "provider /aws/lambda/" $2 }' >>"$found" || true
-  [[ -s "$found" ]] || return 0
-  touch "$LOG_GROUPS"
-  sort -u "$LOG_GROUPS" "$found" >"${LOG_GROUPS}.new"
-  mv "${LOG_GROUPS}.new" "$LOG_GROUPS"
+  remember "$found"
+}
+recorded() { # KIND -> the values of STATE's `<KIND> <value>` lines
+  [[ -s "$STATE" ]] || return 0
+  awk -v k="$1" '$1 == k && NF == 2 { print $2 }' "$STATE"
 }
 
 # leftovers: removes the provider functions' log groups and the Runtime log groups a late line
 # recreated (ADR-0047), then fails if a stack, a log group, an agent runtime or a registry
 # parameter of this slice is still there.
 leftovers() {
-  local removed=0 rt g lp left left_stacks left_params err LEFT=""
+  local removed=0 rt g lp id rp left left_stacks left_params err LEFT=""
+  local all_runtimes="${MAIN_TMP}/all-runtimes" api_ids=() registry_prefixes=()
   : >"$OWNED_LOGS"
   : >"$PROVIDER_LOGS"
-  if [[ -s "$LOG_GROUPS" ]]; then
-    awk '$1 == "owned" && NF == 2 { print $2 }' "$LOG_GROUPS" >"$OWNED_LOGS"
-    awk '$1 == "provider" && NF == 2 { print $2 }' "$LOG_GROUPS" >"$PROVIDER_LOGS"
-  fi
+  # What this run collected from live stacks, and what an earlier teardown recorded.
+  recorded owned >"$OWNED_LOGS"
+  recorded provider >"$PROVIDER_LOGS"
+  { cat "$RUNTIMES"; recorded runtime; } | grep -v -e '^$' -e '^None$' | sort -u >"$all_runtimes" || true
+  mapfile -t api_ids < <({ [[ -z "$REST_API_ID" ]] || echo "$REST_API_ID"; recorded restapi; } | sort -u)
+  mapfile -t registry_prefixes < <({ [[ -z "$REGISTRY_PREFIX" ]] || echo "$REGISTRY_PREFIX"; recorded registry; } | sort -u)
   while read -r rt; do
-    [[ -n "$rt" && "$rt" != None ]] || continue
+    [[ -n "$rt" ]] || continue
     for g in $(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null); do
       [[ -n "$g" && "$g" != None ]] || continue
       aws logs delete-log-group --log-group-name "$g" >/dev/null 2>&1 && removed=$((removed + 1))
     done
-  done <"$RUNTIMES"
-  echo "runtime log groups: $(wc -l <"$RUNTIMES") runtimes, ${removed} leftover groups removed"
+  done <"$all_runtimes"
+  echo "runtime log groups: $(wc -l <"$all_runtimes") runtimes, ${removed} leftover groups removed"
   removed=0
   while read -r g; do
     [[ -n "$g" ]] || continue
@@ -223,10 +238,10 @@ leftovers() {
     --query "StackSummaries[?StackName == '${PREFIX}-ingress' || StackName == '${PREFIX}-driver' || starts_with(StackName, '${PREFIX}-agents-')].StackName" 2>/dev/null | tr '\t' ' ' || true)"
   [[ -z "$left_stacks" || "$left_stacks" == None ]] || LEFT="${LEFT}; stacks ${left_stacks}"
   while read -r rt; do
-    [[ -n "$rt" && "$rt" != None ]] || continue
+    [[ -n "$rt" ]] || continue
     left="$(aws logs describe-log-groups --log-group-name-prefix "${RUNTIME_LOG_PREFIX}${rt}" --query 'logGroups[].logGroupName' --output text 2>/dev/null || true)"
     [[ -z "$left" || "$left" == None ]] || LEFT="${LEFT}; runtime log groups ${left}"
-  done <"$RUNTIMES"
+  done <"$all_runtimes"
   # The groups the stacks owned, by name; then by prefix, which also finds one a stack owned
   # in an earlier, partial teardown. CloudFormation names an unnamed group
   # `<stack>-<logical id>-<suffix>`; a function with no group of its own logs to
@@ -241,23 +256,23 @@ leftovers() {
   done <"$OWNED_LOGS"
   local prefixes=("${PREFIX}-ingress-" "${PREFIX}-agents-" "${PREFIX}-driver-"
     "/aws/lambda/${PREFIX}-ingress-" "/aws/lambda/${PREFIX}-agents-" "/aws/lambda/${PREFIX}-driver-")
-  [[ -z "$REST_API_ID" ]] || prefixes+=("API-Gateway-Execution-Logs_${REST_API_ID}")
+  for id in "${api_ids[@]}"; do prefixes+=("API-Gateway-Execution-Logs_${id}"); done
   for lp in "${prefixes[@]}"; do
     left="$(aws logs describe-log-groups --log-group-name-prefix "$lp" --query 'logGroups[].logGroupName' --output text 2>/dev/null | tr '\t' ' ' || true)"
     [[ -z "$left" || "$left" == None ]] || LEFT="${LEFT}; log groups ${left}"
   done
   # A Runtime the stack created is gone when GetAgentRuntime says so; any other answer counts as left.
   while read -r rt; do
-    [[ -n "$rt" && "$rt" != None ]] || continue
+    [[ -n "$rt" ]] || continue
     err="$(aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id "$rt" --query agentRuntimeId --output text 2>&1 >/dev/null || true)"
     [[ -n "$err" && "$err" == *ResourceNotFoundException* ]] || LEFT="${LEFT}; agent runtime ${rt}"
-  done <"$RUNTIMES"
-  if [[ -n "$REGISTRY_PREFIX" ]]; then
-    left_params="$(aws ssm get-parameters-by-path --path "$REGISTRY_PREFIX" --recursive --query 'Parameters[].Name' --output text 2>/dev/null | tr '\t' ' ' || true)"
+  done <"$all_runtimes"
+  for rp in "${registry_prefixes[@]}"; do
+    left_params="$(aws ssm get-parameters-by-path --path "$rp" --recursive --query 'Parameters[].Name' --output text 2>/dev/null | tr '\t' ' ' || true)"
     [[ -z "$left_params" || "$left_params" == None ]] || LEFT="${LEFT}; parameters ${left_params}"
-  fi
+  done
   [[ -z "$LEFT" ]] || fail "leftovers after teardown${LEFT}"
-  rm -f "$LOG_GROUPS"
+  rm -f "$STATE"
   echo "leftovers: none (stacks, log groups, agent runtimes, registry parameters)"
 }
 RUNTIME_LOG_PREFIX="/aws/bedrock-agentcore/runtimes/"
@@ -271,8 +286,8 @@ exists "${PREFIX}-driver" && DRIVER=true
 STACKS+=("${LIVE_AGENTS[@]}")
 exists "${PREFIX}-ingress" && STACKS+=("${PREFIX}-ingress")
 if (( ${#STACKS[@]} == 0 )) && [[ "$DRIVER" == false ]]; then
-  if [[ -s "$LOG_GROUPS" ]]; then
-    # An earlier teardown destroyed the stacks and died before its leftover check.
+  if [[ -s "$STATE" ]]; then
+    # An earlier teardown destroyed the stacks and failed or died before its leftover check passed.
     echo "stacks: none with prefix ${PREFIX}; finishing the leftover check of an earlier teardown"
     leftovers
   else
@@ -322,11 +337,12 @@ done
 # line written after its Delete recreates outside the stack (ADR-0047; what
 # scripts/integ.sh removes too), the stacks' log groups (above), and the
 # registry prefix the ingress published under, to check no parameter stays behind.
+# All of it goes into the state file before the first destroy.
 for s in "${STACKS[@]}"; do
   log_groups_of "$s"
   aws cloudformation list-stack-resources --stack-name "$s" \
     --query "StackResourceSummaries[?ResourceType=='AWS::BedrockAgentCore::Runtime'].PhysicalResourceId" --output text 2>/dev/null \
-    | tr '\t' '\n' | sed 's#.*/##' | grep -v '^$' >>"$RUNTIMES" || true
+    | tr '\t' '\n' | sed 's#.*/##' | grep -v -e '^$' -e '^None$' >>"$RUNTIMES" || true
 done
 if exists "${PREFIX}-ingress"; then
   REGISTRY_PREFIX="$(aws cloudformation describe-stacks --stack-name "${PREFIX}-ingress" \
@@ -340,6 +356,13 @@ if exists "${PREFIX}-ingress"; then
     --query "Stacks[0].Outputs[?OutputKey=='RestApiId'].OutputValue" --output text 2>/dev/null || true)"
   [[ "$REST_API_ID" == None ]] && REST_API_ID=""
 fi
+COLLECTED="${MAIN_TMP}/collected"
+{
+  sed 's/^/runtime /' "$RUNTIMES"
+  [[ -z "$REST_API_ID" ]] || echo "restapi ${REST_API_ID}"
+  [[ -z "$REGISTRY_PREFIX" ]] || echo "registry ${REGISTRY_PREFIX}"
+} >"$COLLECTED"
+remember "$COLLECTED"
 
 for s in "${STACKS[@]}"; do
   echo "== destroy ${s}"

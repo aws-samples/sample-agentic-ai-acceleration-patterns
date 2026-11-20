@@ -85,10 +85,11 @@ State lives in `$STRESS_HOME/$STRESS_PREFIX/agentic-runtime-isolation/`
 (stack outputs), `manifest.json` (tenant ids, names and user names; never a
 token or a password), `timings.txt` (deploy and destroy seconds, and the driver
 host's ready seconds), `pending.jsonl` and, until a teardown's leftover check
-passes, `teardown-log-groups` (the log groups the stacks owned and the CDK
-provider functions' groups, so a rerun handles them after their stacks are
-gone). Without `STRESS_STATE_DIR` the scripts use
-`~/.runtime-isolation-stress/<prefix>/` instead, for a run by hand.
+passes, `teardown-state` (the log groups the stacks owned, the CDK provider
+functions' groups, the Runtime ids, the REST API id and the registry prefix,
+so a rerun checks them after their stacks are gone). Without
+`STRESS_STATE_DIR` the scripts use `~/.runtime-isolation-stress/<prefix>/`
+instead, for a run by hand.
 
 ## By hand, step by step
 

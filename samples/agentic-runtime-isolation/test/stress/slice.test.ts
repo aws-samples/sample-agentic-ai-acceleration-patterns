@@ -232,22 +232,27 @@ describe('slice.sh', () => {
 set -u
 F="$FAKE"
 svc="$1"; op="$2"; shift 2
-name="" query="" prefix="" lg=""
+name="" query="" prefix="" lg="" ppath="" rtid=""
 while (( $# )); do
   case "$1" in
     --stack-name) name="$2"; shift 2 ;;
     --query) query="$2"; shift 2 ;;
     --log-group-name-prefix) prefix="$2"; shift 2 ;;
     --log-group-name) lg="$2"; shift 2 ;;
+    --path) ppath="$2"; shift 2 ;;
+    --agent-runtime-id) rtid="$2"; shift 2 ;;
     --stack-status-filter) shift; while (( $# )) && [[ "$1" != --* ]]; do shift; done ;;
     *) shift ;;
   esac
 done
-touch "$F/logs.txt"
+touch "$F/logs.txt" "$F/params.txt"
 case "$svc $op" in
   "cloudformation describe-stacks")
     [[ -d "$F/stacks/$name" ]] || { echo "Stack with id $name does not exist" >&2; exit 254; }
-    if [[ "$query" == *StackStatus* ]]; then echo CREATE_COMPLETE; else echo None; fi ;;
+    if [[ "$query" == *StackStatus* ]]; then echo CREATE_COMPLETE
+    elif [[ "$query" == *RegistryPrefix* && -f "$F/stacks/$name/RegistryPrefix" ]]; then cat "$F/stacks/$name/RegistryPrefix"
+    elif [[ "$query" == *RestApiId* && -f "$F/stacks/$name/RestApiId" ]]; then cat "$F/stacks/$name/RestApiId"
+    else echo None; fi ;;
   "cloudformation list-stacks")
     names=""
     for d in "$F"/stacks/*/; do
@@ -262,7 +267,13 @@ case "$svc $op" in
     case "$query" in
       *AWS::Logs::LogGroup*) if [[ -f "$d/loggroups" ]]; then paste -sd '\\t' "$d/loggroups"; fi ;;
       *AWS::Lambda::Function*) if [[ -f "$d/functions" ]]; then cat "$d/functions"; fi ;;
+      *AWS::BedrockAgentCore::Runtime*) if [[ -f "$d/runtimes" ]]; then paste -sd '\\t' "$d/runtimes"; fi ;;
     esac ;;
+  "ssm get-parameters-by-path")
+    awk -v p="$ppath" 'index($0, p) == 1' "$F/params.txt" | paste -sd '\\t' - ;;
+  "bedrock-agentcore-control get-agent-runtime")
+    if [[ -e "$F/live-runtimes/$rtid" ]]; then echo "$rtid"
+    else echo "An error occurred (ResourceNotFoundException) when calling the GetAgentRuntime operation" >&2; exit 254; fi ;;
   "logs describe-log-groups")
     if [[ "$query" == *"logGroupName=="* ]]; then grep -Fx -- "$prefix" "$F/logs.txt" || true
     else awk -v p="$prefix" 'index($0, p) == 1' "$F/logs.txt" | paste -sd '\\t' -; fi ;;
@@ -290,6 +301,7 @@ if [[ "$1" == cdk && "$4" == destroy ]]; then
     grep -Fxv -f "$F/stacks/$s/loggroups" "$F/logs.txt" >"$F/logs.new" || true
     mv "$F/logs.new" "$F/logs.txt"
   fi
+  if [[ -f "$F/stacks/$s/latelogs" ]]; then cat "$F/stacks/$s/latelogs" >>"$F/logs.txt"; fi
   rm -r "$F/stacks/$s"
   exit 0
 fi
@@ -325,11 +337,19 @@ echo "stack=\${STRESS_PREFIX}-driver destroy_seconds=1"
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  function stack(name: string, files: { functions?: string[]; loggroups?: string[] }) {
+  function stack(name: string, files: {
+    functions?: string[];
+    loggroups?: string[];
+    runtimes?: string[];
+    latelogs?: string[];
+    RegistryPrefix?: string;
+    RestApiId?: string;
+  }) {
     const d = path.join(fake, 'stacks', name);
     fs.mkdirSync(d);
-    if (files.functions) fs.writeFileSync(path.join(d, 'functions'), files.functions.join('\n') + '\n');
-    if (files.loggroups) fs.writeFileSync(path.join(d, 'loggroups'), files.loggroups.join('\n') + '\n');
+    for (const [k, v] of Object.entries(files)) {
+      fs.writeFileSync(path.join(d, k), (Array.isArray(v) ? v.join('\n') : v) + '\n');
+    }
   }
   function teardown() {
     return spawnSync('bash', [path.join(root, 'samples', 'sample', 'scripts', 'stress', 'teardown.sh')], {
@@ -347,7 +367,8 @@ echo "stack=\${STRESS_PREFIX}-driver destroy_seconds=1"
   }
   const logs = () => fs.readFileSync(path.join(fake, 'logs.txt'), 'utf8').split('\n').filter((l) => l);
   const deleted = () => (fs.existsSync(path.join(fake, 'deleted.txt')) ? fs.readFileSync(path.join(fake, 'deleted.txt'), 'utf8').split('\n').filter((l) => l) : []);
-  const LIST = () => path.join(state, 'teardown-log-groups');
+  const LIST = () => path.join(state, 'teardown-state');
+  const recorded = () => fs.readFileSync(LIST(), 'utf8').split('\n').filter((l) => l);
 
   it("removes a destroyed driver's provider log group on the rerun after a later destroy failed", () => {
     stack(`${P}-driver`, {
@@ -368,7 +389,7 @@ echo "stack=\${STRESS_PREFIX}-driver destroy_seconds=1"
     expect(first.stderr).toContain(`FAILED: destroy ${P}-ingress`);
     expect(fs.existsSync(path.join(fake, 'stacks', `${P}-driver`))).toBe(false);
     expect(logs()).toContain(PROVIDER_GROUP);
-    expect(fs.readFileSync(LIST(), 'utf8').split('\n').filter((l) => l)).toEqual([
+    expect(recorded()).toEqual([
       `owned ${OWNED_GROUP}`,
       `provider ${PROVIDER_GROUP}`,
       `provider /aws/lambda/${P}-ingress-AWS679f53fac002430cb0da5b7982-def`,
@@ -402,6 +423,66 @@ echo "stack=\${STRESS_PREFIX}-driver destroy_seconds=1"
     expect(logs()).toEqual([OWNED_GROUP]);
     expect(deleted()).toEqual([]);
     expect(fs.existsSync(LIST())).toBe(true);
+  });
+
+  it('keeps failing on a registry parameter after the stacks are gone, and passes and forgets the run once it is removed', () => {
+    const registry = `/stress/${P}/`;
+    const param = `${registry}agents/a1`;
+    stack(`${P}-ingress`, { runtimes: [`${P}IngressRt-AAAA`], RegistryPrefix: registry, RestApiId: 'abc123' });
+    fs.writeFileSync(path.join(fake, 'params.txt'), `${param}\n`);
+
+    const first = teardown();
+    expect(first.status).toBe(1);
+    expect(first.stderr).toContain(`parameters ${param}`);
+    expect(fs.existsSync(path.join(fake, 'stacks', `${P}-ingress`))).toBe(false);
+    expect(recorded()).toEqual([`registry ${registry}`, 'restapi abc123', `runtime ${P}IngressRt-AAAA`]);
+
+    const rerun = teardown();
+    expect(rerun.status).toBe(1);
+    expect(rerun.stdout).toContain('finishing the leftover check of an earlier teardown');
+    expect(rerun.stdout).toContain('runtime log groups: 1 runtimes');
+    expect(rerun.stderr).toContain(`parameters ${param}`);
+    expect(fs.existsSync(LIST())).toBe(true);
+
+    fs.writeFileSync(path.join(fake, 'params.txt'), '');
+    const last = teardown();
+    expect(last.stderr).toBe('');
+    expect(last.status).toBe(0);
+    expect(last.stdout).toContain('leftovers: none');
+    expect(fs.existsSync(LIST())).toBe(false);
+  });
+
+  it("still checks the destroyed agents' runtimes and their log groups on the rerun after the ingress destroy failed", () => {
+    const agentRt = `${P}AgentRt-BBBB`;
+    const agentGroup = `/aws/bedrock-agentcore/runtimes/${agentRt}-DEFAULT`;
+    stack(`${P}-agents-1`, { runtimes: [agentRt], latelogs: [agentGroup] });
+    stack(`${P}-ingress`, { runtimes: [`${P}IngressRt-AAAA`] });
+    fs.writeFileSync(path.join(fake, `fail-destroy-${P}-ingress`), '');
+    fs.mkdirSync(path.join(fake, 'live-runtimes'));
+    fs.writeFileSync(path.join(fake, 'live-runtimes', agentRt), '');
+
+    const first = teardown();
+    expect(first.status).toBe(1);
+    expect(first.stderr).toContain(`FAILED: destroy ${P}-ingress`);
+    expect(fs.existsSync(path.join(fake, 'stacks', `${P}-agents-1`))).toBe(false);
+    expect(logs()).toEqual([agentGroup]);
+    expect(recorded()).toEqual([`runtime ${P}AgentRt-BBBB`, `runtime ${P}IngressRt-AAAA`]);
+
+    fs.rmSync(path.join(fake, `fail-destroy-${P}-ingress`));
+    const rerun = teardown();
+    expect(rerun.status).toBe(1);
+    expect(rerun.stdout).toContain('runtime log groups: 2 runtimes, 1 leftover groups removed');
+    expect(rerun.stderr).toContain(`agent runtime ${agentRt}`);
+    expect(deleted()).toEqual([agentGroup]);
+    expect(fs.existsSync(LIST())).toBe(true);
+
+    fs.rmSync(path.join(fake, 'live-runtimes', agentRt));
+    const last = teardown();
+    expect(last.stderr).toBe('');
+    expect(last.status).toBe(0);
+    expect(last.stdout).toContain('finishing the leftover check of an earlier teardown');
+    expect(last.stdout).toContain('leftovers: none');
+    expect(fs.existsSync(LIST())).toBe(false);
   });
 
   it('has nothing to do with no stacks and no list from an earlier teardown', () => {
