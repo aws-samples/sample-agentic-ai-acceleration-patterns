@@ -39,7 +39,9 @@ Two non-production accounts:
   an account without one, `test/integ/api-gateway-account.app.ts` sets it
   (deploy command in its header); it keeps the role when its stack is
   removed, because other API Gateway stages in the Region log through it.
-  The driver checks all of these before it creates anything.
+  The driver checks the hosted zone, that no other front door is there,
+  the `tenant-identity` deployments and the logs role before it creates
+  anything; a missing CDK bootstrap fails the first deploy.
 - The **control plane's account**, CDK-bootstrapped in your Region to
   trust the edge account, so the driver deploys into it with the edge
   account's credentials. It must hold no other control plane in that

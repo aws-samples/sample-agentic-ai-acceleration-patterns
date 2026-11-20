@@ -297,6 +297,7 @@ ti_tenant() {
     --argjson s "${4:-[\"app/use\"]}" '{tenantId: $id, name: $n, adminEmail: $e, scopes: $s}')")"
   [[ "$st" == 201 ]] || die "tenant-identity CreateTenant $3: HTTP $st $(jq -r '.message // empty' "$BODY" 2>/dev/null | head -c 160)"
   TI_ADMIN="$(jq -r .admin.user.username "$BODY")"
+  : >"$BODY"
 }
 # ti_token API TENANT_ID USER VAR: a fresh access token in VAR. The shared
 # pool's app client issues access tokens valid for five minutes. Returns 1

@@ -13,10 +13,10 @@ deletes the front door's two global hooks on the control plane (spec
 §5.2). `integ.sh`, with its parts in `integ/`, is the integration test
 driver (spec §10, ADR-0028); the integration test's demo application
 scripts and its `tfd-probe` hook in `../test/integ/` follow these
-conventions too. What a script prints lands in the operator's terminal and, in CI,
-the job log; what the route hook prints lands in the control plane's
-hook build log. The scripts handle access tokens, temporary passwords and
-SigV4 credentials, so none of those ever reach output.
+conventions too. What a script prints lands in the operator's terminal
+and, in CI, the job log; what the route hook prints lands in the control
+plane's hook build log. The scripts handle access tokens, temporary
+passwords and SigV4 credentials, so none of those ever reach output.
 
 ## Log hygiene
 

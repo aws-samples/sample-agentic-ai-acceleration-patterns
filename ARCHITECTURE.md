@@ -326,6 +326,7 @@ is the memory layer: its Gateway trusts any issuer meeting §2.1, so an agent
 holding a tenant-identity access token reaches only its own tenant's memory.
 
 `tenant-front-door` is the edge in front of the application plane. It routes
-a request to a cell from the same tenant claim every other sample reads, and
-it learns where a cell is from the control plane's hooks, so placement stays
-the control plane's. It does not verify the token: the cell's API does.
+a request to a cell by its tenant: from the same tenant claim every other
+sample reads, or in `host` mode from the tenant's own host. It learns where a
+cell is from the control plane's hooks, so placement stays the control
+plane's. It does not verify the token: the cell's API does.
