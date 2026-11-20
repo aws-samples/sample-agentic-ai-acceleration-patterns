@@ -197,9 +197,10 @@ and the records in
    for the warm-up tenant (after front-door phase two, §3.5) and for the
    `large` fleet's seed; a churn create (PS-5) gets identity calls only
    where PS-1 is timed on it (`large`), because PS-5's own probes need no
-   token (§5.1). The driver then polls through the edge until the first
-   `report` is served. It then makes one `/api/*` call through the edge to
-   the cell API, whose answer carries the route hint (§5.3). The identity
+   token (§5.1). The driver then polls through the edge with the admin's
+   token until `GET /api/whoami` is served: the cell API answers with the
+   verified tenant and the route hint, which is the isolation assertion of
+   §5.3 (stress ADR-0020; the agent path is the load scenarios'). The identity
    calls and the polling are part of PS-1's time to the first served
    request (§5.1). The run's first tenant is the warm-up tenant of §3.5:
    its deployment builds the cell, and `/agents/*` is refused at the edge
@@ -253,29 +254,32 @@ a declaration, `scripts/stress/slice.json`.
 | `budget` | prints the slice's draw on each account-wide quota at the tier, as JSON | run without credentials |
 | `deploy` | deploys the slice's stacks, or reuses them | publish what the next slice needs through the sample's published parameters (P-2); the runner times it (P-6) |
 | `seed` | creates the slice's data for the tier, or reuses the manifest | be safe to rerun; never write a token or a password to disk |
+| `step <name>` | platform mode only: one named part of the slice's set-up or teardown that must run between another slice's verbs (§3.5) | be safe to rerun; counted in the slice's deploy seconds |
 | `run <scenario>` | runs one scenario | write one result record per scenario (§4.3); exit non-zero on a pass-criterion failure |
 | `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6); write the late fields (`refusals`, `cost`) into its own slice's records, only those nobody else changed since `run`; any other change after `run` fails the run |
 | `teardown` | removes what the slice deployed | keep fixtures unless `--fixtures` is passed; verify nothing it owned is left; the runner times it (P-6) |
 
 `slice.json` names the slice, the slices it needs (by published interface),
 its scenarios, the scenarios only a platform run can run (`platformOnly`,
-optional), and the quotas it draws on. A `platformOnly` scenario works on
+optional), the platform steps it implements (`steps`, optional), and the quotas
+it draws on. A `platformOnly` scenario works on
 what other slices made, such as the edge and the cells the control plane
 built, so a slice-mode run leaves it out and refuses one named in
 `--scenarios` (§3.5).
 
-The runner orders slices by their needs, and each slice runs its `deploy`
-and then its `seed` before the next slice starts, so a slice's `deploy`
-can read what an earlier slice seeded. `teardown` runs in the reverse
-order. The needs the three existing slices declare, and the ones the
-front-door slice will declare (W-7), are:
+The runner orders slices by their needs. A slice-mode run deploys and then
+seeds each slice in turn. A platform run follows the order of §3.5, which
+interleaves the slices' `deploy` and `seed` verbs and their steps (stress
+ADR-0018). `teardown` runs in the reverse order of the slices, with the
+control plane's `unhook` step before the front door's teardown. The needs and
+steps the four slices declare are:
 
-| Slice | Needs | `platformOnly` scenarios |
-|---|---|---|
-| `tenant-identity` | none | none |
-| `control-plane` | `tenant-identity` | PS-5 |
-| `tenant-front-door` | `control-plane` at least (§3.5, steps 1 to 3) | PS-7 |
-| `agentic-runtime-isolation` | `tenant-identity`, `control-plane`, `tenant-front-door` | PS-2, PS-3, PS-4, PS-6, PS-8 |
+| Slice | Needs | `platformOnly` scenarios | `steps` |
+|---|---|---|---|
+| `tenant-identity` | none | none | none |
+| `control-plane` | `tenant-identity` | PS-5 | `hooks`, `register`, `warm-up`, `unhook` |
+| `tenant-front-door` | `tenant-identity`, `control-plane` | none (PS-7 also runs in slice mode, on the smoke stack) | `phase-two` |
+| `agentic-runtime-isolation` | `tenant-identity`, `control-plane`, `tenant-front-door` | PS-2, PS-3, PS-4, PS-6, PS-8 | none |
 
 The `agentic-runtime-isolation` cells are deployed by the control plane in
 the platform run, and by the slice itself when it runs alone. With one
@@ -351,16 +355,18 @@ control plane's `globalHookManagedPolicyArns` update and the hook
 registration then put the route hook in place before that build: a
 cell built with no hook has no cell route, and every deployment placed
 in it fails its hook with 409 until an operator backfills the route
-(front-door spec §3.2, §3.4). The platform run's set-up order:
+(front-door spec §3.2, §3.4). The platform run's set-up order is a table in
+the runner (`stress/src/platform.ts`, stress ADR-0018); each row below is one
+action of it:
 
 | # | Step | Owned by |
 |---|---|---|
-| 1 | control plane deployed | `control-plane` `deploy` |
+| 1 | control plane deployed, with the route registrar's reader client and no application yet; its connection (API, reader client) written to `control-plane-connection.json` | `control-plane` `deploy` |
 | 2 | front-door phase one, first deploy: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `agentIngress` unset, so the edge refuses `/agents/*` (404, or CloudFront's own 403 for a `POST`, front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
-| 3 | front-door phase one, second deploy: the same app with `registrarUrl`, read from the edge parameter, which adds the `RouteHookAccess` stack in the control plane's account (front-door ADR-0027); then the control plane's `globalHookManagedPolicyArns` update and the global hooks registered with `register-hooks.sh` | `tenant-front-door` `deploy`, with a second `control-plane` update |
-| 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); then the cell account registered for it, with `maxCells` 1 at `small`. The cell app passes the ARN to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7. Both answer 202, so the runner waits until the application and the account are `ACTIVE` | `control-plane` (application and account registration) |
-| 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the runner waits for the cell to be `ACTIVE`; the tenant's identity and users and the readiness poll (§3.3 step 4) run after step 6 | `control-plane`, not timed in PS-1 |
-| 6 | front-door phase two: a main-stack update with `agentIngress` set to that cell's ingress, `registrarUrl` kept | `tenant-front-door` |
+| 3 | front-door phase one, second deploy: the same app with `registrarUrl`, read from the edge parameter, which adds the `RouteHookAccess` stack in the control plane's account (front-door ADR-0027); then the control plane's `globalHookManagedPolicyArns` update and the global hooks registered with the front door's `register-hooks.sh`, pinned to `hookCommit` | `tenant-front-door` `deploy`, then `control-plane` step `hooks` |
+| 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); then the cell account registered for it, with `maxCells` 1 at `small`. The cell app passes the ARN to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7. Both answer 202, so the step waits until the application and the account are `ACTIVE` | `control-plane` step `register` |
+| 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the step waits for the deployment and the cell to be `ACTIVE`, then records the tenant, the cell, its account, the cell API's domain and the ingress parameter in `control-plane.json` (`warmUp`); the tenant's identity and users and the readiness poll (§3.3 step 4) run at the start of PS-1, after step 6 | `control-plane` step `warm-up`, not timed in PS-1 |
+| 6 | front-door phase two: a main-stack update with `agentIngress` set to that cell's ingress, `registrarUrl` kept | `tenant-front-door` step `phase-two` |
 | 7 | the rest of the tier's onboarding (PS-1 at `buildLimit`), then the other scenarios | §5.1 |
 
 The warm-up tenant goes alone because the control plane places a
@@ -369,12 +375,12 @@ while the only cell is `CREATING` claims a new cell slot (control-plane
 §7.2, ADR-0013 as amended by ADR-0024). At `maxCells` 1 such a placement
 is refused, so `small` keeps one cell and one `agentIngress`. Steps 2
 to 6 alternate between two slices' verbs, which a runner that runs one
-slice's `deploy` and `seed` before the next slice starts (item 3 of the
-list in this section) does not express; the first platform run (W-9) adds
-the interleaved order to the runner. Phase two takes the origin's domain and
+slice's `deploy` and `seed` before the next slice starts does not express;
+the runner's platform table interleaves them (stress ADR-0018). Phase two takes the origin's domain and
 its path, the ingress stage, from the ingress's published parameter,
-`/application-plane/shared/agent-runtime/ingress` (`baseUrl`,
-front-door spec §6.3), which the `tenant-front-door` slice reads with
+`/application-plane/shared/agent-runtime/StressCell-<cell id>/ingress` (`baseUrl`,
+front-door spec §6.3; the cell keeps `publishParameters=false`, so the parameter is
+under the cell stack's own prefix, stress ADR-0019), which the `tenant-front-door` slice reads with
 `ssm:GetParameter` on that one parameter. It assumes the ingress reader
 role (§3.6), a read-only role in the cell account's account base (§3.7,
 W-11), with the platform account credentials it deploys with.
@@ -393,9 +399,10 @@ time is an operating rule (`stress/README.md`, known limitations).
 | platform account | none | one non-production, CDK-bootstrapped account for everything that is not a cell |
 | cell accounts | none | one (`small`) or two (`medium`, `large`) standalone non-production accounts, as §3.7 requires |
 | `appDomain` | none | a test subdomain with a public hosted zone in the platform account, for the front door |
-| `buildLimit` | 50 | concurrent builds per control-plane CodeBuild project for the stress deployment (§8, decision 2). The limit applies to every CodeBuild project the control plane creates. The stress application declares no hooks, so there are two, the cell and the tenant project. Both run in the platform account on `BUILD_GENERAL1_SMALL`, so 50 each draws 100 on that account's Linux/Small quota. The service default for that size is 1, so the platform account raises it before the first run |
+| `buildLimit` | 50 | concurrent builds per control-plane CodeBuild project for the stress deployment (§8, decision 2). The limit applies to every CodeBuild project the control plane creates. The stress application declares no application hooks, so the builds that run are in three of the four projects: the cell, the tenant and the global hook project, which runs the front door's route hook. All run in the platform account on `BUILD_GENERAL1_SMALL`, so 50 each draws 150 on that account's Linux/Small quota. The service default for that size is 1, so the platform account raises it before the first run |
 | `pinnedCommit` | the run's `main` commit | the commit the cell scripts deploy |
-| ingress reader role | none | the ARN of the read-only role in a cell account's account base that allows `ssm:GetParameter` on `/application-plane/shared/agent-runtime/ingress` only; the `tenant-front-door` slice assumes it for front-door phase two (§3.5) |
+| `hookCommit` | none | a platform run: the full SHA of a commit in the public repository that holds `samples/tenant-front-door/hooks/route-hook.sh`, which the control plane's global hook project fetches and runs (`STRESS_HOOK_COMMIT`). It can differ from `pinnedCommit`, which is a commit of the run's own branch that need not be public |
+| ingress reader role | none | the ARN of the read-only role in a cell account's account base that allows `ssm:GetParameter` on `/application-plane/shared/agent-runtime/StressCell-*/ingress` only (one per Region of the account); `ingressReaderRoleArn` of the account in the cell accounts file; the `tenant-front-door` slice assumes it for front-door phase two (§3.5) |
 
 ### 3.7 Cell accounts
 
@@ -405,7 +412,7 @@ A cell account holds only:
 |---|---|
 | `CDKToolkit-cell` | the cell bootstrap (§8, decision 7) |
 | the role pair | `control-plane`'s `CellAccountStack`, deployed by the account owner as plain CloudFormation without a service role; its roles are on the default path `/` and carry no cell boundary |
-| account base | the account owner's stacks, each with the stack tag `stress:part=account-base`, deployed without a service role and listed by stack ARN for the check (below) (one or more; the policies deploy first, since the cell bootstrap names the boundary): the cell execution policy and boundary, the API Gateway account's CloudWatch Logs role, the identity parameters a cell reads (`/application-plane/shared/identity/*`, naming the platform's issuer), and a read-only role, trusted by the platform account, that allows `ssm:GetParameter` on the ingress parameter only (§3.5) |
+| account base | the account owner's stacks, each with the stack tag `stress:part=account-base`, deployed without a service role and listed by stack ARN for the check (below) (one or more; the policies deploy first, since the cell bootstrap names the boundary): the cell execution policy and boundary, the API Gateway account's CloudWatch Logs role, the identity parameters a cell reads (`/application-plane/shared/identity/*`, naming the platform's issuer), and a read-only role, trusted by the platform account root, that allows `ssm:GetParameter` on the ingress parameter of the cell stacks only (§3.5, stress ADR-0019) |
 | cells | the stacks the cell script deploys |
 
 It has no default CDK bootstrap, no control plane, no driver host and no
@@ -492,14 +499,15 @@ and creates only what is missing. A slice that finds a manifest missing or
 unusable stops with a message that names the file, the slice that writes it
 and, when the content is wrong, the field.
 
-A platform run uses four manifests:
+A platform run uses five manifests:
 
 | File | Written by | Read by | Holds |
 |---|---|---|---|
 | `tenant-identity.json` | `tenant-identity` `seed` | `agentic-runtime-isolation` | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each user as `{username, email}` |
 | `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation`; `control-plane`, for the identity calls of §3.3 step 4 (W-9) | the value of the SSM parameter `/<prefix>/identity`: `region`, `apiUrl` (the execute-api URL of the platform API), `userPoolId`, `appClientId`; the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>` |
-| `control-plane.json` | `control-plane` `seed`; its driver adds an `identity[]` entry for each identity it creates (§3.3 step 4) | `agentic-runtime-isolation`; `control-plane` (teardown) | tenant ids in `seeded[]` (the platform's steady set), `churn[]` and `extra[]`; the last two belong to the control-plane scenarios; `identity[]`: for each tenant whose identity the driver created (§3.3 step 4), `tenantId`, `admin` and `users[]` as in `tenant-identity.json` |
-| `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` (W-7) | `agentic-runtime-isolation`; `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
+| `control-plane.json` | `control-plane` `seed`; its driver adds an `identity[]` entry for each identity it creates (§3.3 step 4) and its `warm-up` step adds `warmUp` | `agentic-runtime-isolation`; `tenant-front-door` (PS-7, phase two); `control-plane` (teardown) | tenant ids in `seeded[]` (the platform's steady set), `churn[]` and `extra[]`; the last two belong to the control-plane scenarios; `identity[]`: for each tenant whose identity the driver created (§3.3 step 4), `tenantId`, `admin` and `users[]` as in `tenant-identity.json`; `warmUp`: the warm-up `tenantId`, its `cellId` and `accountId`, `cellApiDomain` (the cell API's function URL host), `ingressReaderRoleArn` and `ingressParameter` |
+| `control-plane-connection.json` | `control-plane` `deploy` | `tenant-front-door` | `region`, `accountId`, `fleet`, `applicationId`, `apiUrl` (the control plane API), `vendorIdp`: `tokenUrl`, `clientId` and `clientSecretArn` of the route registrar's reader client (the secret itself stays in Secrets Manager) |
+| `tenant-front-door.json` | `tenant-front-door` `deploy` (phase one), rewritten by its step `phase-two` | `agentic-runtime-isolation`; `control-plane` (PS-5, the hook step, the application's distribution parameter) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`); `appDomain`; `distributionArn`; `hookPolicyArn` (the `RouteHookAccess` policy); `operatorRoleArn`; `phase` (1 or 2); after phase two `agentIngressUrl` |
 
 `agentic-runtime-isolation` also writes `manifest.json` (the tenants it
 drove) and `platform-tenants.json` (tenants it refused or ignored, by id and

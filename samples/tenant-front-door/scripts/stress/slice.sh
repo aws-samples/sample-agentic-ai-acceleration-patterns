@@ -8,16 +8,23 @@
 # environment:
 #
 #   slice.sh budget                 draws on the account-wide quotas, no credentials
-#   slice.sh deploy                 the smoke stacks and the front door (deploy.sh)
-#   slice.sh seed                   tenants, their routes and tokens' prerequisites (test/stress/driver.ts)
-#   slice.sh run <scenario>         PS-7, route-write, router-load or edge-refusals
+#   slice.sh deploy                 slice mode: the smoke stacks and the front door (deploy.sh);
+#                                   platform mode: front-door phase one against the real control plane (deploy-platform.sh)
+#   slice.sh seed                   slice mode: tenants, their routes and tokens' prerequisites (test/stress/driver.ts);
+#                                   platform mode: nothing to seed
+#   slice.sh run <scenario>         slice mode: PS-7, route-write, router-load or edge-refusals; platform mode: PS-7
+#   slice.sh step phase-two         platform mode only: the main stack with `agentIngress` set to the first cell's ingress (phase-two.sh)
 #   slice.sh collect                the edge and cell logs and the router's metrics against the driver's counts
-#   slice.sh teardown [--fixtures]  the run's tenants, then the stacks (teardown.sh)
+#   slice.sh teardown [--fixtures]  slice mode: the run's tenants, then the stacks; platform mode: the front door's stacks and the
+#                                   hook parameter, after the control-plane step `unhook` (teardown.sh)
 #
-# Slice mode only: the front door runs on the smoke stack (a stand-in control
-# plane, one demo cell). The platform run, which composes the real control
-# plane and its global hooks, is a later work item: every verb but `budget`
-# refuses that mode.
+# Slice mode: the front door runs on the smoke stack (a stand-in control plane,
+# one demo cell). Platform mode (STRESS_MODE=platform) composes the real control
+# plane, its global hooks and the cell scripts: the runner calls `deploy`, then
+# the control-plane steps `hooks`, `register` and `warm-up`, then `step
+# phase-two` (stress/src/platform.ts), and the front door's tenants and routes
+# are the control plane's, so `seed` has nothing to do. The two modes never
+# share a run prefix.
 #
 # Needs AWS_REGION and credentials for the account (every verb but budget),
 # STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME (deploy), bash, aws, jq, node and
@@ -86,9 +93,10 @@ need_region() {
   export AWS_DEFAULT_REGION="$AWS_REGION"
 }
 
-need_slice_mode() {
-  if [[ "$STRESS_MODE" != slice ]]; then
-    echo "slice.sh: STRESS_MODE=${STRESS_MODE}: platform mode (the real control plane, its global hooks, the cell scripts) is not implemented by this slice; it runs alone on the smoke stack" >&2
+# need_mode VERB MODE: exits 2 when the run is in the other mode.
+need_mode() {
+  if [[ "$STRESS_MODE" != "$2" ]]; then
+    echo "slice.sh ${1}: STRESS_MODE=${STRESS_MODE}: this verb runs in ${2} mode only" >&2
     exit 2
   fi
 }
@@ -111,38 +119,65 @@ case "$verb" in
     ;;
 
   deploy)
-    need_slice_mode
     no_args deploy "$@"
     need_region
     ensure_built
+    if [[ "$STRESS_MODE" == platform ]]; then
+      exec "${here}/deploy-platform.sh"
+    fi
     exec "${here}/deploy.sh"
     ;;
 
   seed)
-    need_slice_mode
     no_args seed "$@"
+    if [[ "$STRESS_MODE" == platform ]]; then
+      echo "seed: platform mode: the control plane's tenants and routes come from its hooks; nothing to seed"
+      exit 0
+    fi
     need_region
     ensure_installed
     driver seed
     ;;
 
   run)
-    need_slice_mode
+    if [[ "$STRESS_MODE" == platform ]]; then
+      scenarios="PS-7"
+    else
+      scenarios="PS-7, route-write, router-load, edge-refusals"
+    fi
     if (( $# != 1 )); then
-      echo "slice.sh run: one scenario id (PS-7, route-write, router-load, edge-refusals), got $#" >&2
+      echo "slice.sh run: one scenario id (${scenarios}), got $#" >&2
       exit 2
     fi
     case "$1" in
-      PS-7 | route-write | router-load | edge-refusals) ;;
-      *) echo "slice.sh run: unknown scenario $1 (PS-7, route-write, router-load, edge-refusals)" >&2; exit 2 ;;
+      PS-7) ;;
+      route-write | router-load | edge-refusals)
+        need_mode "run $1" slice
+        ;;
+      *) echo "slice.sh run: unknown scenario $1 (${scenarios})" >&2; exit 2 ;;
     esac
     need_region
     ensure_installed
     driver run "$1"
     ;;
 
+  step)
+    need_mode step platform
+    if (( $# != 1 )); then
+      echo "slice.sh step: one step name (phase-two), got $#" >&2
+      exit 2
+    fi
+    case "$1" in
+      phase-two)
+        need_region
+        ensure_built
+        exec "${here}/phase-two.sh"
+        ;;
+      *) echo "slice.sh step: unknown step $1 (phase-two)" >&2; exit 2 ;;
+    esac
+    ;;
+
   collect)
-    need_slice_mode
     no_args collect "$@"
     : "${STRESS_RESULTS:?slice.sh collect: STRESS_RESULTS is not set}"
     need_region
@@ -151,14 +186,13 @@ case "$verb" in
     ;;
 
   teardown)
-    need_slice_mode
     need_region
     ensure_installed
     exec "${here}/teardown.sh" "$@"
     ;;
 
   *)
-    echo "usage: slice.sh budget | deploy | seed | run <PS-7|route-write|router-load|edge-refusals> | collect | teardown [--fixtures]" >&2
+    echo "usage: slice.sh budget | deploy | seed | run <PS-7|route-write|router-load|edge-refusals> | step phase-two | collect | teardown [--fixtures]" >&2
     exit 2
     ;;
 esac

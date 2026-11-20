@@ -15,6 +15,8 @@ export interface Probe {
   readonly edgeTenant?: string;
   /** A served answer must name this tenant, and the route hint the router set must be its lower-case form. */
   readonly expect?: string;
+  /** A served ingress answer (the first `data:` line of its stream) must name this tenant as `tokenTenant`. */
+  readonly expectIngress?: string;
 }
 
 /** The tenant a whoami answer names, and the route hint the router put on it. */
@@ -27,6 +29,18 @@ export function answerOf(body: string): { tenantId?: string; routeHint?: string 
     };
   } catch {
     return {};
+  }
+}
+
+/** The tenant the ingress's `report` answer names: `tokenTenant` of the first `data:` line of its event stream. */
+export function ingressTenantOf(body: string): string | undefined {
+  const line = body.split('\n').find((l) => l.startsWith('data: '));
+  if (line === undefined) return undefined;
+  try {
+    const doc = JSON.parse(line.slice('data: '.length)) as Record<string, unknown>;
+    return typeof doc.tokenTenant === 'string' ? doc.tokenTenant : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -50,13 +64,16 @@ export class Sink {
     this.rec.hop(`client-${p.kind}`, r.total);
     const mustRefuse = !EXPECT[p.kind].served;
     if (c.served) {
-      this.rec.request(200);
+      this.rec.request(r.status);
       if (mustRefuse) {
         this.rec.assertion(false, `${p.kind} naming ${p.tenant} was served`);
       } else if (p.expect !== undefined) {
         const a = answerOf(r.body);
         const held = a.tenantId?.toUpperCase() === p.expect.toUpperCase() && a.routeHint === p.expect.toLowerCase();
         this.rec.assertion(held, `${p.kind} for ${p.expect} was answered for ${a.tenantId ?? '?'} with hint ${a.routeHint ?? '?'}`);
+      } else if (p.expectIngress !== undefined) {
+        const t = ingressTenantOf(r.body);
+        this.rec.assertion(t === p.expectIngress, `${p.kind} for ${p.expectIngress} was answered for ${t ?? '?'}`);
       }
     } else if (c.known && c.reason !== undefined) {
       this.rec.request(r.status, { tenant: p.tenant, reason: c.reason });

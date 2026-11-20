@@ -20,11 +20,25 @@ import type { Env, Manifest, Outputs, RequestLine, TenantEntry } from './state';
 export const SCENARIOS = ['PS-7', 'route-write', 'router-load', 'edge-refusals'] as const;
 export type ScenarioId = (typeof SCENARIOS)[number];
 
-export interface Ctx {
+/** What PS-7 reads of the deployment: the edge, the cell origin it probes directly and, in platform mode, the ingress. */
+export interface Ps7Outputs {
+  readonly appDomain: string;
+  readonly cellFunctionUrl: string;
+  /** The runtime-isolation ingress behind `/agents/*`, probed directly. Platform mode only; slice mode has none. */
+  readonly agentIngress?: { readonly url: string; readonly backend: string };
+}
+
+/** What PS-7 needs, in either mode. */
+export interface Ps7Ctx {
   readonly env: Env;
-  readonly out: Outputs;
+  readonly out: Ps7Outputs;
   readonly manifest: Manifest;
   readonly identity: IdentityClient;
+}
+
+/** What the slice-mode scenarios need: the stand-in control plane's outputs and the registrar. */
+export interface Ctx extends Ps7Ctx {
+  readonly out: Outputs;
   readonly registrar: Registrar;
 }
 
@@ -43,9 +57,9 @@ const busy = (r: { status: number }): boolean => r.status === 503 || r.status ==
 /** Quiet time after the last answer: the next scenario's window never touches this one's (collect counts by window). */
 const QUIET_MS = 5000;
 
-const identityOf = (ctx: Ctx): RecorderIdentity => ({ runId: ctx.env.runId, tier: ctx.env.tier.name, mode: ctx.env.mode, commit: ctx.env.commit });
+const identityOf = (ctx: Ps7Ctx): RecorderIdentity => ({ runId: ctx.env.runId, tier: ctx.env.tier.name, mode: ctx.env.mode, commit: ctx.env.commit });
 
-const active = (ctx: Ctx): TenantEntry[] => ctx.manifest.tenants.filter((t) => t.kind === 'active');
+const active = (ctx: Ps7Ctx): TenantEntry[] => ctx.manifest.tenants.filter((t) => t.kind === 'active');
 const writePool = (ctx: Ctx): TenantEntry[] => ctx.manifest.tenants.filter((t) => t.kind === 'write');
 
 /** Tokens live five minutes (tenant-identity's access token); a scenario that runs longer issues new ones before these expire. */
@@ -56,7 +70,7 @@ const TOKEN_REFRESH_MS = 200_000;
  * refreshed in the background every `TOKEN_REFRESH_MS`, so a scenario of any length reads live
  * tokens; the timer does not keep the process alive, and one scenario runs per process.
  */
-async function tokensFor(ctx: Ctx, tenants: readonly TenantEntry[]): Promise<Map<string, string>> {
+async function tokensFor(ctx: Ps7Ctx, tenants: readonly TenantEntry[]): Promise<Map<string, string>> {
   const tokens = new Map<string, string>();
   const issue = (): Promise<void> => pool(tenants, TOKEN_ISSUE_CONCURRENCY, async (t) => {
     tokens.set(t.tenantId, await ctx.identity.issueToken(t.tenantId, t.username));
@@ -95,16 +109,36 @@ interface SendOptions {
   readonly auth?: string;
   readonly headers?: Record<string, string>;
   readonly url?: string;
+  readonly method?: string;
+  readonly body?: string;
+  readonly timeoutMs?: number;
 }
 
-async function send(ctx: Ctx, sink: Sink, p: Probe, o: SendOptions = {}): Promise<void> {
+async function send(ctx: Ps7Ctx, sink: Sink, p: Probe, o: SendOptions = {}): Promise<void> {
   const headers: Record<string, string> = { ...o.headers };
   if (o.auth !== undefined) headers.authorization = o.auth;
-  const r = await request({ method: 'GET', url: o.url ?? `https://${ctx.out.appDomain}${o.path ?? '/api/whoami'}`, headers });
+  const r = await request({ method: o.method ?? 'GET', url: o.url ?? `https://${ctx.out.appDomain}${o.path ?? '/api/whoami'}`, headers, body: o.body, timeoutMs: o.timeoutMs });
   sink.take(p, r);
 }
 
 const whoami = (tenantId: string): Probe => ({ kind: 'whoami', tenant: tenantId, edgeTenant: tenantId.toLowerCase(), expect: tenantId });
+
+/**
+ * A `report` call to the ingress, in the shape the runtime-isolation k6 probe sends (`probe.js` `invoke`): POST
+ * `<ingress>/<backend>/invocations` with `{conversationId, prompt}`. The conversation id (16 to 64 letters and digits) is the
+ * tenant's, so its calls share one Runtime session, and the prompt is the cheapest the agent answers with the tenant its token names.
+ */
+export function ingressCall(ingress: { readonly url: string; readonly backend: string }, tenantId: string, auth: string): SendOptions {
+  return {
+    url: `${ingress.url}/${ingress.backend}/invocations`,
+    method: 'POST',
+    body: JSON.stringify({ conversationId: `tfdps7${tenantId.replace(/[^A-Za-z0-9]/g, '')}`.slice(0, 64), prompt: 'report' }),
+    headers: { 'content-type': 'application/json', 'accept': 'text/event-stream' },
+    auth,
+    // A cold Runtime session takes longer than the edge's 30 s default.
+    timeoutMs: 90_000,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // PS-7: probes at the router
@@ -115,9 +149,12 @@ const whoami = (tenantId: string): Probe => ({ kind: 'whoami', tenant: tenantId,
  * token whose payload names another tenant, a route header and a token
  * header the client supplies, a token with a tenants list, a claim with no
  * route, and a direct call to the cell origin. Every probe is an assertion:
- * served is a mismatch. A plain request is the control.
+ * served is a mismatch. A plain request is the control. In platform mode
+ * (`out.agentIngress` set) each round adds two direct calls to the ingress,
+ * which is public by design: a token whose payload names another tenant must
+ * be refused, and the tenant's own token must be served.
  */
-export async function ps7(ctx: Ctx): Promise<Outcome> {
+export async function ps7(ctx: Ps7Ctx): Promise<Outcome> {
   const plan = planOf(ctx.env.tier);
   const tenants = active(ctx);
   if (tenants.length < 2) throw new Error('PS-7 needs two active tenants');
@@ -125,6 +162,7 @@ export async function ps7(ctx: Ctx): Promise<Outcome> {
   const rec = new Recorder();
   const sink = new Sink(rec);
   const jobs: (() => Promise<void>)[] = [];
+  const ingress = ctx.out.agentIngress;
   for (let round = 0; round < plan.probeRounds; round += 1) {
     const [a, b] = shuffled(tenants);
     const ta = token(tokens, a.tenantId);
@@ -142,11 +180,19 @@ export async function ps7(ctx: Ctx): Promise<Outcome> {
       },
       () => send(ctx, sink, { kind: 'direct-origin', tenant: a.tenantId }, { url: `${ctx.out.cellFunctionUrl}api/whoami`, headers: { 'x-tenant-token': ta, 'x-tenant-route': a.tenantId.toLowerCase() } }),
     );
+    // Platform mode (spec §5.1): the ingress is public by design and checks the token itself, so a token whose payload names another
+    // tenant is refused there, and the tenant's own token is served. No edge in the path: the answers carry no `x-amz-cf-id`.
+    if (ingress !== undefined) {
+      jobs.push(
+        () => send(ctx, sink, { kind: 'ingress-forged-payload', tenant: b.tenantId }, ingressCall(ingress, b.tenantId, bearer(forgeToken(ta, b.tenantId)))),
+        () => send(ctx, sink, { kind: 'ingress-own-token', tenant: a.tenantId, expectIngress: a.tenantId }, ingressCall(ingress, a.tenantId, bearer(ta))),
+      );
+    }
   }
   await paced(10, jobs.length / 10, async (i) => jobs[i]());
   sink.flush();
   await sleep(QUIET_MS);
-  return { record: rec.build(identityOf(ctx), 'PS-7'), lines: sink.lines, failures: rec.failures, notes: [`${jobs.length} probes in ${plan.probeRounds} rounds`] };
+  return { record: rec.build(identityOf(ctx), 'PS-7'), lines: sink.lines, failures: rec.failures, notes: [`${jobs.length} probes in ${plan.probeRounds} rounds${ingress === undefined ? '' : ', two of each round direct to the ingress'}`] };
 }
 
 // ---------------------------------------------------------------------------

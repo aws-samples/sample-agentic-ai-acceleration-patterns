@@ -134,18 +134,15 @@ describe('slice.sh', () => {
     const EDGE = { version: 1, prefix: 'StressTest', edgeUrl: 'https://stress.example.com' };
     const ids = (n: number): string[] => Array.from({ length: n }, (_, i) => `01HZX0000000000000000000${String(i).padStart(2, '0')}`);
     const user = (name: string) => ({ username: name, email: `${name}@example.com` });
-    const CONTROL_PLANE = { version: 1, prefix: 'StressTest', tier: 'small', commit: 'abc1234', seeded: ids(4), churn: ids(6).slice(4), extra: [] };
-    const TENANT_IDENTITY = {
-      version: 1,
-      seeded: [
-        { tenantId: ids(4)[0], name: 's-0000', admin: user('a0'), users: [user('u0')] },
-        { tenantId: ids(4)[1], name: 's-0001', admin: user('a1'), users: [] },
-        { tenantId: ids(4)[2], name: 's-0002', admin: user(''), users: [] },
-        { tenantId: '01HZX00000000000000000PROB', name: 's-probe', admin: user('p0'), users: [] },
-      ],
-      transient: [],
-    };
-    const ALL = { 'tenant-front-door.json': EDGE, 'identity.json': IDENTITY, 'control-plane.json': CONTROL_PLANE, 'tenant-identity.json': TENANT_IDENTITY };
+    // identity[] is what the control-plane driver records for each identity tenant it creates (stress ADR-0017).
+    const IDENTITIES = [
+      { tenantId: ids(4)[0], admin: user('a0'), users: [user('u0')] },
+      { tenantId: ids(4)[1], admin: user('a1'), users: [] },
+      { tenantId: ids(4)[2], admin: user(''), users: [] },
+      { tenantId: '01HZX00000000000000000PROB', admin: user('p0'), users: [] },
+    ];
+    const CONTROL_PLANE = { version: 1, prefix: 'StressTest', tier: 'small', commit: 'abc1234', seeded: ids(4), churn: ids(6).slice(4), extra: [], identity: IDENTITIES };
+    const ALL = { 'tenant-front-door.json': EDGE, 'identity.json': IDENTITY, 'control-plane.json': CONTROL_PLANE };
 
     /** A STRESS_HOME with the manifests platform mode reads, as the other slices write them. */
     function home(files: Record<string, unknown> = ALL): string {
@@ -199,7 +196,6 @@ describe('slice.sh', () => {
           expect(r.status).toBe(1);
           expect(r.stderr).toContain('identity.json, which the tenant-identity slice writes');
           expect(r.stderr).toContain('control-plane.json, which the control-plane slice writes');
-          expect(r.stderr).toContain('tenant-identity.json, which the tenant-identity slice writes');
           expect(r.stderr).not.toContain('tenant-front-door.json');
         });
       });
@@ -213,6 +209,7 @@ describe('slice.sh', () => {
         ['an identity with no client', { 'identity.json': { ...IDENTITY, appClientId: '' } }, /appClientId is missing/],
         ['an identity with a bad pool', { 'identity.json': { ...IDENTITY, userPoolId: 'pool' } }, /userPoolId is missing/],
         ['a manifest that is not an object', { 'control-plane.json': '[1]' }, /control-plane.json \(written by the control-plane slice\) is not a JSON object/],
+        ['a control-plane manifest whose identity is no list', { 'control-plane.json': { ...CONTROL_PLANE, identity: {} } }, /"identity" must be an array/],
         ['a control-plane manifest with no seeded list', { 'control-plane.json': { version: 1 } }, /control-plane.json \(written by the control-plane slice\): "seeded" must be an array/],
       ])('refuses %s', (_name, change, pattern) => {
         withHome({ ...ALL, ...change }, (h) => {
@@ -483,7 +480,7 @@ describe('slice.sh', () => {
       });
 
       it('stops a platform run with fewer than two usable tenants before it starts k6', () => {
-        withHome({ ...ALL, 'tenant-identity.json': { ...TENANT_IDENTITY, seeded: TENANT_IDENTITY.seeded.slice(0, 1) } }, (h) => {
+        withHome({ ...ALL, 'control-plane.json': { ...CONTROL_PLANE, identity: IDENTITIES.slice(0, 1) } }, (h) => {
           fs.mkdirSync(path.join(h, 'results'));
           fs.rmSync(path.join(fake, 'k6-args.txt'), { force: true });
           const r = run(script(), runEnv(h), 'run', 'PS-2');
@@ -495,12 +492,11 @@ describe('slice.sh', () => {
     });
 
     (hasJq ? describe : describe.skip)('the tenants it drives (platform-tenants.jq, platform.sh)', () => {
-      const jq = (cp: unknown, ti: unknown, active: number) => {
+      const jq = (cp: unknown, active: number) => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-tenants-'));
         try {
           fs.writeFileSync(path.join(dir, 'cp.json'), JSON.stringify(cp));
-          fs.writeFileSync(path.join(dir, 'ti.json'), JSON.stringify(ti));
-          const r = spawnSync('jq', ['-n', '-c', '--slurpfile', 'cp', path.join(dir, 'cp.json'), '--slurpfile', 'ti', path.join(dir, 'ti.json'), '--argjson', 'active', String(active), '--arg', 'scale', 'small', '-f', path.join(STRESS_DIR, 'platform-tenants.jq')], { encoding: 'utf8' });
+          const r = spawnSync('jq', ['-n', '-c', '--slurpfile', 'cp', path.join(dir, 'cp.json'), '--argjson', 'active', String(active), '--arg', 'scale', 'small', '-f', path.join(STRESS_DIR, 'platform-tenants.jq')], { encoding: 'utf8' });
           expect(r.status).toBe(0);
           return JSON.parse(r.stdout);
         } finally {
@@ -508,8 +504,8 @@ describe('slice.sh', () => {
         }
       };
 
-      it('drives the steady tenants identity knows with a user, refuses the rest by reason, and ignores identity-only tenants', () => {
-        const out = jq(CONTROL_PLANE, TENANT_IDENTITY, 1);
+      it('drives the steady tenants that have an identity tenant with a user, refuses the rest by reason, and ignores identity-only tenants', () => {
+        const out = jq(CONTROL_PLANE, 1);
         expect(out.manifest.scale).toBe('small');
         expect(out.manifest.tenants).toEqual([
           { tenantId: ids(4)[0], admin: { username: 'a0' }, users: [{ username: 'u0' }], active: true },
@@ -523,13 +519,13 @@ describe('slice.sh', () => {
       });
 
       it('never drives the control plane\'s churn or extra tenants', () => {
-        const out = jq({ seeded: [], churn: ids(2), extra: ids(3) }, TENANT_IDENTITY, 2);
+        const out = jq({ seeded: [], churn: ids(2), extra: ids(3), identity: IDENTITIES }, 2);
         expect(out.manifest.tenants).toEqual([]);
         expect(out.refused).toEqual([]);
       });
 
       it('writes the manifest and the refusals, and stops with fewer than two usable tenants', () => {
-        withHome({ ...ALL, 'tenant-identity.json': { ...TENANT_IDENTITY, seeded: TENANT_IDENTITY.seeded.slice(0, 1) } }, (h) => {
+        withHome({ ...ALL, 'control-plane.json': { ...CONTROL_PLANE, identity: IDENTITIES.slice(0, 1) } }, (h) => {
           const state = path.join(h, 'StressTest', 'agentic-runtime-isolation');
           const env = { STRESS_HOME: h, STRESS_PREFIX: 'StressTest', STRESS_TIER: 'small', STRESS_STATE_DIR: state };
           const call = (tier: object) =>

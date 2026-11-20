@@ -13,9 +13,10 @@ demo cell. It measures how fast a route reaches the edge, what the router
 costs with large tokens, which refusals never reach an origin, and whether the
 router ever sends a request to a tenant it was not for.
 
-Platform mode, with the real control plane, its global hooks and the cell
-scripts, is not part of this slice. Every verb but `budget` exits 2 with a
-message when `STRESS_MODE` is `platform`.
+Platform mode (`STRESS_MODE=platform`) runs the same front door in front of the
+real control plane, its global hooks and the cell scripts' cell, in two phases,
+and runs PS-7 against the ingress as well. It is described under
+[Platform mode](#platform-mode); the rest of this file is slice mode.
 
 ## Run it
 
@@ -56,15 +57,14 @@ distribution, is most of it) and a destroy of the stacks about 9, with about
 | `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain |
 | `STRESS_FD_ZONE_ID`, `STRESS_FD_ZONE_NAME` | the test subdomain's hosted zone; the front door's `appDomain` is `<prefix in lower case>.<zone name>`: one name per run prefix, so two runs never share a host |
 | `STRESS_FD_IDENTITY_REGION` | the Region of the `tenant-identity` shared pool when it is not `AWS_REGION` |
-| `STRESS_CONTROL_PLANE_URL`, `CONTROL_PLANE_TOKEN` | only in a run that has a control plane: `teardown` then runs `scripts/register-hooks.sh --delete` before it destroys any stack |
+| `STRESS_CONTROL_PLANE_URL`, `CONTROL_PLANE_TOKEN` | slice mode, in a run that has a control plane: `teardown` then runs `scripts/register-hooks.sh --delete` before it destroys any stack. Platform mode ignores them: the control-plane step `unhook` unregisters the hooks |
 
 The zone question of the stress spec (Q-4, which hosted zone the stress front
 door uses) is settled here: the account's existing test subdomain zone, one
 application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 `STRESS_FD_ZONE_NAME`. No domain is written into the repository.
 
-## What it does
-
+## What it does (slice mode)
 | Verb | Does |
 |---|---|
 | `budget` | prints the draw on Lambda concurrency (the registrar's burst plus a quarter second of the cell at the peak rate); no credentials |
@@ -120,6 +120,111 @@ after `collect`. Each scenario waits up to 5 minutes for its own edge logs and
 up to 5 for the cell's. A router error metric with no datapoint counts as zero
 errors when the router's invocations were counted for the same minutes, and is
 reported as not checked when they were not.
+
+## Platform mode
+
+`STRESS_MODE=platform` (spec §3.5, §5.1; stress ADR-0016 and ADR-0017). The
+platform account holds the control plane, the stress identity, this front door
+and the k6 host; the cell is in a cell account. The front door, the control
+plane, its registrar and the stress identity share one Region (the route hook
+checks the registrar's Region and the cell API's Region against the hook's), and
+only the edge stack is in `us-east-1`. The runner calls the verbs in this order
+(`stress/src/platform.ts`):
+
+| # | Verb | What this slice does |
+|---|---|---|
+| 1 | `deploy` (after `tenant-identity` and `control-plane` deploy) | Phase one, `deploy-platform.sh`: the support stack with only the edge operator role, then the edge, main and edge-logging stacks with `agentIngress` unset (the edge refuses `/agents/*`), then the same app again with `registrarUrl`, which adds the `RouteHookAccess` stack. Each stack prints `stack=<name> deploy_seconds=<n>` |
+| 2 | `seed` | Prints that there is nothing to seed: the control plane's tenants and routes come from its global hooks |
+| 3 | control-plane steps `hooks`, `register`, `warm-up` | Not this slice's: the hook policy goes on the control plane, the hooks are registered, and one tenant builds the cell |
+| 4 | `step phase-two` | `phase-two.sh`: reads the cell's ingress parameter, redeploys the main stack alone with `agentIngress` set and `registrarUrl` kept, waits until the edge routes `/agents/*`, rewrites `tenant-front-door.json` |
+| 5 | `run PS-7` | The router probes of slice mode plus two direct calls to the ingress (below) |
+| 6 | `collect` | The edge-log join of slice mode, for PS-7; the cell's log is not compared |
+| 7 | control-plane step `unhook`, then `teardown` | The front door only, in the order below |
+
+`route-write`, `router-load` and `edge-refusals` write routes, load the router
+and suspend a tenant through the registrar, which the platform run leaves to the
+control plane's hooks and PS-5; they stay slice mode, and `slice.sh run` refuses
+them in platform mode (exit 2).
+
+### Inputs and manifests
+
+`AWS_REGION`, `STRESS_PREFIX`, `STRESS_HOME`, `STRESS_FD_ZONE_ID`,
+`STRESS_FD_ZONE_NAME` and `INTEG_DEPLOY_CONCURRENCY` as in slice mode. The
+files are in `$STRESS_HOME/$STRESS_PREFIX/`, JSON, ids and names only, mode 0600;
+a missing file or field stops the verb with a message that names the file and the
+slice that writes it.
+
+| File | Written by | This slice |
+|---|---|---|
+| `identity.json` | `tenant-identity` deploy | reads `apiUrl` (the platform API where `IssueToken` is called) and `appClientId` (the placeholder SPA issuer). The stress identity publishes no fixed SSM parameters in platform mode, so nothing is read from `/application-plane/shared/identity/*` |
+| `control-plane-connection.json` | `control-plane` deploy | `deploy` reads `region`, `accountId`, `fleet`, `applicationId`, `apiUrl` and the registrar's reader client `vendorIdp`; the account and Region must be those of the credentials and of `AWS_REGION` |
+| `control-plane.json` | `control-plane` seed and steps | reads `seeded[]`, `identity[]` and `warmUp` (`cellApiDomain`, `ingressReaderRoleArn`, `ingressParameter`) |
+| `tenant-front-door.json` | **this slice**: `deploy` (phase 1), rewritten by `step phase-two` (phase 2) | `edgeUrl`, `registrarUrl`, `agentBackend` (`default`), `appDomain`, `distributionArn`, `hookPolicyArn` (the `RouteHookAccess` policy, for the control plane's `globalHookManagedPolicyArns`), `operatorRoleArn`, `phase`; phase 2 adds `agentIngressUrl` (the ingress base URL: https, no secret in it) |
+
+`outputs.json` in the slice's own state directory keeps what `collect` and the
+driver need (`edgeLogGroup`, `routerFunction`, `identityApiUrl`, ...), as in slice
+mode.
+
+### Phase two
+
+`step phase-two` reads `control-plane.json` `warmUp`, assumes the cell account's
+ingress reader role with the run's own credentials (the driver's credentials
+provider keeps them in memory; nothing prints or writes them; session name
+`tfd-stress-phase-two`), and reads the one parameter the role allows, the cell's
+ingress parameter `/application-plane/shared/agent-runtime/StressCell-<cell id>/ingress`.
+The `baseUrl` in its JSON value becomes the front door's `agentIngress` input,
+`https://<host>/<stage>` with no trailing slash (`agentIngressOf` in
+`test/stress/platform.ts`; the front door's own validation takes the domain and
+the origin path from it). The main stack is redeployed alone (`--exclusively`)
+with `registrarUrl` kept: a CloudFront distribution update. The step prints
+`phase two: <n> s` and `stack=<main> deploy_seconds=<n> phase=two`; the runner
+adds the step's time to the slice's deploy seconds.
+
+A distribution update takes minutes to reach every edge, so the step then polls
+`GET /agents/<backend>/invocations` with an unsigned token for a made-up tenant
+until the router's own `403` (no route for that tenant) comes back five times in
+a row, for up to 10 minutes. Before phase two the same request gets the router's
+`404`. Running the step again with the same ingress changes nothing in the stack.
+
+### PS-7 in platform mode
+
+The tenants are the control plane's `seeded[]` that have an `identity[]` entry,
+the first `min(tenantsActive, 100)` of them, at least two. Tokens come from
+tenant-identity's `IssueToken`, signed with the run's own credentials, and are
+never written down. The probes of slice mode (control, forged payload, client
+route header, client token header, `tenants` list, unrouted ghost tenant, direct
+call to the cell origin with a token) run against the real cell; the cell origin
+is `https://<warmUp.cellApiDomain>/`. Two probes per round are new:
+
+| Probe | Sends | Pass |
+|---|---|---|
+| `ingress-forged-payload` | `POST <agentIngressUrl>/<backend>/invocations` with a token whose payload names another tenant (the request shape of the runtime-isolation k6 probe: `{conversationId, prompt: "report"}`) | refused with 401 or 403, never 2xx. The call does not pass the edge, so it has no `x-amz-cf-id` and is not joined to the edge log |
+| `ingress-own-token` | the same call with the tenant's own token | served (2xx; the ingress is public by design, front-door spec §1.2) and the first `data:` line names the tenant as `tokenTenant`; the ingress's own rate limit (429) is counted as an attributed refusal |
+
+The record is `tenant-front-door.PS-7.json` in `$STRESS_RESULTS`, `mode:
+platform`. `collect` joins the driver's request log with the edge log
+(`x-amz-cf-id` = `x-edge-request-id`) as in slice mode and checks the router's
+error metrics; it does not compare the cell's log (the cell's log group is in
+the cell account, which this slice cannot read) and says so in its notes.
+
+### Teardown
+
+The runner runs the control-plane step `unhook` first (hooks unregistered, the
+hook policy off the control plane's hook role). Then `teardown`, which refuses
+to start when `RouteHookAccess`'s policy is still attached to a role (it names
+the role and says to run `unhook` first; nothing is removed) and otherwise
+deletes, in order: the `RouteHookAccess` stack; the hook parameter
+`/application-plane/applications/<application id>/shared/front-door-hook`, which
+the stack retains; edge logging; main; edge; the support stack. It checks that no
+stack, resource, log group, edge parameter or hook parameter is left, and only
+then removes `tenant-front-door.json` and the slice's state; otherwise the trail
+stays and the run exits non-zero. `--fixtures` changes nothing: the front door
+has no fixtures. Log groups that CDK's custom resource functions leave are listed
+with the line that removes each, as in slice mode.
+
+Use one prefix in one mode only: both modes name their support stack
+`<prefix>-support`, and the platform run's support stack has no stand-in hook role
+(the smoke app's `smokeHookRole=false`), which the slice-mode run needs.
 
 ## Measured (small tier)
 
@@ -193,10 +298,28 @@ What the numbers say:
   construct id, so `src/main.ts` takes the id from `stackNamePrefix`; two
   front doors in one account need different prefixes as well as different
   Regions.
-- Slice mode only: the registrar reads a stand-in control plane, and the
-  global hook role is a role of the same account. Nothing here runs the route
-  hook script, the real hooks or the cell scripts, and `teardown` has never run
+- Slice mode: the registrar reads a stand-in control plane, and the global hook
+  role is a role of the same account. Nothing in slice mode runs the route hook
+  script, the real hooks or the cell scripts, and `teardown` has never run
   `register-hooks.sh --delete` live (a slice-mode run registers no hook).
+- Platform mode has not run live. `deploy-platform.sh`, `phase-two.sh` and the
+  platform branches of `teardown.sh` and `slice.sh` are checked with `bash -n`
+  only (no `shellcheck` here); the pure parts (manifests, outputs, the
+  `agentIngress` derivation, the probe classification) have unit tests. Not
+  exercised without AWS: the CDK deploys, the `RouteHookAccess` hook stack's
+  deletion order, the phase-two wait, the ingress probes against a real ingress
+  (the shape is the k6 probe's; an ingress whose first `data:` line is not the
+  `report` fails PS-7 as a mismatch), and `collect` without a cell log.
+- Platform PS-7 sends one `report` per round to the ingress, which opens a
+  Runtime session for the tenant's conversation: 10 at `small`, 25 above it.
+  A cold session can take longer than the edge probes; those calls wait up to
+  90 s.
+- Phase two is a distribution update on every run; its time is the number to
+  watch (stress ADR-0016 consequences). A run that fails between the
+  `context.json` write and the manifest rewrite leaves `agentIngress` in the
+  context and the manifest at phase 1: run the step again, it is idempotent.
+- `deploy` in platform mode rewrites `context.json` without `agentIngress`: do
+  not run it again after phase two on the same prefix.
 - No quota ids for CloudFront Functions compute or the API Gateway control
   plane: neither has a Service Quotas code (checked with `list-service-quotas`
   for `cloudfront` and `apigateway`), so `stress/src/budget.ts` has nothing
@@ -228,5 +351,6 @@ What the numbers say:
 | File | Holds |
 |---|---|
 | `slice.sh`, `slice.json` | the verbs and the declaration the runner reads |
-| `deploy.sh`, `teardown.sh`, `lib.sh` | stacks and what they leave behind |
-| `../../test/stress/` | the driver: `driver.ts` (verbs), `scenarios.ts`, `classify.ts`, `sink.ts`, `recorder.ts`, `collect.ts`, `join.ts`, `clients.ts`, `sigv4.ts`, `plan.ts`; unit tests in `stress.test.ts` |
+| `deploy.sh`, `teardown.sh`, `lib.sh` | stacks and what they leave behind (slice mode; `teardown.sh` also does platform mode) |
+| `deploy-platform.sh`, `phase-two.sh` | platform mode: front-door phase one, and phase two |
+| `../../test/stress/` | the driver: `driver.ts` (verbs), `scenarios.ts`, `classify.ts`, `sink.ts`, `recorder.ts`, `collect.ts`, `join.ts`, `clients.ts`, `sigv4.ts`, `plan.ts`, `platform.ts` (the other slices' manifests, platform PS-7, the `agentIngress` derivation); unit tests in `stress.test.ts` and `platform.test.ts` |

@@ -101,14 +101,14 @@ export interface Edge {
 
 const elapsed = (started: bigint): number => Number(process.hrtime.bigint() - started) / 1e9;
 
-interface Credentials {
+export interface Credentials {
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
   readonly sessionToken?: string;
 }
 
 /** The caller's credentials as the AWS CLI resolves them, kept in memory only. */
-async function loadCredentials(): Promise<{ creds: Credentials; expiresAt: number } | undefined> {
+export async function loadCredentials(): Promise<{ creds: Credentials; expiresAt: number } | undefined> {
   try {
     const out = await aws(['configure', 'export-credentials', '--format', 'process']);
     if (typeof out.AccessKeyId !== 'string' || typeof out.SecretAccessKey !== 'string') return undefined;

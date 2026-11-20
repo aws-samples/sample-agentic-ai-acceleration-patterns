@@ -9,7 +9,7 @@ import { record } from './result.test';
 import { type Exec, groupExec, planRun, runStress, scenarioOrder, spawnExec } from '../src/runner';
 import { loadSlice } from '../src/slice';
 
-type Decl = { needs?: string[]; scenarios: string[]; platformOnly?: string[]; quotas?: string[] };
+type Decl = { needs?: string[]; scenarios: string[]; platformOnly?: string[]; steps?: string[]; quotas?: string[] };
 
 /** A repository with fake slices, and a home folder for the run. */
 function fixture(slices: Record<string, Decl>, scripts: Record<string, string> = {}) {
@@ -66,7 +66,7 @@ function stub(o: StubOptions = {}) {
 const base = { runId: '20261118T150000Z', commit: 'f368ad5', prefix: 'stress', log: () => undefined };
 const slices: Record<string, Decl> = {
   'tenant-identity': { scenarios: ['PS-1'], quotas: ['cognito-groups'] },
-  'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-5', 'placement-race', 'PS-1'], quotas: ['codebuild-linux-small'] },
+  'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-5', 'placement-race', 'PS-1'], steps: ['hooks', 'register', 'warm-up', 'unhook'], quotas: ['codebuild-linux-small'] },
 };
 const both = ['control-plane', 'tenant-identity'];
 
@@ -148,7 +148,7 @@ describe('runner (spec §3.5)', () => {
     expect(calls).toEqual([]);
   });
 
-  it('deploys and seeds one slice before the next starts, and tears down in reverse', async () => {
+  it('sets a platform run up in the order of the platform table, and tears down in reverse', async () => {
     const { root, home } = fixture(slices);
     const { calls, envs, exec } = stub();
     const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec });
@@ -159,6 +159,8 @@ describe('runner (spec §3.5)', () => {
       'tenant-identity seed',
       'control-plane deploy',
       'control-plane seed',
+      'control-plane step register',
+      'control-plane step warm-up',
       'tenant-identity run PS-1',
       'control-plane run PS-1',
       'control-plane run PS-5',
@@ -173,6 +175,56 @@ describe('runner (spec §3.5)', () => {
     expect(md).toContain('| control-plane | PS-5 |');
     expect(md).toMatch(/\| tenant-identity \| \d+ \| \d+ \|/);
     expect(fs.existsSync(path.join(home, 'stress', 'run.lock'))).toBe(false);
+  });
+
+  it('runs the full platform order: the front door and the control plane interleave, and the hooks come out before the front door goes', async () => {
+    const four: Record<string, Decl> = {
+      'tenant-identity': { scenarios: ['PS-1'] },
+      'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-1', 'PS-5'], platformOnly: ['PS-5'], steps: ['hooks', 'register', 'warm-up', 'unhook'] },
+      'tenant-front-door': { needs: ['tenant-identity', 'control-plane'], scenarios: ['PS-7'], steps: ['phase-two'] },
+      'agentic-runtime-isolation': { needs: ['tenant-identity', 'control-plane', 'tenant-front-door'], scenarios: ['PS-2'], platformOnly: ['PS-2'] },
+    };
+    const { root, home } = fixture(four);
+    const { calls, exec } = stub();
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['agentic-runtime-isolation', 'tenant-front-door', 'control-plane', 'tenant-identity'], exec });
+    expect(summary.failures).toEqual([]);
+    expect(calls.filter((c) => !c.endsWith('budget') && !c.includes(' run ') && !c.endsWith('collect'))).toEqual([
+      'tenant-identity deploy',
+      'tenant-identity seed',
+      'control-plane deploy',
+      'control-plane seed',
+      'tenant-front-door deploy',
+      'tenant-front-door seed',
+      'control-plane step hooks',
+      'control-plane step register',
+      'control-plane step warm-up',
+      'tenant-front-door step phase-two',
+      'agentic-runtime-isolation deploy',
+      'agentic-runtime-isolation seed',
+      'agentic-runtime-isolation teardown',
+      'control-plane step unhook',
+      'tenant-front-door teardown',
+      'control-plane teardown',
+      'tenant-identity teardown',
+    ]);
+    const life = JSON.parse(fs.readFileSync(path.join(home, 'stress', base.runId, 'results', 'control-plane.lifecycle.json'), 'utf8'));
+    expect(life.deploySeconds).toBeGreaterThanOrEqual(0);
+  });
+
+  it('refuses a platform order that calls a step the slice does not declare, and skips the hook steps without the front door', async () => {
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-1'], steps: ['register'] } });
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec })).rejects.toThrow(/control-plane step warm-up, which the slice's slice.json does not list/);
+    expect(calls.filter((c) => c.includes('step'))).toEqual([]);
+  });
+
+  it('stops after a failed step and still tears the slice down', async () => {
+    const { root, home } = fixture(slices);
+    const { calls, exec } = stub({ fail: ['control-plane step'] });
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec });
+    expect(summary.failures).toEqual(['control-plane step register exited 1']);
+    expect(calls).not.toContain('control-plane step warm-up');
+    expect(calls.slice(-2)).toEqual(['control-plane teardown', 'tenant-identity teardown']);
   });
 
   it('gives budget no AWS credentials', async () => {
@@ -262,7 +314,7 @@ describe('runner (spec §3.5)', () => {
   });
 
   it('fails on a mismatch, a missing record, a record that does not parse, and passes --fixtures when asked', async () => {
-    const { root, home } = fixture({ ...slices, 'tenant-front-door': { needs: ['control-plane'], scenarios: ['PS-5'] } });
+    const { root, home } = fixture({ ...slices, 'tenant-front-door': { needs: ['control-plane'], scenarios: ['PS-5'], steps: ['phase-two'] } });
     const { calls, exec } = stub({ mismatch: ['control-plane'], silent: ['tenant-front-door'] });
     const summary = await runStress({
       ...base, repoRoot: root, home, tier: 'small', slices: [...both, 'tenant-front-door'], scenarios: ['PS-5'], exec, removeFixtures: true,
@@ -328,7 +380,7 @@ describe('runner (spec §3.5)', () => {
   });
 
   it('refuses a record another slice wrote before its run, even when the run writes none', async () => {
-    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-2'] } });
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-2'], steps: ['register', 'warm-up'] } });
     const { exec } = stub({ silent: ['control-plane'] });
     const plant: Exec = async (script, args, env, capture, onStart) => {
       const r = await exec(script, args, env, capture, onStart);
@@ -346,7 +398,7 @@ describe('runner (spec §3.5)', () => {
   });
 
   it('refuses a record another slice rewrote after its run', async () => {
-    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-1'] } });
+    const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-1'], steps: ['register', 'warm-up'] } });
     const { exec } = stub();
     const rewrite: Exec = async (script, args, env, capture, onStart) => {
       const r = await exec(script, args, env, capture, onStart);

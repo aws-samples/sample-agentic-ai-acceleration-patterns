@@ -109,7 +109,7 @@ class World {
       cellAccounts: [],
       region: 'eu-central-1',
       log: () => undefined,
-      tier: { name: 'small', cellAccounts: 1, cells: 1, maxTenants: 25, tenantsSeeded: 20, onboarding: 'every-run', churnPerRun: over.manifest?.churn.length ?? 3, steadyRps: 10, scenarioSeconds: 60 },
+      tier: { name: 'small', cellAccounts: 1, cells: 1, maxTenants: 25, tenantsSeeded: 20, onboarding: 'every-run', churnPerRun: over.manifest?.churn.length ?? 3, steadyRps: 10, usersPerActiveTenant: 2, scenarioSeconds: 60 },
       manifest: { version: 1, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: TENANTS, extra: [] },
       buildLimit: 1,
       setBuildLimit: async () => 0,

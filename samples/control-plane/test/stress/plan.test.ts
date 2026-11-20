@@ -14,7 +14,7 @@ import {
   type TierSizes,
 } from './plan';
 
-const SMALL: TierSizes = { name: 'small', cellAccounts: 1, cells: 1, maxTenants: 25, tenantsSeeded: 20, onboarding: 'every-run', churnPerRun: 5, steadyRps: 10, scenarioSeconds: 60 };
+const SMALL: TierSizes = { name: 'small', cellAccounts: 1, cells: 1, maxTenants: 25, tenantsSeeded: 20, onboarding: 'every-run', churnPerRun: 5, steadyRps: 10, usersPerActiveTenant: 2, scenarioSeconds: 60 };
 const MEDIUM: TierSizes = { ...SMALL, name: 'medium', cellAccounts: 2, cells: 2, maxTenants: 110, tenantsSeeded: 200, churnPerRun: 20, steadyRps: 100 };
 const LARGE: TierSizes = { ...MEDIUM, name: 'large', cells: 4, maxTenants: 1025, tenantsSeeded: 4000, churnPerRun: 100, onboarding: 'fixture' };
 
@@ -63,14 +63,16 @@ describe('the tier', () => {
 });
 
 describe('the budget (spec §4.4)', () => {
-  it('draws the build limit on both projects, and a little STS in every cell account', () => {
+  it('draws the build limit on the three projects that run builds, two Cognito groups for each tenant, and a little STS in every cell account', () => {
     expect(drawsOf(SMALL, 50)).toEqual([
-      { account: 'platform', quota: 'codebuild-linux-small', amount: 100 },
-      { account: 'platform', quota: 'lambda-concurrency', amount: 120 },
-      { account: 'platform', quota: 'sts-assume-role-rps', amount: 3 },
+      { account: 'platform', quota: 'codebuild-linux-small', amount: 150 },
+      { account: 'platform', quota: 'lambda-concurrency', amount: 170 },
+      { account: 'platform', quota: 'sts-assume-role-rps', amount: 4 },
+      { account: 'platform', quota: 'cognito-groups', amount: 40 },
       { account: 'cell-account-1', quota: 'sts-assume-role-rps', amount: 1 },
     ]);
-    expect(drawsOf(MEDIUM, 5).map((d) => d.account)).toEqual(['platform', 'platform', 'platform', 'cell-account-1', 'cell-account-2']);
+    expect(drawsOf(MEDIUM, 5).map((d) => d.account)).toEqual(['platform', 'platform', 'platform', 'platform', 'cell-account-1', 'cell-account-2']);
+    expect(drawsOf(LARGE, 5).find((d) => d.quota === 'cognito-groups')?.amount).toBe(2 * (4000 + 100));
   });
 });
 
@@ -92,6 +94,13 @@ describe('the cell accounts file', () => {
     expect(() => parseCellAccounts(file([foreign]), 'f', SMALL, '9')).toThrow(/not a stack ARN of/);
     expect(() => parseCellAccounts(file([{ ...entry(1, '111111111111'), accountBaseStackArns: [] }]), 'f', SMALL, '9')).toThrow(/must list/);
   });
+  it('reads the ingress reader role of an account, and refuses one of another account', () => {
+    const role = 'arn:aws:iam::111111111111:role/CellAccountBase-IngressReader-ABC';
+    expect(parseCellAccounts(file([{ ...entry(1, '111111111111'), ingressReaderRoleArn: role }]), 'f', SMALL, '9')[0].ingressReaderRoleArn).toBe(role);
+    expect(parseCellAccounts(file([entry(1, '111111111111')]), 'f', SMALL, '9')[0].ingressReaderRoleArn).toBeUndefined();
+    expect(() => parseCellAccounts(file([{ ...entry(1, '111111111111'), ingressReaderRoleArn: role.replace('111111111111', '222222222222') }]), 'f', SMALL, '9')).toThrow(/role ARN of 111111111111/);
+    expect(() => parseCellAccounts(file([{ ...entry(1, '111111111111'), ingressReaderRoleArn: 'not an arn' }]), 'f', SMALL, '9')).toThrow(/role ARN of/);
+  });
 });
 
 describe('the stress application', () => {
@@ -108,5 +117,11 @@ describe('the stress application', () => {
   });
   it('refuses a policy suffix the owner stacks would refuse', () => {
     expect(() => applicationDefinition(SMALL, 'b/k', 'w10')).toThrow(/suffix/);
+  });
+  it('declares the distribution ARN as a cell parameter in a platform run, and refuses a value that is no distribution', () => {
+    const arn = 'arn:aws:cloudfront::123456789012:distribution/E2EXAMPLE12345';
+    const d = applicationDefinition(SMALL, 'b/k', '', arn) as any;
+    expect(d.cellParameters.map((p: any) => [p.name, p.default])).toEqual([['CELL_POLICY_SUFFIX', ''], ['DISTRIBUTION_ARN', arn]]);
+    expect(() => applicationDefinition(SMALL, 'b/k', '', 'arn:aws:iam::123456789012:role/x')).toThrow(/distribution ARN/);
   });
 });

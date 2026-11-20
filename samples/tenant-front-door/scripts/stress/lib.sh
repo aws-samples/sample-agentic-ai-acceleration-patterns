@@ -41,6 +41,12 @@ STACK_CELL="${PREFIX}-cell"
 STACK_EDGE="${PREFIX}-edge"
 STACK_MAIN="${PREFIX}-main"
 STACK_LOGGING="${PREFIX}-edge-logging"
+# Platform mode only: the hook parameter and policy, in the control plane's account (front-door ADR-0027).
+STACK_HOOK="${PREFIX}-route-hook-access"
+
+# The manifests of the platform run (stress/README.md), beside the slice's own state directory.
+MANIFEST_DIR="${STRESS_HOME}/${PREFIX}"
+FD_MANIFEST="${MANIFEST_DIR}/tenant-front-door.json"
 
 # The CDK selects a stack by its construct path, not by its stack name (the construct id is the prefix, src/main.ts).
 fd_selector() {
@@ -48,6 +54,7 @@ fd_selector() {
     "$STACK_EDGE") echo "${PREFIX}/Edge" ;;
     "$STACK_MAIN") echo "${PREFIX}/Main" ;;
     "$STACK_LOGGING") echo "${PREFIX}/EdgeLogging" ;;
+    "$STACK_HOOK") echo "${PREFIX}/RouteHookAccess" ;;
     *) fail "no front door stack named $1" ;;
   esac
 }
@@ -110,11 +117,21 @@ fd_context_args() {
   for k in appDomain hostedZone applicationId controlPlane dedicatedDomains fleet edgeOperatorRoleArn issuer stackNamePrefix; do
     FD_CONTEXT+=(--context "${k}=$(jq -r --arg k "$k" '.[$k] | if type == "string" then . else tojson end' "$CONTEXT")")
   done
+  # Platform mode adds these two to context.json (slice mode never does): `registrarUrl` after phase one, `agentIngress` at phase two.
+  for k in registrarUrl agentIngress; do
+    if jq -e --arg k "$k" 'has($k)' "$CONTEXT" >/dev/null; then
+      FD_CONTEXT+=(--context "${k}=$(jq -r --arg k "$k" '.[$k]' "$CONTEXT")")
+    fi
+  done
 }
 
 # The CDK context of the smoke app's stacks.
 smoke_context_args() {
   SMOKE_CONTEXT=(--context "smokePrefix=${PREFIX}" --context "smokeFleet=${FLEET}")
+  # The real control plane owns the global hook role of a platform run.
+  if [[ "${STRESS_MODE:-slice}" == platform ]]; then
+    SMOKE_CONTEXT+=(--context "smokeHookRole=false")
+  fi
   if [[ -s "$CONTEXT" ]] && [[ "$(jq -r '.distributionArn // empty' "$CONTEXT")" != "" ]]; then
     SMOKE_CONTEXT+=(
       --context "distributionArn=$(jq -r .distributionArn "$CONTEXT")"
@@ -124,4 +141,41 @@ smoke_context_args() {
       --context "cellId=${CELL_ID}"
     )
   fi
+}
+
+# deploy_stack STACK APP_KIND [NOTE]: one CDK deploy of one stack, timed. APP_KIND is `smoke` (the smoke app) or `fd` (the
+# front door app). NOTE, when given, ends the printed line (platform mode: `phase=two`). The caller sets LOGS to a scratch
+# folder; a failed deploy prints the last lines of its log.
+deploy_stack() {
+  local stack="$1" kind="$2" note="${3:-}" start=$SECONDS secs
+  echo "== deploy ${stack}"
+  if [[ "$kind" == smoke ]]; then
+    smoke_context_args
+    npx cdk deploy "$stack" --exclusively --app "$SMOKE_APP" --output "${STATE_DIR}/cdk.out.smoke" "${SMOKE_CONTEXT[@]}" \
+      --require-approval never --concurrency "$CONCURRENCY" >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
+  else
+    fd_context_args
+    npx cdk deploy "$(fd_selector "$stack")" --exclusively --output "${STATE_DIR}/cdk.out.fd" "${FD_CONTEXT[@]}" \
+      --require-approval never --concurrency "$CONCURRENCY" >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
+  fi
+  secs=$((SECONDS - start))
+  echo "stack=${stack} deploy_seconds=${secs}${note:+ ${note}}"
+  echo "$(date -u +%F) stack=${stack} deploy_seconds=${secs}${note:+ ${note}}" >>"$TIMINGS"
+}
+
+# json_private FILE: reads JSON on stdin and writes it to FILE with mode 0600, by way of a temporary file, so a reader never sees half a file.
+json_private() {
+  local file="$1"
+  cat >"${file}.new"
+  chmod 600 "${file}.new"
+  mv "${file}.new" "$file"
+}
+
+# manifest_field FILE PRODUCER JQ_PATH: the string at JQ_PATH of a manifest another slice wrote, or a failure that names the file and that slice.
+manifest_field() {
+  local file="$1" producer="$2" path="$3" v
+  [[ -s "$file" ]] || fail "${file} is missing: the ${producer} slice writes it; run that slice's set-up first"
+  v="$(jq -r "${path} // empty | if type == \"string\" then . else empty end" "$file")" || fail "${file} is not JSON"
+  [[ -n "$v" ]] || fail "${file}: ${path} is missing or not a string (the ${producer} slice writes it)"
+  printf '%s' "$v"
 }

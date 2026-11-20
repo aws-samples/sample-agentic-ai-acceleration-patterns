@@ -67,14 +67,43 @@ export interface Outputs {
 export function readOutputs(env: Env): Outputs {
   const file = path.join(env.stateDir, 'outputs.json');
   if (!fs.existsSync(file)) throw new Error(`${file} is missing: run deploy first`);
+  return readStrings(file, ['region', 'edgeRegion', 'accountId', 'appDomain', 'applicationId', 'registrarUrl', 'cellId', 'cellApiDomain', 'cellFunctionUrl', 'cellLogGroup', 'edgeLogGroup', 'routerFunction', 'fixtureTable', 'operatorRoleArn', 'hookRoleArn', 'identityApiUrl', 'identityAppClientId']) as unknown as Outputs;
+}
+
+/** The named fields of a JSON file, each a non-empty string. */
+function readStrings(file: string, keys: readonly string[]): Record<string, string> {
   const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
-  const o = {} as Record<string, string>;
-  for (const k of ['region', 'edgeRegion', 'accountId', 'appDomain', 'applicationId', 'registrarUrl', 'cellId', 'cellApiDomain', 'cellFunctionUrl', 'cellLogGroup', 'edgeLogGroup', 'routerFunction', 'fixtureTable', 'operatorRoleArn', 'hookRoleArn', 'identityApiUrl', 'identityAppClientId']) {
+  const o: Record<string, string> = {};
+  for (const k of keys) {
     const v = doc[k];
     if (typeof v !== 'string' || v === '') throw new Error(`${file}: ${k} is missing`);
     o[k] = v;
   }
-  return o as unknown as Outputs;
+  return o;
+}
+
+/**
+ * What `deploy-platform.sh` records in platform mode: the front door's own stacks in the platform account and what `collect` needs
+ * to read their logs. The stand-in's fixture table, hook role and cell are not there: the control plane and its cells are other slices'.
+ */
+export interface PlatformOutputs {
+  readonly region: string;
+  readonly edgeRegion: string;
+  readonly accountId: string;
+  readonly appDomain: string;
+  readonly applicationId: string;
+  readonly registrarUrl: string;
+  readonly edgeLogGroup: string;
+  readonly routerFunction: string;
+  readonly operatorRoleArn: string;
+  readonly identityApiUrl: string;
+  readonly identityAppClientId: string;
+}
+
+export function readPlatformOutputs(env: Env): PlatformOutputs {
+  const file = path.join(env.stateDir, 'outputs.json');
+  if (!fs.existsSync(file)) throw new Error(`${file} is missing: run deploy first`);
+  return readStrings(file, ['region', 'edgeRegion', 'accountId', 'appDomain', 'applicationId', 'registrarUrl', 'edgeLogGroup', 'routerFunction', 'operatorRoleArn', 'identityApiUrl', 'identityAppClientId']) as unknown as PlatformOutputs;
 }
 
 export type TenantKind = 'active' | 'write';

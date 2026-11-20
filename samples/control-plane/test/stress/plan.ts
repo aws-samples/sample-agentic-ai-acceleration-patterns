@@ -20,6 +20,8 @@ export interface TierSizes {
   readonly onboarding: 'every-run' | 'fixture';
   readonly churnPerRun: number;
   readonly steadyRps: number;
+  /** Users per active tenant, the admin included (spec §4.1). */
+  readonly usersPerActiveTenant: number;
   readonly scenarioSeconds: number;
 }
 
@@ -27,13 +29,20 @@ export interface TierSizes {
 export const DEFAULT_BUILD_LIMIT = 50;
 /** Spec §5.2: the build limits the scaling scenario steps through. */
 export const SCALING_LIMITS = [5, 20, 50] as const;
-/** The CodeBuild projects that run builds for the stress application: cell and tenant, no hooks (spec §3.6). */
-export const BUILD_PROJECTS = 2;
+/**
+ * The CodeBuild projects that run builds in a stress run: the cell and the tenant project and the
+ * global hook project, which runs the front door's route hook on every cell and deployment event
+ * of a platform run. The stress application declares no application hooks, so that project runs
+ * none (spec §3.6). The limit applies to each of the four projects the control plane creates.
+ */
+export const BUILD_PROJECTS = 3;
 /** The stress application's id. */
 export const APPLICATION_ID = 'stress';
 
 const PREFIX = /^[A-Za-z][A-Za-z0-9-]{2,31}$/;
 const FLEET = /^[a-z0-9][a-z0-9-]{0,31}$/;
+/** The stress application's `DISTRIBUTION_ARN` cell parameter: `arn:aws:cloudfront::<account>:distribution/<id>`. */
+export const DISTRIBUTION_ARN = /^arn:aws[a-z-]*:cloudfront::\d{12}:distribution\/[A-Z0-9]{8,32}$/;
 
 export interface StackNames {
   readonly setup: string;
@@ -94,6 +103,7 @@ export function parseTier(text: string | undefined): TierSizes {
     onboarding: doc.onboarding,
     churnPerRun: count(doc.churnPerRun, 'churnPerRun', 1),
     steadyRps: count(doc.steadyRps, 'steadyRps', 1),
+    usersPerActiveTenant: count(doc.usersPerActiveTenant, 'usersPerActiveTenant', 1),
     scenarioSeconds: count(doc.scenarioSeconds, 'scenarioSeconds', 1),
   };
   if (tier.cells % tier.cellAccounts !== 0) throw new Error('STRESS_TIER_JSON: cells must spread evenly over the cell accounts');
@@ -117,7 +127,7 @@ export const scalingLimitsFor = (buildLimit: number): number[] => SCALING_LIMITS
 
 export interface Draw {
   readonly account: string;
-  readonly quota: 'codebuild-linux-small' | 'lambda-concurrency' | 'sts-assume-role-rps';
+  readonly quota: 'codebuild-linux-small' | 'lambda-concurrency' | 'sts-assume-role-rps' | 'cognito-groups';
   readonly amount: number;
 }
 
@@ -134,6 +144,9 @@ export function drawsOf(t: TierSizes, buildLimit: number): Draw[] {
     { account: 'platform', quota: 'codebuild-linux-small', amount: builds },
     { account: 'platform', quota: 'lambda-concurrency', amount: 2 * t.steadyRps + builds },
     { account: 'platform', quota: 'sts-assume-role-rps', amount: Math.ceil(builds / 60) + 1 },
+    // A platform run gives each onboarded tenant an identity tenant (stress ADR-0017): two Cognito
+    // groups each in the stress pool, for the seeded set and, at a fixture tier, the churn creates PS-1 is timed on.
+    { account: 'platform', quota: 'cognito-groups', amount: 2 * (t.onboarding === 'fixture' ? t.tenantsSeeded + t.churnPerRun : t.tenantsSeeded) },
   ];
   for (let n = 1; n <= t.cellAccounts; n += 1) {
     draws.push({ account: `cell-account-${n}`, quota: 'sts-assume-role-rps', amount: 1 });
@@ -149,10 +162,13 @@ export interface CellAccountInput {
   readonly profile: string;
   /** The account-base stacks the owner deployed, by stack ARN (spec §3.7). */
   readonly accountBaseStackArns: readonly string[];
+  /** The ingress reader role of the account base (spec §3.5, §3.7), which the front door's phase two assumes. */
+  readonly ingressReaderRoleArn?: string;
 }
 
 const ACCOUNT = /^\d{12}$/;
 const PROFILE = /^[A-Za-z0-9_.-]{1,64}$/;
+const ROLE_ARN = /^arn:aws[a-z-]*:iam::\d{12}:role\/[A-Za-z0-9+=,.@_\/-]{1,512}$/;
 const STACK_ARN = /^arn:aws[a-z-]*:cloudformation:[a-z0-9-]+:(\d{12}):stack\/[A-Za-z][A-Za-z0-9-]{0,127}\/[0-9a-f-]{36}$/;
 
 /** Parses the cell accounts file and keeps the tier's first `cellAccounts`. */
@@ -165,7 +181,7 @@ export function parseCellAccounts(text: string, file: string, t: TierSizes, plat
   }
   if (!Array.isArray(doc.accounts)) throw new Error(`${file}: "accounts" must be an array`);
   const accounts = doc.accounts.map((a: unknown, i: number): CellAccountInput => {
-    const { label, accountId, profile, accountBaseStackArns } = (a ?? {}) as Record<string, unknown>;
+    const { label, accountId, profile, accountBaseStackArns, ingressReaderRoleArn } = (a ?? {}) as Record<string, unknown>;
     if (label !== `cell-account-${i + 1}`) throw new Error(`${file}: accounts[${i}].label must be cell-account-${i + 1}`);
     if (typeof accountId !== 'string' || !ACCOUNT.test(accountId)) throw new Error(`${file}: accounts[${i}].accountId must be 12 digits`);
     if (accountId === platformAccount) throw new Error(`${file}: accounts[${i}] is the platform account, never a cell account (spec §3.1)`);
@@ -177,7 +193,16 @@ export function parseCellAccounts(text: string, file: string, t: TierSizes, plat
       const m = typeof arn === 'string' ? STACK_ARN.exec(arn) : null;
       if (m === null || m[1] !== accountId) throw new Error(`${file}: accounts[${i}].accountBaseStackArns holds a value that is not a stack ARN of ${accountId}`);
     }
-    return { label, accountId, profile, accountBaseStackArns: accountBaseStackArns as string[] };
+    if (ingressReaderRoleArn !== undefined && (typeof ingressReaderRoleArn !== 'string' || !ROLE_ARN.test(ingressReaderRoleArn) || !ingressReaderRoleArn.includes(`:${accountId}:`))) {
+      throw new Error(`${file}: accounts[${i}].ingressReaderRoleArn must be a role ARN of ${accountId}`);
+    }
+    return {
+      label,
+      accountId,
+      profile,
+      accountBaseStackArns: accountBaseStackArns as string[],
+      ...(ingressReaderRoleArn === undefined ? {} : { ingressReaderRoleArn }),
+    };
   });
   if (new Set(accounts.map((a) => a.accountId)).size !== accounts.length) throw new Error(`${file}: an account is listed twice`);
   if (accounts.length < t.cellAccounts) throw new Error(`${file}: the ${t.name} tier needs ${t.cellAccounts} cell accounts, the file lists ${accounts.length}`);
@@ -185,8 +210,14 @@ export function parseCellAccounts(text: string, file: string, t: TierSizes, plat
 }
 
 /** The stress application's definition (control-plane `PutApplication`, spec §3.1). */
-export function applicationDefinition(t: TierSizes, sourceLocation: string, cellPolicySuffix: string): Record<string, unknown> {
+export function applicationDefinition(
+  t: TierSizes,
+  sourceLocation: string,
+  cellPolicySuffix: string,
+  distributionArn?: string,
+): Record<string, unknown> {
   if (!/^(-[a-z0-9]{1,16})?$/.test(cellPolicySuffix)) throw new Error('the cell policy suffix must be empty or - and 1 to 16 lower-case letters or digits');
+  if (distributionArn !== undefined && !DISTRIBUTION_ARN.test(distributionArn)) throw new Error('the distribution ARN must be a CloudFront distribution ARN');
   const scripts = (kind: 'cell' | 'tenant') => ({
     create: `stress/application/scripts/${kind}/create.sh`,
     update: `stress/application/scripts/${kind}/update.sh`,
@@ -202,7 +233,11 @@ export function applicationDefinition(t: TierSizes, sourceLocation: string, cell
       { name: 'AGENTS', required: false, default: 'default', description: 'Agents the tenant is subscribed to on its cell, comma-separated' },
       { name: 'TOOLS', required: false, default: '', description: 'Tools the tenant is subscribed to on its cell, comma-separated' },
     ],
-    cellParameters: [{ name: 'CELL_POLICY_SUFFIX', default: cellPolicySuffix, description: 'The cell policy suffix of the cell accounts (stress/application)' }],
+    cellParameters: [
+      { name: 'CELL_POLICY_SUFFIX', default: cellPolicySuffix, description: 'The cell policy suffix of the cell accounts (stress/application)' },
+      // A platform run: the cell API grants this distribution (front-door spec §5.2). Slice mode declares none and the cell has no cell API.
+      ...(distributionArn === undefined ? [] : [{ name: 'DISTRIBUTION_ARN', default: distributionArn, description: 'The front door distribution the cell API origin grants (stress/application)' }]),
+    ],
     hooks: [],
   };
 }

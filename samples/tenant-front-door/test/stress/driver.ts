@@ -10,21 +10,25 @@
  *   driver.ts run <scenario>    one scenario: its result record and request log
  *   driver.ts collect           the hops' logs against the driver's counts; the late fields
  *   driver.ts sweep             the run's routes and tenants
+ *   driver.ts ingress           platform mode: the cell's ingress base URL, read through the ingress reader role (stdout)
+ *   driver.ts await-agents      platform mode: polls until the edge routes `/agents/*` (front-door phase two)
  *
- * It prints ids, counts and timings, never a token, a password or a key.
+ * In platform mode (STRESS_MODE=platform) `run` and `collect` read the other slices' manifests (platform.ts) instead of
+ * the stand-in's outputs and run PS-7 only. It prints ids, counts and timings, never a token, a password or a key.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { DeleteParametersCommand, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { Fixtures, IdentityClient, newUlid, Registrar, retrying } from './clients';
+import { DeleteParametersCommand, GetParameterCommand, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { Fixtures, IdentityClient, newUlid, Registrar, retrying, unsignedToken } from './clients';
 import { collect } from './collect';
 import { request, sleep } from './http';
 import { pool, Rate } from './load';
 import { drawsOf, parseTier, planOf, tenantsToSeed } from './plan';
-import { runScenario, SCENARIOS, type Ctx, type ScenarioId } from './scenarios';
+import { agentIngressOf, agentsOpen, ingressBaseUrl, manifestDir, needWarmUp, parseControlPlane, parseFrontDoor, parseIdentity, platformTenants, ps7Outputs, readManifest as readPlatformManifest } from './platform';
+import { ps7, runScenario, SCENARIOS, type Ctx, type Ps7Ctx, type ScenarioId } from './scenarios';
 import { assumedCredentials, ownCredentials, signedCaller } from './sigv4';
-import { readEnv, readManifest, readOutputs, writeManifest, writeRequestLog, type Env, type Manifest, type Outputs, type TenantEntry } from './state';
+import { readEnv, readManifest, readOutputs, readPlatformOutputs, writeManifest, writeRequestLog, type Env, type Manifest, type Outputs, type TenantEntry } from './state';
 
 const SEED_CONCURRENCY = 2;
 /** PutParameter and DeleteParameter share a 3 per second account limit (SSM). */
@@ -179,11 +183,13 @@ async function sweep(env: Env, routes: boolean): Promise<number> {
 }
 
 async function run(env: Env, scenario: string): Promise<number> {
-  if (!(SCENARIOS as readonly string[]).includes(scenario)) throw new Error(`unknown scenario ${scenario} (${SCENARIOS.join(', ')})`);
+  const platform = env.mode === 'platform';
+  const known = platform ? ['PS-7'] : (SCENARIOS as readonly string[]);
+  if (!known.includes(scenario)) throw new Error(`unknown scenario ${scenario} (${known.join(', ')}${platform ? ' in platform mode; the others are slice mode only' : ''})`);
   if (env.results === '') throw new Error('STRESS_RESULTS is not set');
-  const out = readOutputs(env);
-  const ctx = context(env, out, readManifest(env));
-  const outcome = await runScenario(ctx, scenario as ScenarioId);
+  const outcome = platform
+    ? await ps7(platformContext(env))
+    : await runScenario(context(env, readOutputs(env), readManifest(env)), scenario as ScenarioId);
   const record = outcome.record;
   fs.mkdirSync(env.results, { recursive: true });
   fs.writeFileSync(path.join(env.results, `tenant-front-door.${scenario}.json`), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
@@ -195,6 +201,74 @@ async function run(env: Env, scenario: string): Promise<number> {
   for (const n of outcome.notes) console.log(`  ${n}`);
   for (const f of outcome.failures) console.error(`run ${scenario}: FAIL ${f}`);
   return outcome.failures.length === 0 && record.isolation.mismatches === 0 && record.refusals.unattributed === 0 ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// Platform mode (docs/stress-test.spec.md §3.5, stress ADR-0016, ADR-0017): the manifests of the other slices stand in for
+// the stand-in control plane and its fixtures.
+// ---------------------------------------------------------------------------
+
+/** The manifests of the platform run, each read the way it names the slice that writes it. */
+const manifestFile = (env: Env, name: string): string => path.join(manifestDir(env), name);
+
+function readFrontDoor(env: Env) {
+  const file = manifestFile(env, 'tenant-front-door.json');
+  return { file, fd: parseFrontDoor(readPlatformManifest(file, 'tenant-front-door'), file) };
+}
+
+function readControlPlane(env: Env) {
+  const file = manifestFile(env, 'control-plane.json');
+  return { file, cp: parseControlPlane(readPlatformManifest(file, 'control-plane'), file) };
+}
+
+/** PS-7 in platform mode: tenants, tokens and the cell origin and ingress from the manifests; no registrar, no fixtures. */
+function platformContext(env: Env): Ps7Ctx {
+  const { file: fdFile, fd } = readFrontDoor(env);
+  const { file: cpFile, cp } = readControlPlane(env);
+  const idFile = manifestFile(env, 'identity.json');
+  const identity = parseIdentity(readPlatformManifest(idFile, 'tenant-identity'), idFile);
+  const tenants = platformTenants(cp, planOf(env.tier).activeTenants);
+  if (tenants.length < 2) {
+    throw new Error(`PS-7 needs two tenants with an identity, ${cpFile} has ${tenants.length}: ${cp.seeded.length} seeded, ${cp.identity.length} with an identity entry (the control-plane slice writes identity[], stress ADR-0017)`);
+  }
+  const out = ps7Outputs(fd, needWarmUp(cp, cpFile), fdFile);
+  return { env, out, manifest: { version: 1, tenants }, identity: new IdentityClient(identity.apiUrl, signedCaller(env.region, ownCredentials())) };
+}
+
+/**
+ * Phase two, first half: the cell's ingress base URL. Assumes the cell account's ingress reader role with the run's own credentials
+ * (held in memory by the credentials provider, never printed or written) and reads the one parameter it allows. Prints the URL alone.
+ */
+async function ingress(env: Env): Promise<number> {
+  const { file, cp } = readControlPlane(env);
+  const warm = needWarmUp(cp, file);
+  const ssm = new SSMClient({ region: env.region, credentials: assumedCredentials(warm.ingressReaderRoleArn, env.region, 'tfd-stress-phase-two') });
+  const r = await ssm.send(new GetParameterCommand({ Name: warm.ingressParameter }));
+  console.log(agentIngressOf(ingressBaseUrl(r.Parameter?.Value ?? '')));
+  return 0;
+}
+
+/** How long phase two waits for the distribution update to reach the edge (a CloudFront deployment takes minutes). */
+const AGENTS_WAIT_MS = 600_000;
+
+/** Phase two, second half: polls until the edge routes `/agents/*`, five answers in a row, for up to ten minutes. */
+async function awaitAgents(env: Env, waitMs = AGENTS_WAIT_MS): Promise<number> {
+  const { fd } = readFrontDoor(env);
+  const from = Date.now();
+  let streak = 0;
+  let last = 'no answer';
+  while (Date.now() - from < waitMs) {
+    const r = await request({ method: 'GET', url: `${fd.edgeUrl}/agents/${fd.agentBackend}/invocations`, headers: { authorization: `Bearer ${unsignedToken(newUlid())}` } });
+    last = r.status === 0 ? `no answer (${r.error ?? 'error'})` : `HTTP ${r.status}`;
+    streak = agentsOpen(r.status, r.body) ? streak + 1 : 0;
+    if (streak >= 5) {
+      console.log(`phase two: the edge routes /agents/* ${Math.round((Date.now() - from) / 1000)} s after the deploy returned`);
+      return 0;
+    }
+    await sleep(5000);
+  }
+  console.error(`phase two: the edge did not route /agents/* within ${Math.round(waitMs / 60_000)} minutes (the last answer was ${last}, not the router's 403 for an unknown tenant)`);
+  return 1;
 }
 
 async function main(): Promise<number> {
@@ -213,15 +287,19 @@ async function main(): Promise<number> {
     }
     case 'collect': {
       const env = readEnv();
-      const r = await collect(env, readOutputs(env));
+      const r = await collect(env, env.mode === 'platform' ? readPlatformOutputs(env) : readOutputs(env));
       for (const n of r.notes) console.log(`collect: ${n}`);
       for (const f of r.failures) console.error(`collect: FAIL ${f}`);
       return r.failures.length === 0 ? 0 : 1;
     }
     case 'sweep':
       return sweep(readEnv(), arg !== '--no-routes');
+    case 'ingress':
+      return ingress(readEnv());
+    case 'await-agents':
+      return awaitAgents(readEnv());
     default:
-      console.error('usage: driver.ts budget | seed | run <scenario> | collect | sweep');
+      console.error('usage: driver.ts budget | seed | run <scenario> | collect | sweep | ingress | await-agents');
       return 2;
   }
 }

@@ -7,6 +7,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { type Draw, type Limits, overdraws, parseDraws, sumDraws } from './budget';
+import { setupActions, stepsBeforeTeardown } from './platform';
 import { parseRecord, recordFailures, renderResults, type ResultRecord } from './result';
 import { loadSlice, orderSlices, type Slice, type Verb } from './slice';
 import { type Tier, tierOf, tierProblems } from './tiers';
@@ -217,7 +218,9 @@ export function planRun(opts: Pick<RunOptions, 'repoRoot' | 'tier' | 'slices'>):
     }
   }
   const slices = orderSlices(loaded);
-  return { tier, slices, mode: slices.length === 1 ? 'slice' : 'platform' };
+  const mode = slices.length === 1 ? 'slice' : 'platform';
+  setupActions(slices, mode); // refuses a platform order that calls a step a slice does not declare
+  return { tier, slices, mode };
 }
 
 /**
@@ -382,17 +385,20 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     }
     stopIfAborted();
 
-    // Each slice deploys and then seeds before the next one starts, so a slice can read what
-    // an earlier one seeded when it deploys (the front door needs the control plane's
-    // application, which exists after the control plane's seed). A slice's `needs` are
-    // always earlier in `slices`, so its seed follows every deploy it depends on.
-    for (const s of slices) {
+    // A slice-mode run deploys and then seeds each slice in turn; a platform run follows the
+    // interleaved order of `PLATFORM_SETUP` (spec §3.5), so a slice can read what an earlier
+    // slice made when it deploys. A slice's deploy seconds are the time of its `deploy` and
+    // its set-up steps, which is the time it takes to be ready to run (P-6); `seed` is not part of it.
+    const byName = new Map(slices.map((s) => [s.name, s]));
+    for (const a of setupActions(slices, mode)) {
+      const s = byName.get(a.slice)!;
       const t0 = Date.now();
-      started.set(s.name, { start: now().toISOString() });
-      if (!(await verb(s, 'deploy'))) throw new Stopped();
-      started.get(s.name)!.deploySeconds = Math.round((Date.now() - t0) / 1000);
-      stopIfAborted();
-      if (!(await verb(s, 'seed'))) throw new Stopped();
+      if (!started.has(s.name)) started.set(s.name, { start: now().toISOString() });
+      if (!(await verb(s, a.verb, a.step === undefined ? [] : [a.step]))) throw new Stopped();
+      if (a.verb !== 'seed') {
+        const info = started.get(s.name)!;
+        info.deploySeconds = (info.deploySeconds ?? 0) + Math.round((Date.now() - t0) / 1000);
+      }
       stopIfAborted();
     }
     for (const sc of scenarios) {
@@ -457,6 +463,13 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
 
   async function teardown(s: Slice): Promise<void> {
     const t0 = Date.now();
+    // Steps that must run before this slice's teardown (platform mode, `PLATFORM_BEFORE_TEARDOWN`), for the
+    // slices that started; their time counts in this slice's destroy seconds, and a failed one is recorded
+    // by `verb` and does not stop the teardown (the slice's own teardown names what it still finds).
+    for (const a of stepsBeforeTeardown(s.name, slices, mode)) {
+      const owner = slices.find((x) => x.name === a.slice);
+      if (owner !== undefined && started.has(owner.name)) await verb(owner, 'step', [a.step!]);
+    }
     const ok = await verb(s, 'teardown', opts.removeFixtures ? ['--fixtures'] : []);
     const info = started.get(s.name)!;
     const lifecycle: ResultRecord = {

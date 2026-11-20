@@ -22,7 +22,9 @@
  * `tfd-smoke-global-hook`. The stress slice (`scripts/stress/`) passes the
  * contexts `smokePrefix` and `smokeFleet` to name them after its run prefix,
  * so that two runs, or a run and the smoke test, share neither a stack name
- * nor an IAM role name.
+ * nor an IAM role name. In the platform stress run the context
+ * `smokeHookRole=false` leaves the stand-in hook role (and its output) out:
+ * the real control plane owns `<fleet>-global-hook` there.
  *
  * Not part of the sample: nothing here is deployed by `src/main.ts`.
  */
@@ -69,17 +71,21 @@ operator.addToPolicy(new iam.PolicyStatement({
   actions: ['execute-api:Invoke'],
   resources: registrarRoutes('*/*/PUT/cells/*', '*/*/PUT/tenants/*', '*/*/DELETE/cells/*', '*/*/DELETE/tenants/*', '*/*/DELETE/hosts/*'),
 }));
-const hook = new iam.Role(support, 'GlobalHook', {
-  roleName: `${SMOKE_FLEET}-global-hook`,
-  assumedBy: new iam.AccountRootPrincipal(),
-  description: 'tenant-front-door smoke test: stands in for the control plane global hook role',
-});
-hook.addToPolicy(new iam.PolicyStatement({
-  actions: ['execute-api:Invoke'],
-  resources: registrarRoutes('*/*/PUT/cells/*', '*/*/PUT/tenants/*', '*/*/DELETE/cells/*', '*/*/DELETE/tenants/*'),
-}));
+// The platform stress run (`smokeHookRole=false`) has the real control plane, whose own `<fleet>-global-hook`
+// role the registrar admits: a stand-in role of that name must not exist there.
+if (String(app.node.tryGetContext('smokeHookRole')) !== 'false') {
+  const hook = new iam.Role(support, 'GlobalHook', {
+    roleName: `${SMOKE_FLEET}-global-hook`,
+    assumedBy: new iam.AccountRootPrincipal(),
+    description: 'tenant-front-door smoke test: stands in for the control plane global hook role',
+  });
+  hook.addToPolicy(new iam.PolicyStatement({
+    actions: ['execute-api:Invoke'],
+    resources: registrarRoutes('*/*/PUT/cells/*', '*/*/PUT/tenants/*', '*/*/DELETE/cells/*', '*/*/DELETE/tenants/*'),
+  }));
+  new CfnOutput(support, 'GlobalHookRoleArn', { value: hook.roleArn });
+}
 new CfnOutput(support, 'EdgeOperatorRoleArn', { value: operator.roleArn });
-new CfnOutput(support, 'GlobalHookRoleArn', { value: hook.roleArn });
 
 // --- Stand-in control plane ---------------------------------------------------
 

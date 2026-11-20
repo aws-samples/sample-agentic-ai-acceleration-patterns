@@ -74,7 +74,7 @@ describe('classify', () => {
 
   it('knows what each kind may get back', () => {
     const kinds = Object.keys(EXPECT) as RequestKind[];
-    expect(kinds).toHaveLength(15);
+    expect(kinds).toHaveLength(17);
     expect(meets('forged-payload', { served: true, known: true })).toBe(false);
     expect(meets('forged-payload', { served: false, reason: 'cell-forbidden', known: true })).toBe(true);
     expect(meets('whoami', { served: false, reason: 'edge-no-route', known: true })).toBe(false);
