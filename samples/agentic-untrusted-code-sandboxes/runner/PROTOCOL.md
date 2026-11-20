@@ -176,8 +176,9 @@ can take a job (HTTP 503 after a forced failed start). `run` delivers the
 start call's payload; `suspend`, `resume` and `terminate` answer HTTP 200
 `{}` and change nothing. A hook request may carry no body and no
 `Content-Length` (the platform sends `suspend` that way); its body is then
-empty, as RFC 9112 section 6.3 says. The `run` hook with an empty body is
-HTTP 400. Any other path is HTTP 404.
+empty, as RFC 9112 section 6.3 says. A `Transfer-Encoding` other than `chunked` is HTTP 400 and
+closes the connection. The first `run` hook with an empty body is HTTP 400;
+a later `run` hook answers HTTP 200 whatever its body. Any other path is HTTP 404.
 
 The platform wraps the `RunMicrovm` `runHookPayload` (at most 4096
 characters) as a JSON string, `{"microvmId": "…", "runHookPayload":

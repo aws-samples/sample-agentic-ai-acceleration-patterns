@@ -512,6 +512,20 @@ class LimitsTest(unittest.TestCase):
             self.assertIn(b" 404 ", self.raw(hooks, b"POST /nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").split(b"\r\n")[0])
             self.assertIn(b" 400 ", self.raw(hooks, b"POST /run HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").split(b"\r\n")[0])
             self.assertIsNone(sb.nonce_hash)
+            for value in (b"identity", b"gzip, chunked", b"chunked, identity", b"bogus"):
+                second = b"POST /terminate HTTP/1.1\r\nHost: x\r\n\r\n"
+                answer = self.raw(hooks, b"POST /ready HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: " + value + b"\r\n\r\n" + second)
+                self.assertIn(b" 400 ", answer.split(b"\r\n")[0], value)
+                self.assertEqual(answer.count(b"HTTP/1.1 "), 1, value)
+            with socket.create_connection(("127.0.0.1", hooks), timeout=5) as s:
+                s.sendall(b"POST /suspend HTTP/1.1\r\nHost: x\r\n\r\nPOST /resume HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                answer = b""
+                while answer.count(b"HTTP/1.1 200") < 2:
+                    piece = s.recv(4096)
+                    if not piece:
+                        break
+                    answer += piece
+                self.assertEqual(answer.count(b"HTTP/1.1 200"), 2)
             for head in (b"", b"Content-Length: 0\r\n"):
                 answer = self.raw(jobs, b"POST /run HTTP/1.1\r\nHost: x\r\nConnection: close\r\n" + head + b"\r\n")
                 self.assertIn(b" 400 ", answer.split(b"\r\n")[0], head)

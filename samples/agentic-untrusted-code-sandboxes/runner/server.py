@@ -260,6 +260,9 @@ def read_body(handler: BaseHTTPRequestHandler, limit: int = wire.MAX_BODY_BYTES)
 
 
 def _read_body(handler, limit: int, deadline: float) -> Optional[bytes]:
+    encoding = handler.headers.get("Transfer-Encoding")
+    if encoding is not None and encoding.lower() != "chunked":
+        return None  # RFC 9112 section 6.3: any other framing is refused, so the bytes after it are never read as a request
     if handler.headers.get("Transfer-Encoding", "").lower() == "chunked":
         data = bytearray()
         while True:
