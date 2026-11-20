@@ -273,11 +273,13 @@ describe('the driver\'s teardown', () => {
    * An aws stub for the driver. `describe` sets what DescribeStacks answers
    * for the run's stacks: `missing`, CloudFormation's "does not exist", or
    * `error`, any other error. `assume` sets whether the driver can assume a
-   * role. Every other read answers as for an account where the run left
-   * nothing, with each service's own not-found error. Once
-   * `$STUB_DIR/creds-gone` exists, every call fails as with no credentials.
+   * role. `apigwRoleGone` makes the role API Gateway's account setting
+   * names answer NoSuchEntity, as after it was deleted. Every other read
+   * answers as for an account where the run left nothing, with each
+   * service's own not-found error. Once `$STUB_DIR/creds-gone` exists,
+   * every call fails as with no credentials.
    */
-  const awsStub = (opts: { describe: 'missing' | 'error'; assume: boolean; blind?: boolean }) => `#!/usr/bin/env bash
+  const awsStub = (opts: { describe: 'missing' | 'error'; assume: boolean; blind?: boolean; apigwRoleGone?: boolean }) => `#!/usr/bin/env bash
 args="$*"
 echo "$args" >> "$STUB_DIR/aws.log"
 if [[ -f "$STUB_DIR/creds-gone" ]]; then echo 'Unable to locate credentials. You can configure credentials by running "aws configure".' >&2; exit 253; fi
@@ -288,7 +290,7 @@ case "$1 $2" in
 esac
 ${opts.blind ? 'fail AccessDenied Any "not authorized"' : ''}
 case "$1 $2" in
-  "iam get-role") [[ "$args" == *"--role-name Admin"* || "$args" == *"--role-name apigw-logs"* ]] && echo arn:aws:iam::111111111111:role/Admin || fail NoSuchEntity GetRole "The role cannot be found." ;;
+  "iam get-role") [[ "$args" == *"--role-name Admin"* ${opts.apigwRoleGone ? '' : '|| "$args" == *"--role-name apigw-logs"* '}]] && echo arn:aws:iam::111111111111:role/Admin || fail NoSuchEntity GetRole "The role cannot be found." ;;
   "iam get-policy") fail NoSuchEntity GetPolicy "Policy was not found." ;;
   "route53 get-hosted-zone") echo integ-placeholder.example.com. ;;
   "route53 list-resource-record-sets") [[ "$args" == *length* ]] && echo 0 || echo null ;;
@@ -424,6 +426,16 @@ exit 1
     expect(r.output).toContain(`resume with: scripts/integ.sh teardown ${RUN} single`);
     expect(r.output).not.toContain('teardown: (1)');
     expect(r.output).not.toContain('PASS teardown parts');
+  });
+
+  it('refuses to start when API Gateway\'s CloudWatch Logs role was deleted, before any deploy', () => {
+    stub(awsStub({ describe: 'missing', assume: true, apigwRoleGone: true }));
+    fs.rmSync(runDir, { recursive: true, force: true });
+    const r = dir.run(path.join(SAMPLE_ROOT, 'scripts', 'integ.sh'), { ...inputs, TFD_INTEG_RUN_ID: RUN }, ['single']);
+    expect(r.status).toBe(1);
+    expect(r.output).toContain('API Gateway\'s CloudWatch Logs role in eu-central-1 no longer exists; set one (test/integ/api-gateway-account.app.ts)');
+    expect(fs.readFileSync(path.join(dir.dir, 'aws.log'), 'utf8')).toContain('iam get-role --role-name apigw-logs');
+    expect(npxCalls()).not.toContain('deploy');
   });
 
   it('refuses to start when the control plane\'s account already holds a control plane', () => {
