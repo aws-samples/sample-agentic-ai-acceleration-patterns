@@ -226,6 +226,20 @@ describe('authorize', () => {
     release();
     expect(effectOf(await run)).toBe('Allow');
   });
+
+  it('logs the client correlation id on the authorised and refused lines, and drops a malformed one (ADR-0053)', async () => {
+    const token = `Bearer ${await issuer.mint()}`;
+    await authorizer.authorize(event({ 'Authorization': token, 'x-correlation-id': 'run1-3-b1' }), deps());
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request authorised')).toMatchObject({ correlationId: 'run1-3-b1' });
+    logs = [];
+    await authorizer.authorize(event({ 'Authorization': 'Bearer nope', 'X-Correlation-Id': 'run1-3-b2' }), deps());
+    expect(refusal()).toMatchObject({ correlationId: 'run1-3-b2' });
+    logs = [];
+    const result = await authorizer.authorize(event({ 'Authorization': token, 'x-correlation-id': 'bad id' }), deps());
+    expect(effectOf(result)).toBe('Allow');
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request authorised').correlationId).toBeUndefined();
+    expect(logs.join('\n')).not.toContain('bad id');
+  });
 });
 
 describe('handler', () => {

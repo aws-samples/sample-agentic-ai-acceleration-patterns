@@ -239,15 +239,17 @@ LAST_TTFB=""
 LAST_TOTAL=""
 : >"${LIB_TMP}/timing"
 
-# invoke ENDPOINT TOKEN_VAR JSON [SESSION_HEADER_VALUE] [X_TENANT_ID] -> HTTP status; body in $BODY.
+# invoke ENDPOINT TOKEN_VAR JSON [SESSION_HEADER_VALUE] [X_TENANT_ID] [CORRELATION_ID] -> HTTP status; body in $BODY.
 # TOKEN_VAR is a variable NAME (empty name: no Authorization header).
 # X_TENANT_ID selects one tenant of a token that carries `tenants` (ADR-0038).
+# CORRELATION_ID is sent as `x-correlation-id` (ADR-0053); it must hold no `"` or `\`.
 # Writes TTFB and total seconds for timing().
 invoke() {
-  local endpoint="$1" token_var="$2" json="$3" fake_session="${4:-}" tenant_header="${5:-}" config="" out status ttfb total
+  local endpoint="$1" token_var="$2" json="$3" fake_session="${4:-}" tenant_header="${5:-}" correlation="${6:-}" config="" out status ttfb total
   [[ -n "$token_var" ]] && config="header = \"Authorization: Bearer ${!token_var}\""
   [[ -n "$fake_session" ]] && config+=$'\n'"header = \"${SESSION_HEADER}: ${fake_session}\""
   [[ -n "$tenant_header" ]] && config+=$'\n'"header = \"X-Tenant-Id: ${tenant_header}\""
+  [[ -n "$correlation" ]] && config+=$'\n'"header = \"x-correlation-id: ${correlation}\""
   printf '%s' "$json" >"$REQ"
   out="$(curl -s -N --max-time 180 -o "$BODY" -w '%{http_code} %{time_starttransfer} %{time_total}' -X POST "$endpoint" \
     -H 'Content-Type: application/json' -H 'Accept: text/event-stream' --data-binary "@$REQ" --config - <<<"$config")"

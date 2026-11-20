@@ -27,6 +27,24 @@ export function headerValue(
   return undefined;
 }
 
+/** The client's correlation header (ADR-0053, stress ADR-0005). */
+export const CORRELATION_HEADER = 'x-correlation-id';
+
+const CORRELATION_ID = /^[A-Za-z0-9-]{1,64}$/;
+
+/**
+ * The client's correlation id when it is 1 to 64 characters of
+ * `[A-Za-z0-9-]`, else undefined (ADR-0053). The value is client-chosen:
+ * it is logged as the `correlationId` field so one request's lines join
+ * across hops, and nothing decides on it. A value of any other shape is
+ * dropped, not trimmed, so a log line never carries client text beyond
+ * that alphabet.
+ */
+export function correlationIdOf(headers: Record<string, string | undefined> | null | undefined): string | undefined {
+  const value = headerValue(headers, CORRELATION_HEADER);
+  return value !== undefined && CORRELATION_ID.test(value) ? value : undefined;
+}
+
 /** The required scopes the granted list lacks; empty when every one is present (AND). */
 export function missingScopes(granted: readonly string[], required: readonly string[]): string[] {
   return required.filter((scope) => !granted.includes(scope));

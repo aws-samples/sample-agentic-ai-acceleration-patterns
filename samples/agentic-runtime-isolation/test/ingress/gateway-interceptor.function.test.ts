@@ -326,6 +326,20 @@ describe('intercept', () => {
     expect((out.http as any).transformedGatewayResponse.statusCode).toBe(401);
   });
 
+  it('logs the client correlation id on admitted and refused lines, drops a malformed one, and never forwards it (ADR-0053)', async () => {
+    const token = await issuer.mint();
+    const out = await intercept(event({ 'Authorization': `Bearer ${token}`, 'X-Correlation-Id': 'run1-2-c1' }, body), deps());
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted')).toMatchObject({ correlationId: 'run1-2-c1' });
+    const http = out.http as { transformedGatewayRequest: { headers: Record<string, string> } };
+    expect(Object.keys(http.transformedGatewayRequest.headers).map((k) => k.toLowerCase())).not.toContain('x-correlation-id');
+    logs = [];
+    await intercept(event({ 'x-correlation-id': 'run1-2-c2' }, body), deps());
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request refused')).toMatchObject({ correlationId: 'run1-2-c2', status: 401 });
+    logs = [];
+    await intercept(event({ 'Authorization': `Bearer ${token}`, 'x-correlation-id': 'a'.repeat(65) }, body), deps());
+    expect(logs.map((l) => JSON.parse(l)).find((l) => l.message === 'request admitted').correlationId).toBeUndefined();
+  });
+
   it('exports a handler', () => {
     expect(typeof handler).toBe('function');
   });

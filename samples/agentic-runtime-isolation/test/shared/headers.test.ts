@@ -1,7 +1,23 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { headerValue, missingScopes } from '../../src/shared/headers';
+import { correlationIdOf, headerValue, missingScopes } from '../../src/shared/headers';
+
+describe('correlationIdOf (ADR-0053)', () => {
+  it('returns 1 to 64 characters of [A-Za-z0-9-], matched case-insensitively by header name', () => {
+    expect(correlationIdOf({ 'x-correlation-id': 'run1-7-a3' })).toBe('run1-7-a3');
+    expect(correlationIdOf({ 'X-Correlation-Id': 'A' })).toBe('A');
+    expect(correlationIdOf({ 'x-correlation-id': 'a'.repeat(64) })).toBe('a'.repeat(64));
+  });
+
+  it('drops any other shape, and a missing header', () => {
+    for (const bad of ['', 'a'.repeat(65), 'a b', 'a_b', 'a.b', 'a\nb', 'ü', '<x>']) {
+      expect(correlationIdOf({ 'x-correlation-id': bad })).toBeUndefined();
+    }
+    expect(correlationIdOf({})).toBeUndefined();
+    expect(correlationIdOf(undefined)).toBeUndefined();
+  });
+});
 
 describe('headerValue', () => {
   it('matches the header name case-insensitively', () => {

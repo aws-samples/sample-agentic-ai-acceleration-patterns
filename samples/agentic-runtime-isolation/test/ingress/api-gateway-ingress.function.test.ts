@@ -452,4 +452,55 @@ describe('handleRequest', () => {
       expect(logs.some((l) => l.includes('_aws'))).toBe(false);
     });
   });
+
+  describe('correlation id (ADR-0053)', () => {
+    const body = '{"prompt":"hi","conversationId":"conversationA1x0001"}';
+    const withId = async (id: string | undefined) => {
+      const e = event(`Bearer ${await issuer.mint()}`, body);
+      return id === undefined ? e : { ...e, headers: { ...e.headers, 'X-Correlation-Id': id } };
+    };
+    const lines = () => logs.map((l) => JSON.parse(l));
+
+    it('a well-formed id lands on the request served line as correlationId', async () => {
+      await handleRequest(await withId('run1-7-a3'), writer().out, deps(new FakeBackend()));
+      expect(lines().find((l) => l.message === 'request served')).toMatchObject({ correlationId: 'run1-7-a3', status: 200 });
+    });
+
+    it('a refusal carries it too, so an unattributed 4xx still joins the driver record', async () => {
+      const e = { ...event(undefined, body), headers: { 'x-correlation-id': 'run1-7-a4' } };
+      await handleRequest(e, writer().out, deps(new FakeBackend()));
+      expect(lines().find((l) => l.message === 'request refused')).toMatchObject({ correlationId: 'run1-7-a4', status: 401 });
+    });
+
+    it('a backend failure line carries it', async () => {
+      const failing: InvokeBackend = {
+        invoke: async () => {
+          throw new TypeError('boom');
+        },
+        transportHeaders: () => ({}),
+      } as unknown as InvokeBackend;
+      await handleRequest(await withId('run1-7-a5'), writer().out, deps(failing));
+      expect(lines().find((l) => l.message === 'backend invoke failed')).toMatchObject({ correlationId: 'run1-7-a5' });
+    });
+
+    it('an id of any other shape is dropped, never trimmed, and changes nothing else', async () => {
+      for (const bad of ['', 'a'.repeat(65), 'has space', 'semi;colon', 'new\nline', 'ü-umlaut', '"quoted"']) {
+        logs = [];
+        const backend = new FakeBackend();
+        const { w, out } = writer();
+        await handleRequest(await withId(bad), out, deps(backend));
+        expect(w.status).toBe(200);
+        const served = lines().find((l) => l.message === 'request served');
+        expect(served.correlationId).toBeUndefined();
+        if (bad.length > 0) {
+          expect(logs.join('\n')).not.toContain(bad);
+        }
+      }
+    });
+
+    it('no header, no field', async () => {
+      await handleRequest(await withId(undefined), writer().out, deps(new FakeBackend()));
+      expect('correlationId' in lines().find((l) => l.message === 'request served')).toBe(false);
+    });
+  });
 });

@@ -76,6 +76,7 @@ target per agent, which the agent added after the deploy does not get.
 | 4b | session `tenant` scope: B1 with A1's conversation lands in B's unit; A2 sharing it shares A1's |
 | 5 | A1 resumes its conversation on the same microVM |
 | 6 | no token, tampered token, ID token, malformed `conversationId`: refused |
+| 6c | client correlation id (ADR-0053): a well-formed `x-correlation-id` is logged as `correlationId` on `request served` (`api-gateway`) or `request admitted` (`agentcore-gateway`); a malformed one is in no line and the request is still served; on `api-gateway` the authoriser's `token refused` line carries it too |
 | 7 | grants: `scope`, `tenant_id`, `agent`, `aud` and `act.sub` per caller |
 | 8a | TVM: own tenant item read, other tenant's denied in IAM; the runner cannot assume the tenant role |
 | 8b | a model prompt ends with `event: usage` |

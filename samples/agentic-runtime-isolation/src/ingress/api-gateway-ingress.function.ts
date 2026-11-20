@@ -9,12 +9,14 @@
  * response streaming (spike V-5: the integration timeout is two minutes, set
  * by the construct). One Lambda serves every backend behind the ingress
  * (ADR-0024); no Runtime ARN is in its environment. Logs carry the verified
- * tenantId, the backend and the session prefix as fields, never a header
- * value (P-9); one EMF record per request carries requests, 4xx/5xx, TTFB
+ * tenantId, the backend and the session prefix as fields, and no header
+ * value but the shape-checked correlation id (P-9, ADR-0053); one EMF record per request carries requests, 4xx/5xx, TTFB
  * and streamed bytes (P-9) and the cost meters (P-10, ADR-0017): ingress
  * milliseconds, backend invoke seconds (from the invoke call to the end of
  * the stream), and the model tokens read from the agent's final
- * `event: usage` SSE event. The stream is forwarded unchanged; the scanner
+ * `event: usage` SSE event. Every line also carries the client's
+ * `x-correlation-id` as `correlationId` when it has the accepted shape.
+ * The stream is forwarded unchanged; the scanner
  * only looks at it.
  */
 
@@ -23,7 +25,7 @@ import type { APIGatewayProxyEvent, StreamifyHandler } from 'aws-lambda';
 import { AgentCoreRuntimeBackend } from '../backend/agentcore-runtime.transport';
 import type { InvokeBackend } from '../backend/backend';
 import { isLambdaRuntime, readIngressConfig } from '../shared/config';
-import { headerValue } from '../shared/headers';
+import { correlationIdOf, headerValue } from '../shared/headers';
 import { errorName, log } from '../shared/logger';
 import { emitRequestMetrics, type RequestMetrics, UsageEventScanner } from '../shared/metrics';
 import { type AuthorizedContext, errorBody, type ErrorStatus, IngressPipeline, pipelineFor, RequestError } from '../shared/request';
@@ -88,6 +90,9 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
   const authorizer = (event.requestContext?.authorizer ?? {}) as Record<string, unknown>;
   const authorizedTenant = typeof authorizer.tenantId === 'string' ? authorizer.tenantId : undefined;
   const authorizedBackend = typeof authorizer.backend === 'string' ? authorizer.backend : undefined;
+  // ADR-0053: the client's correlation id, on every line of this request
+  // when it has the accepted shape; never used for a decision.
+  const correlationId = correlationIdOf(event.headers);
   type Extra = Omit<RequestMetrics, 'tenantId' | 'ingress' | 'status' | 'ingressDurationMs'>;
   // One EMF record per request, emitted once, at the end, so IngressDurationMs
   // covers the whole handler (P-10).
@@ -109,7 +114,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     );
 
   const fail = (status: ErrorStatus, reason: string, tenantId?: string, backend: string | undefined = authorizedBackend) => {
-    log.warn('request refused', { ingress: 'api-gateway', status, reason, tenantId, backend });
+    log.warn('request refused', { ingress: 'api-gateway', status, reason, tenantId, backend, correlationId });
     tenantForMetrics(status, tenantId, { backend });
     out.start(status, { 'Content-Type': 'text/plain' });
     out.write(errorBody(status, reason));
@@ -137,7 +142,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     if (error instanceof RequestError) {
       return fail(error.status, error.reason, error.tenantId);
     }
-    log.error('pipeline failed', { ingress: 'api-gateway', error: errorName(error) });
+    log.error('pipeline failed', { ingress: 'api-gateway', error: errorName(error), correlationId });
     return fail(502, 'pipeline_failed');
   }
 
@@ -155,6 +160,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
     // ADR-0048: set on the delegation route; the token's `txn` above is the caller's.
     delegatedFrom: request.delegatedFrom,
     depth: request.depth,
+    correlationId,
   };
   // Backend invoke wall time runs from the invoke call to the end of the
   // stream: the AgentCore Runtime bills the session's active CPU and memory

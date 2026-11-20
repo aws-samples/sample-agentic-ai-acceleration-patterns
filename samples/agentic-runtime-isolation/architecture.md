@@ -689,7 +689,7 @@ reading code against spec §5.1:
 | Signal | Where | Tenant field |
 |---|---|---|
 | Access log (`api-gateway`) | `ApiAccessLogs` | `tenantId` from the authoriser context, `principalId` |
-| Ingress lines | `request authorised` (authoriser), `request served` (integration Lambda: `ttfbMs`, `streamedBytes`, `backendInvokeSeconds`, `usageInput`, `usageOutput`, `modelId`), `request admitted` (interceptor: `sessionPrefix`), `request refused` and `token refused` with `reason` | `tenantId`, `backend`/`agent`, `txn`, `grantSize`, `mint` |
+| Ingress lines | `request authorised` (authoriser), `request served` (integration Lambda: `ttfbMs`, `streamedBytes`, `backendInvokeSeconds`, `usageInput`, `usageOutput`, `modelId`), `request admitted` (interceptor: `sessionPrefix`), `request refused` and `token refused` with `reason` | `tenantId`, `backend`/`agent`, `txn`, `grantSize`, `mint`; `correlationId` when the client sent a well-formed `x-correlation-id` (ADR-0053) |
 | Tools lines | `tools request admitted`, `tool admitted` (`decision`, `gateway`, `target`, `reason`), `tools list filtered` (`listed`, `kept`), `tool served` (`durationMs`, `bytes`), `tool refused` | `tenantId`, `agent`, `txn` |
 | Entitlement API | `entitlement written`, `entitlement deleted`, `entitlement request refused` | the target tenant id |
 | EMF, opt-in | namespace `RuntimeIsolation`, dimensions `[TenantId, Ingress]` and `[TenantId, Ingress, Backend]`: `Requests`, `Errors4xx`, `Errors5xx`, `IngressDurationMs`, `TtfbMs`, `BackendInvokeSeconds`, `StreamedBytes`, `ModelInputTokens`, `ModelOutputTokens` | `perTenantMetrics`, off by default because each tenant adds about nine billed metrics per ingress (ADR-0021); integ 8b-metrics checks it |

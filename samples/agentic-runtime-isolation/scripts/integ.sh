@@ -619,6 +619,13 @@ stack_vars() { # SUFFIX
   CRM_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" CrmToolsLogs)"
   # api-gateway only (ADR-0048): the authoriser's log group, read by step 25.
   AUTHORIZER_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" SharedIngressAuthorizerLogs)"
+  # The ingress function that writes the per-request line (step 6c, ADR-0053):
+  # `request served` on api-gateway, `request admitted` on agentcore-gateway.
+  if [[ "$s" == api-gateway ]]; then
+    REQUEST_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" SharedIngressIngressLogs)"; REQUEST_LINE="request served"
+  else
+    REQUEST_LOGS="$(log_group_like "${STACK_PREFIX}-${s}" SharedIngressInterceptorLogs)"; REQUEST_LINE="request admitted"
+  fi
 }
 
 # delegation_url AGENT -> the api-gateway delegation route of AGENT (ADR-0048, spec §5.1.1).
@@ -685,6 +692,26 @@ run_all_on() { # SUFFIX
   status="$(invoke "$ENDPOINT" A1_ID "$(body "$C1" report)")"; check "ID token: 401|403 (got ${status})" status_is "401|403" "$status"
   status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "bad!" report)")"; check "malformed conversationId: 400|403 (got ${status})" status_is "400|403" "$status"
   note "all refused"
+  end_step
+
+  begin "6c ${INGRESS}" "client correlation id (ADR-0053): a well-formed id is logged as correlationId on the ${REQUEST_LINE:-request} line; a malformed one is dropped and the request still served"
+  since="$(( $(date +%s) * 1000 - 5000 ))"
+  local cid_bad="integ_${RUN}_badcorr" cid_good="integ-${RUN}-corr"
+  status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" report)" "" "" "$cid_bad")"; check "malformed id: HTTP 200 (got ${status})" eq "$status" 200
+  status="$(invoke "$ENDPOINT" A1_ACCESS "$(body "$C1" report)" "" "" "$cid_good")"; check "well-formed id: HTTP 200 (got ${status})" eq "$status" 200
+  check "the ${REQUEST_LINE} line carries correlationId ${cid_good} and tenant A" \
+    wait_log "$REQUEST_LOGS" "$since" "\"${cid_good}\"" ".message == \"${REQUEST_LINE}\" and .correlationId == \"${cid_good}\" and .tenantId == \"${TENANT_A}\""
+  check "the malformed id is in no ingress line" eq "$(log_lines "$REQUEST_LOGS" "$since" "\"${cid_bad}\"" | wc -l | tr -d ' ')" 0
+  if [[ "$INGRESS" == api-gateway ]]; then
+    # A token step 6 never sent, so the authoriser runs rather than answering from its cache.
+    local sig="${A1_ACCESS##*.}" flip
+    if [[ "${sig:9:1}" == A ]]; then flip=B; else flip=A; fi
+    TAMPERED_C="${A1_ACCESS%.*}.${sig:0:9}${flip}${sig:10}"
+    status="$(invoke "$ENDPOINT" TAMPERED_C "$(body "$C1" report)" "" "" "${cid_good}-r")"; check "tampered with an id: 401|403 (got ${status})" status_is "401|403" "$status"
+    check "the authoriser's token refused line carries the id" \
+      wait_log "$AUTHORIZER_LOGS" "$since" "\"${cid_good}-r\"" ".message == \"token refused\" and .correlationId == \"${cid_good}-r\""
+  fi
+  note "id ${cid_good} on ${REQUEST_LINE}; ${cid_bad} absent"
   end_step
 
   begin "7 ${INGRESS}" "grants: scope, tenant_id, agent, aud and act.sub per caller (spec §8 expected grants)"
