@@ -200,11 +200,11 @@ and the records in
    token (§5.1). The driver then polls through the edge until the first
    `report` is served. It then makes one `/api/*` call through the edge to
    the cell API, whose answer carries the route hint (§5.3). The identity
-   calls and the polling are
-   part of PS-1's time to the first served request (§5.1). The run's first
-   tenant is the warm-up tenant of §3.5: its deployment builds the cell,
-   and `/agents/*` is refused at the edge (404, or CloudFront's own 403 for
-   a `POST`) until front-door phase two, so it is not timed in PS-1.
+   calls and the polling are part of PS-1's time to the first served
+   request (§5.1). The run's first tenant is the warm-up tenant of §3.5:
+   its deployment builds the cell, and `/agents/*` is refused at the edge
+   (404, or CloudFront's own 403 for a `POST`) until front-door phase two,
+   so it is not timed in PS-1.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -509,11 +509,10 @@ tenants of every deployment of the run that has one: the seeded tenants of
 which PS-5 deleted; it removes their `identity[]` entries, because the
 control plane's `DeleteDeployment` does not and the `tenant-identity`
 `teardown` removes only the tenants it seeded; the reverse order of §3.4
-runs it before `tenant-identity`'s. The
-`large` fleet is a fixture (P-5): its identity tenants stay with it, and
-`--fixtures` removes them. `DeleteTenant` scans the whole pool in
-`shared-pool` (tenant-identity README), so that teardown's time at `large`
-is a result.
+runs it before `tenant-identity`'s. The `large` fleet is a fixture (P-5):
+its identity tenants stay with it, and `--fixtures` removes them.
+`DeleteTenant` scans the whole pool in `shared-pool` (tenant-identity
+README), so that teardown's time at `large` is a result.
 
 ### 4.3 Result records
 
