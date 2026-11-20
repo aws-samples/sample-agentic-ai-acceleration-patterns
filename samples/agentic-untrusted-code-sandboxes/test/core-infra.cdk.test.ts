@@ -419,6 +419,21 @@ describe('teardown order and log ownership (spec 5.3)', () => {
     expect(drain[1].Properties.Backends).toEqual(['microvm', 'nitro', 'agentcore']);
   });
 
+  test('every backend resource waits for the sandbox endpoints, and a security group does not (it is their client)', () => {
+    const all = base.t.toJSON().Resources as Record<string, Json>;
+    const endpointIds = Object.entries(all).filter(([, r]) => /\/Endpoints\//.test(pathOf(r))).map(([id]) => id);
+    expect(endpointIds.length).toBeGreaterThan(6);
+    const vpcEndpoints = Object.entries(all).filter(([, r]) => r.Type === 'AWS::EC2::VPCEndpoint').map(([id]) => id);
+    expect(vpcEndpoints).toHaveLength(4);
+    for (const name of ['microvm', 'nitro', 'agentcore']) {
+      const marker = Object.values(all).find((r) => r.Type === 'AWS::CloudFormation::WaitConditionHandle' && pathOf(r).includes(`Backend-${name}/`)) as Json;
+      for (const id of endpointIds) expect(dependsOn(marker)).toContain(id);
+    }
+    // the fake nitro lists its client group among the resources to drain; it must not wait for the endpoints
+    const clients = Object.values(all).find((r) => r.Type === 'AWS::EC2::SecurityGroup' && /Backend-nitro\/Clients\//.test(pathOf(r))) as Json;
+    expect(dependsOn(clients).filter((id) => endpointIds.includes(id))).toEqual([]);
+  });
+
   test('a container backend waits for the image copy of the architecture it asked for; microvm waits for none', () => {
     const resources = base.t.toJSON().Resources as Record<string, Json>;
     const copies = Object.entries(resources).filter(([, r]) => /RunnerImages\/Copy-/.test(pathOf(r)) && r.Type.startsWith('Custom::'));
