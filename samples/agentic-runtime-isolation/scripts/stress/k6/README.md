@@ -2,20 +2,22 @@
 
 The load half of the stress test in
 [design/agentic-runtime-isolation.stress-test.md](../../../design/agentic-runtime-isolation.stress-test.md)
-(§5 Phase 2, §6, §8.3). `run.sh` copies this folder, the shared library
-[`stress/k6/`](../../../../../stress/k6/README.md) (token pool and refresh, pacing, the
-correlation header, the result record) and the seed manifest to the driver host and runs
-one scenario; the pass table is computed by `collect.sh`,
-not here. Written for k6 v1.x (ES modules, `k6/execution`); `k6 inspect` of S1 to S7 passes on k6
-v2.4 on the driver host. No full run of these scenarios against an ingress has used the shared
-library yet, so a first run is also its check.
+(§5 Phase 2, §6, §8.3). `slice.sh run`, through `stress/driver/k6.sh`, copies
+this folder, the shared library [`stress/k6/`](../../../../../stress/k6/README.md)
+(token pool and refresh, pacing, the correlation header, the result record) and
+the seed manifest to the driver host and runs one scenario; the pass table is
+computed by `collect.sh`, not here, from the records and the hops' logs. Written
+for k6 v1.x (ES modules, `k6/execution`); `k6 inspect` of S1 to S7 passes on k6
+v2.4 on the driver host, and `slice.sh run` runs them against an ingress
+(ADR-0052).
 
 | File | Does |
 |---|---|
 | `probe.js` | this sample's part: `invoke` (with the correlation header), `probe` with the §6 assertions, `pickProbe` (70/20/10), the warm-up and `step` helpers; re-exports the shared library's tier, manifest and pacing helpers, and wraps its `setupTokens`, `buildOptions` and `summarize` with this sample's fields |
 | `s1-steady.js` | active tenants x users, steady rate, §6 probe mix, tier length (large 600 s) |
-| `s2-herd.js` | token prime only (ingress idle), then 0 to 1.6 x steady in 5 s, held (large 120 s); no warm-up |
-| `s3-noisy.js` | S1 minus one tenant, plus scenario `noisy`: that tenant at 10 x `tenantLimitRpm` a minute |
+| `s2-herd.js` | token prime only (ingress idle), then 0 to 1.6 x steady in 5 s, held (large 120 s); no warm-up: it reuses the conversations S1 opened in the same run |
+| `s3-noisy.js` | S1 minus one tenant, plus that tenant at 10 x `tenantLimitRpm` a minute; one self-paced `constant-vus` scenario, VU ids 1..VUS steady and the rest noisy, so every steady tenant gets `steadyRps` / tenants (the header says why); a VU behind its pace skips and counts the missed requests (`iteration_skipped{reason:behind}`); `steady_sent` / `steady_expected` feed a threshold and collect's delivery row |
+| `noisy-pace.js` | S3's pacing arithmetic, with no k6 import so `test/stress/slice.test.ts` checks it: each steady VU's rate, a noisy VU's interval, the delivery bound |
 | `s4-tools.js` | `tool t01/tool_001 {}` at 0.4 x steady |
 | `s5-streams.js` | `stream 60` (small: `stream 10`) over half the active tenants at 90 % of the reserved concurrency |
 | `s6-peak.js` | the S1 shape at `peakRps` for 60 s |
@@ -24,10 +26,13 @@ library yet, so a first run is also its check.
 Every scenario starts with an untimed `warmup` scenario (one iteration per VU):
 it issues or refreshes the VU's tokens and opens one conversation per owned
 tenant at 20 new conversations a second overall. The timed scenario starts
-after it. Thresholds: `isolation_mismatch` and `positive_control_fail` count 0.
-`handleSummary` writes `summary.json` (without `setup_data`) and the text
-summary to stdout, and, when `STRESS_RESULTS` is set, the scenario's result
-record (`agentic-runtime-isolation.S<n>.json`, stress spec §4.3).
+after it. Thresholds: `isolation_mismatch` and `positive_control_fail` count 0;
+one always-passing `tenant_429{tenant:<id>}` per tenant the scenario uses, so
+the summary keeps each tenant's 429 count; and in S3 `steady_sent` at least
+95 % of `steady_expected`. `handleSummary` writes `summary.json` (without
+`setup_data`) and the text summary to stdout, and, when `STRESS_RESULTS` is
+set, the scenario's result record (`agentic-runtime-isolation.S<n>.json`,
+stress spec §4.3).
 
 ## Environment
 
@@ -38,7 +43,7 @@ record (`agentic-runtime-isolation.S<n>.json`, stress spec §4.3).
 | `ENDPOINT` | yes | the ingress `EndpointUrl` output; `/<agent>/invocations` is appended as `lib.sh backend_url` does |
 | `PLATFORM_API` | yes | tenant-identity's API base URL (`.../prod/`): `platform/tenants/{t}/users/{u}/token` (SigV4) and `oauth2/token` (exchange) |
 | `APP_CLIENT_ID` | yes | tenant-identity's app client id (`/application-plane/shared/identity/appClientId`); the exchange form requires it |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` (or `REGION`) | yes | signs IssueToken. On the driver, `run.sh` exports the instance role's credentials from IMDSv2 first; the k6 aws jslib does not read IMDS |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` (or `REGION`) | yes | signs IssueToken. On the driver, `stress/driver/k6.sh` exports the instance role's credentials first; the k6 aws jslib does not read IMDS |
 | `STRESS_RUN_ID` (or `RUN_ID`) | no | names the run's conversations (`stress<run><tenant>`) and the correlation ids; default a timestamp |
 | `ISSUER` | no | when set, each report's `tokenIss` is checked against it (a check, not a mismatch) |
 | `ENTITLEMENTS_API` | no | read by the operator scripts; unused here |
@@ -47,9 +52,9 @@ Tuning, all optional: `ISSUE_RPS` (8), `REFRESH_RPS` (17), `REFRESH_MARGIN_S` (9
 `WARM_RPS` (20), `VU_PER_RPS` (1), `REFRESH_SCOPE` (`app/use`),
 `SESSION_SCOPE` (`tenant`), `AGENT_SPREAD` (`false`: every probe on `default`),
 `TOKENS_IN` (`setup` or `vu`), `MEMORY_BUDGET_MB` (2048), `CONVERSATION_RUN_ID`
-(S2: reuse an S1 run's conversations), `SCENARIO_SECONDS`, `HERD_RPS`,
-`TOOL_RPS`, `TOOL_PROMPT`, `STREAM_RPS`, `STREAM_SECONDS`, `PEAK_SECONDS`,
-`EVICTION_RPS`, `SUMMARY_PATH` (`summary.json`).
+(the run id: S2 reuses S1's conversations; set it to name another run's),
+`SCENARIO_SECONDS`, `HERD_RPS`, `TOOL_RPS`, `TOOL_PROMPT`, `STREAM_RPS`,
+`STREAM_SECONDS`, `PEAK_SECONDS`, `EVICTION_RPS`, `SUMMARY_PATH` (`summary.json`).
 
 ## Limits worth knowing
 

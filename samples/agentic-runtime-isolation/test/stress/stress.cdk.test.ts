@@ -155,7 +155,7 @@ describe('StressIngressStack at small, placeholders', () => {
     expect(outputKeys(stack)).toEqual(
       expect.arrayContaining([
         'EndpointUrl', 'EntitlementsApiUrl', 'EntitlementsTableName', 'DemoTableName', 'Issuer', 'RegistryPrefix',
-        'RestApiId', 'StageName', 'IngressLogGroupName', 'AuthorizerFunctionName', 'IngressFunctionName',
+        'RestApiId', 'StageName', 'IngressLogGroupName', 'AuthorizerFunctionName', 'AuthorizerLogGroupName', 'IngressFunctionName',
         'ToolsGatewayUrlDefault', 'ToolsGatewayUrlFinance', 'PolicyEngineIdDefault', 'PolicyEngineIdFinance',
         'PolicySecondsToActiveT01', 'PolicySecondsToActiveT02', 'InterceptorFunctionNames',
       ]),

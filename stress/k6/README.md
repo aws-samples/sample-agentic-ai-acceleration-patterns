@@ -11,7 +11,7 @@ this library by its repository-relative path.
 
 | File | Holds |
 |---|---|
-| `lib.js` | the tier (`loadTier`) and seed manifest (`loadManifest`, `plan`, `tokenMode`); identity tokens (`setupTokens`, `refreshIfNeeded`, `ensureToken`, per-VU ownership with `adopt`, pacing); the correlation header (`correlate`); the counters and `isolationCheck`; the per-tenant ledger lines; `buildOptions`; `summarize` (summary files and the result record) |
+| `lib.js` | the tier (`loadTier`) and seed manifest (`loadManifest`, `selectTenants`, `plan`, `tokenMode`); identity tokens (`setupTokens`, `refreshIfNeeded`, `ensureToken`, per-VU ownership with `adopt`, pacing); the correlation header (`correlate`); the counters and `isolationCheck`; the per-tenant ledger lines; `buildOptions`; `summarize` (summary files and the result record) |
 | `record.js` | `buildRecord`: the result record from k6's end-of-test data, with no k6 import so the contract's tests run it (`stress/test/record.test.ts` checks that `parseRecord` accepts it) |
 | `smoke.js` | five requests to one public endpoint and a record: proves that k6 runs on the driver host and that the library loads from its mirrored path |
 

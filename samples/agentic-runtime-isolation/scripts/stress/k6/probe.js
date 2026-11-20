@@ -7,7 +7,7 @@
 // and the result record are the shared library's (stress/k6/lib.js, stress ADR-0007); the
 // scenario files import everything from here.
 //
-// The shared library sits at stress/k6/ in the repository. On the driver host run.sh copies
+// The shared library sits at stress/k6/ in the repository. On the driver host stress/driver/k6.sh copies
 // both folders to the same relative paths under /opt/stress/repo/, so this import works there
 // as it does in a checkout.
 
@@ -28,10 +28,12 @@ import {
   iterationSkipped,
   isolationCheck,
   ledger,
+  loadManifest as loadManifestShared,
   loadTier as loadTierShared,
   pacing,
   RUN_ID,
   refreshIfNeeded,
+  selectTenants,
   setupTokens as setupTokensShared,
   summarize as summarizeShared,
   timed,
@@ -41,6 +43,7 @@ import {
 } from '../../../../../stress/k6/lib.js';
 
 export {
+  iterationSkipped,
   loadManifest,
   plan,
   scenarioSeconds,
@@ -91,9 +94,20 @@ export function loadTier() {
   });
 }
 
-/** options common to every scenario file. */
-export function buildOptions(scenarios, p, mode) {
-  return buildOptionsShared(scenarios, p, mode, { positive_control_fail: ['count==0'] });
+/**
+ * Options common to every scenario file. One `tenant_429{tenant:<id>}` threshold per tenant
+ * the scenario's plan uses (P.tenants, picked as plan() and setupTokens() pick them) makes k6
+ * keep each tenant's 429 count in the summary; collect.sh caps each tenant's logged 429 lines
+ * at it (attribute.jq, P-7). EXTRA adds a scenario's own thresholds.
+ * shortcut: k6 matches every submetric on every 429 sample; past a few thousand tenants in one
+ * scenario, move the per-tenant count to the tenant_minute ledger instead.
+ */
+export function buildOptions(scenarios, p, mode, extra = {}) {
+  const thresholds = Object.assign({ positive_control_fail: ['count==0'] }, extra);
+  for (const t of selectTenants(loadManifestShared(), p.tenants)) {
+    thresholds[`tenant_429{tenant:${t.tenantId}}`] = ['count>=0'];
+  }
+  return buildOptionsShared(scenarios, p, mode, thresholds);
 }
 
 /** handleSummary: SCENARIO is the plan's id (`S1` ... `S7`). */
@@ -111,8 +125,9 @@ function cleanId(raw) {
  * setup(): the shared token stage with this sample's entry fields. conversationId is per
  * tenant (`stress<run><tenant index>`), shared by the tenant's users: with session scope
  * `tenant` that is one Runtime session per tenant, which keeps a large run under the Runtime's
- * 2,500 active sessions. CONVERSATION_RUN_ID reuses an earlier run's conversations (S2: warm
- * microVMs behind a cold ingress).
+ * 2,500 active sessions. Every scenario of a run shares the run id, so S2 reuses the
+ * conversations S1 opened (warm microVMs behind a cold ingress); CONVERSATION_RUN_ID names
+ * another run's conversations instead.
  */
 export function setupTokens(manifest, tier, opts = {}) {
   const convRun = cleanId(env('CONVERSATION_RUN_ID', RUN_ID));
@@ -434,13 +449,13 @@ export function warmAll(data, pool, slots, conversations, filter) {
  * One timed iteration: the VU's next owned entry with a usable token (round robin, so a VU
  * walks its tenants in turn), its conversation opened once if WARM (paced, untimed), then
  * the probe KIND() names. ENSURE: issue a missing token here (paced), for a pool with no
- * warm-up of its own.
+ * warm-up of its own. Returns true when it sent a request.
  */
 export function step(data, opts) {
   const owned = adopt(data, opts.pool, opts.slots, opts.filter, opts.suffix);
   if (owned.length === 0) {
     iterationSkipped.add(1, { reason: 'unowned' });
-    return;
+    return false;
   }
   vu.cursor = vu.cursor || {};
   for (let tries = 0; tries < owned.length; tries++) {
@@ -463,11 +478,12 @@ export function step(data, opts) {
       if (probe(entry, 'report', Object.assign({}, opts, { phase: 'warm' })).status === 200) {
         vu.warmed[key] = true;
       }
-      return;
+      return true;
     }
     vu.warmed[key] = true;
     probe(entry, opts.kind(), opts);
-    return;
+    return true;
   }
   iterationSkipped.add(1, { reason: 'no usable entry' });
+  return false;
 }
