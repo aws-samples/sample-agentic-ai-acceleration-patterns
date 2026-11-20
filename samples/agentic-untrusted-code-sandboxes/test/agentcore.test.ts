@@ -18,7 +18,7 @@ import {
   buildJob, newNonce, resultProof, sessionIdFor, type RunJob, type RunResult,
 } from '../src/protocol';
 
-const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-west-1:123456789012:runtime/Example_runtime-AbCdEfGhIj';
+const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:eu-west-1:ACCOUNT_ID:runtime/Example_runtime-AbCdEfGhIj';
 const ENV = { AGENTCORE_RUNTIME_ARN: RUNTIME_ARN };
 const BOOT_ID = '0123456789abcdef0123456789abcdef';
 
@@ -35,8 +35,18 @@ function body(text: string, statusCode = 200) {
 
 function resultFor(job: RunJob, nonce: string, patch: Partial<RunResult> = {}): RunResult {
   return {
-    v: 1, runId: job.runId, exitCode: 0, stdout: '1\n', stderr: '', truncated: false, durationMs: 12,
-    timedOut: false, memoryExceeded: false, bootId: BOOT_ID, proof: resultProof(nonce, job.runId), ...patch,
+    v: 1,
+    runId: job.runId,
+    exitCode: 0,
+    stdout: '1\n',
+    stderr: '',
+    truncated: false,
+    durationMs: 12,
+    timedOut: false,
+    memoryExceeded: false,
+    bootId: BOOT_ID,
+    proof: resultProof(nonce, job.runId),
+    ...patch,
   };
 }
 
@@ -48,8 +58,13 @@ async function started(tenantId = 'tenant-a'): Promise<{ backend: AgentcoreBacke
 
 function jobFor(handle: SandboxHandle, patch: Partial<Parameters<typeof buildJob>[0]> = {}): RunJob {
   return buildJob({
-    runId: 'run-1', tenantId: handle.tenantId, nonce: handle.nonce, code: 'print(1)',
-    timeoutMs: 1000, maxOutputBytes: 1024, ...patch,
+    runId: 'run-1',
+    tenantId: handle.tenantId,
+    nonce: handle.nonce,
+    code: 'print(1)',
+    timeoutMs: 1000,
+    maxOutputBytes: 1024,
+    ...patch,
   });
 }
 

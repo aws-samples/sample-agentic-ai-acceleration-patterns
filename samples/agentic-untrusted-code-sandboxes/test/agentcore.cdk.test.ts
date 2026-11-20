@@ -45,7 +45,7 @@ interface Harness {
 }
 
 function build(opts: { sessionFiles?: boolean; imageTag?: boolean; noRepository?: boolean; patch?: Partial<BackendSettings> } = {}): Harness {
-  const stack = new Stack(new App(), 'S', { env: { account: '123456789012', region: 'eu-west-1' } });
+  const stack = new Stack(new App(), 'S');
   const vpc = new ec2.Vpc(stack, 'Vpc', {
     maxAzs: 2,
     natGateways: 1,
@@ -71,7 +71,11 @@ function build(opts: { sessionFiles?: boolean; imageTag?: boolean; noRepository?
   };
   const backend = new AgentcoreBackendResources(stack, 'Backend-agentcore', ctx);
   return {
-    stack, backend, vpc, repository, bucket,
+    stack,
+    backend,
+    vpc,
+    repository,
+    bucket,
     template: () => Template.fromStack(stack),
     resolve: (statements) => statements.map((s) => render(stack.resolve(s.toStatementJson()))),
   };
@@ -82,7 +86,10 @@ function roleStatements(t: Template): Array<Record<string, unknown>> {
   const policies = t.findResources('AWS::IAM::Policy', {
     Properties: { Roles: Match.arrayWith([Match.objectLike({ Ref: Match.stringLikeRegexp('RuntimeRole') })]) },
   });
-  return Object.values(policies).flatMap((p) => render((p as { Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } } }).Properties.PolicyDocument.Statement) as Array<Record<string, unknown>>);
+  return Object.values(policies).flatMap((p) => {
+    const doc = (p as { Properties: { PolicyDocument: { Statement: unknown } } }).Properties.PolicyDocument;
+    return render(doc.Statement) as Array<Record<string, unknown>>;
+  });
 }
 
 const sidOf = (s: Record<string, unknown>) => s.Sid as string;
@@ -98,8 +105,8 @@ function render(v: unknown): unknown {
       return parts.map(render).join(sep);
     }
     if (o.Ref === 'AWS::Partition') return 'aws';
-    if (o.Ref === 'AWS::Region') return 'eu-west-1';
-    if (o.Ref === 'AWS::AccountId') return '123456789012';
+    if (o.Ref === 'AWS::Region') return 'REGION';
+    if (o.Ref === 'AWS::AccountId') return 'ACCOUNT';
     if (typeof o.Ref === 'string') return `<Ref:${o.Ref}>`;
     if ('Fn::GetAtt' in o) return `<GetAtt:${(o['Fn::GetAtt'] as string[]).join('.')}>`;
     return Object.fromEntries(Object.entries(o).map(([k, x]) => [k, render(x)]));
@@ -132,7 +139,8 @@ describe('the runtime (spec §3.3, §3.4, ADR-0015)', () => {
 
   test('the runtime sits in the sandbox subnets only, with the backend security group', () => {
     const [runtime] = Object.values(t.findResources('AWS::BedrockAgentCore::Runtime'));
-    const net = (runtime as { Properties: { NetworkConfiguration: { NetworkModeConfig: { Subnets: unknown[]; SecurityGroups: unknown[] } } } }).Properties.NetworkConfiguration.NetworkModeConfig;
+    type Net = { Subnets: unknown[]; SecurityGroups: unknown[] };
+    const net = (runtime as { Properties: { NetworkConfiguration: { NetworkModeConfig: Net } } }).Properties.NetworkConfiguration.NetworkModeConfig;
     const sandbox = h.vpc.selectSubnets({ subnetGroupName: 'Sandbox' }).subnets;
     expect(net.Subnets).toHaveLength(2);
     expect(flat(net.Subnets)).toContain(h.stack.resolve(sandbox[0].subnetId).Ref);
@@ -185,8 +193,8 @@ describe('the runtime role (spec §3.6)', () => {
       Effect: 'Allow',
       Principal: { Service: 'bedrock-agentcore.amazonaws.com' },
       Condition: {
-        StringEquals: { 'aws:SourceAccount': '123456789012' },
-        ArnLike: { 'aws:SourceArn': `arn:aws:bedrock-agentcore:eu-west-1:123456789012:runtime/${RUNTIME_NAME}-*` },
+        StringEquals: { 'aws:SourceAccount': 'ACCOUNT' },
+        ArnLike: { 'aws:SourceArn': `arn:aws:bedrock-agentcore:REGION:ACCOUNT:runtime/${RUNTIME_NAME}-*` },
       },
     }]);
   });
@@ -198,7 +206,7 @@ describe('the runtime role (spec §3.6)', () => {
     expect(byId[SID.roleEcrToken]).toMatchObject({ Action: 'ecr:GetAuthorizationToken', Resource: '*' });
     expect(byId[SID.roleEcrPull]).toMatchObject({ Action: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'] });
     expect(flat(byId[SID.roleEcrPull].Resource)).toContain('RunnerRepository');
-    const group = `arn:aws:logs:eu-west-1:123456789012:log-group:${RUNTIME_LOG_PREFIX}${RUNTIME_NAME}-*`;
+    const group = `arn:aws:logs:REGION:ACCOUNT:log-group:${RUNTIME_LOG_PREFIX}${RUNTIME_NAME}-*`;
     expect(byId[SID.roleLogs]).toMatchObject({ Action: ['logs:CreateLogGroup', 'logs:DescribeLogStreams'], Resource: group });
     expect(byId[SID.roleLogStreams]).toMatchObject({ Action: ['logs:CreateLogStream', 'logs:PutLogEvents'], Resource: `${group}:log-stream:*` });
   });

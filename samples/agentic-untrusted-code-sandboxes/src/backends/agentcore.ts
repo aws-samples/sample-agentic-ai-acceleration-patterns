@@ -31,13 +31,11 @@ import type {
   StopFacts, TenantCredentials,
 } from '../backend';
 import { NO_ANSWER_MARGIN_MS } from '../backend';
+import { BACKEND_ENV } from '../env';
 import {
   decodeNonce, proofMatches, resultProof, sessionIdFor, TENANT_ID_PATTERN,
   type Refusal, type RefusalCode, type RunResult,
 } from '../protocol';
-
-/** Function environment variable that names the runtime (set by `BackendConstruct.environment()`). */
-export const AGENTCORE_RUNTIME_ARN_ENV = 'AGENTCORE_RUNTIME_ARN';
 
 /** Start cap in ms (spec §3.4: measured 2 to 2.5 s for a new session). */
 export const AGENTCORE_START_CAP_MS = 30_000;
@@ -147,9 +145,9 @@ export class AgentcoreBackend implements SandboxBackend {
   }
 
   private runtimeArn(): string {
-    const arn = this.env[AGENTCORE_RUNTIME_ARN_ENV];
+    const arn = this.env[BACKEND_ENV.AGENTCORE_RUNTIME_ARN];
     if (!arn) {
-      throw new Error(`agentcore backend: ${AGENTCORE_RUNTIME_ARN_ENV} is not set`);
+      throw new Error(`agentcore backend: ${BACKEND_ENV.AGENTCORE_RUNTIME_ARN} is not set`);
     }
     return arn;
   }

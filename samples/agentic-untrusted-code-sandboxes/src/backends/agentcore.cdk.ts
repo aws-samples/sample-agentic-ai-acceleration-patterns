@@ -18,7 +18,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import { DockerImageName, ECRDeployment } from 'cdk-ecr-deployment';
 import { Construct, type IConstruct } from 'constructs';
 import type { BackendConstruct, BackendContext, SandboxEndpoint } from '../backend-construct';
-import { AGENTCORE_RUNTIME_ARN_ENV } from './agentcore';
+import { BACKEND_ENV } from '../env';
 
 /** Prefix of every log group AgentCore creates for a runtime (spec §5.3). */
 export const RUNTIME_LOG_PREFIX = '/aws/bedrock-agentcore/runtimes/';
@@ -251,7 +251,7 @@ export class AgentcoreBackendResources extends Construct implements BackendConst
   }
 
   public environment(): Record<string, string> {
-    return { [AGENTCORE_RUNTIME_ARN_ENV]: this.runtime.agentRuntimeArn };
+    return { [BACKEND_ENV.AGENTCORE_RUNTIME_ARN]: this.runtime.agentRuntimeArn };
   }
 
   /** The runtime goes after the drain, which stops every session that has a row (spec §5.3). */
