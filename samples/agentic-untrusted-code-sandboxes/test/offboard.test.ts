@@ -5,6 +5,7 @@ import { harness, maintenanceDeps, rowItem, seedSandbox } from './harness';
 import { offboardTenant } from '../src/offboard/offboard';
 import { handler } from '../src/offboard/offboard.function';
 import { reapOnce } from '../src/reaper/reaper';
+import { toolTimeoutMs } from '../src/tool/config';
 import { runCode } from '../src/tool/run-code';
 
 const A = 'tenant-a';
@@ -206,12 +207,63 @@ describe('offboardTenant', () => {
     await h.registry.takeOver({
       tenantId: A, backend: 'microvm', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 3_600_000, replaces: old.handle,
     }, prev);
-    h.clock.t += 1000;
+    h.clock.t += toolTimeoutMs(h.deps.config) + 1;
     await offboardTenant(A, maintenanceDeps(h));
     expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: old.handle, by: 'offboard', reason: 'replaced' })]);
     expect(h.db.items.size).toBe(0);
     await offboardTenant(A, maintenanceDeps(h));
     expect(h.events('sandbox_stopped')).toHaveLength(1);
+  });
+
+  test('a call that may still be writing its line is given the time of a tool call to do it: no claim before that', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', A);
+    const prev = (await h.registry.get(A, 'microvm'))!;
+    await h.registry.takeOver({
+      tenantId: A, backend: 'microvm', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 3_600_000, replaces: old.handle,
+    }, prev);
+    h.clock.t += 1000;
+    await offboardTenant(A, maintenanceDeps(h));
+    expect(h.backends.get('microvm')!.sandboxes.get(old.handle)!.live).toBe(false);
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
+  test('a takeover of a FAILED row owes no line, so nothing writes one for the sandbox it replaced', async () => {
+    const h = harness();
+    await runCode({ tenantId: A, code: 'x' }, h.deps);
+    const b = h.backends.get('microvm')!;
+    jest.spyOn(b, 'run').mockResolvedValue({ kind: 'refused', refusal: { v: 1, error: 'wrong_sandbox' } });
+    await runCode({ tenantId: A, code: 'x' }, h.deps);
+    jest.restoreAllMocks();
+    expect(await h.registry.get(A, 'microvm')).toMatchObject({ state: 'FAILED' });
+    const linesBefore = h.events('sandbox_stopped').length;
+    h.clock.t += 31_000;
+    await runCode({ tenantId: A, code: 'x' }, h.deps);
+    expect(h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')?.replacesLined).toBe(true);
+    h.clock.t += toolTimeoutMs(h.deps.config) + 1;
+    await offboardTenant(A, maintenanceDeps(h));
+    expect(h.events('sandbox_stopped').filter((l) => l.reason === 'replaced')).toEqual([]);
+    expect(h.events('sandbox_stopped').filter((l) => l.handle === 'fake-2')).toHaveLength(1);
+    expect(h.events('sandbox_stopped')).toHaveLength(linesBefore + 1);
+  });
+
+  test('a replaced sandbox whose stop fails keeps the row and fails the call', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', 'tenant-z');
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', A);
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replaces = old.handle;
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replacesLined = true;
+    const b = h.backends.get('microvm')!;
+    const real = b.stop.bind(b);
+    const failing = jest.spyOn(b, 'stop').mockImplementation(async (handle, creds) => {
+      if (handle.handle === old.handle) throw new Error('throttled');
+      return real(handle, creds);
+    });
+    await expect(offboardTenant(A, maintenanceDeps(h))).rejects.toThrow(/could not be cleared/);
+    expect(await h.registry.get(A, 'microvm')).toBeDefined();
+    failing.mockImplementation(real);
+    await offboardTenant(A, maintenanceDeps(h));
+    expect(await h.registry.get(A, 'microvm')).toBeUndefined();
   });
 
   test('a FAILED row whose sandbox is still listed after its stop becomes STOPPING, so the reaper deletes it once the sandbox leaves the list', async () => {

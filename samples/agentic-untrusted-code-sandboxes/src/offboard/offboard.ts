@@ -15,7 +15,7 @@
 
 import type { BackendName, SandboxBackend } from '../backend';
 import { TENANT_ID_PATTERN } from '../protocol';
-import type { ToolConfig } from '../tool/config';
+import { toolTimeoutMs, type ToolConfig } from '../tool/config';
 import type { Logger } from '../tool/log';
 import type { Registry, RowKey } from '../tool/registry';
 import { handleOf, settleReplaced, stopQuietly, writeStopLine } from '../tool/sandbox';
@@ -61,8 +61,16 @@ export async function offboardTenant(tenantId: unknown, deps: OffboardDeps): Pro
       }
       // A sandbox a takeover replaced is still named on the row: stop it too. Its line is the call's that took the row over;
       // if that call died, this offboard writes it, because it deletes the row and nobody else could.
-      const claimed = await settleReplaced({ row, stopAlways: true, claimNow: true, backend, registry, log, config, now: deps.now(), by: 'offboard' });
-      if (claimed !== undefined) row = { ...row, version: claimed, replacesLined: true };
+      const replaced = await settleReplaced({
+        row, stopAlways: true, claimAfterMs: toolTimeoutMs(config), backend, registry, log, config, now: deps.now(), by: 'offboard',
+      });
+      if (replaced.version !== undefined) row = { ...row, version: replaced.version, replacesLined: true };
+      if (!replaced.stopped) {
+        // The replaced sandbox is still running: keep the row, which names it, and fail the call so it is repeated.
+        failures += 1;
+        settled = true;
+        break;
+      }
       let held: RowKey = row;
       if (row.handle !== undefined) {
         const handle = { ...row, handle: row.handle };

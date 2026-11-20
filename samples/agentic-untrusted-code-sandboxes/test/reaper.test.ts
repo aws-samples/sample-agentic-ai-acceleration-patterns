@@ -501,6 +501,16 @@ describe('a pass', () => {
     expect(h.events('sandbox_stopped')).toHaveLength(1);
   });
 
+  test('an expired STOPPING row is deleted even when isAlive throws: the rule that needs it is not evaluated', async () => {
+    const h = harness();
+    const handle = await seedSandbox(h, 'STOPPING', {});
+    h.backends.get('microvm')!.kill(handle.handle);
+    h.clock.t += 8 * HOUR;
+    jest.spyOn(h.backends.get('microvm')!, 'isAlive').mockRejectedValue(new Error('x'));
+    await reapOnce(maintenanceDeps(h));
+    expect(await row(h)).toBeUndefined();
+  });
+
   test('a STOPPING row whose sandbox has left the list is deleted without a line, a FAILED row is kept', async () => {
     const h = harness();
     const stopping = await seedSandbox(h, 'STOPPING', {}, 'microvm', A);

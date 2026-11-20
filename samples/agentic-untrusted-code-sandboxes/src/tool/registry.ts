@@ -31,6 +31,8 @@ export const REPLACES_LINED = 'replacesLined';
 
 /** Fields a writer sets on a `STARTING` row it takes over (spec §4.1 step 2). */
 export interface NewRow {
+  /** False when the takeover owes the replaced sandbox's stop line (it moved the row out of READY or STARTING). */
+  readonly replacesLined?: boolean;
   /** The handle the takeover replaces. It stays named on the new row until it is stopped, so no sweep takes it for an orphan. */
   readonly replaces?: string;
   readonly tenantId: string;
@@ -137,7 +139,7 @@ export class Registry {
    * deleted and recreated with the same version number is not taken over by
    * mistake. Returns the new row, or undefined when another caller won.
    */
-  public async takeOver(next: NewRow, prev: RegistryRow | undefined): Promise<RegistryRow | undefined> {
+  public async takeOver(next: NewRow, prev: RegistryRow | undefined): Promise<StoredRow | undefined> {
     const expiresAt = next.now + next.sandboxMaxLifeMs;
     const version = (prev?.version ?? 0) + 1;
     const item = {
@@ -149,7 +151,7 @@ export class Registry {
       [R.EXPIRES_AT]: expiresAt,
       [R.TTL_AT]: Math.floor((expiresAt + 3_600_000) / 1000),
       [R.VERSION]: version,
-      ...(next.replaces === undefined ? {} : { [REPLACES]: next.replaces, [REPLACES_LINED]: false }),
+      ...(next.replaces === undefined ? {} : { [REPLACES]: next.replaces, [REPLACES_LINED]: next.replacesLined ?? false }),
     };
     try {
       await this.client.send(new PutCommand({

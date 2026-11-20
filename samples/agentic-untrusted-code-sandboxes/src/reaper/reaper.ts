@@ -102,10 +102,18 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
     if (backend === undefined) continue;
     try {
       if (row.replaces !== undefined) {
-        const claimed = await settleReplaced({
-          row, listed: live.get(row.backend)?.get(row.replaces), backend, registry, log, config, now: deps.now(), by: 'reaper',
+        const settled = await settleReplaced({
+          row,
+          listed: live.get(row.backend)?.get(row.replaces),
+          backend,
+          registry,
+          log,
+          config,
+          now: deps.now(),
+          by: 'reaper',
+          claimAfterMs: handleLessStaleMs(config),
         });
-        if (claimed !== undefined) row = { ...row, version: claimed, replacesLined: true };
+        if (settled.version !== undefined) row = { ...row, version: settled.version, replacesLined: true };
       }
       const now = deps.now();
       const summary = row.handle === undefined ? undefined : live.get(row.backend)?.get(row.handle);
@@ -120,7 +128,7 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
         // A STOPPING row is done when the sandbox has left the list, `isAlive` agrees (`agentcore` lists nothing and is always
         // alive, so its row waits for expiry and the next call's takeover stops the session again), and the sandbox the row
         // replaced is gone as well, so that one is never taken for an orphan.
-        const finished = row.state === 'STOPPING' && notListed && handled !== undefined
+        const finished = !expired && row.state === 'STOPPING' && notListed && handled !== undefined
           && !(live.get(row.backend)?.has(row.replaces ?? '') ?? false) && !(await backend.isAlive(handleOf(handled)));
         // The row stays while a stop is failing: it is what makes the next pass stop the sandbox again. A STOPPING row
         // whose sandbox has left the list has done its work (an offboard keeps it for a task that is still stopping).

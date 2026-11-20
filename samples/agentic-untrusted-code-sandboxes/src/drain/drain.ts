@@ -12,7 +12,7 @@
  */
 
 import type { BackendName, RegistryRow, SandboxBackend, SandboxSummary } from '../backend';
-import type { ToolConfig } from '../tool/config';
+import { handleLessStaleMs, type ToolConfig } from '../tool/config';
 import type { Logger } from '../tool/log';
 import type { Registry } from '../tool/registry';
 import { handleOf, orphanHandle, settleReplaced, stopQuietly, writeStopLine } from '../tool/sandbox';
@@ -68,7 +68,10 @@ export async function drain(deps: DrainDeps, limitMs: number = Number.POSITIVE_I
       if (backend !== undefined && row.replaces !== undefined) {
         // The sandbox a takeover replaced has its line from that takeover (or from the drain, when the call died); the drain stops it.
         lined.add(key(row.backend, row.replaces));
-        const claimed = await settleReplaced({ row, stopAlways: true, backend, registry, log, config, now: deps.now(), by: 'drain' });
+        const settled = await settleReplaced({
+          row, stopAlways: true, backend, registry, log, config, now: deps.now(), by: 'drain', claimAfterMs: handleLessStaleMs(config),
+        });
+        const claimed = settled.version;
         if (claimed !== undefined) row = { ...row, version: claimed, replacesLined: true };
       }
       if (backend === undefined || row.handle === undefined) continue;

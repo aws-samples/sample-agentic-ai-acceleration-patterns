@@ -6,7 +6,7 @@
 import type {
   BackendName, RegistryRow, SandboxBackend, SandboxHandle, SandboxSummary, StopFacts, TenantCredentials,
 } from '../backend';
-import { handleLessStaleMs, type ToolConfig } from './config';
+import type { ToolConfig } from './config';
 import { buildStopLine, errorName, type Logger, type StopRowFacts } from './log';
 import type { Registry, StoredRow } from './registry';
 
@@ -95,29 +95,30 @@ export function backendOf(map: ReadonlyMap<BackendName, SandboxBackend>, name: B
  * still listed (`stopAlways` for the drain), silently, because the call that took the row over writes its line. When that
  * call died first, the row is old and `replacesLined` is still false: one writer claims the line with a conditional write,
  * stops the sandbox, and writes it. A `replaces` that is the row's own handle, or that the platform says belongs to
- * another tenant, is ignored. Returns the row's new version when this call claimed the line.
+ * another tenant, is ignored. Returns the row's new version when this call claimed the line, and whether the stop worked.
  */
 export async function settleReplaced(args: {
   readonly row: StoredRow;
   readonly listed?: SandboxSummary;
   readonly stopAlways?: boolean;
-  /** Claim the line whatever the row's age: the caller deletes the row, so nobody else could write it later (offboard). */
-  readonly claimNow?: boolean;
+  /** Claim the line when the row is older than this (ms): a call younger than that may still be about to write it. */
+  readonly claimAfterMs: number;
   readonly backend: SandboxBackend;
   readonly registry: Registry;
   readonly log: Logger;
   readonly config: ToolConfig;
   readonly now: number;
   readonly by: string;
-}): Promise<number | undefined> {
+}): Promise<{ readonly version?: number; readonly stopped: boolean }> {
   const { row, listed, backend, log, config } = args;
-  if (row.replaces === undefined || row.replaces === '' || row.replaces === row.handle) return undefined;
-  if (listed?.tenantId !== undefined && listed.tenantId !== row.tenantId) return undefined;
-  const owed = row.replacesLined !== true && (args.claimNow === true || args.now - row.createdAt > handleLessStaleMs(config));
+  if (row.replaces === undefined || row.replaces === '' || row.replaces === row.handle) return { stopped: true };
+  if (listed?.tenantId !== undefined && listed.tenantId !== row.tenantId) return { stopped: true };
+  const owed = row.replacesLined !== true && args.now - row.createdAt > args.claimAfterMs;
   const claimedVersion = owed ? await args.registry.update(row, { replacesLined: true }) : undefined;
   const claimed = claimedVersion !== undefined;
+  let stopped = true;
   if (listed !== undefined || args.stopAlways || claimed) {
-    await stopQuietly(backend, { backend: row.backend, tenantId: row.tenantId, handle: row.replaces, nonce: '' }, log);
+    stopped = await stopQuietly(backend, { backend: row.backend, tenantId: row.tenantId, handle: row.replaces, nonce: '' }, log);
   }
   if (claimed) {
     await writeStopLine({
@@ -130,5 +131,5 @@ export async function settleReplaced(args: {
       row: { tenantId: row.tenantId, backend: row.backend, handle: row.replaces, createdAt: listed?.startedAt },
     });
   }
-  return claimedVersion;
+  return { version: claimedVersion, stopped };
 }
