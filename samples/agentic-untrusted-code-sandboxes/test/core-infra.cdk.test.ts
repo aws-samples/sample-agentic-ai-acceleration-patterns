@@ -1062,6 +1062,24 @@ describe('least privilege and teardown details', () => {
     expect(Object.values(s.t.toJSON().Resources as Record<string, Json>).filter((r) => r.Type === 'Custom::S3AutoDeleteObjects')).toEqual([]);
   });
 
+  test('the drain resource is answered by a framework function with a role and a log group of the construct\'s own', () => {
+    const all = resources();
+    const drain = Object.values(all).find((r) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/DrainResource/')) as Json;
+    const frameworkId = (drain.Properties.ServiceToken['Fn::GetAtt'] as string[])[0];
+    const framework = all[frameworkId];
+    expect(pathOf(framework)).toContain('/DrainProvider/');
+    expect(JSON.stringify(framework.Properties.LoggingConfig.LogGroup)).toContain('DrainProviderLogs');
+    const role = framework.Properties.Role['Fn::GetAtt'][0] as string;
+    expect(managedPoliciesOf(base.t, role)).toEqual([]);
+    const stmts = statementsOfRole(base.t, role);
+    expect(actionsOf(stmts).sort()).toEqual(['lambda:GetFunction', 'lambda:InvokeFunction', 'logs:CreateLogStream', 'logs:PutLogEvents']);
+    const invoke = stmts.find((st) => Array.isArray(st.Action) && st.Action.includes('lambda:InvokeFunction') || st.Action === 'lambda:InvokeFunction') as Json;
+    expect(JSON.stringify(invoke.Resource)).toContain(fnId(base.t, 'Drain'));
+    // the framework waits for the log drain like every other writer
+    const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/LogDrain/Resource'))![0];
+    expect(dependsOn(framework)).toContain(drainId);
+  });
+
   test('the reaper schedule is deleted before the drain, and every custom resource has a service timeout', () => {
     const all = resources();
     const drainId = Object.entries(all).find(([, r]) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).includes('/DrainResource/'))![0];

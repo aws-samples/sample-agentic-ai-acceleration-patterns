@@ -22,6 +22,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import type { BackendName } from './backend';
 import type { BackendConstruct, BackendContext, BackendFactory } from './backend-construct';
@@ -310,8 +311,23 @@ export class UntrustedCodeSandboxes extends Construct {
 
     const drain = this.lambdaFunction('Drain', HANDLERS.drain, drainRole, Duration.minutes(15), 'Stops every sandbox before the stack deletes its resources (spec 5.3)');
     this.insights.addStopLogGroup(drain.logGroup.logGroupName);
+    // The drain handler is the `onEvent` handler of a custom resource provider (ADR-0034): it returns the physical id and the
+    // framework function answers CloudFormation. The framework function gets a role and a log group of the construct's own.
+    const frameworkLogs = new logs.LogGroup(this, 'DrainProviderLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: RemovalPolicy.DESTROY });
+    const frameworkRole = new iam.Role(this, 'DrainProviderRole', {
+      description: 'Framework function of the drain custom resource: invokes the drain and writes its own log group (ADR-0029)',
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+    frameworkLogs.grantWrite(frameworkRole);
+    const provider = new cr.Provider(this, 'DrainProvider', {
+      onEventHandler: drain.fn,
+      logGroup: frameworkLogs,
+      frameworkOnEventRole: frameworkRole,
+    });
+    this.logDrain.protect(frameworkLogs);
+    this.logDrain.writer(provider);
     this.drainResource = new CustomResource(this, 'DrainResource', {
-      serviceToken: drain.fn.functionArn,
+      serviceToken: provider.serviceToken,
       serviceTimeout: Duration.minutes(15),
       properties: { Backends: this.config.backends },
     });

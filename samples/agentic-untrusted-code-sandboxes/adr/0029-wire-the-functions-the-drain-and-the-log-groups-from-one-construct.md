@@ -17,17 +17,16 @@ owner; this decision fixes the contract between the two.
 
 ## Options considered
 
-### Option 1: Direct custom resource for the drain; `NodejsFunction` per handler; log drain for the construct's own groups
-Pros: the drain handler answers the CloudFormation response URL itself,
-as the siblings' custom resources do, and needs no framework Lambda in the
-VPC; the log drain is the proven wait-between-writers-and-groups pattern.
-Cons: the handler must always answer (a `try`/`finally`), or the delete
-waits `ServiceTimeout`.
+### Option 1: Direct custom resource for the drain
+Pros: the drain handler answers the CloudFormation response URL itself, as
+the siblings' custom resources do, and needs no framework Lambda. Cons: the
+handler must always answer (a `try`/`finally`), or the delete waits
+`ServiceTimeout`.
 
 ### Option 2: `custom-resources.Provider`
-Pros: the handler returns a value or throws. Cons: two framework Lambdas
-per provider, one more role, and the drain's 10-minute wait runs inside the
-framework's own timeout.
+Pros: the handler returns a value or throws, and the framework answers.
+Cons: one framework Lambda and role more, and the drain's wait runs inside
+the framework function's own 15-minute timeout.
 
 ### Option 3: Name a bound function's log group `/aws/lambda/<function name>`
 Pros: no change to the function. Cons: the group depends on the function, the
@@ -38,12 +37,17 @@ function and a late invocation recreates it with no retention.
 
 ## Decision
 
-Option 1.
+Option 2 for the drain (the handler was written as an `onEvent` handler,
+ADR-0034), with a function per handler and the log drain for the construct's
+own groups.
 
 - The drain is `AWS::CloudFormation::CustomResource` with `ServiceToken` =
-  the drain function. `Create` and `Update` answer at once; `Delete` stops
-  every sandbox and answers success or failure through `ResponseURL`, always
-  (spec §5.3). The function timeout and `ServiceTimeout` are both 15 minutes.
+  the provider's framework function, which invokes the drain function.
+  `Create` and `Update` return the physical id at once; `Delete` stops every
+  sandbox and returns, or throws, so the framework answers success or
+  failure (spec §5.3). The framework function has a role and a log group of
+  the construct's own, behind the log drain. The drain function timeout and
+  `ServiceTimeout` are both 15 minutes.
 - Delete order: tool functions, then the drain, then each backend's
   `drainOrder()` resources, then the log cleanup resource. The tool
   functions depend on the drain; the drain depends on every `drainOrder()`
@@ -117,7 +121,7 @@ Option 1.
 
 ## Consequences
 
-A handler author writes `Delete` so that every path ends in a response. A
+The drain handler returns or throws on `Delete`, and the framework answers CloudFormation, so every path ends in a response. A
 gateway function built with its own log group has that group in the app's
 hands; the core cannot put it behind its log drain. The core functions
 run on immutable role references, so a grant made through

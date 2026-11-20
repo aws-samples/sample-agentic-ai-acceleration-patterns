@@ -121,6 +121,12 @@ export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
       reason: 'The wildcard is the object name under the one prefix the platform derives from the session, so a session reaches only its own prefix (ADR-0007, spec 3.6 AgentCore runtime role).',
     },
     {
+      // The framework function invokes the drain function, and the Lambda grant names the function with any qualifier.
+      matches: re(/^<[^>.:]+\.Arn>:\*$/),
+      actions: /^lambda:InvokeFunction$/,
+      reason: 'The drain custom resource\'s framework function invokes the drain function of this stack; the grant names the function ARN with any version or alias, and no other function (ADR-0029).',
+    },
+    {
       matches: re(/:network-interface\/\*$/),
       actions: /^ec2:(CreateNetworkInterface|CreateTags)$/,
       reason: 'The connector operator role creates and tags network interfaces, which have no id before creation; its subnet and security group resources are the sample\'s and CreateTags needs the managed-operator condition (spec 3.6 MicroVM connector operator role).',
