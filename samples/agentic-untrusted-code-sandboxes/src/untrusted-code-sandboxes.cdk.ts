@@ -33,7 +33,7 @@ import { SandboxEndpoints } from './core/endpoints';
 import { LogCleanup } from './core/log-cleanup';
 import { LogDrain } from './core/log-drain';
 import { RunnerImages, type RunnerArch } from './core/runner-image';
-import { acknowledge, acknowledgeGranularFinding, nagFindingResource } from './core/nag';
+import { acknowledge, acknowledgeGranularFinding, acknowledgeKnownFindings, nagFindingResource } from './core/nag';
 import { InsightRules } from './core/observability';
 import { ENV, TENANT_KEY_PREFIX, TENANT_TAG, REGISTRY } from './env';
 import { handlerEntry, HANDLERS, runnerPath } from './handler-entry';
@@ -315,7 +315,7 @@ export class UntrustedCodeSandboxes extends Construct {
     if (this.config.standalone) {
       const run = this.lambdaFunction('RunCode', HANDLERS.runCode, toolRole, this.config.toolBudget, 'run_code for the vendor\'s own API (spec 3.2, ADR-0017)', 512);
       this.insights.addToolLogGroup(run.logGroup.logGroupName);
-      (run.fn.node.defaultChild as lambda.CfnFunction).addDependency(this.drainResource.node.defaultChild as CfnResource);
+      (run.fn.node.defaultChild as lambda.CfnFunction).addResourceDependency(this.drainResource.node.defaultChild as CfnResource);
       this.runCodeFunction = run.fn;
     }
 
@@ -330,6 +330,8 @@ export class UntrustedCodeSandboxes extends Construct {
       this.logDrain.protect(this.dnsFirewall.queryLogGroup);
       this.logDrain.writer(this.dnsFirewall.queryLogAssociation);
     }
+
+    acknowledgeKnownFindings(this);
 
     this.node.addValidation({
       validate: () => (this.config.standalone || this.bound.length > 0
@@ -386,8 +388,9 @@ export class UntrustedCodeSandboxes extends Construct {
       }).logGroupName;
     }
     // Only the function resource waits for the drain, not its role, which the tenant role's trust names.
-    cfn.addDependency(this.drainResource.node.defaultChild as CfnResource);
+    cfn.addResourceDependency(this.drainResource.node.defaultChild as CfnResource);
     this.insights.addToolLogGroup(groupName);
+    acknowledgeKnownFindings(fn.role);
     this.bound.push(fn);
   }
 

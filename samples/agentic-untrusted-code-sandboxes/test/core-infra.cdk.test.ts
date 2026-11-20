@@ -19,6 +19,7 @@ import { AwsSolutionsChecks } from 'cdk-nag';
 import { requestedNames } from './fake-core-backend';
 import { ALLOW_PRIORITY, BLOCK_PRIORITY, DNS_FIREWALL_ALLOWED_DOMAINS } from '../src/core/dns-firewall';
 import { CLEANUP_SOURCE } from '../src/core/log-cleanup';
+import { acknowledgeKnownFindings, knownWildcard } from '../src/core/nag';
 import { ENV } from '../src/env';
 import { NAME_PATTERNS, NAME_RULES, nameFor } from '../src/names';
 import { resolveProps, type UntrustedCodeSandboxesProps } from '../src/props';
@@ -726,5 +727,46 @@ describe('cdk-nag (AwsSolutions)', () => {
     const findings = report.violations.map((v) => `${v.ruleName}: ${JSON.stringify(v.violatingResources)}`);
     // The gateway function in this test is the test's own; its role and function are not the construct's.
     expect(findings.filter((f) => !/Gateway/.test(f))).toEqual([]);
+  });
+});
+
+describe('known wildcards (ADR-0030)', () => {
+  const arn = 'arn:<AWS::Partition>:ecs:<AWS::Region>:<AWS::AccountId>';
+  test.each([
+    ['*', ['ecr:GetAuthorizationToken'], true],
+    ['*', ['ec2:DescribeInstances'], true],
+    ['*', ['ecr:GetAuthorizationToken', 's3:GetObject'], false],
+    ['*', ['s3:GetObject'], false],
+    ['*', ['sts:AssumeRole'], false],
+    [`${arn}:task/<Cluster>/*`, ['ecs:StopTask', 'ecs:DescribeTasks'], true],
+    [`${arn}:task/<Cluster>/*`, ['ecs:RunTask'], false],
+    [`${arn}:container-instance/<Cluster>/*`, ['ecs:DescribeContainerInstances'], true],
+    [`${arn}:container-instance/*`, ['ecs:Poll'], true],
+    [`${arn}:container-instance/*`, ['ecs:DeregisterContainerInstance'], false],
+    ['<Rt.AgentRuntimeArn>/runtime-endpoint/*', ['bedrock-agentcore:StopRuntimeSession'], true],
+    ['<Rt.AgentRuntimeArn>/runtime-endpoint/*', ['bedrock-agentcore:DeleteAgentRuntime'], false],
+    ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/x-*', ['logs:CreateLogGroup'], true],
+    ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/x:*', ['logs:PutLogEvents'], true],
+    ['arn:<AWS::Partition>:logs:<AWS::Region>:<AWS::AccountId>:log-group:/aws/x-*', ['logs:DeleteLogGroup', 'logs:GetLogEvents'], false],
+    ['arn:<AWS::Partition>:ec2:<AWS::Region>:<AWS::AccountId>:network-interface/*', ['ec2:CreateNetworkInterface'], true],
+    ['arn:<AWS::Partition>:ec2:<AWS::Region>:<AWS::AccountId>:network-interface/*', ['ec2:DeleteNetworkInterface'], false],
+    ['<Bucket.Arn>/inputs/<aws:PrincipalTag/TenantId>/*', ['s3:GetObject'], true],
+    ['<Bucket.Arn>/inputs/<aws:PrincipalTag/TenantId>/*', ['s3:DeleteObject'], false],
+    ['<Bucket.Arn>/*', ['s3:GetObject'], false],
+    ['<Bucket.Arn>/other/*', ['s3:GetObject'], false],
+  ])('%s with %p is %s', (resource, actions, accepted) => {
+    expect(knownWildcard(resource, actions) !== undefined).toBe(accepted);
+  });
+
+  test('a wider action on a known resource stays a finding, and a known one is acknowledged', () => {
+    const stack = new Stack(new App(), 'S');
+    const role = new iam.Role(stack, 'R', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
+    role.addToPolicy(new iam.PolicyStatement({ actions: ['ecr:GetAuthorizationToken'], resources: ['*'] }));
+    const wide = new iam.Role(stack, 'Wide', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
+    wide.addToPolicy(new iam.PolicyStatement({ actions: ['ecr:GetAuthorizationToken', 's3:GetObject'], resources: ['*'] }));
+    acknowledgeKnownFindings(stack);
+    const found = new AwsSolutionsChecks(stack).validateScope(stack).violations.flatMap((v) => v.violatingResources.map((r) => r.constructPath));
+    expect(found.some((p) => p.startsWith('S/R/'))).toBe(false);
+    expect(found.some((p) => p.startsWith('S/Wide/'))).toBe(true);
   });
 });

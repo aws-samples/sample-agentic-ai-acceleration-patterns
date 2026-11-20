@@ -1,10 +1,12 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
+import { Stack } from 'aws-cdk-lib';
 import type * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import { DockerImageName, ECRDeployment } from 'cdk-ecr-deployment';
 import { Construct } from 'constructs';
+import { acknowledgeImageCopy } from './nag';
 
 export type RunnerArch = 'arm64' | 'amd64';
 
@@ -50,6 +52,7 @@ export class RunnerImages extends Construct {
         dest: new DockerImageName(`${this.props.repository.repositoryUri}:${tag}`),
         imageArch: [arch],
       });
+      acknowledgeImageCopy(Stack.of(this));
       found = { tag, copy };
       this.built.set(arch, found);
     }
