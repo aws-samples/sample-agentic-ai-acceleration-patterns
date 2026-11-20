@@ -65,15 +65,38 @@ describe('bundling root', () => {
     fs.rmSync(scratch, { recursive: true, force: true });
   });
 
-  it('is this package directory and its lock file, not the working directory', () => {
-    const before = process.cwd();
-    process.chdir(scratch);
-    try {
-      expect(bundlingRoot()).toEqual({ projectRoot: PACKAGE_ROOT, depsLockFilePath: path.join(PACKAGE_ROOT, 'package-lock.json') });
-    } finally {
-      process.chdir(before);
-    }
+  it('is this package directory and its lock file', () => {
+    expect(bundlingRoot()).toEqual({ projectRoot: PACKAGE_ROOT, depsLockFilePath: path.join(PACKAGE_ROOT, 'package-lock.json') });
     expect(fs.existsSync(bundlingRoot().depsLockFilePath)).toBe(true);
+  });
+
+  it('is spread into every NodejsFunction in src, directly or through functionProps', () => {
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== 'smithy') walk(full);
+        } else if (entry.name.endsWith('.ts')) {
+          files.push(full);
+        }
+      }
+    };
+    walk(path.join(PACKAGE_ROOT, 'src'));
+    const missing: string[] = [];
+    let sites = 0;
+    for (const file of files) {
+      const text = fs.readFileSync(file, 'utf8');
+      for (const match of text.matchAll(/new NodejsFunction\(/g)) {
+        sites += 1;
+        const body = text.slice(match.index, match.index + 200);
+        if (!body.includes('bundlingRoot()') && !body.includes('functionProps(')) {
+          missing.push(`${path.relative(PACKAGE_ROOT, file)}:${text.slice(0, match.index).split('\n').length}`);
+        }
+      }
+    }
+    expect(sites).toBeGreaterThan(0);
+    expect(missing).toEqual([]);
   });
 
   it('synthesises ToolTarget and SharedIngress from a working directory with no lock file', () => {

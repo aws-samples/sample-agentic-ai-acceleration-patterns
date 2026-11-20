@@ -10,8 +10,9 @@ SPDX-License-Identifier: MIT-0
 
 ## Context
 Another sample reaches this package through a `file:` dependency and
-constructs `ToolTarget` and `SharedIngress` in its own CDK app (the package
-entry, ADR-0017 of agentic-untrusted-code-sandboxes). `NodejsFunction`
+constructs `ToolTarget` and `SharedIngress` in its own CDK app, as the
+agentic-untrusted-code-sandboxes sample does through the package entry.
+`NodejsFunction`
 decides where to bundle from two props. `depsLockFilePath` defaults to the
 first lock file found walking up from the process working directory, and
 `projectRoot` defaults to that file's directory. Every entry file of this
@@ -50,9 +51,9 @@ working directory, with and without a lock file of its own.
 
 ## Consequences
 Easier: any app, in any folder, can construct these constructs. Harder: a
-new `NodejsFunction` in this package must spread `bundlingRoot()` or it
-fails again for consumers; the test catches it only for the constructs it
-builds. The root assumes `src/shared` or the compiled `lib/shared` two levels
+new `NodejsFunction` in this package must spread `bundlingRoot()`, directly
+or through `functionProps`, or it fails for consumers; a source check in the
+test fails when a `new NodejsFunction(` call has neither. The root assumes `src/shared` or the compiled `lib/shared` two levels
 below the package directory. Revisit if the package is published to a
 registry (the lock file is then not shipped; bundle from pre-built code,
 Option 3).
