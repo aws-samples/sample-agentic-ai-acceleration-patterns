@@ -120,6 +120,8 @@ step_03() {
   local host st
   host="$(front "$TENANT_A")"
   st="$(edge GET "$host" /)"; check "GET / 200" 200 "$st"; check_headers "GET /"
+  local asset; asset="$({ grep -o '/assets/[A-Za-z0-9._-]*' "$BODY" || true; } | head -1)"
+  st="$(edge GET "$host" "${asset:-/assets/none}")"; check "an /assets/* load 200" 200 "$st"
   st="$(edge GET "$host" /config.json)"; check "GET /config.json 200" 200 "$st"; check_headers "/config.json"
   skip "the inline callback script order and its hash in script-src: SPA build tests (test/spa/build.test.ts)"
   skip "no CSP violation on /callback or /?code= in a browser: no browser in the driver (spec §10, run by hand)"
