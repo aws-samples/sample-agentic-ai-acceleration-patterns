@@ -491,8 +491,7 @@ with `busy`. The runner:
    gets a fresh one under the same id. 32 MiB is a design value; the one
    spike result on it is §7 S-21 (a 2 GiB SysV fill drained below it inside
    1 s; 420 000 empty files in `/work` kept it above, seen before the poll
-   existed). Files in `/work`
-   stay (below).
+   existed). Files in `/work` stay (below).
 
    After a job ends, the kill, the sweep and the thread joins of the runner
    share one budget of 3 s, so the answer comes with 2 s to spare inside the
@@ -745,7 +744,7 @@ takeover, a crashed start, or a row TTL removed while the reaper was not
 running) gets its line from the stopper, marked `orphan` = true, with
 `tenantId` from the task's `TenantId` tag on `nitro`, or `unknown` on
 `microvm`, whose MicroVMs take no tags. An `agentcore` orphan session gets no stop
-line, because no API lists it; its cost still reaches the tenant through
+line, because no API lists it; its cost should reach the tenant through
 AgentCore's usage logs (table below), so the `sandboxSeconds` ranking is
 not complete for `agentcore`. On
 `microvm` the line also carries `runningSeconds` and `suspendedSeconds`.
@@ -782,7 +781,7 @@ Cost attribution per backend:
 |---|---|---|---|
 | `microvm` | `sandboxSeconds` per tenant from the registry (MicroVMs take no tags) | baseline rate × seconds running + suspended storage rate × seconds suspended | the image build |
 | `nitro` | `TenantId` task tag with ECS split cost allocation data turned on (account setting) | Cost Explorer split of instance cost by task reservation | idle instance capacity, NAT and endpoints, apportioned by `sandboxSeconds` |
-| `agentcore` | AgentCore's session-level usage logs, joined to the tenant through `runtimeSessionId` in the tool line | per-second vCPU and memory rates × the session's reported usage (consumption billing, no configured baseline) | none beyond the shared endpoints and NAT |
+| `agentcore` | AgentCore's session-level usage logs, joined to the tenant through `runtimeSessionId` in the tool line (format not yet verified, §7.8) | per-second vCPU and memory rates × the session's reported usage (consumption billing, no configured baseline) | none beyond the shared endpoints and NAT |
 
 ### 3.9 DNS Firewall option (ADR-0016)
 
@@ -1115,7 +1114,7 @@ own them. Instead a cleanup custom resource, on which the runtime depends,
 takes that prefix as a property (known at synth, no reference to the
 runtime), is deleted after the runtime, and then deletes every group under
 the prefix. The session usage logs that §3.8 uses for `agentcore`
-cost are delivered (`AWS::Logs::DeliverySource`, `DeliveryDestination`,
+cost (format not yet verified, §7.8) are delivered (`AWS::Logs::DeliverySource`, `DeliveryDestination`,
 `Delivery`) to a log group the construct owns. AgentCore names its groups
 `/aws/bedrock-agentcore/runtimes/<runtimeName>-<10-character id>-DEFAULT`,
 and code with the runtime role can add more under the same prefix; the
@@ -1462,13 +1461,13 @@ Three single-backend deployments of the construct (`standalone` on,
 `sandboxIdle` 2 min, 1 min on `agentcore`, `runTimeout` 20 s; `dnsFirewall`
 off on `nitro` and `agentcore`), driven through `runCodeFunction` with the
 steps of §8 that need no gateway and no other backend. The `agentcore` run
-had two stacks, `sessionFiles` off and on, and ran its SysV case again on a
-second deploy with the 1 s poll. Every stack was removed; no stack, runtime,
+had two stacks, `sessionFiles` off and on, and ran its SysV case again
+after a redeploy on the build with the 1 s poll. Every stack was removed; no stack, runtime,
 task, function or log group of the runs was left.
 
 | Check | Result |
 |---|---|
-| `agentcore` job group after a sweep | 1000 SysV semaphore arrays (2 GiB) are swept and the group drains below 32 MiB inside the 1 s poll: no `dirty`, 5 of 5. 420 000 empty files in `/work` kept the group above 32 MiB (slab memory charged to it; seen before the poll existed, not run again with it), so the runner marked itself `dirty` and the next start gets a fresh session, which is the §3.5 rule |
+| `agentcore` job group after a sweep | 1000 SysV semaphore arrays (2 GiB) are swept and the group drains below 32 MiB inside the 1 s poll: no `dirty`; the 2 GiB case ran once, and five SysV jobs from 20 MiB to a fill-to-kill kept the session. 420 000 empty files in `/work` kept the group above 32 MiB (slab memory charged to it; seen before the poll existed, not run again with it), so the runner marked itself `dirty` and the next start gets a fresh session, which is the §3.5 rule |
 | `agentcore` stop line | for sessions the platform already ended at its idle timeout, the drain's stop lines carry `sandboxSeconds` of 560 to 900 s: the session's end is not known, so the line counts to the drain (§3.8). No AgentCore usage-log record arrived in 90 minutes of calls and stops, only the delivery's validation stream |
 | Stack delete with live sandboxes | `nitro` 27 min (the drain 80 s; the VPC-attached `RunCodeDrain` function 21 min, its network interfaces release late); `microvm` 23 min (cause not isolated); `agentcore`, two stacks, 31.7 min (the VPC-attached Reaper and Drain functions 19.5 min each). A delete of stacks that never ran a sandbox took 15 s |
 
