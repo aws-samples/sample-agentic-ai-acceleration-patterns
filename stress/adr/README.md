@@ -21,6 +21,8 @@ that change a sample are recorded in that sample's `adr/`.
 | [0009](./0009-deploy-the-driver-as-its-own-cdk-app-in-stress.md) | Deploy the driver as its own CDK app in `stress/` | Accepted | 2026-11-19 |
 | [0010](./0010-count-an-isolation-assertion-per-answered-request.md) | Count an isolation assertion per answered request, and every refusal under `refusals` | Accepted | 2026-11-19 |
 | [0011](./0011-give-the-roles-a-cell-creates-a-workload-boundary-without-iam.md) | Give the roles a cell creates a workload boundary without IAM | Proposed | 2026-11-20 |
+| [0016](./0016-send-agent-traffic-to-the-one-cells-ingress-at-small.md) | Send agent traffic to the one cell's ingress at `small` | Proposed | 2026-11-20 |
+| [0017](./0017-create-the-identity-tenant-and-users-in-the-control-plane-driver.md) | Create each control-plane tenant's identity tenant and users in the control-plane driver | Proposed | 2026-11-20 |
 
 In `samples/control-plane/adr/`:
 
