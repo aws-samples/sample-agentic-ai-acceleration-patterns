@@ -89,7 +89,7 @@ export async function handleRequest(event: APIGatewayProxyEvent, out: ResponseWr
   const authorizer = (event.requestContext?.authorizer ?? {}) as Record<string, unknown>;
   const authorizedTenant = typeof authorizer.tenantId === 'string' ? authorizer.tenantId : undefined;
   const authorizedBackend = typeof authorizer.backend === 'string' ? authorizer.backend : undefined;
-  // ADR-0053: the client's correlation id, on every line this function
+  // ADR-0053: the client's correlation id, on every line this handler
   // writes for the request when it has the accepted shape; never used for
   // a decision.
   const correlationId = correlationIdOf(event.headers);

@@ -1984,9 +1984,10 @@ Steps 11 to 25 run between step 9-registry and step 10.
    malformed `conversationId`: 400 or 403.
 6c. Client correlation id (ADR-0053): a well-formed `x-correlation-id` is
    logged as `correlationId` on `request served` (`api-gateway`) or
-   `request admitted` (`agentcore-gateway`); a malformed one is in neither
-   log group and the request is still served; on `api-gateway` the
-   authoriser's `token refused` line for a tampered token carries it (P-9).
+   `request admitted` (`agentcore-gateway`); a malformed one is absent from
+   that function's log group and the request is still served; on
+   `api-gateway` the authoriser's `token refused` line for a tampered token
+   carries it (P-9).
 7. Grants: for each row of the expected grants table, the agent
    reports `scope`, `tenant_id`, `agent`, `aud` and `act.sub` equal to the
    expected values.

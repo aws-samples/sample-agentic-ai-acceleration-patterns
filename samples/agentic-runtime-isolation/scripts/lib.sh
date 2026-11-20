@@ -178,10 +178,10 @@ issue_token() {
 
 urlencode() { jq -sRr @uri; }
 
-# tamper TOKEN_VAR [POS] -> the token with the signature character at POS (default 5)
-# changed (never printed by callers).
-# A middle character: the last base64url character of an RS256 signature
-# carries padding bits, so changing it may leave the signature bytes intact.
+# tamper TOKEN_VAR [POS] -> the token with the signature character at POS
+# (default 5) changed; callers never print it. A middle character: the last
+# base64url character of an RS256 signature carries padding bits, so
+# changing it may leave the signature bytes intact.
 tamper() {
   local t="${!1}" pos="${2:-5}" head sig c
   head="${t%.*}"; sig="${t##*.}"; c="${sig:pos:1}"
@@ -243,7 +243,7 @@ LAST_TOTAL=""
 # invoke ENDPOINT TOKEN_VAR JSON [SESSION_HEADER_VALUE] [X_TENANT_ID] [CORRELATION_ID] -> HTTP status; body in $BODY.
 # TOKEN_VAR is a variable NAME (empty name: no Authorization header).
 # X_TENANT_ID selects one tenant of a token that carries `tenants` (ADR-0038).
-# CORRELATION_ID is sent as `x-correlation-id` (ADR-0053); it must hold no `"` or `\`.
+# CORRELATION_ID is sent as `x-correlation-id` (ADR-0053); it must hold no `"`, `\` or newline.
 # Writes TTFB and total seconds for timing().
 invoke() {
   local endpoint="$1" token_var="$2" json="$3" fake_session="${4:-}" tenant_header="${5:-}" correlation="${6:-}" config="" out status ttfb total
