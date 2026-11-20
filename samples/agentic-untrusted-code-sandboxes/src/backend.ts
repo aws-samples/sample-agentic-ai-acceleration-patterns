@@ -133,8 +133,9 @@ export interface StopFacts {
  * `failAtBoot` makes the runner of this one sandbox exit at boot: `nitro`
  * sets the runner's fail-at-boot variable in the container override,
  * `microvm` adds `"failAtBoot": true` to the `run` hook payload, `agentcore`
- * gets none. Only the tool sets it, and only for the one tenant the
- * integration stack names (src/env.ts, the integration test hooks).
+ * ignores it (its start makes no AWS call). Only the tool sets it, and only
+ * for the one tenant the integration stack names (src/env.ts, the
+ * integration test hooks).
  */
 export interface StartOptions {
   readonly failAtBoot?: boolean;

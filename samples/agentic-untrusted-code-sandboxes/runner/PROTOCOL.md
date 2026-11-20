@@ -204,8 +204,8 @@ The integration test makes one sandbox fail to start (spec §8
 - `nitro`: the `RunTask` container override `environment` also holds
   `RUNNER_FAIL_AT_BOOT` = `1` (that exact value). The runner logs
   `fail_at_boot` and exits 1 before it opens a port. The runner reads the
-  variable on `agentcore` too, but the tool sends no hook to `agentcore`,
-  which has no start call.
+  variable on `agentcore` too, but the `agentcore` backend ignores the
+  option the tool passes, because its start makes no AWS call.
 - `microvm`: the `run` hook payload also holds `"failAtBoot": true` (only
   the JSON value `true` counts). The runner reads it inside the
   `runHookPayload` wrapper and before it checks the payload shape, so the

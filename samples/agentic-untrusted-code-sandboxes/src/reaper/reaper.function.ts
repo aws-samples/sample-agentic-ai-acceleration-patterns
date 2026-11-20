@@ -9,6 +9,7 @@
  */
 
 import { reapOnce, type ReaperDeps, type ReaperSummary } from './reaper';
+import { TEST_HOOK_ENV, TEST_HOOK_FIELDS } from '../env';
 import { loadConfig } from '../tool/config';
 import { loadBackends, registryClient } from '../tool/deps';
 import { Logger } from '../tool/log';
@@ -26,7 +27,23 @@ function build(): ReaperDeps {
   };
 }
 
-export async function handler(_event?: unknown): Promise<ReaperSummary> {
+/**
+ * Test hook of the integration test (spec §8 `max-life`, ADR-0058): with `RC_INTEG_OVERRIDES` = `1` on this function,
+ * a positive `maxLifeSeconds` in the event replaces `sandboxMaxLife` for this one pass. Otherwise the event is ignored.
+ */
+export function maxLifeOverrideMs(event: unknown, env: Readonly<Record<string, string | undefined>> = process.env): number | undefined {
+  if (env[TEST_HOOK_ENV.RC_INTEG_OVERRIDES] !== '1') return undefined;
+  const seconds = (event as Record<string, unknown> | null | undefined)?.[TEST_HOOK_FIELDS.REAPER_MAX_LIFE_SECONDS];
+  return typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+}
+
+/** The deps of one pass: a copy with the overridden life when the hook applies, the shared deps untouched otherwise. */
+export function passDeps(base: ReaperDeps, event: unknown, env: Readonly<Record<string, string | undefined>> = process.env): ReaperDeps {
+  const override = maxLifeOverrideMs(event, env);
+  return override === undefined ? base : { ...base, config: { ...base.config, sandboxMaxLifeMs: override } };
+}
+
+export async function handler(event?: unknown): Promise<ReaperSummary> {
   deps ??= build();
-  return reapOnce(deps);
+  return reapOnce(passDeps(deps, event));
 }
