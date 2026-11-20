@@ -18,6 +18,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
+import { bundlingRoot } from './bundling-root.cdk';
 import { KEY_PREFIX } from './entitlements';
 import type { LogDrain } from './log-drain';
 import { acknowledgeGranularFinding } from './nag';
@@ -109,6 +110,7 @@ export class OwnedRows extends Construct {
       removalPolicy: RemovalPolicy.DESTROY, // sample only
     });
     const fn = new NodejsFunction(this, 'Function', {
+      ...bundlingRoot(),
       entry: path.join(__dirname, 'reservation.function.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_24_X,
