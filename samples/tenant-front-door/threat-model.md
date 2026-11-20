@@ -666,15 +666,12 @@ None. Spec §11 has no open question.
 
 ProtoShield scanned the sample on 2026-11-20 (semgrep, cdk-nag on the
 synthesized templates, checkov, gitleaks, CVE, IAM least privilege, licence
-headers; bandit found no Python): 0 critical, 4 high, 7 medium, 0 low. An
-earlier scan the same day found a JWT-shaped test token in
-`test/integ/agent-ingress.test.ts`, now a plain placeholder. Each finding:
+headers; bandit and cfn-nag had no Python or `.template` file to run on): 0 critical, 4 high, 7 medium, 0 low. Each finding:
 
 | Finding | Severity | Outcome |
 |---|---|---|
 | IAM: `cloudfront:ListDistributionTenants` on `*` (sweeper, teardown, guard) and `acm:ListCertificates` on `*` (in `us-east-1` only) | high (2) | Accepted. Neither action supports a resource type or a condition key in the service authorisation reference, so `*` is the only resource. Each role reads only; every update and delete is scoped by the distribution tag (AR-33). |
 | IAM: `logs:DescribeLogGroups` and `cloudwatch:GetMetricData` on `*` in the integration test's access role (`test/integ/stacks.ts`) | high (2) | Accepted. Neither action takes a resource ARN. Both are reads; the role trusts only the driver's principal and exists for one run (`integration-test.md`). |
-| IAM: `cloudfront:CreateDistributionTenant` and `acm:RequestCertificate` on `*` (earlier scan) | high | Accepted. Neither action supports a resource type. Both require the request tags to name this distribution and allow only the front door's tag keys (spec §3.4, AR-33), so a created resource is always one this front door's scoped delete reaches. |
 | IAM: reads of `distribution-tenant/*` and `certificate/*` with no tag condition, beside writes that have one | medium (2) | Accepted. The reads return metadata only. The registrar and the sweeper check a resource's distribution tag before any change (409), and IAM conditions every write on it (M-16). |
 | IAM: `ssm:GetParametersByPath` on `/application-plane/tenants/*/<applicationId>` in the demo cell | medium (1) | Accepted. Tenant ids are minted at run time, so the path names the application and leaves the tenant open; the cell reads only its own application's namespaces and builds the path from the verified claim (M-2). |
 | semgrep `unknown-value-with-script-tag` in `spa/build.ts` | medium (2) | False positive. The build fills its own `index.html` with constants and digests at build time; no request value reaches it. |
