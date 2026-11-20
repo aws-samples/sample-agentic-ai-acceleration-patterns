@@ -11,7 +11,7 @@ describe('correlationIdOf (ADR-0053)', () => {
   });
 
   it('drops any other shape, and a missing header', () => {
-    for (const bad of ['', 'a'.repeat(65), 'a b', 'a_b', 'a.b', 'a\nb', 'ü', '<x>']) {
+    for (const bad of ['', 'a'.repeat(65), 'a b', 'a_b', 'a.b', 'a\nb', 'abc\n', 'ü', '<x>']) {
       expect(correlationIdOf({ 'x-correlation-id': bad })).toBeUndefined();
     }
     expect(correlationIdOf({})).toBeUndefined();

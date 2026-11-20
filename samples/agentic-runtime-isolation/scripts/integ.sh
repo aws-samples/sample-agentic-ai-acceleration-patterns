@@ -67,9 +67,9 @@ INTEG_APP="npx ts-node -P tsconfig.json --prefer-ts-exts test/integ.runtime.ts"
 # INTEG_DEPLOY_CONCURRENCY (default 6) is the `cdk deploy --all` concurrency. Six
 # stacks each creating a REST API at once trip the API Gateway control-plane
 # throttle in a Region at its default quota (us-east-1, 2026-11-09, and
-# eu-central-1, 2026-11-11: CreateModel 429 after five SDK attempts,
-# `RuntimeIsolationInteg-session-user` rolled back); set it to 2 (deploy 705 s
-# instead of about 270 s).
+# eu-central-1, 2026-11-11 and 2026-11-20: CreateModel 429 after five SDK
+# attempts, `RuntimeIsolationInteg-session-user` rolled back); set it to 2
+# (run 21: deploy 1,277 s at 2; run 20: 454 s at 6).
 # INTEG_PREFIX deploys under another stack prefix, beside an earlier run's
 # DELETE_FAILED stacks (CloudFormation refuses updates to them); the leftover
 # check below is scoped to this prefix.
@@ -714,6 +714,7 @@ run_all_on() { # SUFFIX
     status="$(invoke "$ENDPOINT" TAMPERED_C "$(body "$C1" report)" "" "" "${cid_good}-r")"; check "tampered with an id: 401|403 (got ${status})" status_is "401|403" "$status"
     check "the authoriser's token refused line carries the id" \
       wait_log "$AUTHORIZER_LOGS" "$since" "\"${cid_good}-r\"" ".message == \"token refused\" and .correlationId == \"${cid_good}-r\""
+    note "token refused carries ${cid_good}-r"
   fi
   note "id ${cid_good} on ${REQUEST_LINE}; ${cid_bad} absent"
   end_step
