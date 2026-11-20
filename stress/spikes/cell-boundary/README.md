@@ -81,8 +81,9 @@ headers: 0. IAM least privilege: 5 high, all in `cell-policies.yaml`.
 | Service wildcards (`apigateway:*`, `dynamodb:*`, `kms:*`, `lambda:*`, `logs:*`, `ssm:*`, ...) on `*`, in both policies | Accepted: the file records the policies the spike ran, to keep B-1 to B-5 reproducible. It is not deployable guidance; the cell policies are spec §8, decision 7, scoped by the standalone cell account |
 | IAM role writes, `iam:PassRole` and `sts:AssumeRole` on `*` | Accepted for the same reason; this is the gap B-4 names and the `/cell/` path closes in the cell policies (path spike) |
 
-The policies in `stress/application/` replace these;
-the spike file then stays as the record of this run only.
+History: the policies in [`stress/application/`](../../application/README.md)
+replace these. This folder is the record of the 2026-11-18 run only; do not
+deploy its `cell-policies.yaml`.
 
 ## Teardown
 

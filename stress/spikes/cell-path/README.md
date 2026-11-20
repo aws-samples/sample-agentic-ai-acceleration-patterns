@@ -4,6 +4,13 @@ SPDX-License-Identifier: MIT-0
 -->
 # Path spike: the `/cell/` path in standalone cell accounts
 
+History: the shipped policies, the `/cell/` aspect, the cell bootstrap
+script and the ported probes are in
+[`stress/application/`](../../application/README.md), which replaces this
+folder's `cell-policies.yaml`, `app.js` and `probes.sh`. CP-9 is decided by
+stress [ADR-0011](../../adr/0011-give-the-roles-a-cell-creates-a-workload-boundary-without-iam.md).
+This folder is the record of the 2026-11-18 and 2026-11-19 runs only.
+
 Questions ([spec](../../../docs/stress-test.spec.md) §8, decision 7; §10 Q-5, the request path, stays open (CP-6);
 stress [ADR-0006](../../adr/0006-deploy-cells-through-a-scoped-cell-bootstrap.md)):
 does a cell bootstrap whose execution role and every cell role carry the
