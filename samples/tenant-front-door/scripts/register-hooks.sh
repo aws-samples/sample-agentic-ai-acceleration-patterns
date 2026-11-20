@@ -5,8 +5,8 @@
 # Registers the front door's two global hooks on the control plane with
 # PutHook (spec §5.2, ADR-0017; control-plane R-39), or removes them.
 #
-#   scripts/register-hooks.sh            # put front-door-post and front-door-pre, check with ListHooks
-#   scripts/register-hooks.sh --delete   # DeleteHook both, check with ListHooks
+#   scripts/register-hooks.sh            # put front-door-pre, then front-door-post, check with ListHooks
+#   scripts/register-hooks.sh --delete   # DeleteHook front-door-post, then front-door-pre, check with ListHooks
 #
 # Both hooks run hooks/route-hook.sh from this repository, pinned to one
 # full commit SHA, and serve every front door on the control plane. A hook
@@ -145,8 +145,12 @@ put_hook() { # ID PHASE EVENT...
   echo "register-hooks: put ${id}, revision $(jq -r '.hook.revision' "$BODY")"
 }
 
-put_hook "$HOOK_POST" POST CELL_CREATE CELL_UPDATE DEPLOYMENT_CREATE DEPLOYMENT_UPDATE
+# PRE first: a run that stops after it leaves a hook that only deletes
+# routes, which answers 200 when a route is absent. POST first would leave
+# a control plane that writes routes and never removes them. --delete
+# removes them in the opposite order for the same reason.
 put_hook "$HOOK_PRE" PRE CELL_DELETE DEPLOYMENT_DELETE
+put_hook "$HOOK_POST" POST CELL_CREATE CELL_UPDATE DEPLOYMENT_CREATE DEPLOYMENT_UPDATE
 
 hooks="$(list_hooks)"
 jq -e --arg a "$HOOK_POST" --arg b "$HOOK_PRE" '

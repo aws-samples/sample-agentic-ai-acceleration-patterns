@@ -182,7 +182,7 @@ has passed the registrar's domain challenge (ADR-0018).
 | Agent route | edge | `/agents/*` behaviour | Streams to the agent ingress of `agentic-runtime-isolation`, when configured, with the `Managed-AllViewerExceptHostHeader` origin request policy. The router forwards only `/agents/<backend>/invocations` and strips the leading `/agents`, so the ingress receives `<stage>/<backend>/invocations` (§3.3 step 7, ADR-0019) |
 | Route hook | the control plane's | CodeBuild, the control plane's global hook project, under `<fleet>-global-hook` (control-plane R-41) | `hooks/route-hook.sh`, registered as two global hooks. `front-door-post` (`POST` on `CELL_CREATE`, `CELL_UPDATE`, `DEPLOYMENT_CREATE`, `DEPLOYMENT_UPDATE`) puts the cell or tenant route; `front-door-pre` (`PRE` on `CELL_DELETE`, `DEPLOYMENT_DELETE`) deletes it (§3.2, §3.4). It acts only for an application that has a front door hook parameter (`RouteHookAccess`, below) in the control plane's account, and exits 0 for every other (ADR-0014) |
 | `RouteHookAccess` stack | the control plane's | IAM and SSM Parameter Store | Added by the front door's app once the `registrarUrl` input names the deployed registrar (§3.6, ADR-0027). The front door hook parameter `/application-plane/applications/<applicationId>/shared/front-door-hook`, one JSON document with `version`, `registrarUrl`, `appDomain` and `addressing` (§6.4), a name of its own so that it cannot collide with the cell-account copy (§6.4) when the control plane's account also hosts cells. The parameter has `DeletionPolicy` and `UpdateReplacePolicy` `Retain`, so deleting or replacing the stack keeps it (§3.4 route hook step 1, §6.2). The name is fixed, so a retained parameter has to be deleted, or imported into the new stack, before `RouteHookAccess` is deployed again after a stack delete or after a first create that rolled back (CloudFormation keeps `Retain` resources on a create rollback too); otherwise the create fails because the parameter exists. When `applicationId` changes, the operator deletes the old application's parameter: while it stays, the hook calls the registrar for that application, the registrar refuses with 403 (§3.4 step 3) and that application's creates and updates fail (§6.2 limits). The stack also holds a customer-managed policy, `tenant-front-door-route-hook-<applicationId>`, listed in the control plane's `globalHookManagedPolicyArns`, that lets `<fleet>-global-hook` read any front door hook parameter (`ssm:GetParameter` on `/application-plane/applications/*/shared/front-door-hook`) and invoke this registrar's hook routes (`execute-api:Invoke` on `PUT` and `DELETE` of `/cells/*` and `/tenants/*`). `/tenants/*` also matches `PUT /tenants/<tenantId>/status`, which the registrar refuses to the hook role (§5.1). It grants nothing else |
-| `register-hooks.sh` | the operator's shell | the control plane API, with an operator token | Puts both global hooks with `PutHook`, from this sample's source at a pinned commit, and checks them with `ListHooks`; idempotent. `--delete` removes them (§5.2) |
+| `register-hooks.sh` | the operator's shell | the control plane API, with an operator token | Puts both global hooks with `PutHook`, the `PRE` hook first, from this sample's source at a pinned commit, and checks them with `ListHooks`; idempotent. `--delete` removes them, the `POST` hook first (§5.2) |
 | Telemetry | edge | CloudFront standard logging v2: delivery source, delivery destination, delivery and log group in `us-east-1` (ADR-0010) | Per-tenant requests, errors, bytes and latency from the record fields ADR-0010 lists, and the tenant in `viewer-request-log-data` (Telemetry, below) |
 
 **Telemetry.** The delivery's record fields are the ones ADR-0010 lists.
@@ -1823,11 +1823,15 @@ backoff; a 429 with `reason: certificate-quota` is not.
   fits the hooks' 10-minute run timeout.
 - **`scripts/register-hooks.sh [--delete]`**, run by an operator with an
   operator token (`CONTROL_PLANE_URL`, `CONTROL_PLANE_TOKEN`, which
-  reaches curl on stdin): puts `front-door-post` and `front-door-pre` with
-  `PutHook` (control-plane R-39), each with this sample's repository as
+  reaches curl on stdin): puts `front-door-pre`, then `front-door-post`,
+  with `PutHook` (control-plane R-39), each with this sample's repository as
   `source` (`GITHUB`, overridable for a fork), pinned to a full commit
   SHA (`HOOK_SOURCE_VERSION`), `samples/tenant-front-door/hooks/route-hook.sh`
-  as `script` and `timeoutMinutes` 10. It first reads each hook with
+  as `script` and `timeoutMinutes` 10. The `PRE` hook goes first, so a run
+  that fails between the two puts (a sixth global hook, a 5xx, an expired
+  token) leaves a hook that only deletes routes, which answers 200 when
+  a route is absent, and never one that writes routes no hook removes.
+  It first reads each hook with
   `GetHook` and leaves one registered with the same definition as it is,
   so a rerun changes nothing and does not raise the revision, then checks
   with `ListHooks` that both hooks are there with their phases and
@@ -1839,7 +1843,8 @@ backoff; a 429 with `reason: certificate-quota` is not.
   changes the hook for every front door at once: the hook-to-registrar
   API stays backward compatible across sample versions (a new hook works
   with an older registrar and the reverse), or every front door on the
-  control plane upgrades together. `--delete` removes them with
+  control plane upgrades together. `--delete` removes `front-door-post`,
+  then `front-door-pre`, with
   `DeleteHook`, a 404 included, and checks that `ListHooks` names
   neither.
   Run it first when the last front door on a control plane is removed:

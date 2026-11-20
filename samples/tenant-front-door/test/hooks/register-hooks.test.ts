@@ -59,22 +59,35 @@ describe('the script', () => {
 });
 
 describe('put', () => {
-  it('puts both hooks pinned to the commit, then finds them with ListHooks', () => {
-    h.curl(NOT_FOUND, { status: 200, body: { hook: summary(HOOK_POST, POST_DEF) } });
-    h.curl(NOT_FOUND, { status: 200, body: { hook: summary(HOOK_PRE, PRE_DEF) } }, LIST_BOTH);
+  it('puts the PRE hook, then the POST hook, pinned to the commit, then finds them with ListHooks', () => {
+    h.curl(NOT_FOUND, { status: 200, body: { hook: summary(HOOK_PRE, PRE_DEF) } });
+    h.curl(NOT_FOUND, { status: 200, body: { hook: summary(HOOK_POST, POST_DEF) } }, LIST_BOTH);
     const r = h.run(SCRIPT, env());
     expect(r.status).toBe(0);
     const calls = h.curlCalls();
     expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
-      `GET ${API}/hooks/${HOOK_POST}`,
-      `PUT ${API}/hooks/${HOOK_POST}`,
       `GET ${API}/hooks/${HOOK_PRE}`,
       `PUT ${API}/hooks/${HOOK_PRE}`,
+      `GET ${API}/hooks/${HOOK_POST}`,
+      `PUT ${API}/hooks/${HOOK_POST}`,
       `GET ${API}/hooks`,
     ]);
-    expect(JSON.parse(calls[1].data!)).toEqual(POST_DEF);
-    expect(JSON.parse(calls[3].data!)).toEqual(PRE_DEF);
+    expect(JSON.parse(calls[1].data!)).toEqual(PRE_DEF);
+    expect(JSON.parse(calls[3].data!)).toEqual(POST_DEF);
     expect(r.output).toContain(`ListHooks names ${HOOK_POST} (POST) and ${HOOK_PRE} (PRE)`);
+  });
+
+  it('leaves only the PRE hook when the second put fails, so no hook writes routes that none deletes', () => {
+    h.curl(NOT_FOUND, { status: 200, body: { hook: summary(HOOK_PRE, PRE_DEF) } });
+    h.curl(NOT_FOUND, { status: 409, body: { message: 'The control plane holds 5 global hooks; delete one first' } });
+    const r = h.run(SCRIPT, env());
+    expect(r.status).toBe(1);
+    const puts = h.curlCalls().filter((c) => c.method === 'PUT');
+    expect(puts.map((c) => c.url)).toEqual([`${API}/hooks/${HOOK_PRE}`, `${API}/hooks/${HOOK_POST}`]);
+    expect(r.output).toContain(`put ${HOOK_PRE}, revision 1`);
+    expect(r.output).not.toContain(`put ${HOOK_POST}`);
+    expect(r.output).toContain(`PutHook ${HOOK_POST}: HTTP 409`);
+    expect(h.curlCalls()).toHaveLength(4);
   });
 
   it('sends the token on stdin, never on the command line or in the output', () => {
@@ -92,8 +105,8 @@ describe('put', () => {
 
   it('leaves a hook registered with the same definition unchanged, so a rerun does not raise its revision', () => {
     h.curl(
-      { status: 200, body: { hook: summary(HOOK_POST, { ...POST_DEF, events: [...HOOK_POST_EVENTS].reverse() }, 3) } },
       { status: 200, body: { hook: summary(HOOK_PRE, PRE_DEF, 2) } },
+      { status: 200, body: { hook: summary(HOOK_POST, { ...POST_DEF, events: [...HOOK_POST_EVENTS].reverse() }, 3) } },
       LIST_BOTH,
     );
     const r = h.run(SCRIPT, env());
@@ -105,21 +118,21 @@ describe('put', () => {
   it('replaces a hook pinned to another commit', () => {
     const old = definition('POST', HOOK_POST_EVENTS, { source: { type: 'GITHUB', location: REPO, sourceVersion: 'f'.repeat(40) } });
     h.curl(
+      { status: 200, body: { hook: summary(HOOK_PRE, PRE_DEF) } },
       { status: 200, body: { hook: summary(HOOK_POST, old) } },
       { status: 200, body: { hook: summary(HOOK_POST, POST_DEF, 2) } },
-      { status: 200, body: { hook: summary(HOOK_PRE, PRE_DEF) } },
       LIST_BOTH,
     );
     const r = h.run(SCRIPT, env());
     expect(r.status).toBe(0);
-    expect(h.curlCalls().map((c) => c.method)).toEqual(['GET', 'PUT', 'GET', 'GET']);
+    expect(h.curlCalls().map((c) => c.method)).toEqual(['GET', 'GET', 'PUT', 'GET']);
     expect(r.output).toContain(`put ${HOOK_POST}, revision 2`);
   });
 
   it('takes the source location, type and timeout from the environment', () => {
     h.curl(NOT_FOUND, { status: 200, body: { hook: {} } }, NOT_FOUND, { status: 200, body: { hook: {} } });
     h.run(SCRIPT, env({ HOOK_SOURCE_LOCATION: 'https://git.example.com/vendor/fork.git', HOOK_SOURCE_TYPE: 'GITLAB', HOOK_TIMEOUT_MINUTES: '15' }));
-    expect(JSON.parse(h.curlCalls()[1].data!)).toEqual(definition('POST', HOOK_POST_EVENTS, {
+    expect(JSON.parse(h.curlCalls()[1].data!)).toEqual(definition('PRE', HOOK_PRE_EVENTS, {
       source: { type: 'GITLAB', location: 'https://git.example.com/vendor/fork.git', sourceVersion: SHA },
       timeoutMinutes: 15,
     }));
@@ -127,8 +140,8 @@ describe('put', () => {
 
   it('follows ListHooks pages', () => {
     h.curl(
-      { status: 200, body: { hook: summary(HOOK_POST, POST_DEF) } },
       { status: 200, body: { hook: summary(HOOK_PRE, PRE_DEF) } },
+      { status: 200, body: { hook: summary(HOOK_POST, POST_DEF) } },
       { status: 200, body: { hooks: [summary(HOOK_POST, POST_DEF)], nextToken: 'a+b/c=' } },
       { status: 200, body: { hooks: [summary(HOOK_PRE, PRE_DEF)] } },
     );
@@ -139,8 +152,8 @@ describe('put', () => {
 
   it('fails when ListHooks does not name both hooks with their phases', () => {
     h.curl(
-      { status: 200, body: { hook: summary(HOOK_POST, POST_DEF) } },
       { status: 200, body: { hook: summary(HOOK_PRE, PRE_DEF) } },
+      { status: 200, body: { hook: summary(HOOK_POST, POST_DEF) } },
       { status: 200, body: { hooks: [summary(HOOK_POST, POST_DEF), summary(HOOK_PRE, { ...PRE_DEF, phase: 'POST' })] } },
     );
     const r = h.run(SCRIPT, env());
@@ -152,7 +165,7 @@ describe('put', () => {
     h.curl(NOT_FOUND, { status: 409, body: { message: 'The control plane holds 5 global hooks; delete one first' } });
     const r = h.run(SCRIPT, env());
     expect(r.status).toBe(1);
-    expect(r.output).toContain(`PutHook ${HOOK_POST}: HTTP 409: {"message":"The control plane holds 5 global hooks; delete one first"}`);
+    expect(r.output).toContain(`PutHook ${HOOK_PRE}: HTTP 409: {"message":"The control plane holds 5 global hooks; delete one first"}`);
     expect(h.curlCalls()).toHaveLength(2);
   });
 
@@ -160,7 +173,7 @@ describe('put', () => {
     h.curl({ status: 403, body: { message: 'Forbidden' } });
     const r = h.run(SCRIPT, env());
     expect(r.status).toBe(1);
-    expect(r.output).toContain(`GetHook ${HOOK_POST}: HTTP 403`);
+    expect(r.output).toContain(`GetHook ${HOOK_PRE}: HTTP 403`);
   });
 
   it.each([
