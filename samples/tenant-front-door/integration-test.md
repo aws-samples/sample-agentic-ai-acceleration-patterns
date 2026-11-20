@@ -1,0 +1,160 @@
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
+<!-- SPDX-License-Identifier: MIT-0 -->
+# Tenant front door: integration test
+
+This file describes the sample's integration test, as the
+[sample standard §5.3](../../docs/sample-standard.md#53-integration-test-document-integration-testmd)
+lays it out. The steps are those of
+[spec §10](./design/tenant-front-door.spec.md#10-integration-test-outline).
+
+## What it is
+
+[`scripts/integ.sh`](./scripts/integ.sh) drives two CDK apps,
+[`test/integ.single.ts`](./test/integ.single.ts) and
+[`test/integ.host.ts`](./test/integ.host.ts), whose stacks are built in
+[`test/integ/stacks.ts`](./test/integ/stacks.ts)
+([ADR-0028](./adr/0028-drive-the-integration-test-from-a-bash-driver.md)).
+It deploys the front door with its own control plane in two accounts,
+runs the steps below and tears everything down in the order of spec
+§6.2.
+
+The test is the reference implementation of the front door's wiring:
+how the `TenantFrontDoor` construct, the control-plane sample (deployed
+through its own app), its global hooks and `RouteHookAccess`, the demo
+cell API and the `tenant-identity` shared pool fit together is read from
+that code, not from prose.
+
+## How to run it
+
+Two non-production accounts:
+
+- The **edge account**, the one your credentials point at. It holds the
+  public hosted zone for the test domain and is CDK-bootstrapped in your
+  Region and in `us-east-1`. It also holds the `tenant-identity`
+  `shared-pool` deployment (and `shared-pool-multi-tenant` for a `single`
+  run), whose published parameters the test reads and which it never
+  changes or removes. It must hold no other front door in your Region
+  (the edge parameter's name is fixed, spec §6.4), and API Gateway must
+  have its CloudWatch Logs role set there. The driver checks all of these
+  before it creates anything.
+- The **control plane's account**, CDK-bootstrapped in your Region to
+  trust the edge account, so the driver deploys into it with the edge
+  account's credentials. It must hold no other control plane in that
+  Region.
+
+Once, with credentials for the control plane's account:
+
+```bash
+npx cdk bootstrap aws://<CONTROL_PLANE_ACCOUNT_ID>/<REGION> --trust <EDGE_ACCOUNT_ID> --cloudformation-execution-policies arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+In `samples/control-plane`, run `npm ci` once. Then, from this sample,
+with credentials for the edge account that last at least five hours:
+
+```bash
+export AWS_REGION=eu-central-1
+export TFD_INTEG_ACCOUNT_B=<CONTROL_PLANE_ACCOUNT_ID>
+export TFD_APP_DOMAIN=<a name below the zone's apex>
+export TFD_HOSTED_ZONE_ID=<the zone's id>
+export TFD_DEDICATED_DOMAIN=<a second name in the zone, outside TFD_APP_DOMAIN>
+npx projen integ
+```
+
+`npx projen integ:host` runs the `host` mode steps. A run takes hours;
+start it from a shell that outlives it (`nohup`, `tmux`).
+
+| Knob | Default | Effect |
+|---|---|---|
+| `AWS_REGION` | none (required) | The control plane's Region; the edge stacks go to `us-east-1` |
+| `TFD_INTEG_ACCOUNT_B` | none (required) | The control plane's account |
+| `TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`, `TFD_DEDICATED_DOMAIN` | none (required) | The test domain, its zone in the edge account, and step 14's domain |
+| `TFD_INTEG_RUN_ID` | new per run | `[a-z0-9]{1,10}`; names every stack, role, policy and application of the run |
+| `TFD_IDENTITY_REGION` | `AWS_REGION` | The Region of the `tenant-identity` deployments |
+| `TFD_ISSUER_DOMAIN` | reserved example endpoints | A Cognito domain for the front door's `issuer` input |
+| `TFD_INTEG_KEEP` | unset | `1` skips the teardown; run `scripts/integ.sh teardown <run id> <mode>` after |
+
+`scripts/integ.sh plan [single|host]` prints the run's names, its deploy
+order, its steps and its teardown order without an AWS call.
+
+## What it stands up
+
+`<p>` is `TfdInteg-<run id>`; the control plane's fleet is `tfdi-<run id>`.
+
+| Stack | Account | Contents |
+|---|---|---|
+| `<p>-support` | edge | The vendor IdP (a Cognito pool whose trigger adds `role`), its operator and registrar reader clients and the reader secret; the edge operator role; a stranger role for step 12; the edge pair's probe policy |
+| `<p>-cp-setup` | control plane | The source zip of the route hook, the `tfd-probe` hook and the demo application's scripts, in a versioned bucket; the home pair's probe policy; the driver's access role |
+| `<p>-agent-ingress` | edge | The stand-in agent ingress ([ADR-0024](./adr/0024-test-the-agent-route-against-a-stand-in-ingress.md)) |
+| `<p>-control-plane` | control plane | The control plane, through the control-plane sample's app, with the vendor IdP, a reader role, the registrar's client id and, after step 1, the `RouteHookAccess` policy |
+| `tfdi-<run id>-cell-account` | edge | The account role pair with the run's external id, through the control-plane sample's app |
+| `<p>-edge`, `<p>-main`, `<p>-edge-logging` | edge | The front door under test |
+| `<p>-route-hook-access` | control plane | `RouteHookAccess` ([ADR-0027](./adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md)) |
+| `<p>-cell-a`, `<p>-cell-b` | control plane, edge | One demo cell API each |
+| `<p>-test-role` | edge | The test role (spec §6.1) |
+
+The run reuses the `tenant-identity` pools and tears down everything
+else, in the §6.2 order, from an `EXIT` trap.
+
+## Steps
+
+| # | Step | What it checks |
+|---|---|---|
+| 1 | Setup | Both accounts `ACTIVE` through `PutAccount` (the edge account tenant-owned with an external id), the front door, `RouteHookAccess` on the control plane, `ListHooks` names both front door hooks, the demo application `ACTIVE` |
+| 2 | Tenants and fixture | `a` in cell A (control plane's account), `b` in cell B (edge account), each cell and deployment ran `front-door-post`, the route entries, the `host#` fixture |
+| 3 | Headers | §7.1 headers on the SPA and the router's answers, `/logout` and `/signin-state` in `single` mode, a dedicated domain's `signInHost` |
+| 4 | Cells | `/api/whoami` reaches each tenant's cell |
+| 5 | 401 | No token, a `tenants` token, an oversized `Authorization`; no origin log line; an 8,192-byte header in `TestFunction` |
+| 6 to 10 | Refusals | Unregistered tenant 403, forged payload refused by cell B, client route headers ignored, `Sec-Fetch-Site` 403, direct function URL 403 |
+| 11 to 13 | Who may write | The pair roles' 403s (from the demo application's scripts), the operator's 400 and 409, a stranger's 403, a suspension a tenant cannot lift |
+| 14 | Domain challenge | Tokens, mismatch, certificate, 409, the daily re-check (pass, third miss, metric), ACM's repeat request, the switch-off guard, the sweeper's delete |
+| 15 | Telemetry | Per-tenant counts in the edge log, the registrar's access log and log |
+| 16 | Delete hook | `b`'s route removed before its delete script |
+| 17, 18 | `host` mode | Tenant hosts, the rate rules, the sign-in host |
+| 19 to 21 | Hooks | An application without a front door, `tfd-probe` outside its operation, a cell event without `frontDoorApiDomain` |
+| 22 | Skipped delete hook | A suspension across a re-created deployment |
+| 23 | `/agents/*` | The rewrite, the 404s, the refusals, a suspension, one streamed call to the stand-in |
+| 24 | Teardown | The fixture, then §6.2 in order, then the leftover check |
+
+The `single` run runs steps 1 to 16 and 19 to 24; the `host` run steps
+1 to 4, 11, 15, 17, 18, 23 and 24. Spec §10 lists what the steps leave to
+unit tests.
+
+## Runtime and cost
+
+About four and a half hours for a `single` run and two and a half for a
+`host` run (estimates until the first run): about 30 minutes of deploys,
+the control plane's script and hook builds one at a time, and about 50
+minutes of teardown. The driver prints each stack's deploy and destroy
+time at the end (`.integ/<run id>/times.tsv`). The cost is a few dollars:
+CloudFront, a few dozen short CodeBuild builds, one ACM certificate
+request, Lambda, DynamoDB and API Gateway requests, all removed at the
+end.
+
+Last green run: none yet.
+
+## After an interruption
+
+The driver saves the run's ids in `.integ/<run id>/state.env`. Run
+`scripts/integ.sh teardown <run id> <mode>` with the same environment:
+it runs every teardown part, skips what is gone and ends with the
+leftover check. By hand, look for stacks named `TfdInteg-<run id>-*` and
+`tfdi-<run id>-*` in both accounts (and in `us-east-1` of the edge
+account), the parameter
+`/application-plane/applications/tfd-<run id>/shared/front-door-hook` in
+the control plane's account, TXT records at `_tfd-challenge.<dd>`, and
+certificates for `<dd>` and `probe.<dd>` in the edge account's
+`us-east-1`. Default Lambda log groups under `/aws/lambda/TfdInteg-<run
+id>` are expected leftovers of the CDK custom resources.
+
+## Test-only shortcuts
+
+| In the test | What a deployer does instead |
+|---|---|
+| The edge account is registered tenant-owned and hosts a tenant-owned cell (spec §6.1) | Keeps the edge account the vendor's alone |
+| The step 2 fixture and step 14's sweeper items are written straight to the route table and the sweeper's table by the test role | Nothing: only the registrar and the sweeper write them |
+| A throwaway vendor IdP whose trigger picks `role` from the user name | Configures its own vendor IdP (spec §6.1) |
+| Hooks and scripts from an S3 zip, read through a bucket policy | Registers the hooks from the repository at a commit (spec §5.2) |
+| The cells' origins are deployed ahead of the cells | Lets each cell script deploy its cell's origin |
+| The pair roles hold a probe policy, and the demo application's scripts call the registrar on a test parameter | Nothing: a pair role never calls the registrar |
+| A driver access role in the control plane's account writes the hook parameter | Nothing: only `RouteHookAccess` writes it |
+| Browser and issuer sign-in checks of steps 3 and 18 are run by hand | Runs them as part of its release checks |
