@@ -12,7 +12,8 @@
  * - a customer-managed policy the deployer lists in the control plane's
  *   `globalHookManagedPolicyArns` (control-plane R-41), which lets
  *   `<fleet>-global-hook` read every front door hook parameter and invoke
- *   this front door's registrar routes the route hook calls.
+ *   this front door's registrar routes the route hook calls, and denies it
+ *   the edge operator's status and host routes.
  */
 
 import { CfnOutput, RemovalPolicy, Stack, StackProps, Token } from 'aws-cdk-lib';
@@ -24,6 +25,14 @@ import { Addressing, HookParameter, paramHook, REGISTRAR_URL } from '../shared/c
 
 /** The registrar routes the route hook calls (spec §3.2): puts and deletes of cell and tenant routes. */
 export const ROUTE_HOOK_ROUTES: readonly string[] = ['PUT/cells/*', 'DELETE/cells/*', 'PUT/tenants/*', 'DELETE/tenants/*'];
+
+/**
+ * Edge operator routes the hook policy denies explicitly (spec §3.1, §5.1):
+ * IAM's `*` also matches `/`, so `PUT/tenants/*` above covers
+ * `UpdateTenantRouteStatus`; `DeleteHostRoute` is denied too, so no later
+ * allow can reach it.
+ */
+export const ROUTE_HOOK_DENIED_ROUTES: readonly string[] = ['PUT/tenants/*/status', '*/hosts/*'];
 
 /** Every front door's hook parameter, which the shared hook role reads. */
 export const HOOK_PARAMETER_PATTERN = 'application-plane/applications/*/shared/front-door-hook';
@@ -100,9 +109,9 @@ export class RouteHookAccess extends Construct {
     // deletion makes the hook skip the application (M-46, T-63).
     parameter.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
-    const invokeResources = ROUTE_HOOK_ROUTES.map(
-      (route) => `arn:${stack.partition}:execute-api:${registrar.region}:${props.edgeAccountId}:${registrar.apiId}/${registrar.stage}/${route}`,
-    );
+    const invokeArn = (route: string): string =>
+      `arn:${stack.partition}:execute-api:${registrar.region}:${props.edgeAccountId}:${registrar.apiId}/${registrar.stage}/${route}`;
+    const invokeResources = ROUTE_HOOK_ROUTES.map(invokeArn);
     const parameterResource = stack.formatArn({ service: 'ssm', resource: 'parameter', resourceName: HOOK_PARAMETER_PATTERN });
     this.policy = new iam.ManagedPolicy(this, 'Policy', {
       managedPolicyName: `tenant-front-door-route-hook-${props.applicationId}`,
@@ -118,6 +127,12 @@ export class RouteHookAccess extends Construct {
           actions: ['execute-api:Invoke'],
           resources: invokeResources,
         }),
+        new iam.PolicyStatement({
+          sid: 'DenyOperatorRoutes',
+          effect: iam.Effect.DENY,
+          actions: ['execute-api:Invoke'],
+          resources: ROUTE_HOOK_DENIED_ROUTES.map(invokeArn),
+        }),
       ],
     });
     acknowledge(
@@ -130,8 +145,9 @@ export class RouteHookAccess extends Construct {
       acknowledge(
         this.policy,
         `AwsSolutions-IAM5[Resource::${nagFindingResource(this, resource)}]`,
-        'One registrar route per cell or tenant id, which the registrar checks against the control plane on every call; '
-        + 'the wildcard is the id path segment (ADR-0017, M-6, M-7).',
+        'One registrar route per cell or tenant id, which the registrar checks against the control plane on every call (M-7). '
+        + 'IAM\'s * also matches /, so PUT/tenants/* covers PUT /tenants/<id>/status too; the policy denies that route and '
+        + '/hosts/* explicitly, and the registrar refuses UpdateTenantRouteStatus to the hook role with 403 (M-9, spec §3.1, §5.1; ADR-0017).',
       );
     }
   }

@@ -5,7 +5,7 @@
 
 import { App, Stack, Token } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { RouteHookAccess, parseRegistrarUrl } from '../../src/hooks/route-hook-access.cdk';
+import { ROUTE_HOOK_DENIED_ROUTES, ROUTE_HOOK_ROUTES, RouteHookAccess, parseRegistrarUrl } from '../../src/hooks/route-hook-access.cdk';
 import { paramHook } from '../../src/shared/contracts';
 import { BASE_PROPS, CONTROL_PLANE_ACCOUNT, EDGE_ACCOUNT, FULL_HOST_PROPS, only, synth } from '../edge/helpers';
 
@@ -68,8 +68,35 @@ describe('RouteHookAccess stack', () => {
   });
 
   it('grants nothing on the control plane\'s own resources and no write at all', () => {
-    const actions = statements(single.routeHook!).flatMap((s) => [s.Action].flat());
+    const actions = statements(single.routeHook!).filter((s) => s.Effect === 'Allow').flatMap((s) => [s.Action].flat());
     expect(actions).toEqual(['ssm:GetParameter', 'execute-api:Invoke']);
+  });
+
+  it('denies the status route, which PUT/tenants/* also matches, and the hosts route (spec §3.1, M-9)', () => {
+    const all = statements(single.routeHook!);
+    expect(all).toHaveLength(3);
+    const deny = all[2];
+    expect(deny.Sid).toBe('DenyOperatorRoutes');
+    expect(deny.Effect).toBe('Deny');
+    expect(deny.Action).toBe('execute-api:Invoke');
+    const arns = deny.Resource.map((r: any) => r['Fn::Join'][1].map((p: any) => (typeof p === 'string' ? p : '<p>')).join(''));
+    expect(arns).toEqual(['PUT/tenants/*/status', '*/hosts/*'].map(
+      (route) => `arn:<p>:execute-api:eu-central-1:${EDGE_ACCOUNT}:abcde12345/v1/${route}`,
+    ));
+  });
+
+  it('denies exactly the operator routes the allow would otherwise reach, and none the hook calls', () => {
+    // IAM's * matches any run of characters, / included. The patterns hold only letters, / and *.
+    const matches = (pattern: string, route: string): boolean => new RegExp(`^${pattern.split('*').join('.*')}$`).test(route);
+    const allowed = (route: string): boolean =>
+      ROUTE_HOOK_ROUTES.some((p) => matches(p, route)) && !ROUTE_HOOK_DENIED_ROUTES.some((p) => matches(p, route));
+    const id = '01KAAAAAAAAAAAAAAAAAAAAAAA';
+    for (const route of [`PUT/cells/${id}`, `DELETE/cells/${id}`, `PUT/tenants/${id}`, `DELETE/tenants/${id}`]) {
+      expect(allowed(route)).toBe(true);
+    }
+    expect(matches('PUT/tenants/*', `PUT/tenants/${id}/status`)).toBe(true);
+    expect(allowed(`PUT/tenants/${id}/status`)).toBe(false);
+    expect(allowed('DELETE/hosts/t1.app.example.com')).toBe(false);
   });
 
   it('outputs the policy ARN for globalHookManagedPolicyArns and the parameter name', () => {
