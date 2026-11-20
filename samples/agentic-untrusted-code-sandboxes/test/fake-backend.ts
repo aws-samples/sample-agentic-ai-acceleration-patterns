@@ -10,7 +10,7 @@
 
 import type {
   BackendName, ReadyResult, RegistryRow, RunJob, RunOutcome, SandboxBackend, SandboxHandle,
-  SandboxSummary, StopFacts, TenantCredentials,
+  SandboxSummary, StartOptions, StopFacts, TenantCredentials,
 } from '../src/backend';
 import { jobAuth, proofMatches, resultProof } from '../src/protocol';
 
@@ -40,13 +40,16 @@ export class FakeBackend implements SandboxBackend {
   public readonly startCapMs = 20_000;
   public readonly sandboxes = new Map<string, FakeSandbox>();
   public readonly calls: string[] = [];
+  /** The fourth argument of every `start`, in order. */
+  public readonly startOptions: Array<StartOptions | undefined> = [];
   public script: FakeScript = {};
   private seq = 0;
 
   public constructor(public readonly name: BackendName = 'microvm', public now: () => number = () => Date.now()) {}
 
-  public async start(tenantId: string, nonce: string, creds: TenantCredentials): Promise<SandboxHandle> {
+  public async start(tenantId: string, nonce: string, creds: TenantCredentials, options?: StartOptions): Promise<SandboxHandle> {
     this.calls.push(`start ${tenantId}`);
+    this.startOptions.push(options);
     if (creds.tenantId !== tenantId) throw new Error('credentials of another tenant');
     if (this.script.failStart) throw this.script.failStart;
     const handle: SandboxHandle = { backend: this.name, tenantId, handle: `fake-${++this.seq}`, nonce };

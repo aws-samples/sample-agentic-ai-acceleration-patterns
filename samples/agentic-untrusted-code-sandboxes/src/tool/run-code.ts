@@ -17,7 +17,8 @@
  *   step 5 on no answer, set STOPPING, stop, and return `timedOut`.
  */
 
-import { type BackendName, BACKEND_NAMES, type RegistryRow, type SandboxBackend, type TenantCredentials } from '../backend';
+import { type BackendName, BACKEND_NAMES, type RegistryRow, type SandboxBackend, type StartOptions, type TenantCredentials } from '../backend';
+import { TEST_HOOK_ENV } from '../env';
 import { buildJob, proofMatches, resultProof, TENANT_ID_PATTERN } from '../protocol';
 import { handleLessStaleMs } from './config';
 import { defaultDeps, type RunCodeDeps } from './deps';
@@ -299,7 +300,7 @@ async function startNew(call: Call, prev: RegistryRow | undefined, why: string):
   }
   let started;
   try {
-    started = await call.backend.start(call.tenantId, nonce, call.creds);
+    started = await call.backend.start(call.tenantId, nonce, call.creds, startOptions(call.tenantId));
   } catch (error) {
     // Nothing is recorded to stop. A sandbox the failed call launched anyway is an orphan the reaper's sweep stops.
     call.stoppedReason = errorName(error);
@@ -324,6 +325,15 @@ async function startNew(call: Call, prev: RegistryRow | undefined, why: string):
     return { kind: 'error', error: fail('sandbox_starting', 1) };
   }
   return probe(call, { ...held, handle: started.handle, address: started.address, version });
+}
+
+/**
+ * Test hook of the integration test (spec §8 `failed-start`, ADR-0058): with `RC_INTEG_OVERRIDES` = `1` on this function,
+ * the one tenant named in `RC_INTEG_FAIL_START_TENANT` starts its sandboxes with `failAtBoot`. Nothing else sets it.
+ */
+export function startOptions(tenantId: string, env: Readonly<Record<string, string | undefined>> = process.env): StartOptions | undefined {
+  const named = env[TEST_HOOK_ENV.RC_INTEG_FAIL_START_TENANT];
+  return env[TEST_HOOK_ENV.RC_INTEG_OVERRIDES] === '1' && named !== undefined && named !== '' && named === tenantId ? { failAtBoot: true } : undefined;
 }
 
 /** Stops the handle a takeover replaced. The takeover moved the row out of READY or STARTING only then does this call owe the line. */
