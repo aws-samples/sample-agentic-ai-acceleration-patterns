@@ -745,6 +745,11 @@ cd ../../stress
 ./run.sh run --tier small --slices control-plane --remove-fixtures
 ```
 
+`STRESS_REGIONS` (comma-separated, default `AWS_REGION`) names the Regions the
+account check lists stacks in: every Region the run uses (spec §3.7). Each
+record's `quotas` holds the peak of operations the driver kept in flight,
+which is its draw on the platform account's concurrent Linux/Small builds;
+Lambda concurrency and STS are budgeted (`slice.sh budget`) but not measured.
 The platform account's CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL`
 builds must hold the build limit times two (the cell and tenant projects; the
 service default is 1). Scenarios: `PS-1` (the seeded tenants onboarded at the

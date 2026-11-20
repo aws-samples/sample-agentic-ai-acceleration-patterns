@@ -18,8 +18,11 @@
 # Beyond the runner's variables it reads STRESS_CELL_ACCOUNTS (the cell accounts file:
 # account ids, the owner's read profile and the account-base stack ARNs, spec §3.7),
 # STRESS_BUILD_LIMIT (default 50, ADR-0046), STRESS_CELL_POLICY_SUFFIX (the cell policy
-# suffix of the cell accounts, default none) and AWS_REGION, with credentials for the
-# platform account. It needs bash, git, jq, node and the AWS CLI, and runs the sample's
+# suffix of the cell accounts, default none), STRESS_REGIONS (comma-separated Regions the
+# account check lists stacks in, default AWS_REGION; spec §3.7 asks for every Region the run
+# uses) and AWS_REGION, with credentials for the platform account and the cell accounts
+# file's read profiles. It needs bash, git, jq, node, zip, the AWS CLI and the Smithy CLI
+# (the source zip builds runtime-isolation's generated code), and runs the sample's
 # `npm ci` and `smithy build` when they are missing. It prints ids and counts only, never a
 # token, a password or a key, and never runs `set -x` (scripts/CONVENTIONS.md).
 #
@@ -45,9 +48,20 @@ if ! [[ "$STRESS_PREFIX" =~ ^[A-Za-z][A-Za-z0-9-]{2,31}$ ]]; then
   echo "slice.sh: STRESS_PREFIX must match ^[A-Za-z][A-Za-z0-9-]{2,31}\$ (it names the fleet)" >&2
   exit 2
 fi
-if ! command -v jq > /dev/null 2>&1; then
-  echo "slice.sh: jq is not installed" >&2
-  exit 2
+for tool in jq; do
+  if ! command -v "$tool" > /dev/null 2>&1; then
+    echo "slice.sh: ${tool} is not installed" >&2
+    exit 2
+  fi
+done
+# deploy and teardown build the source zip.
+if [ "$verb" = deploy ] || [ "$verb" = teardown ]; then
+  for tool in git zip smithy; do
+    if ! command -v "$tool" > /dev/null 2>&1; then
+      echo "slice.sh: ${tool} is not installed" >&2
+      exit 2
+    fi
+  done
 fi
 
 FLEET="$(printf '%s' "$STRESS_PREFIX" | tr '[:upper:]' '[:lower:]')"
