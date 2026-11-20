@@ -10,7 +10,10 @@ door with one demo cell and a stand-in control plane in a test account,
 and check the edge, the cell and the registrar live without the control
 plane's hooks (design/spikes.md, Smoke run). `register-hooks.sh` puts or
 deletes the front door's two global hooks on the control plane (spec
-§5.2). What a script prints lands in the operator's terminal and, in CI,
+§5.2). `integ.sh`, with its parts in `integ/`, is the integration test
+driver (spec §10, ADR-0028); the integration test's demo application
+scripts and its `tfd-probe` hook in `../test/integ/` follow these
+conventions too. What a script prints lands in the operator's terminal and, in CI,
 the job log; what the route hook prints lands in the control plane's
 hook build log. The scripts handle access tokens, temporary passwords and
 SigV4 credentials, so none of those ever reach output.
@@ -37,6 +40,12 @@ SigV4 credentials, so none of those ever reach output.
 
 - One `mktemp -d` directory, files mode 0600, removed from the `EXIT` trap
   on every exit.
+- `integ.sh` also keeps `.integ/<run id>/` (gitignored): its CDK
+  assemblies, logs, deploy and destroy times, the CDK context and the
+  run's ids, so a teardown after an interruption can finish. Nothing
+  there holds a token, a password or a key.
+- A password or a body that holds a token reaches the AWS CLI in a 0600
+  `--cli-input-json` or `fileb://` file, never as an argument.
 
 ## Failure behaviour and cleanup
 

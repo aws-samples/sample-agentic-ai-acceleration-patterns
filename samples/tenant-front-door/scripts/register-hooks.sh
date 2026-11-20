@@ -9,7 +9,8 @@
 #   scripts/register-hooks.sh --delete   # DeleteHook front-door-post, then front-door-pre, check with ListHooks
 #
 # Both hooks run hooks/route-hook.sh from this repository, pinned to one
-# full commit SHA, and serve every front door on the control plane. A hook
+# full commit SHA (or, from an S3 zip, to one object version), and serve
+# every front door on the control plane. A hook
 # already registered with the same definition is left as it is, so a rerun
 # changes nothing and does not raise the hook's revision. A changed
 # definition reaches only operations the control plane accepts afterwards.
@@ -18,9 +19,14 @@
 #   CONTROL_PLANE_URL      the control plane API's base URL, https
 #   CONTROL_PLANE_TOKEN    an operator access token for it (never printed)
 #   HOOK_SOURCE_VERSION    the commit to pin, 40 lower-case hex characters;
+#                          for an S3 source, the zip object's version id;
 #                          not needed with --delete
-#   HOOK_SOURCE_LOCATION   default the aws-samples repository's clone URL
-#   HOOK_SOURCE_TYPE       default GITHUB
+#   HOOK_SOURCE_LOCATION   default the aws-samples repository's clone URL;
+#                          for an S3 source, <bucket>/<key>.zip of a zip whose
+#                          root is the repository's root
+#   HOOK_SOURCE_TYPE       default GITHUB; S3 for a zip in a versioned bucket
+#                          in the control plane's account (the integration
+#                          test's source, spec §10 step 1)
 #   HOOK_TIMEOUT_MINUTES   default 10 (control-plane range 5 to 30)
 #
 # Run --delete before the last front door on a control plane is removed
@@ -102,16 +108,27 @@ if [[ "$MODE" == delete ]]; then
 fi
 
 : "${HOOK_SOURCE_VERSION:?set HOOK_SOURCE_VERSION to the full commit SHA to pin}"
-[[ "$HOOK_SOURCE_VERSION" =~ ^[0-9a-f]{40}$ ]] || fail "HOOK_SOURCE_VERSION must be a full commit SHA (40 lower-case hex characters)"
-LOCATION="${HOOK_SOURCE_LOCATION:-https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns.git}"
 TYPE="${HOOK_SOURCE_TYPE:-GITHUB}"
 TIMEOUT="${HOOK_TIMEOUT_MINUTES:-10}"
-# Inside the control plane's hook charset (control-plane R-39): no `@`, so
-# no userinfo.
-[[ "$LOCATION" =~ ^https://[A-Za-z0-9._~:/%-]+$ && ${#LOCATION} -le 1024 ]] \
-  || fail "HOOK_SOURCE_LOCATION must be an https clone URL without userinfo, query or fragment"
-[[ "$TYPE" =~ ^(CODECOMMIT|GITHUB|GITHUB_ENTERPRISE|GITLAB|GITLAB_SELF_MANAGED|BITBUCKET)$ ]] \
-  || fail "HOOK_SOURCE_TYPE must be a git source type"
+if [[ "$TYPE" == S3 ]]; then
+  # An S3 source is pinned by its object version, as a git source is by its
+  # commit: a zip in a versioned bucket, never a folder, which has no version.
+  : "${HOOK_SOURCE_LOCATION:?set HOOK_SOURCE_LOCATION to <bucket>/<key>.zip for an S3 source}"
+  LOCATION="$HOOK_SOURCE_LOCATION"
+  [[ "$LOCATION" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/([A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.zip$ && ${#LOCATION} -le 1024 ]] \
+    || fail "HOOK_SOURCE_LOCATION must be <bucket>/<key>.zip for an S3 source"
+  [[ "$HOOK_SOURCE_VERSION" =~ ^[A-Za-z0-9._+/-]{1,128}$ ]] \
+    || fail "HOOK_SOURCE_VERSION must be the zip's S3 object version id for an S3 source"
+else
+  [[ "$HOOK_SOURCE_VERSION" =~ ^[0-9a-f]{40}$ ]] || fail "HOOK_SOURCE_VERSION must be a full commit SHA (40 lower-case hex characters)"
+  LOCATION="${HOOK_SOURCE_LOCATION:-https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns.git}"
+  # Inside the control plane's hook charset (control-plane R-39): no `@`, so
+  # no userinfo.
+  [[ "$LOCATION" =~ ^https://[A-Za-z0-9._~:/%-]+$ && ${#LOCATION} -le 1024 ]] \
+    || fail "HOOK_SOURCE_LOCATION must be an https clone URL without userinfo, query or fragment"
+  [[ "$TYPE" =~ ^(CODECOMMIT|GITHUB|GITHUB_ENTERPRISE|GITLAB|GITLAB_SELF_MANAGED|BITBUCKET)$ ]] \
+    || fail "HOOK_SOURCE_TYPE must be a git source type or S3"
+fi
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] && ((TIMEOUT >= 5 && TIMEOUT <= 30)) || fail "HOOK_TIMEOUT_MINUTES must be 5 to 30"
 
 # definition PHASE EVENT... -> the PutHook body, events sorted.
