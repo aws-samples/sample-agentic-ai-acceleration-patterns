@@ -182,6 +182,7 @@ describe('roles (spec 3.6)', () => {
   test('reaper role: reads, updates and deletes every row and holds no instance action and no bucket action', () => {
     const stmts = statementsOfRole(base.t, roleId(base.t, 'ReaperRole'));
     const actions = actionsOf(stmts);
+    expect(actions).not.toContain('dynamodb:Query');
     expect(actions).toEqual(expect.arrayContaining(['dynamodb:Scan', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'fake:Reapernitro']));
     expect(actions).not.toContain('ecs:DeregisterContainerInstance');
     expect(actions).not.toContain('ecs:ListContainerInstances');

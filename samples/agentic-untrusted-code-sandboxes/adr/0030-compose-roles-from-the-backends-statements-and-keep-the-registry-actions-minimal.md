@@ -76,3 +76,5 @@ alphabet). A handler that needs `Query` on the tenant role (for example to read 
 tenant's rows in one call) needs a change here and an ADR amendment. The
 synth tests assert each `fake:` marker statement lands on one role only,
 and that the reaper role holds none of the drain list.
+
+Note 2026-11-20: the reaper role has no `dynamodb:Query`. No code path queries the table: the tool, the reaper and the offboard function read by key or scan.

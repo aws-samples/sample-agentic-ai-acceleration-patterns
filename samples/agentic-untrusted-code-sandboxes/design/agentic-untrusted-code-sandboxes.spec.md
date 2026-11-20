@@ -787,8 +787,8 @@ it blocked over 15 minutes; clock behaviour over hours is unverified.
 Names a vendor adds in `allowDomains` are the vendor's own exception to
 C-3.
 
-Each instance with `dnsFirewall` on, and each `agentcore` backend, adds one
-account-level CloudWatch Logs resource policy of its own. The per-Region
+Each instance with `dnsFirewall` on adds one account-level CloudWatch Logs
+resource policy of its own, and each `agentcore` backend adds one more. The per-Region
 quota for these policies is 10 (check the current quota before deploying
 more instances into one Region and account).
 
