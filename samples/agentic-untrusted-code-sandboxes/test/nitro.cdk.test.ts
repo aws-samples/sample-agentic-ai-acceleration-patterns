@@ -223,6 +223,7 @@ describe('task definition (ADR-0023, spec §3.4)', () => {
         Name: 'runner',
         Essential: true,
         PortMappings: [{ ContainerPort: 8443, Protocol: 'tcp' }],
+        Environment: [{ Name: 'RUNNER_BACKEND', Value: 'nitro' }],
         LogConfiguration: {
           LogDriver: 'awslogs',
           Options: { 'awslogs-group': stack.resolve(backend.taskLogGroup.logGroupName), 'awslogs-region': 'eu-central-1', 'awslogs-stream-prefix': 'runner' },

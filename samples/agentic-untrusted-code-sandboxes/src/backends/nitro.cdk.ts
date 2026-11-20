@@ -160,6 +160,9 @@ export class NitroBackendResources extends Construct implements BackendConstruct
         image: repository.repositoryUriForTag(imageTag),
         essential: true,
         portMappings: [{ containerPort: RUNNER_PORTS.tls, protocol: 'tcp' }],
+        // The runner serves three backends from one image and exits at start without this (ADR-0037).
+        // The nonce hash is not here: it is set per start by the container override (ADR-0018).
+        environment: [{ name: 'RUNNER_BACKEND', value: 'nitro' }],
         logConfiguration: {
           logDriver: 'awslogs',
           options: {

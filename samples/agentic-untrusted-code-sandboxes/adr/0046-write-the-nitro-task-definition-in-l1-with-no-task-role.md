@@ -32,7 +32,9 @@ afterwards is a trap for the next reader.
 Option 1. The task definition has the execution role, `awslogs` to the
 construct's task log group, one container named `runner` on 8443, no
 added capability and no task role, and `TrustedExecutionConfiguration`
-`{ IsolationMode: ISOLATED_SANDBOX }` as an override. The CloudFormation
+`{ IsolationMode: ISOLATED_SANDBOX }` as an override. The container sets
+`RUNNER_BACKEND=nitro` (ADR-0037); the nonce hash comes per start from the
+container override. The CloudFormation
 validation finding for the unknown property (`F3002`) is acknowledged with
 a reason that cites the spikes, which deployed the property in raw
 CloudFormation. The image is the construct repository at the tag the core
