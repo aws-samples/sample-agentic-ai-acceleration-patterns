@@ -174,7 +174,10 @@ hook port; the runner serves the same names at `/<name>` too. `ready`
 runs at image build and answers HTTP 200 `{}` once the runner serves and
 can take a job (HTTP 503 after a forced failed start). `run` delivers the
 start call's payload; `suspend`, `resume` and `terminate` answer HTTP 200
-`{}` and change nothing. Any other path is HTTP 404.
+`{}` and change nothing. A hook request may carry no body and no
+`Content-Length` (the platform sends `suspend` that way); its body is then
+empty, as RFC 9112 section 6.3 says. The `run` hook with an empty body is
+HTTP 400. Any other path is HTTP 404.
 
 The platform wraps the `RunMicrovm` `runHookPayload` (at most 4096
 characters) as a JSON string, `{"microvmId": "…", "runHookPayload":

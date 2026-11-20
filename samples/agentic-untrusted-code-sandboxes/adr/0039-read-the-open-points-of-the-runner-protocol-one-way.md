@@ -73,3 +73,5 @@ Option 1.
 The tool sees only the refusal codes the protocol names. A change to any
 point here that the tool must know about goes through `runner/PROTOCOL.md`
 by a maintainer decision.
+
+Note 2026-11-20: a request with neither `Content-Length` nor chunked encoding has an empty body (RFC 9112 section 6.3), not a broken one. The hook port answers it, because the MicroVM platform sends `suspend` bodiless and a 400 ended the sandbox instead of suspending it. The job port still refuses an empty body as a malformed job.

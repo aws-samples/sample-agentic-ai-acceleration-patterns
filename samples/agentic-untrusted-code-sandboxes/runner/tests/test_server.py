@@ -500,6 +500,24 @@ class LimitsTest(unittest.TestCase):
         self.assertLess(fake.connection.timeouts[0], server.BODY_DEADLINE_S + 0.01)
         self.assertEqual(fake.connection.timeouts[-1], 10)
 
+    def test_bodiless_hooks_are_answered_and_the_job_port_refuses_an_empty_body(self):
+        sb, _ = make("microvm")
+        jobs, hooks = free_port(), free_port()
+        srv = [server.serve(sb, jobs, "jobs", host="127.0.0.1"), server.serve(sb, hooks, "hooks", host="127.0.0.1")]
+        try:
+            for prefix in ("/", server.HOOK_PREFIX):
+                for name in ("ready", "suspend", "resume", "terminate"):
+                    bare = b"POST " + (prefix + name).encode() + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+                    self.assertIn(b" 200 ", self.raw(hooks, bare).split(b"\r\n")[0], prefix + name)
+            self.assertIn(b" 404 ", self.raw(hooks, b"POST /nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").split(b"\r\n")[0])
+            self.assertIn(b" 400 ", self.raw(hooks, b"POST /run HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").split(b"\r\n")[0])
+            self.assertIsNone(sb.nonce_hash)
+            for head in (b"", b"Content-Length: 0\r\n"):
+                answer = self.raw(jobs, b"POST /run HTTP/1.1\r\nHost: x\r\nConnection: close\r\n" + head + b"\r\n")
+                self.assertIn(b" 400 ", answer.split(b"\r\n")[0], head)
+        finally:
+            stop(*srv)
+
     def test_hook_body_cap(self):
         sb, _ = make("microvm")
         port = free_port()
