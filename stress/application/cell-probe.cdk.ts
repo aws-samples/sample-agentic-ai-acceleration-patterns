@@ -8,20 +8,19 @@
  * - `CellBoundaryProbeStack`, an owner stack (legacy synthesizer, owner credentials):
  *   `cell/cell-policy-probe`, under the cell permissions boundary, standing in for the
  *   execution role, with a trust that refuses every `/cell/` principal. The execution
- *   role cannot create it: a role it creates must carry
- *   the workload boundary (ADR-0011). The stack also holds the decoys every escalation
- *   outside `/cell/` aims at, so a probe that a regressed policy lets through changes
- *   nothing the account uses: `cell-policy-probe-decoy`, a role on `/` with no policy that
- *   only the probe roles may assume, `cell-policy-probe-decoy`, a managed policy
- *   attached to nothing, and an empty table and a KMS key of the same name for the
- *   resource-policy probes.
+ *   role cannot create it: a role it creates must carry the workload boundary
+ *   (ADR-0011). The stack also holds the decoys every escalation outside `/cell/` aims
+ *   at, so a probe that a regressed policy lets through changes nothing the account
+ *   uses: `cell-policy-probe-decoy`, a role on `/` with no policy that only the probe
+ *   roles may assume, `cell-policy-probe-decoy`, a managed policy attached to nothing,
+ *   and an empty table and a KMS key of the same name for the resource-policy probes.
  * - `CellWorkloadProbeStack`, deployed through the cell bootstrap: `cell/cell-policy-probe-workload`
  *   under the workload boundary, which the execution role sets from the cell synth
  *   context, plus two targets: `cell-policy-probe-target` (a role the probes change or
  *   pass) and `cell-policy-probe-tenant` (a role the workload probe assumes, as the TVM does).
  *
- * Both probe roles hold an identity policy that allows every escalation the probes try,
- * so only a boundary can refuse one.
+ * Both probe roles hold an identity policy that allows, on `*`, every action the probes
+ * call, so only a boundary or a trust policy can refuse one.
  */
 
 import { Duration, LegacyStackSynthesizer, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
@@ -50,7 +49,7 @@ export const PROBE_DECOY_KEY_ALIAS = 'alias/cell-policy-probe-decoy';
 /** The stack tag of the probe stacks, so the account check and a leftover check can find them. */
 export const PROBE_TAG = { key: 'stress:part', value: 'cell-policy-probe' } as const;
 
-/** Every escalation the probes try, allowed on `*` so that only a boundary refuses. */
+/** Every action the probes call, allowed on `*` so that only a boundary or a trust policy refuses. */
 export const PROBE_ACTIONS = [
   'iam:GetRole',
   'iam:CreateRole',
@@ -92,11 +91,12 @@ function probeRole(
   trust: iam.IPrincipal = new iam.AccountRootPrincipal(),
 ): iam.Role {
   const role = new iam.Role(scope, id, { roleName, assumedBy: trust, description });
-  role.addToPolicy(new iam.PolicyStatement({ sid: 'EveryEscalation', actions: [...PROBE_ACTIONS], resources: ['*'] }));
-  const reason = 'A probe role: its identity policy allows every escalation on purpose, so the probes show that the boundary alone refuses each one.';
-  for (const finding of ['AwsSolutions-IAM5[Resource::*]', ...PROBE_ACTIONS.filter((a) => a.includes('*')).map((a) => `AwsSolutions-IAM5[Action::${a}]`)]) {
-    acknowledgeGranularFinding(role, finding, reason);
-  }
+  role.addToPolicy(new iam.PolicyStatement({ sid: 'EveryProbedAction', actions: [...PROBE_ACTIONS], resources: ['*'] }));
+  acknowledgeGranularFinding(
+    role,
+    'AwsSolutions-IAM5[Resource::*]',
+    'A probe role: its identity policy allows, on *, every action the probes call, so the probes show that the boundary alone refuses each escalation.',
+  );
   return role;
 }
 

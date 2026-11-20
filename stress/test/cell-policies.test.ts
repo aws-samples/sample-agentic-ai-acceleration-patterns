@@ -18,7 +18,7 @@ import {
   RESOURCE_POLICY_WRITE_ACTIONS,
   ROLE_WRITE_ACTIONS,
 } from '../application/cell-policies';
-import { CellBoundaryProbeStack, CellWorkloadProbeStack, PROBE_DECOY_POLICY, PROBE_ROLES, PROBE_TAG } from '../application/cell-probe.cdk';
+import { CellBoundaryProbeStack, CellWorkloadProbeStack, PROBE_ACTIONS, PROBE_DECOY_POLICY, PROBE_ROLES, PROBE_TAG } from '../application/cell-probe.cdk';
 
 const NAMES = cellPolicyNames();
 const CELL_ROLES = 'arn:<AWS::Partition>:iam::<AWS::AccountId>:role/cell/*';
@@ -377,6 +377,20 @@ describe('the /cell/ path aspect and the cell synth context', () => {
 });
 
 describe('the probe stacks', () => {
+  it('give the probe roles named actions only, never a wildcard action', () => {
+    expect(PROBE_ACTIONS.filter((a) => a.includes('*'))).toEqual([]);
+    const app = new App({ context: cellSynthContext(NAMES) });
+    const stacks = [new CellWorkloadProbeStack(app, 'W'), new CellBoundaryProbeStack(new App(), 'B', { names: NAMES })];
+    for (const stack of stacks) {
+      const policies = Object.values(Template.fromStack(stack).toJSON().Resources).filter((r: any) => r.Type === 'AWS::IAM::Policy') as any[];
+      expect(policies.length).toBeGreaterThan(0);
+      for (const p of policies) {
+        for (const st of p.Properties.PolicyDocument.Statement) {
+          for (const a of [st.Action].flat()) expect(String(a)).not.toContain('*');
+        }
+      }
+    }
+  });
   it('CellWorkloadProbe: every role on /cell/ under the workload boundary, through the cell bootstrap', () => {
     const app = new App({ context: cellSynthContext(NAMES) });
     Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));

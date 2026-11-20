@@ -124,7 +124,8 @@ policy that only the probe roles may assume, and a managed policy of the
 same name, attached to nothing. It then deploys `CellWorkloadProbe`
 through the cell bootstrap, with the cell synth context, so the execution
 role creates its three roles on `/cell/` under the workload boundary. Both
-probe roles hold an identity policy that allows every escalation on `*`.
+probe roles hold an identity policy that allows, on `*`, every action the
+probes call.
 
 Every write a deny probe tries lands on something the account does not use:
 the decoys, new parameter names under the owner's paths, or the API Gateway
@@ -178,37 +179,44 @@ their versions, so a later policy change needs no new bootstrap.
 |---|---|---|
 | `deploy-owner.sh` (`CellPolicies`, `CellAccountBase`, no identity parameters) | 74 s | 71 s |
 | `bootstrap-cell.sh` | 55 s | 54 s |
-| `probe-deploy.sh` (`CellBoundaryProbe`, `CellWorkloadProbe`) | 51 s and 54 s | 56 s and 60 s |
+| `probe-deploy.sh` (`CellBoundaryProbe`, `CellWorkloadProbe`) | 56 s and 54 s | 55 s and 60 s |
 | `probes.sh` | 50 of 50 pass: 24 deny and 8 allowed as the cell boundary probe; 16 deny, 1 refused by the stand-in's trust and 1 allowed as the workload probe | 50 of 50 pass, the same |
-| `probe-remove.sh` | 33 s and 32 s; no probe leftovers | 33 s and 32 s; no probe leftovers |
-| runtime-isolation cell (`api-gateway`, `tvm=true`, `publishParameters=false`) through the cell bootstrap in `eu-central-1`, with `CellRolePath` and `cellSynthContext` | `CREATE_COMPLETE` in 417 s; 27 of 27 roles on `/cell/` under the workload boundary; destroyed in 527 s, nothing left | not deployed |
+| `probe-remove.sh` | 32 s and 33 s; no probe leftovers | 32 s and 32 s; no probe leftovers |
+| runtime-isolation cell (`api-gateway`, `tvm=true`, `publishParameters=false`) in `eu-central-1`, through that Region's cell bootstrap and the `-w10` policies, with `CellRolePath` and `cellSynthContext` | `CREATE_COMPLETE` in 417 s; 27 of 27 roles on `/cell/` under the workload boundary; destroyed in 527 s, nothing left | not deployed |
 
-The cell deploy ran once, under the same execution policy and cell
-permissions boundary, and a workload boundary without the denies on log
-deliveries, export tasks, table exports and X-Ray resource policies. No
-role of the cell calls those actions, so the cell was not deployed again.
-It needed no change to deploy under the workload boundary: its 27 roles
-call no IAM action, pass no role, write no resource policy, and assume
-only `/cell/` roles. The cell app must load one copy of the CDK: the
-aspect and the synth context register on the app's own `aws-cdk-lib`, so
-W-5's cell app compiles these files against the sample's CDK (the cell
-deploy resolved them through the sample's `node_modules`).
+The cell deploy ran once, in `eu-central-1` under the `-w10` set of the
+same policies: the same execution policy and cell permissions boundary,
+and a workload boundary without the denies on log deliveries, export
+tasks, table exports and X-Ray resource policies. No role of the cell
+calls those actions, so the cell was not deployed again. It needed no
+change to deploy under the workload boundary: its 27 roles call no IAM
+action, pass no role, write no resource policy, and assume only `/cell/`
+roles. The cell app must load one copy of the CDK: the aspect and the
+synth context register on the app's own `aws-cdk-lib`, so W-5's cell app
+compiles these files against the sample's CDK (the cell deploy resolved
+them through the sample's `node_modules`).
 
 ## Security scan
 
-ProtoShield v0.18.0 on `stress/` (2026-11-20, after the review fixes), with
-`stress/.protoshield/config.yaml` and `--max-tokens 32000` (the IAM agent
-runs out of output tokens at the default). Semgrep, CVE, secrets and
-license headers: 0. IAM least privilege: 0 critical, 6 high, 3 medium,
-2 low; every phase completed.
+ProtoShield v0.18.0 (2026-11-20), with `stress/.protoshield/config.yaml`
+and `--max-tokens 32000`, on `stress/` without `spikes/`: the spike files
+are the record of their runs and are not deployed, and with them in scope
+the IAM agent runs out of output tokens. Semgrep, secrets and license
+headers: 0. CVE: 2 medium. IAM least privilege: 0 critical, 3 high. Every
+phase completed.
 
 | Finding | Outcome |
 |---|---|
-| Service wildcards (`apigateway:*`, `bedrock-agentcore:*`, `dynamodb:*`, `kms:*`, `lambda:*`, `logs:*`, `ssm:*`, ...) on `*`, in the execution policy, the cell permissions boundary and the workload boundary (high, 3) | Accepted. ADR-0006 chose standalone cell accounts so that IAM is the only thing scoped by resource: the account holds nothing but cells, the cell bootstrap, the role pair and these stacks, so the service grants reach only cells. The roles a cell creates carry their own narrow identity policies; the boundaries are the backstop. Their explicit denies keep every cell principal off IAM outside `/cell/` (the workload boundary off IAM entirely), off public function URLs, the owner's parameters and the API Gateway account setting, and keep cell roles off resource-policy writes, which the probes show. Listing actions one by one would break the next cell construct that calls a new action, with no gain inside a cell-only account. What stays open is under Known limitations. Never deploy these policies in an account that holds anything else |
-| `iam:Get*` and `iam:List*` on `*` in the execution policy and the cell permissions boundary (medium, 2) | Accepted: CloudFormation reads roles and policies while it creates and updates the cell's roles, and IAM reads expose no data in a cell-only account. The workload boundary has none |
-| `s3:ListBucket` on the cell asset bucket (low) | Accepted: the CDK lists the bucket when it publishes and reads assets; the bucket holds only cell assets |
-| The same wildcards and IAM reads in `spikes/*/cell-policies.yaml` (high, 2; medium, 1) | Accepted as before: the spike files are the record of their runs and are not deployed; the shipped policies replace them |
-| SSM Agent actions on `*` and `execute-api:Invoke` on the account's APIs in `driver/stress-driver.cdk.ts` (high, 1; low, 1) | Not this folder: the driver host role, acknowledged in its own code (stress ADR-0009) |
+| Service wildcards (`apigateway:*`, `bedrock-agentcore:*`, `dynamodb:*`, `kms:*`, `lambda:*`, `logs:*`, `ssm:*`, ...) on `*`, in the execution policy, the cell permissions boundary and the workload boundary (high, 3) | Accepted. ADR-0006 chose standalone cell accounts so that IAM is the only thing scoped by resource: the account holds nothing but cells, the cell bootstrap, the role pair and these stacks, so the service grants reach only cells. The roles a cell creates carry their own narrow identity policies; the boundaries are the backstop. Their explicit denies keep every cell principal off IAM outside `/cell/` (and roles under the workload boundary off IAM entirely), off public function URLs, the owner's parameters and the API Gateway account setting, and keep cell roles off resource-policy writes, which the probes show. Listing actions one by one would break the next cell construct that calls a new action, with no gain inside a cell-only account. What stays open is under Known limitations. Never deploy these policies in an account that holds anything else |
+| `minimatch` 10.2.6 (bundled in `aws-cdk-lib` and in the test tooling) and `glob` 10.5.0 (test tooling) in `stress/package-lock.json` (medium, 2) | Not this folder: both run on the deployer's machine at synth or test time and are not deployed; this change does not touch the lock file. A dependency update fixes them |
+
+Two more grants are accepted for the same reason. The execution policy
+and the cell permissions boundary hold `iam:Get*` and `iam:List*` on `*`:
+CloudFormation reads roles and policies while it creates and updates the
+cell's roles, and IAM reads expose no data in a cell-only account. The
+workload boundary has none. The execution policy and both boundaries
+allow `s3:ListBucket` on the cell asset bucket: the CDK lists it when it
+publishes and reads assets, and it holds only cell assets.
 
 ## Known limitations
 
