@@ -164,7 +164,12 @@ step_05() {
   note "TestFunction compute utilisation ${TF_COMPUTE:-?}"
   sleep 20
   check "no cell A log line" 0 "$(log_count "$CELL_A_LOG" "$REGION" '' "$t0" cp)"
+  local fails_before=$FAILS
   check "no cell B log line" 0 "$(log_count "$CELL_B_LOG" "$REGION" '' "$t0")"
+  if (( FAILS > fails_before )); then
+    note "cell B lines in the window: $(as_test aws logs filter-log-events --region "$REGION" --log-group-name "$CELL_B_LOG" --start-time "$t0" \
+      --query 'events[].message' --output json 2>/dev/null | jq -rc '[.[] | (fromjson? // {}) | {type, message, reason, path, status}] | .[:5]')"
+  fi
 }
 # multi_tenant_token VAR: a token of tenant-identity's shared-pool-multi-tenant topology (tenants claim, no tenant_id).
 multi_tenant_token() {
@@ -473,10 +478,10 @@ step_15() {
   fi
   # The global hook role's writes, counted in each step's own window.
   check "registrar log names the global hook role on the writes of step 2" "[1-9][0-9]*" \
-    "$(log_count "$REGISTRAR_LOG" "$REGION" "\"${FLEET}-global-hook\"" "${STEP_START_MS[02]}" "" "${STEP_END_MS[02]}")"
+    "$(log_count "$REGISTRAR_LOG" "$REGION" '{ $.role = "hook" }' "${STEP_START_MS[02]}" "" "${STEP_END_MS[02]}")"
   if [[ "$MODE" == single ]]; then
     check "registrar log names the global hook role on the write of step 13" "[1-9][0-9]*" \
-      "$(log_count "$REGISTRAR_LOG" "$REGION" "\"${FLEET}-global-hook\"" "${STEP_START_MS[13]}" "" "${STEP_END_MS[13]}")"
+      "$(log_count "$REGISTRAR_LOG" "$REGION" '{ $.role = "hook" }' "${STEP_START_MS[13]}" "" "${STEP_END_MS[13]}")"
   fi
 }
 
@@ -490,7 +495,7 @@ step_16() {
   token_for b B_TOKEN
   wait_status "b's token 403 once the entry is gone" 403 "$APP_DOMAIN" /api/whoami B_TOKEN 180
   sleep 15
-  check "registrar log names the global hook role on the delete" "[1-9][0-9]*" "$(log_count "$REGISTRAR_LOG" "$REGION" "\"${FLEET}-global-hook\"" "$t0")"
+  check "registrar log names the global hook role on the delete" "[1-9][0-9]*" "$(log_count "$REGISTRAR_LOG" "$REGION" '{ $.role = "hook" }' "$t0")"
 }
 
 # -- Steps 17 and 18 (host) -----------------------------------------------------------------------

@@ -145,8 +145,12 @@ preflight() {
   if aws ssm get-parameter --region "$REGION" --name /application-plane/shared/front-door/edge >/dev/null 2>&1; then
     die "another front door holds /application-plane/shared/front-door/edge in this account and ${REGION}: one front door per account and Region (spec §6.4); remove it or pick another Region"
   fi
-  [[ "$(aws apigateway get-account --region "$REGION" --query cloudwatchRoleArn --output text)" == arn:* ]] \
-    || die "API Gateway has no CloudWatch Logs role in ${REGION} (the front door's prerequisite)"
+  local apigw_role
+  apigw_role="$(aws apigateway get-account --region "$REGION" --query cloudwatchRoleArn --output text)"
+  [[ "$apigw_role" == arn:* ]] || die "API Gateway has no CloudWatch Logs role in ${REGION} (the front door's prerequisite)"
+  # A setting that names a deleted role delivers no access log, silently.
+  aws iam get-role --role-name "${apigw_role##*/}" >/dev/null 2>&1 \
+    || die "API Gateway's CloudWatch Logs role in ${REGION} no longer exists; set one (test/integ/api-gateway-account.app.ts)"
   if [[ "$MODE" == single ]]; then
     aws cloudformation describe-stacks --region "$IDENTITY_REGION" --stack-name TenantIdentity-shared-pool-multi-tenant >/dev/null \
       || die "step 5 needs tenant-identity's TenantIdentity-shared-pool-multi-tenant deployment (never destroyed by this test)"

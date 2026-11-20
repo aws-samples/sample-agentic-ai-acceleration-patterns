@@ -287,7 +287,7 @@ case "$1 $2" in
 esac
 ${opts.blind ? 'fail AccessDenied Any "not authorized"' : ''}
 case "$1 $2" in
-  "iam get-role") [[ "$args" == *"--role-name Admin"* ]] && echo arn:aws:iam::111111111111:role/Admin || fail NoSuchEntity GetRole "The role cannot be found." ;;
+  "iam get-role") [[ "$args" == *"--role-name Admin"* || "$args" == *"--role-name apigw-logs"* ]] && echo arn:aws:iam::111111111111:role/Admin || fail NoSuchEntity GetRole "The role cannot be found." ;;
   "iam get-policy") fail NoSuchEntity GetPolicy "Policy was not found." ;;
   "route53 get-hosted-zone") echo integ-placeholder.example.com. ;;
   "route53 list-resource-record-sets") [[ "$args" == *length* ]] && echo 0 || echo null ;;

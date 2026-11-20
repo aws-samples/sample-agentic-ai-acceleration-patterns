@@ -22,7 +22,7 @@ check_eq() { # NAME WANT GOT: a literal comparison, for values holding regex cha
     FAILS=$((FAILS + 1)); echo "  FAIL $1: want $2, got $3"; fi
 }
 skip() { SKIPS=$((SKIPS + 1)); echo "  SKIP $*"; }
-yes_no() { if "$@"; then echo yes; else echo no; fi; }
+yes_no() { if "$@" >/dev/null; then echo yes; else echo no; fi; }
 elapsed() { echo $(( $(date +%s) - $1 )); }
 # die MESSAGE: ends the run. During the teardown (IN_TEARDOWN=1) it only
 # returns 1, so a reader the teardown shares with the deploy phases fails
@@ -137,12 +137,30 @@ signed() {
   curl "${args[@]}" "$2" <<<"$config" || echo 000
 }
 # as ROLE_ARN METHOD PATH [JSON]: one registrar call as the role.
-as() { assume "$1" || { echo 000; return; }; signed "$2" "${REGISTRAR}$3" "${4:-}"; }
+# as ROLE_ARN METHOD PATH [JSON]: one registrar call as ROLE_ARN. A 503 whose
+# body says the control plane cannot be read is retried up to three times,
+# 5 s apart, as the route hook and an operator do (spec §3.4 step 2): the
+# first read after the control plane's function has been idle can pass the
+# registrar's 3 s call limit (design/spikes.md, Integration run).
+as() {
+  local st i
+  assume "$1" || { echo 000; return; }
+  for i in 1 2 3 4; do
+    st="$(signed "$2" "${REGISTRAR}$3" "${4:-}")"
+    [[ "$st" == 503 ]] && grep -q 'control plane cannot be read' "$BODY" 2>/dev/null && (( i < 4 )) || break
+    sleep 5
+  done
+  echo "$st"
+}
 
 # edge METHOD HOST PATH [TOKEN_VAR] [curl args...] -> status; headers in $HEAD, body in $BODY.
 edge() {
   local method="$1" host="$2" path="$3" tv="${4:-}" config=""
   shift 3; shift || true
+  # A tenant token past its refresh age is issued again (the pool's tokens
+  # last five minutes). edge runs in $(...), so the caller keeps its copy;
+  # token_for at a step's start keeps that copy fresh too.
+  if [[ "$tv" =~ ^([ABC])_TOKEN$ ]]; then token_for "${BASH_REMATCH[1],,}" "$tv"; fi
   [[ -n "$tv" ]] && config="header = \"Authorization: Bearer ${!tv}\""
   : >"$BODY"; : >"$HEAD"
   curl -s -D "$HEAD" -o "$BODY" -w '%{http_code}' --max-time 30 -X "$method" "$@" --config - "https://${host}${path}" <<<"$config" || echo 000
@@ -255,7 +273,8 @@ ti_tenant() {
   [[ "$st" == 201 ]] || die "tenant-identity CreateTenant $3: HTTP $st $(jq -r '.message // empty' "$BODY" 2>/dev/null | head -c 160)"
   TI_ADMIN="$(jq -r .admin.user.username "$BODY")"
 }
-# ti_token API TENANT_ID USER VAR: a fresh access token (the pool's last one hour).
+# ti_token API TENANT_ID USER VAR: a fresh access token. The shared pool's
+# app client issues access tokens valid for five minutes.
 ti_token() {
   local st pw
   own_creds
@@ -293,7 +312,8 @@ ti_status() {
 # token_for T VAR: a token for one of the run's tenants (a, b, c), minted again after 30 minutes.
 token_for() {
   local id_var="TENANT_${1^^}" user_var="TI_USER_${1^^}" at_var="TOKEN_AT_${1^^}"
-  if (( $(date +%s) - ${!at_var:-0} > 1800 )); then
+  # Refreshed after three minutes, so a token outlives the request that sends it.
+  if (( $(date +%s) - ${!at_var:-0} > 180 )); then
     ti_token "$IDENTITY_API" "${!id_var}" "${!user_var}" "$2"
     printf -v "$at_var" '%s' "$(date +%s)"
   fi
@@ -337,7 +357,11 @@ log_count() {
   local pattern=() until=()
   [[ -z "$3" ]] || pattern=(--filter-pattern "$3")
   [[ -z "${6:-}" ]] || until=(--end-time "$6")
-  $runner aws logs filter-log-events --region "$2" --log-group-name "$1" --start-time "$4" "${until[@]}" "${pattern[@]}" \
-    --query 'length(events)' --output text 2>/dev/null || echo error
+  # filter-log-events pages its answer, and --query runs once per page, so
+  # the CLI prints one count per page: add them.
+  local counts
+  counts="$($runner aws logs filter-log-events --region "$2" --log-group-name "$1" --start-time "$4" "${until[@]}" "${pattern[@]}" \
+    --query 'length(events)' --output text 2>/dev/null)" || { echo error; return; }
+  awk '{ for (i = 1; i <= NF; i++) n += $i } END { print n + 0 }' <<<"$counts"
 }
 now_ms() { echo $(( $(date +%s) * 1000 )); }
