@@ -18,19 +18,21 @@ container. ADR-0024 puts the image in a repository the construct owns, so the
 endpoint policy and the roles can name it, and copies it there from a CDK
 image asset.
 
-The core creates the repository and may know the tag of the image it copied
+The core creates the repository and, for every container backend, copies the
+runner image into it once per architecture and names the tag
 (`BackendContext.runnerImageTag`). The runtime is arm64.
 
 ## Options considered
 
-### Option 1: Use the core's copy when it gives a tag, and copy the image here when it does not
-Pros: one image copy per architecture when the core makes it; the backend
-works alone. Cons: two paths, one of them unused in a given deployment.
+### Option 1: Use the core's copy and its tag
+Pros: one image copy per architecture whichever backends are on; this backend
+holds no second copy function with its own permissions. Cons: the runtime
+cannot be used without a core that names the tag.
 
-### Option 2: Always copy here
-Pros: one path. Cons: with `nitro` on Graviton two backends would write the
-same tag in an immutable repository; a rerun of the same tag with
-`cdk-ecr-deployment` is untested.
+### Option 2: Copy the image in this backend
+Pros: the backend stands alone. Cons: with `nitro` on Graviton two backends
+would write the same tag in an immutable repository, and each copy adds a
+Lambda with broad ECR rights.
 
 ### Option 3: Point the runtime at the CDK asset in the bootstrap repository
 Pros: no copy. Cons: the roles and endpoint policies would have to admit the
@@ -40,18 +42,17 @@ bootstrap repository, which holds every asset of the account and Region
 ## Decision
 
 Option 1. The runtime's artifact is `fromImageUri(<repository>:<tag>)`, a
-container configuration only. With no tag from the core, this backend builds a
-`DockerImageAsset` of `runnerPath()` for `linux/arm64` and copies it into the
-runner repository as `runner-arm64-<asset hash>` with `cdk-ecr-deployment`,
-setting `imageArch` to `arm64` because that library copies only `amd64`
-unless told otherwise. The runtime depends on the copy. With a tag from the
-core, the core owns the copy, and the runtime (returned by `drainOrder()`)
-must be ordered after it by the core; this backend has nothing to depend on.
+container configuration only, and the backend refuses to build when the core
+names no tag. The core owns the copy, so the runtime (returned by
+`drainOrder()`) is ordered after it by the core; this backend has nothing to
+depend on.
 
 ## Consequences
 
 A synth test asserts the artifact has a container configuration and no code
-configuration, and the copy and its architecture. Not proven before the
-integration test: the copy of a manifest list produced by a build with
-attestations, and a second deploy of an unchanged asset against an immutable
-tag. The deploy takes the runtime's create time (201 to 553 s, spec §5.3).
+configuration, that the tag is the core's, and that this backend adds no copy;
+the construct test asserts the tag in the runtime equals the tag the core
+copied. Not proven before the integration test: the copy of a manifest list
+produced by a build with attestations into an arm64 runtime, and a second
+deploy of an unchanged asset against an immutable tag. The deploy takes the
+runtime's create time (201 to 553 s, spec §5.3).

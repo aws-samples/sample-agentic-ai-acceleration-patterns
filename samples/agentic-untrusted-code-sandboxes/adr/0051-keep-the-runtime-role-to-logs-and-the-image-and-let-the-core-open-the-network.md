@@ -67,7 +67,13 @@ role and its policy.
 
 The security group has no ingress and no egress of its own and is returned
 by `endpointClients()`. Spec §3.7 states what the core must open for it: 443
-to the ECR and Logs endpoint groups and to the S3 prefix list.
+to the ECR and Logs endpoint groups and to the S3 prefix list (in the VPC the
+core creates, where the sandbox route table has no default route, any address
+on 443 stands in for the prefix list, which CloudFormation cannot read; a
+supplied prefix list id narrows it). The runtime waits for its security group
+and the rules the core adds to it, because it is created in the sandbox
+subnets; ordering it after the endpoints themselves is the core's, through
+`drainOrder()`.
 
 ## Consequences
 

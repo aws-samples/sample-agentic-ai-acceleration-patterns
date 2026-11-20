@@ -44,7 +44,7 @@ interface Harness {
   resolve(statements: iam.PolicyStatement[]): unknown[];
 }
 
-function build(opts: { sessionFiles?: boolean; imageTag?: boolean; noRepository?: boolean; patch?: Partial<BackendSettings> } = {}): Harness {
+function build(opts: { sessionFiles?: boolean; noTag?: boolean; noRepository?: boolean; patch?: Partial<BackendSettings> } = {}): Harness {
   const stack = new Stack(new App(), 'S');
   const vpc = new ec2.Vpc(stack, 'Vpc', {
     maxAzs: 2,
@@ -64,7 +64,7 @@ function build(opts: { sessionFiles?: boolean; imageTag?: boolean; noRepository?
     toolSecurityGroup: new ec2.SecurityGroup(stack, 'Tool', { vpc }),
     inputBucket: bucket,
     runnerRepository: opts.noRepository ? undefined : repository,
-    runnerImageTag: opts.imageTag ? (arch) => `core-copy-${arch}` : undefined,
+    runnerImageTag: opts.noTag ? undefined : (arch) => `core-copy-${arch}`,
     runnerDir: runnerPath(),
     nameFor,
     settings: settings({ agentcoreSessionFiles: opts.sessionFiles ?? false, ...opts.patch }),
@@ -133,8 +133,7 @@ describe('the runtime (spec §3.3, §3.4, ADR-0015)', () => {
     const [runtime] = Object.values(t.findResources('AWS::BedrockAgentCore::Runtime'));
     const artifact = (runtime as { Properties: { AgentRuntimeArtifact: Record<string, unknown> } }).Properties.AgentRuntimeArtifact;
     expect(Object.keys(artifact)).toEqual(['ContainerConfiguration']);
-    expect(flat(artifact)).toContain(`:runner-arm64-${h.backend.imageTag.replace('runner-arm64-', '')}`);
-    expect(h.backend.imageTag).toMatch(/^runner-arm64-[0-9a-f]{64}$/);
+    expect(flat(artifact)).toContain(':core-copy-arm64');
   });
 
   test('the runtime sits in the sandbox subnets only, with the backend security group', () => {
@@ -155,12 +154,12 @@ describe('the runtime (spec §3.3, §3.4, ADR-0015)', () => {
     });
   });
 
-  test('the runtime waits for its role, its policy and the image copy', () => {
+  test('the runtime waits for its role, its policy and its security group with the rules in it', () => {
     const [runtime] = Object.values(t.findResources('AWS::BedrockAgentCore::Runtime'));
     const deps = (runtime as { DependsOn: string[] }).DependsOn.join(' ');
     expect(deps).toMatch(/RuntimeRole[0-9A-F]{8}\b/);
     expect(deps).toContain('RuntimeRoleDefaultPolicy');
-    expect(deps).toContain('RunnerImageCopy');
+    expect(deps).toMatch(/SecurityGroup[0-9A-F]{8}\b/);
   });
 
   test('a runtime name the service refuses fails synth, so the log patterns cannot match another runtime', () => {
@@ -193,6 +192,7 @@ describe('the runtime (spec §3.3, §3.4, ADR-0015)', () => {
       toolSecurityGroup: new ec2.SecurityGroup(stack, `T${id}`, { vpc }),
       inputBucket: bucket,
       runnerRepository: repository,
+      runnerImageTag: () => 'core-copy-arm64',
       runnerDir: runnerPath(),
       nameFor: (service, suffix) => (service === 'agentcore-runtime' ? `Rt_${id}` : `${service}-${suffix}-${id}`.replace(/^log-group/, '/lg')),
       settings: settings(),
@@ -213,20 +213,14 @@ describe('the runtime (spec §3.3, §3.4, ADR-0015)', () => {
     }
   });
 
-  test('a core-made image copy is used as is, and this backend makes none', () => {
-    const own = build({ imageTag: true });
-    expect(own.backend.imageTag).toBe('core-copy-arm64');
-    const tpl = own.template();
-    expect(flat(tpl.toJSON())).toContain(':core-copy-arm64');
-    expect(Object.keys(tpl.findResources('Custom::CDKECRDeployment'))).toHaveLength(0);
+  test('the image is the core\'s copy: the tag it names, and no copy of its own', () => {
+    expect(h.backend.imageTag).toBe('core-copy-arm64');
+    expect(flat(t.toJSON())).toContain(':core-copy-arm64');
+    expect(Object.keys(t.findResources('Custom::CDKECRDeployment'))).toHaveLength(0);
   });
 
-  test('this backend copies the arm64 image into the runner repository when the core does not', () => {
-    t.hasResourceProperties('Custom::CDKECRDeployment', { ImageArch: 'arm64' });
-    const [copy] = Object.values(t.findResources('Custom::CDKECRDeployment'));
-    const props = (copy as { Properties: { SrcImage: unknown; DestImage: unknown } }).Properties;
-    expect(render(props.SrcImage)).toMatch(/^docker:\/\//);
-    expect(flat(props.DestImage)).toContain(h.backend.imageTag);
+  test('it refuses to build when the core names no image tag', () => {
+    expect(() => build({ noTag: true })).toThrow(/image tag/);
   });
 
   test('it refuses to build with no runner repository', () => {

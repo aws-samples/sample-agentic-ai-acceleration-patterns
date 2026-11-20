@@ -12,10 +12,8 @@
 import { ArnFormat, Aws, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as bedrockagentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import { DockerImageName, ECRDeployment } from 'cdk-ecr-deployment';
 import { Construct, type IConstruct } from 'constructs';
 import type { BackendConstruct, BackendContext, SandboxEndpoint } from '../backend-construct';
 import { BACKEND_ENV } from '../env';
@@ -62,23 +60,11 @@ export class AgentcoreBackendResources extends Construct implements BackendConst
       throw new Error('agentcore backend: the runtime name must match [a-zA-Z][a-zA-Z0-9_]{0,47} (spec 5.3)');
     }
 
-    // Image: the runner repository holds an arm64 copy under runner-arm64-<hash> (ADR-0024).
-    // The core may do the copy for every container backend (ctx.runnerImageTag); otherwise this backend does.
-    let copy: ECRDeployment | undefined;
-    if (ctx.runnerImageTag) {
-      this.imageTag = ctx.runnerImageTag('arm64');
-    } else {
-      const asset = new ecrAssets.DockerImageAsset(this, 'RunnerImage', {
-        directory: ctx.runnerDir,
-        platform: ecrAssets.Platform.LINUX_ARM64,
-      });
-      this.imageTag = `runner-arm64-${asset.assetHash}`;
-      copy = new ECRDeployment(this, 'RunnerImageCopy', {
-        src: new DockerImageName(asset.imageUri),
-        dest: new DockerImageName(`${repository.repositoryUri}:${this.imageTag}`),
-        imageArch: ['arm64'],
-      });
+    // Image: the core copies the runner image into the runner repository and names the arm64 tag (ADR-0024, ADR-0053).
+    if (!ctx.runnerImageTag) {
+      throw new Error('agentcore backend: the core did not name the runner image tag (ADR-0053)');
     }
+    this.imageTag = ctx.runnerImageTag('arm64');
 
     // Security group: no ingress and no egress of its own. The core adds the egress for each endpoint this
     // backend asks for in endpoints(), and the ingress on the endpoints' groups for endpointClients() (ADR-0051).
@@ -123,7 +109,8 @@ export class AgentcoreBackendResources extends Construct implements BackendConst
       },
     });
     this.runtime.node.addDependency(this.runtimeRole);
-    if (copy) this.runtime.node.addDependency(copy);
+    // The runtime is created in the sandbox subnets: its group, and the rules the core adds to it, must exist first (ADR-0051).
+    this.runtime.node.addDependency(this.securityGroup);
 
     // Usage logs: the source of per-tenant AgentCore cost (spec §3.8). Built from the L1 resources so every
     // name comes from the sanitiser and the resource policy is this instance's own (the L2's is shared by id).
