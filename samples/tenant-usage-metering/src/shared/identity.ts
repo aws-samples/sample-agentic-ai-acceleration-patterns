@@ -10,7 +10,7 @@
  * `<fleet>-ue-<emitterId>`. Nothing in the request body is ever consulted.
  */
 
-/** An emitter id is a ULID (spec §4.2). */
+/** An emitter id is a ULID (`EmitterId`, model/__global.smithy). */
 const EMITTER_ID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 /** `<fleet>` follows the control plane's charset (spec §3.3). */
