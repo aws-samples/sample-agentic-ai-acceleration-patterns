@@ -84,7 +84,7 @@ describe('cellPolicyNames', () => {
 });
 
 describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
-  const { template, json } = policiesTemplate();
+  const { json } = policiesTemplate();
 
   it('passes cdk-nag, holds the four managed policies and nothing else, with no CDK bootstrap dependency', () => {
     expect(Object.values(json.Resources).map((r: any) => r.Type)).toEqual(Array(4).fill('AWS::IAM::ManagedPolicy'));
@@ -98,17 +98,16 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
     const app = new App();
     const stack = new CellPoliciesStack(app, 'CellPolicies', { names: NAMES });
     expect(stack.tags.tagValues()).toEqual({ [ACCOUNT_BASE_TAG.key]: ACCOUNT_BASE_TAG.value });
-    expect(template).toBeDefined();
   });
 
   describe('the execution policy', () => {
     const p = managedPolicy(json, 'cell-execution-policy');
 
-    it('writes roles on role/cell/* only, without a boundary swap', () => {
+    it('writes roles on role/cell/* only', () => {
       const st = p.sid('CellRoles');
       expect(st.Effect).toBe('Allow');
       expect(st.Resource).toBe(CELL_ROLES);
-      expect(list(st.Action)).toEqual(ROLE_WRITE_ACTIONS.filter((a) => a !== 'iam:PutRolePermissionsBoundary'));
+      expect(list(st.Action)).toEqual([...ROLE_WRITE_ACTIONS]);
     });
 
     it('passes /cell/ roles to Lambda and AgentCore only', () => {

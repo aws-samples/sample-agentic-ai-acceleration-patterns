@@ -30,7 +30,7 @@ what is here: the `/cell/` path aspect and the cell synth context.
 
 | Policy | On | Holds |
 |---|---|---|
-| `cell-execution-policy` | the cell bootstrap's CloudFormation execution role | the services a cell deploys (API Gateway, Application Auto Scaling, AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM), IAM read, read of the `cdk-cell-assets-*` bucket, IAM role writes on `role/cell/*`, `iam:PassRole` of `role/cell/*` to Lambda and AgentCore only, and the two service-linked roles (`ops.apigateway.amazonaws.com`, `runtime-identity.bedrock-agentcore.amazonaws.com`) |
+| `cell-execution-policy` | the cell bootstrap's CloudFormation execution role | the services a cell deploys (API Gateway, Application Auto Scaling, AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM), IAM read, read of the `cdk-cell-assets-*` bucket, IAM role writes on `role/cell/*` (a boundary change only to the workload boundary, which the cell permissions boundary enforces), `iam:PassRole` of `role/cell/*` to Lambda and AgentCore only, and the two service-linked roles (`ops.apigateway.amazonaws.com`, `runtime-identity.bedrock-agentcore.amazonaws.com`) |
 | `cell-permissions-boundary` | the same execution role, as its boundary | the same services plus the run-time calls (`execute-api`, the Bedrock model calls, `sts:TagSession`, X-Ray), `sts:AssumeRole` on `role/cell/*`; denies a role without the workload boundary, any IAM write, `iam:PassRole` or `sts:AssumeRole` outside `role/cell/*`, `iam:PassRole` to any other service, other service-linked roles, boundary removal, users, access keys, policy writes, SSM writes to `/application-plane/shared/identity/*` and `/cdk-bootstrap/cell/*`, and changes to the API Gateway account setting |
 | `cell-workload-boundary` | every role a cell creates (ADR-0011) | the run-time services, `sts:AssumeRole` on `role/cell/*` only; denies every IAM action, `sts:AssumeRole` outside `role/cell/*`, the owner's parameters and the API Gateway account setting |
 | `cell-build-policy` | the role pair's cell role, through control-plane's `cellBuildManagedPolicyArns` (control-plane ADR-0047) | `sts:AssumeRole` on `cdk-cell-deploy-role-*`, `cdk-cell-file-publishing-role-*` and `cdk-cell-image-publishing-role-*` of the account and Region; not the lookup role |
@@ -160,6 +160,12 @@ boundary: its 27 roles call no IAM action, pass no role, and assume only
 the synth context register on the app's own `aws-cdk-lib`, so W-5's cell app
 compiles these files against the sample's CDK (the check above resolved
 them through the sample's `node_modules`).
+
+After these runs the execution policy gained `iam:PutRolePermissionsBoundary`
+on `role/cell/*`, so a redeploy can move an existing cell role to a new
+workload boundary. `deploy-owner.sh` updated both accounts in place (32 s
+and 31 s). The probes were not run again: they assume the probe roles, not
+the execution role, and neither boundary changed.
 
 ## Security scan
 

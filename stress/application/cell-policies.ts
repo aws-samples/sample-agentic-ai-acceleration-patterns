@@ -201,11 +201,9 @@ export function cellExecutionPolicyDocument(): iam.PolicyDocument {
     statements: [
       new iam.PolicyStatement({ sid: 'CellResources', actions: [...DEPLOY_ACTIONS, ...IAM_READ_ACTIONS], resources: ['*'] }),
       assetStatement('CellAssets'),
-      new iam.PolicyStatement({
-        sid: 'CellRoles',
-        actions: ROLE_WRITE_ACTIONS.filter((a) => a !== 'iam:PutRolePermissionsBoundary'),
-        resources: [cellRolesArn()],
-      }),
+      // Role writes include iam:PutRolePermissionsBoundary, so a redeploy can move an existing
+      // cell role to a new workload boundary; the cell permissions boundary only lets it set that one.
+      new iam.PolicyStatement({ sid: 'CellRoles', actions: [...ROLE_WRITE_ACTIONS], resources: [cellRolesArn()] }),
       passRoleStatement(),
       serviceLinkedRoleStatement(),
     ],
