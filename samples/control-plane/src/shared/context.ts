@@ -33,9 +33,11 @@ const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
 
 /**
  * Reads the OPTIONAL `stackName` context: the name of the control plane
- * stack, default `control-plane-dev`. A deployer who runs more than one
- * control plane in an account and Region, such as one per test run, names
- * each stack. Fails synthesis on a name CloudFormation would refuse.
+ * stack, default `control-plane-dev`. Another sample's integration run
+ * names the control plane it deploys through this app. An account and
+ * Region still hold one control plane, because the stack's
+ * `/control-plane/tenant-api-url` parameter has a fixed name. Fails
+ * synthesis on a name CloudFormation would refuse.
  */
 export function readStackName(node: Node): string {
   const value: unknown = node.tryGetContext('stackName');
