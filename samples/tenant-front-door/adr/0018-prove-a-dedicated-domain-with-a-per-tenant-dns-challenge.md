@@ -300,3 +300,9 @@ writes the domain's `host#` key.
   the tenant zone's negative-caching TTL, S-10), when CloudFront or ACM
   offer a per-tenant domain proof of their own, or when a vendor needs
   the multi-perspective check.
+
+Note 2026-11-20: the dedicated-domain run (design/spikes.md) found that
+ACM refuses a tagged `RequestCertificate` under an IAM `Null` condition
+on `aws:ResourceTag/tenant-front-door:distribution`. The registrar's tag
+grants instead require that tag to equal the distribution's id, which a
+create's own tags satisfy (spec §3.4, threat model AR-33).

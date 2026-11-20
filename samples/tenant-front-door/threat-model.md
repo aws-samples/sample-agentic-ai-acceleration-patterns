@@ -635,13 +635,18 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
     create's tags (T-25).** The tag grants hold only where
     `aws:ResourceTag/tenant-front-door:distribution` is this
     distribution's id. A create passes because CloudFront and ACM present
-    the request's tags as the resource's: the smoke run showed it for
+    the request's tags as the resource's: the dedicated-domain run
+    (design/spikes.md) showed it for
     `RequestCertificate` and `CreateDistributionTenant`, and showed that
     an IAM `Null` condition on the same key refuses ACM's create. A
     resource with no distribution tag, another front door's, and the
     pooled distribution tenant (`pooled/<distribution id>`, M-16) are
     therefore refused by the policy; that refusal has not been tested
-    live. *Why:* the condition is the only way IAM offers to bound a tag
+    live. The grant still matches a resource that already carries this
+    distribution's tag, so the role can rewrite the tenant tags
+    (`tenant-front-door:tenant`, `TenantId`) on this front door's own
+    certificates and distribution tenants: the tenant's next domain call
+    then gets 409, or an unused certificate goes to the sweeper. *Why:* the condition is the only way IAM offers to bound a tag
     grant that a create also uses. *Bounded by:* the actor (compromised
     registrar code, AR-19); the sweeper never deletes a certificate that
     is in use; CloudTrail names every `TagResource` and

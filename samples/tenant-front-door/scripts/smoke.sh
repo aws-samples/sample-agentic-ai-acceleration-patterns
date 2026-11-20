@@ -16,7 +16,7 @@
 # parameters). Tokens and keys stay in shell variables and 0600 files.
 #
 # The stacks stay up after the run. Remove them with cdk destroy in the
-# order cell, front door (edge-logging, main, edge), support.
+# order dns, cell, front door (edge-logging, main, edge), control plane, support.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."

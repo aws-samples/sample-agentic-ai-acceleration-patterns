@@ -48,7 +48,7 @@ reach output.
 - Checks do not exit: each prints PASS or FAIL, the run goes on, and the
   exit status is non-zero when any check failed.
 - The stacks stay up after `check`. The operator removes them with
-  `cdk destroy` in the order cell, front door, support.
+  `cdk destroy` in the order dns, cell, front door, control plane, support.
 
 ## Shared fixtures
 
