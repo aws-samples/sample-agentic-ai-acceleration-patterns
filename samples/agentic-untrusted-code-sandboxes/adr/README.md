@@ -30,3 +30,8 @@
 | [0024](0024-keep-the-runner-in-one-directory-and-copy-its-image-into-the-construct-repository.md) | Keep the runner in one directory and copy its image into the construct repository | Proposed | 2026-11-20 |
 | [0025](0025-pin-the-runner-wire-protocol-and-the-backend-interface.md) | Pin the runner wire protocol and the backend interface | Proposed | 2026-11-20 |
 | [0026](0026-run-the-python-tests-and-the-tree-checks-in-the-projen-build.md) | Run the Python tests and the tree checks in the projen build | Proposed | 2026-11-20 |
+| [0027](0027-name-resources-from-the-construct-path-and-find-a-supplied-vpcs-subnets-by-group-name.md) | Name resources from the construct path, and find a supplied VPC's subnets by group name | Proposed | 2026-11-20 |
+| [0028](0028-give-each-endpoint-class-its-own-security-group-and-bound-s3-egress-by-routing.md) | Give each endpoint class its own security group, and bound S3 egress by routing | Proposed | 2026-11-20 |
+| [0029](0029-wire-the-functions-the-drain-and-the-log-groups-from-one-construct.md) | Wire the functions, the drain and the log groups from one construct | Proposed | 2026-11-20 |
+| [0030](0030-compose-roles-from-the-backends-statements-and-keep-the-registry-actions-minimal.md) | Compose roles from the backends' statements, and keep the registry actions minimal | Proposed | 2026-11-20 |
+| [0031](0031-build-the-insight-rules-at-synth-switch-per-tenant-metrics-by-environment-and-fail-the-firewall-closed.md) | Build the insight rules at synth, switch per-tenant metrics by environment, and fail the firewall closed | Proposed | 2026-11-20 |
