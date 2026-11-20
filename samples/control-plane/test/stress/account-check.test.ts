@@ -21,6 +21,19 @@ const role = (name: string, path: string, principal: unknown = { Service: 'lambd
   boundaryArn,
 });
 
+/** The trust control-plane's CellAccountStack writes, as IAM returns it. */
+function pairTrust(half: 'cell' | 'tenant'): any {
+  return {
+    Version: '2012-10-17',
+    Statement: [{
+      Effect: 'Allow',
+      Principal: { AWS: `arn:aws:iam::${OTHER}:root` },
+      Action: 'sts:AssumeRole',
+      Condition: { ArnEquals: { 'aws:PrincipalArn': [`arn:aws:iam::${OTHER}:role/${FLEET}-${half}-build`, `arn:aws:iam::${OTHER}:role/${FLEET}-api`] } },
+    }],
+  };
+}
+
 /** What the role pair stack gives each half: its owner policy and its SSM default policy. */
 function pairPolicies(half: 'cell' | 'tenant'): Pick<RoleState, 'attached' | 'inline'> {
   const owner = half === 'cell' ? 'cell-build-policy' : 'cell-tenant-build-policy';
@@ -59,13 +72,13 @@ function healthy(): AccountState {
       role(`cdk-cell-deploy-role-${ACCOUNT}-${REGION}`, '/', { AWS: `arn:aws:iam::${ACCOUNT}:root` }),
     ],
     pair: {
-      cell: { ...role(`${FLEET}-cell-provisioning`, '/', { AWS: `arn:aws:iam::${OTHER}:root` }), ...pairPolicies('cell') },
-      tenant: { ...role(`${FLEET}-tenant-provisioning`, '/', { AWS: `arn:aws:iam::${OTHER}:root` }), ...pairPolicies('tenant') },
+      cell: { ...role(`${FLEET}-cell-provisioning`, '/'), trust: pairTrust('cell'), ...pairPolicies('cell') },
+      tenant: { ...role(`${FLEET}-tenant-provisioning`, '/'), trust: pairTrust('tenant'), ...pairPolicies('tenant') },
     },
   };
 }
 
-const check = (s: AccountState, base = BASE): string[] => accountProblems(s, { fleet: FLEET, accountBaseStackArns: base });
+const check = (s: AccountState, base = BASE): string[] => accountProblems(s, { fleet: FLEET, accountBaseStackArns: base, platformAccountId: OTHER });
 
 describe('the cell account check (spec §3.7)', () => {
   it('passes an account with the cell bootstrap, the role pair, the listed account base and a cell', () => {
@@ -155,9 +168,36 @@ describe('the cell account check (spec §3.7)', () => {
     ]);
   });
 
+  it('refuses a role pair trust other than its stack\'s: another principal, a wider role list, an extra statement, a dropped condition', () => {
+    const s = healthy();
+    const wrong = `role pair cell role ${FLEET}-cell-provisioning has a trust policy other than its stack's`;
+    const base = pairTrust('cell');
+    const st = base.Statement[0];
+    const variants: any[] = [
+      { ...base, Statement: [{ ...st, Principal: { AWS: 'arn:aws:iam::333333333333:root' } }] },
+      { ...base, Statement: [{ ...st, Principal: { AWS: '*' } }] },
+      { ...base, Statement: [{ ...st, Principal: { AWS: st.Principal.AWS, Service: 'ec2.amazonaws.com' } }] },
+      { ...base, Statement: [{ ...st, Condition: { ArnEquals: { 'aws:PrincipalArn': [...st.Condition.ArnEquals['aws:PrincipalArn'], `arn:aws:iam::${OTHER}:role/admin`] } } }] },
+      { ...base, Statement: [{ ...st, Condition: { ArnLike: { 'aws:PrincipalArn': `arn:aws:iam::${OTHER}:role/*` } } }] },
+      { ...base, Statement: [{ ...st, Condition: undefined }] },
+      { ...base, Statement: [st, { Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::333333333333:root' }, Action: 'sts:AssumeRole' }] },
+      { ...base, Statement: [{ ...st, Action: ['sts:AssumeRole', 'sts:TagSession'] }] },
+      { ...base, Statement: [{ ...st, Condition: { ...st.Condition, StringEquals: { 'sts:ExternalId': 'x' } } }] },
+    ];
+    for (const t of variants) {
+      expect(check({ ...s, pair: { ...s.pair, cell: { ...s.pair.cell!, trust: t } } })).toEqual([wrong]);
+    }
+    // The tenant role names the tenant build role, never the cell build role.
+    const swapped = { ...s.pair.tenant!, trust: pairTrust('cell') };
+    expect(check({ ...s, pair: { ...s.pair, tenant: swapped } })).toEqual([`role pair tenant role ${FLEET}-tenant-provisioning has a trust policy other than its stack's`]);
+    // IAM may return the principal as the bare account id.
+    const bare = { ...base, Statement: [{ ...st, Principal: { AWS: OTHER } }] };
+    expect(check({ ...s, pair: { ...s.pair, cell: { ...s.pair.cell!, trust: bare } } })).toEqual([]);
+  });
+
   it('expects the owner policies with the suffix', () => {
     const s = healthy();
-    expect(accountProblems(s, { fleet: FLEET, accountBaseStackArns: BASE, policySuffix: '-w10' })).toEqual([
+    expect(accountProblems(s, { fleet: FLEET, accountBaseStackArns: BASE, policySuffix: '-w10', platformAccountId: OTHER })).toEqual([
       `role pair cell role ${FLEET}-cell-provisioning has a managed policy outside its stack's set (cell-build-policy)`,
       `role pair cell role ${FLEET}-cell-provisioning lacks cell-build-policy-w10`,
       `role pair tenant role ${FLEET}-tenant-provisioning has a managed policy outside its stack's set (cell-tenant-build-policy)`,

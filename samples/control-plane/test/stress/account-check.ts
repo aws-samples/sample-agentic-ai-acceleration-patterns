@@ -8,11 +8,13 @@
  * account-base stacks (tagged `stress:part=account-base`, deployed without a service role,
  * and on the owner's list by stack ARN) and cells (deployed under the cell bootstrap's
  * execution role). The check refuses anything else, a stack with another service role, a
- * default CDK bootstrap role (`cdk-hnb659fds-*`), a role pair on `/cell/` or under a cell
- * boundary or holding a policy its stack did not give it, and a `/cell/` role that trusts a
- * principal outside the account or a service
- * the cell does not use. Pure: the driver gathers the state with the stack list,
- * `iam:ListRoles` and `iam:GetRole`, and this decides.
+ * default CDK bootstrap role (`cdk-hnb659fds-*`), a role pair on `/cell/`, under a cell
+ * boundary, holding a policy its stack did not give it or trusted by anything but the
+ * platform account's build and API roles of the fleet, and a `/cell/` role that trusts a
+ * principal outside the account or a service the cell does not use. Pure: the driver
+ * gathers the state with the stack list, `iam:ListRoles`, and for the role pair
+ * `iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and
+ * `iam:GetRolePolicy`, and this decides.
  */
 
 export const CELL_TOOLKIT_STACK = 'CDKToolkit-cell';
@@ -62,6 +64,44 @@ export interface CheckInput {
   readonly accountBaseStackArns: readonly string[];
   /** `CELL_POLICY_SUFFIX` of the owner stacks: the owner policies carry it. Default none. */
   readonly policySuffix?: string;
+  /** The platform account, the only principal the role pair trusts. */
+  readonly platformAccountId: string;
+}
+
+/**
+ * Problems with a role pair half's trust policy: it must be what control-plane's
+ * `CellAccountStack` writes (and `stress/test/role-pair-app.test.ts` pins), exactly one
+ * statement that allows `sts:AssumeRole` to the platform account's root, conditioned on
+ * `ArnEquals aws:PrincipalArn` naming exactly the fleet's `<fleet>-<kind>-build` and
+ * `<fleet>-api` roles, with no other condition. A vendor-owned cell account carries no
+ * external id (control-plane ADR-0029).
+ */
+export function pairTrustProblems(half: 'cell' | 'tenant', role: RoleState, s: AccountState, input: CheckInput): string[] {
+  const root = `arn:${s.partition}:iam::${input.platformAccountId}:root`;
+  const expected = [
+    `arn:${s.partition}:iam::${input.platformAccountId}:role/${input.fleet}-${half}-build`,
+    `arn:${s.partition}:iam::${input.platformAccountId}:role/${input.fleet}-api`,
+  ].sort();
+  const statements = asList((role.trust as { Statement?: unknown } | null)?.Statement) as Record<string, unknown>[];
+  const wrong = `role pair ${half} role ${role.name} has a trust policy other than its stack's`;
+  if (statements.length !== 1) return [wrong];
+  const st = statements[0] ?? {};
+  const keys = Object.keys(st).filter((k) => k !== 'Sid').sort();
+  const actions = asList(st.Action).map(String);
+  const principal = (st.Principal ?? {}) as Record<string, unknown>;
+  const awsPrincipals = asList(principal.AWS).map(String);
+  const condition = (st.Condition ?? {}) as Record<string, Record<string, unknown>>;
+  const arns = asList(condition.ArnEquals?.['aws:PrincipalArn']).map(String).sort();
+  const ok =
+    JSON.stringify(keys) === JSON.stringify(['Action', 'Condition', 'Effect', 'Principal']) &&
+    st.Effect === 'Allow' &&
+    actions.length === 1 && actions[0] === 'sts:AssumeRole' &&
+    JSON.stringify(Object.keys(principal)) === JSON.stringify(['AWS']) &&
+    awsPrincipals.length === 1 && (awsPrincipals[0] === root || awsPrincipals[0] === input.platformAccountId) &&
+    JSON.stringify(Object.keys(condition)) === JSON.stringify(['ArnEquals']) &&
+    JSON.stringify(Object.keys(condition.ArnEquals ?? {})) === JSON.stringify(['aws:PrincipalArn']) &&
+    JSON.stringify(arns) === JSON.stringify(expected);
+  return ok ? [] : [wrong];
 }
 
 /** The owner policy the role pair stack attaches to each half (stress ADR-0012, control-plane ADR-0047). */
@@ -207,6 +247,7 @@ export function accountProblems(s: AccountState, input: CheckInput): string[] {
       problems.push(`role pair ${half} role ${role.name} is under a cell boundary`);
     }
     problems.push(...pairPolicyProblems(half as 'cell' | 'tenant', role, s, input.policySuffix ?? ''));
+    problems.push(...pairTrustProblems(half as 'cell' | 'tenant', role, s, input));
   }
   return problems;
 }

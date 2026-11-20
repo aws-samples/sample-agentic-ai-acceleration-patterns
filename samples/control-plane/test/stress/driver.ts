@@ -199,7 +199,12 @@ async function checkAccounts(): Promise<number> {
   let failed = 0;
   for (const a of accounts) {
     const state = await gather(a, regions, names().fleet);
-    const problems = accountProblems(state, { fleet: names().fleet, accountBaseStackArns: a.accountBaseStackArns, policySuffix: process.env.STRESS_CELL_POLICY_SUFFIX ?? '' });
+    const problems = accountProblems(state, {
+      fleet: names().fleet,
+      accountBaseStackArns: a.accountBaseStackArns,
+      policySuffix: process.env.STRESS_CELL_POLICY_SUFFIX ?? '',
+      platformAccountId: platform,
+    });
     log(`account check ${a.label}: ${state.stacks.length} stacks, ${state.roles.length} roles in ${regions.join(', ')}: ${problems.length === 0 ? 'passed' : `${problems.length} problems`}`);
     for (const p of problems) log(`  ${a.label}: ${p}`);
     if (problems.length > 0) failed += 1;
