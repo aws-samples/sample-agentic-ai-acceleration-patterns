@@ -52,7 +52,22 @@ export const PROBE_TAG = { key: 'stress:part', value: 'cell-policy-probe' } as c
 
 /** Every escalation the probes try, allowed on `*` so that only a boundary refuses. */
 export const PROBE_ACTIONS = [
-  'iam:*',
+  'iam:GetRole',
+  'iam:CreateRole',
+  'iam:DeleteRole',
+  'iam:PutRolePolicy',
+  'iam:AttachRolePolicy',
+  'iam:UpdateAssumeRolePolicy',
+  'iam:UpdateRoleDescription',
+  'iam:PutRolePermissionsBoundary',
+  'iam:DeleteRolePermissionsBoundary',
+  'iam:PassRole',
+  'iam:CreateServiceLinkedRole',
+  'iam:CreatePolicy',
+  'iam:CreatePolicyVersion',
+  'iam:SetDefaultPolicyVersion',
+  'iam:CreateUser',
+  'iam:CreateAccessKey',
   'sts:AssumeRole',
   'lambda:CreateFunction',
   'lambda:DeleteFunction',
@@ -95,7 +110,8 @@ export class CellBoundaryProbeStack extends Stack {
     super(scope, id, { ...props, synthesizer: new LegacyStackSynthesizer(), tags: { ...props.tags, [PROBE_TAG.key]: PROBE_TAG.value } });
     // The stand-in holds the cell permissions boundary's IAM headroom, and the workload
     // boundary allows sts:AssumeRole on role/cell/*: its trust refuses every /cell/
-    // principal, so only the account owner can assume it (ADR-0011).
+    // principal, so no cell role can assume it; only principals outside /cell/, such as
+    // the account owner, can (ADR-0011).
     const ownerOnly = new iam.AccountRootPrincipal().withConditions({
       ArnNotLike: { 'aws:PrincipalArn': `arn:${this.partition}:iam::${this.account}:role/cell/*` },
     });

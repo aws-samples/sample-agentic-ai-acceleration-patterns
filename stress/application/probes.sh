@@ -18,9 +18,10 @@
 # let-through probe left behind.
 #
 # A deny probe passes only when the error names an explicit deny in a permissions boundary,
-# except the one probe that the stand-in's trust policy refuses, which passes on AccessDenied
-# without a boundary deny. Before the first probe of each role it checks that the CLI runs as
-# that role, and stops with exit 2 when it does not. Exit code: the number of failed probes.
+# except the one probe that the stand-in's trust policy refuses, which passes on IAM's
+# "is not authorized to perform: sts:AssumeRole" with no explicit deny. Before the first probe
+# of each role it checks that the CLI runs as that role, and stops with exit 2 when it does
+# not. Exit code: the number of failed probes.
 #
 #   AWS_REGION=eu-central-1 [CELL_POLICY_SUFFIX=-v2] stress/application/probes.sh
 set -uo pipefail
@@ -105,14 +106,14 @@ expect_allowed() {
   if call "$who" "$@"; then echo "PASS  [${who}] ${name}: allowed"; passes=$((passes + 1))
   else echo "FAIL  [${who}] ${name}: $(tr -s "\n" " " <<<"$OUT" | head -c 400)"; fails=$((fails + 1)); fi
 }
-# Refused by a trust policy, not a boundary: AccessDenied that names no boundary deny.
+# Refused by a trust policy, not a boundary: IAM's no-allow message, with no explicit deny.
 expect_trust_refused() {
   local who="$1" name="$2"; shift 2
   local rc out
   call "$who" "$@"; rc=$?; out="$OUT"
   if [[ $rc -eq 0 ]]; then
     echo "FAIL  [${who}] ${name}: allowed"; fails=$((fails + 1))
-  elif grep -q 'AccessDenied' <<<"$out" && ! grep -qi 'permissions boundary' <<<"$out"; then
+  elif grep -q 'is not authorized to perform: sts:AssumeRole on resource' <<<"$out" && ! grep -qi 'explicit deny' <<<"$out"; then
     echo "PASS  [${who}] ${name}: refused by the trust policy"; passes=$((passes + 1))
   else
     echo "FAIL  [${who}] ${name}: unexpected error: $(tr -s "\n" " " <<<"$out" | head -c 400)"; fails=$((fails + 1))

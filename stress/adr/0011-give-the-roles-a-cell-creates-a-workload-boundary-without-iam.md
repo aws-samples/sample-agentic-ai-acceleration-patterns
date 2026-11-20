@@ -107,8 +107,8 @@ role under the cell permissions boundary (the execution role's cap) and a
 cell-made role under the workload boundary. The owner-made stand-in exists
 only for a probe run, and its trust refuses every `/cell/` principal, so a
 workload role cannot assume it to reach the IAM headroom of the cell
-permissions boundary; a probe checks that refusal. The request path under the
-workload boundary (spec Q-5) is not yet proven; the first platform run at
-`small` checks it. The deploy of a runtime-isolation cell is recorded in
+permissions boundary; a probe checks that refusal. The request path under
+the workload boundary (spec Q-5) is not yet proven; the first platform run
+at `small` checks it. The deploy of a runtime-isolation cell is recorded in
 `stress/application/README.md`. Revisit if the CDK gains per-role
 boundaries, or if a cell needs a role with IAM permissions.

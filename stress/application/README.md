@@ -117,11 +117,11 @@ the cell synth context then need the same suffix, and step 2 must run again.
 `probe-deploy.sh` deploys `CellBoundaryProbe`, an owner stack with one role,
 `cell/cell-policy-probe`, under the cell permissions boundary: it stands in
 for the execution role, which cannot create a role under its own boundary.
-Its trust refuses every `/cell/` principal, so only the account owner can
-assume it.
-The same stack holds the decoys: `cell-policy-probe-decoy`, a role on `/`
-with no policy that only the probe roles may assume, and a managed policy of
-the same name, attached to nothing. It then deploys `CellWorkloadProbe`
+Its trust refuses every `/cell/` principal, so no cell role can assume it;
+only principals outside `/cell/`, such as the account owner, can. The same
+stack holds the decoys: `cell-policy-probe-decoy`, a role on `/` with no
+policy that only the probe roles may assume, and a managed policy of the
+same name, attached to nothing. It then deploys `CellWorkloadProbe`
 through the cell bootstrap, with the cell synth context, so the execution
 role creates its three roles on `/cell/` under the workload boundary. Both
 probe roles hold an identity policy that allows every escalation on `*`.
@@ -140,9 +140,8 @@ Look at the policy before you remove those by hand.
 and stops otherwise, and counts a deny probe as passed only when the error
 names an explicit deny in a permissions boundary. The one exception is the
 workload probe's attempt to assume the stand-in, which the stand-in's trust
-refuses. It retries a throttled
-call. `probe-remove.sh` removes the two probe stacks, and only stacks tagged
-`stress:part=cell-policy-probe`.
+refuses. It retries a throttled call. `probe-remove.sh` removes the two
+probe stacks, and only stacks tagged `stress:part=cell-policy-probe`.
 
 | As | Probe | Expected |
 |---|---|---|
@@ -182,17 +181,16 @@ their versions, so a policy change needs no new bootstrap.
 | `probe-remove.sh` | 32 s and 32 s; no probe leftovers | 32 s and 32 s; no probe leftovers |
 | runtime-isolation cell (`api-gateway`, `tvm=true`, `publishParameters=false`) through the cell bootstrap, with `CellRolePath` and `cellSynthContext` | `CREATE_COMPLETE` in 417 s; 27 of 27 roles on `/cell/` under the workload boundary; destroyed in 527 s, nothing left | not deployed |
 
-The cell deploy ran once, on commit `d6dcf8e`. The workload boundary has
-since gained only deny actions (log deliveries, export tasks, table
-exports, X-Ray resource policies) that no role of the cell calls, and the
-execution policy and the cell permissions boundary are the same, so the
-cell was not deployed again. It needed no change to deploy under the
-workload boundary: its 27 roles call no IAM action, pass no role, write no
-resource policy, and assume only `/cell/` roles. The cell app must load one
-copy of the CDK: the aspect and the synth context register on the app's
-own `aws-cdk-lib`, so W-5's cell app compiles these files against the
-sample's CDK (the cell deploy resolved them through the sample's
-`node_modules`).
+The cell deploy ran once, under the same execution policy and cell
+permissions boundary, and a workload boundary without the denies on log
+deliveries, export tasks, table exports and X-Ray resource policies. No
+role of the cell calls those actions, so the cell was not deployed again.
+It needed no change to deploy under the workload boundary: its 27 roles
+call no IAM action, pass no role, write no resource policy, and assume
+only `/cell/` roles. The cell app must load one copy of the CDK: the
+aspect and the synth context register on the app's own `aws-cdk-lib`, so
+W-5's cell app compiles these files against the sample's CDK (the cell
+deploy resolved them through the sample's `node_modules`).
 
 ## Security scan
 
