@@ -165,8 +165,10 @@ A throttled `CreateTenant` answers 503, and it may have created the tenant
 without its admin (tenant-identity ADR-0037). A blind repeat then answers
 409 and the tenant stays without an admin, which the runtime-isolation slice
 refuses as `no-user`. So on a 503 or a 409 the driver claims the first-admin
-slot with `CreateUser` and `firstAdmin`, where a 409 means the admin exists,
-and repeats the other calls with backoff.
+slot with `CreateUser` and `firstAdmin`, where a 409 means the admin exists
+and a 404 means the tenant was removed by `CreateTenant`'s own compensation,
+so the driver repeats `CreateTenant`. It repeats the other calls with
+backoff.
 
 The stress test no longer exercises the sample's own mount, so a defect in
 `create.sh` or in `PlatformInvokePolicy` is not found by it. The sample's
