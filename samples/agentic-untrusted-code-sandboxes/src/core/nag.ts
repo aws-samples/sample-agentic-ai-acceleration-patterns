@@ -65,7 +65,7 @@ export function flatten(node: unknown): string {
 
 interface KnownWildcard {
   /** Matches the resource as cdk-nag renders it. */
-  readonly resource: RegExp;
+  readonly matches: (resource: string) => boolean;
   /** Every action of the statement must match, so a wider action on the same resource is still a finding. */
   readonly actions: RegExp;
   readonly reason: string;
@@ -84,7 +84,7 @@ export interface KnownContext {
   readonly logGroupPrefixes: readonly string[];
 }
 
-const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const re = (pattern: RegExp) => (resource: string): boolean => pattern.test(resource);
 
 /**
  * The wildcards the backends' statements and roles carry, each with the
@@ -93,67 +93,68 @@ const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\
  * a log group name or prefix, or the tenant's own prefix.
  */
 export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
-  const bucket = escape(ctx.inputBucket);
-  const names = ctx.logGroups.map(escape).join('|');
-  const prefixes = ctx.logGroupPrefixes.map(escape).join('|');
+  const bucket = ctx.inputBucket;
   return [
     {
-      resource: /^\*$/,
+      matches: re(/^\*$/),
       actions: /^(ecr:GetAuthorizationToken|ec2:DescribeInstances|lambda:ListMicrovms|ecs:ListTasks|ecs:DiscoverPollEndpoint|logs:DescribeLogGroups)$/,
       reason: 'These actions take no resource (spec 3.6, ADR-0011, ADR-0030): ECR token, EC2 and MicroVM listing, the ECS poll endpoint, log group listing. ecs:ListTasks carries an ecs:cluster condition. None reads tenant data.',
     },
     {
-      resource: /^\*$/,
+      matches: re(/^\*$/),
       actions: /^ec2:(CreateNetworkInterface|DescribeNetworkInterfaces|DescribeSubnets|DeleteNetworkInterface|AssignPrivateIpAddresses|UnassignPrivateIpAddresses)$/,
       reason: 'A function in a VPC manages its own network interfaces, which have no id before they exist; these six actions are the managed VPC access policy minus its log writes, so no role here can write another function\'s log group (spec 3.6, ADR-0029).',
     },
     {
-      resource: new RegExp(`^${bucket}/inputs/<aws:PrincipalTag/TenantId>/\\*$`),
+      matches: (r) => r === `${bucket}/inputs/<aws:PrincipalTag/TenantId>/*`,
       actions: /^s3:GetObject$/,
       reason: 'The wildcard is the object name under the caller\'s own inputs prefix, resolved from the TenantId session tag; the role reaches no other prefix (spec 3.6, C-5, ADR-0030).',
     },
     {
-      resource: new RegExp(`^${bucket}/outputs/<aws:PrincipalTag/TenantId>/\\*$`),
+      matches: (r) => r === `${bucket}/outputs/<aws:PrincipalTag/TenantId>/*`,
       actions: /^s3:PutObject$/,
       reason: 'The wildcard is the object name under the caller\'s own outputs prefix, resolved from the TenantId session tag; the role reaches no other prefix (spec 3.6, C-5, ADR-0030).',
     },
     {
-      resource: new RegExp(`^${bucket}/sessions/<aws:AgentCoreRuntimeSourceSid>/\\*$`),
+      matches: (r) => r === `${bucket}/sessions/<aws:AgentCoreRuntimeSourceSid>/*`,
       actions: /^s3:(GetObject|PutObject)$/,
       reason: 'The wildcard is the object name under the one prefix the platform derives from the session, so a session reaches only its own prefix (ADR-0007, spec 3.6 AgentCore runtime role).',
     },
     {
-      resource: /:network-interface\/\*$/,
+      matches: re(/:network-interface\/\*$/),
       actions: /^ec2:(CreateNetworkInterface|CreateTags)$/,
       reason: 'The connector operator role creates and tags network interfaces, which have no id before creation; its subnet and security group resources are the sample\'s and CreateTags needs the managed-operator condition (spec 3.6 MicroVM connector operator role).',
     },
     {
-      // Never matches with no known group.
-      resource: new RegExp([
-        names === '' ? '(?!)' : `:log-group:(${names})(:\\*|:log-stream:\\*)$`,
-        prefixes === '' ? '(?!)' : `:log-group:(${prefixes})(\\*|\\*:log-stream:\\*)$`,
-      ].join('|')),
+      // A log group of a backend: after a name, `:*` or a stream part; after a prefix, `*` or a stream part. With no known group nothing matches.
+      matches: (r) => {
+        const at = r.indexOf(':log-group:');
+        if (at < 0) return false;
+        const rest = r.slice(at + ':log-group:'.length);
+        return ctx.logGroups.some((n) => rest === `${n}:*` || rest === `${n}:log-stream:*`)
+          || ctx.logGroupPrefixes.some((p) => rest === `${p}*` || rest === `${p}*:log-stream:*`);
+      },
       actions: /^logs:(CreateLogGroup|CreateLogStream|PutLogEvents|DescribeLogStreams|DeleteLogGroup)$/,
       reason: 'The wildcard is a log stream, or the id the service appends to a runtime name; the group name or prefix before it is one the deployment\'s backends own and the log cleanup resource deletes (spec 3.6, 5.3).',
     },
     {
       // A cluster resource of this stack: a logical id ending in Cluster and its hash, not a pseudo parameter.
-      resource: /:task\/<[^>.:]*Cluster[0-9A-F]{8}>\/\*$/,
+      matches: re(/:task\/<[^>.:]*Cluster[0-9A-F]{8}>\/\*$/),
       actions: /^ecs:(DescribeTasks|StopTask|TagResource)$/,
       reason: 'The wildcard is the task id under a cluster of this stack, which ECS assigns at run time; the statements carry the tag or cluster conditions of spec 3.6 and ADR-0014 where the action supports them.',
     },
     {
-      resource: /:container-instance\/<[^>.:]*Cluster[0-9A-F]{8}>\/\*$/,
+      matches: re(/:container-instance\/<[^>.:]*Cluster[0-9A-F]{8}>\/\*$/),
       actions: /^ecs:DescribeContainerInstances$/,
       reason: 'The wildcard is the container instance id under a cluster of this stack (spec 3.6 Drain role).',
     },
     {
-      resource: /:container-instance\/\*$/,
+      matches: re(/:container-instance\/\*$/),
       actions: /^ecs:(Poll|StartTelemetrySession|PutSystemLogEvents)$/,
       reason: 'The ECS agent on a managed instance polls and reports for its own instance id, which no one knows before launch; these are the actions of the ECS-written instance role (ADR-0004).',
     },
     {
-      resource: /<[^>.:]+\.AgentRuntimeArn>\/runtime-endpoint\/\*$/,
+      matches: re(/<[^>.:]+\.AgentRuntimeArn>\/runtime-endpoint\/\*$/),
       actions: /^bedrock-agentcore:(InvokeAgentRuntime|StopRuntimeSession)$/,
       reason: 'The wildcard is an endpoint of a runtime of this stack (spec 3.6 Tool role); no runtime outside the stack is named.',
     },
@@ -162,7 +163,7 @@ export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
 
 /** The known-wildcard entry that accepts a resource for all of a statement's actions, if any. */
 export function knownWildcard(resource: string, actions: readonly string[], ctx: KnownContext): KnownWildcard | undefined {
-  return knownWildcards(ctx).find((k) => k.resource.test(resource) && actions.length > 0 && actions.every((a) => k.actions.test(a)));
+  return knownWildcards(ctx).find((k) => k.matches(resource) && actions.length > 0 && actions.every((a) => k.actions.test(a)));
 }
 
 interface ResolvedStatement { Action?: string | string[]; Resource?: unknown }
