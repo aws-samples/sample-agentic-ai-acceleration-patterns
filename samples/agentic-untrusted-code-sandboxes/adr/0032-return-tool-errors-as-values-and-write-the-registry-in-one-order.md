@@ -102,3 +102,5 @@ The gateway entry wraps `runCode` and returns its result unchanged. A
 vendor's own tool calls it and checks `isRunCodeError`. A caller that gets
 `tool_failed` learns nothing about why; the reason is in the log line.
 Changing the signature later is a breaking change for the gateway entry.
+
+Note 2026-11-20: amended by the round 1 review (H-2, L-13). The tool no longer cuts raw bytes again: the runner's cut is trusted, because a second cut of the decoded text could count a replacement character as three bytes and set `truncated` on whole output. The tool bounds only the JSON-encoded size of stdout and stderr together, 5 MiB, so an answer stays under the 6 MB Lambda response limit. `maxInputBytes` is at most 6 MiB, the runner's input limit (ADR-0039).

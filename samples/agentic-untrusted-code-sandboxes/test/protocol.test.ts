@@ -4,7 +4,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-  buildJob, decodeNonce, fromBase64url, helloProof, isRefusal, jobAuth, MALFORMED_JOB_STATUS, newNonce, nonceHash,
+  BOOT_ID_PATTERN, buildJob, decodeNonce, fromBase64url, helloProof, isRefusal, jobAuth, MALFORMED_JOB_STATUS, MAX_INPUT_BYTES, newNonce, nonceHash,
   proofMatches, REFUSAL_STATUS, resultProof, sessionIdFor, startToken, TENANT_ID_PATTERN,
 } from '../src/protocol';
 
@@ -129,5 +129,26 @@ describe('encodings', () => {
     expect(proofMatches('abc', 'abd')).toBe(false);
     expect(proofMatches('abc', 'ab')).toBe(false);
     expect(proofMatches('abc', undefined)).toBe(false);
+  });
+});
+
+describe('size limits against the runner (ADR-0039)', () => {
+  test('the largest input and a fully escaped code fit the runner body limit of 9 MiB', () => {
+    const job = buildJob({
+      runId: 'r',
+      tenantId: 'tenant-a',
+      nonce: newNonce(),
+      code: '\u0001'.repeat(65536),
+      input: Buffer.alloc(MAX_INPUT_BYTES, 0xff),
+      timeoutMs: 60000,
+      maxOutputBytes: 4 * 1024 * 1024,
+    });
+    expect(Buffer.byteLength(JSON.stringify(job))).toBeLessThan(9 * 1024 * 1024);
+  });
+
+  test('a boot id is 32 lowercase hex characters', () => {
+    expect(BOOT_ID_PATTERN.test('a'.repeat(32))).toBe(true);
+    expect(BOOT_ID_PATTERN.test('A'.repeat(32))).toBe(false);
+    expect(BOOT_ID_PATTERN.test('a'.repeat(31))).toBe(false);
   });
 });

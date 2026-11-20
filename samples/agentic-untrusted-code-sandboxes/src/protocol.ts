@@ -19,6 +19,12 @@ export const NONCE_BYTES = 32;
 /** Tenant id rule (spec §5.1). */
 export const TENANT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
+/** Largest input the runner takes, in bytes after base64 decoding (runner/wire.py `MAX_INPUT_BYTES`, ADR-0039). */
+export const MAX_INPUT_BYTES = 6 * 1024 * 1024;
+
+/** A runner's `bootId`: 16 random bytes as 32 lowercase hex characters (runner/PROTOCOL.md). */
+export const BOOT_ID_PATTERN = /^[0-9a-f]{32}$/;
+
 /** Ports the runner listens on (spec §3.5). */
 export const RUNNER_PORTS = { http: 8080, tls: 8443, hooks: 9000 } as const;
 

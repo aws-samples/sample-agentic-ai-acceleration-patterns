@@ -59,7 +59,7 @@ export class FakeBackend implements SandboxBackend {
       live: true,
       busy: false,
       startingProbes: this.script.startingProbes ?? 0,
-      bootId: `boot${this.seq}`.padEnd(32, '0'),
+      bootId: `b00${this.seq}`.padEnd(32, '0'),
     });
     return handle;
   }
