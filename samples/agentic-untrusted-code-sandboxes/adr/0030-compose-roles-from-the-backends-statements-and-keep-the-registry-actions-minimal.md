@@ -62,8 +62,9 @@ Option 1.
   `PutObject` on `outputs/`; a log group wildcard is accepted only after a
   name or prefix that a backend lists in `logCleanup()`, so another group or a
   whole service's groups stays a finding (synth refuses a backend log group
-  name or prefix that is empty, ends in `/`, or is a bare `/aws/<service>`); a task or container instance
-  wildcard needs a cluster resource of this stack.
+  name or prefix that is empty, short, ends in `/`, or is a bare
+  `/aws/<service>`); a task or container instance wildcard needs a cluster
+  resource of this stack.
 
 ## Consequences
 

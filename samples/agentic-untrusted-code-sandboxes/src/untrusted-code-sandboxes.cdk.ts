@@ -325,8 +325,8 @@ export class UntrustedCodeSandboxes extends Construct {
       for (const g of list) {
         // A group name or prefix that is empty, ends in `/`, or is a service's whole root would let the cleanup delete, and the
         // wildcard guard accept, every group of that service (ADR-0030).
-        if (g === '' || g.endsWith('/') || /^\/aws\/[^/]*$/.test(g)) {
-          throw new Error(`UntrustedCodeSandboxes: a backend lists the log group ${what} "${g}", which is empty or covers a whole service's groups`);
+        if (g === '' || g.endsWith('/') || /^\/aws\/?[^/]*$/.test(g) || g.length < 8 || (g.split('/').pop() as string).length < 4) {
+          throw new Error(`UntrustedCodeSandboxes: a backend lists the log group ${what} "${g}", which is empty, too short or covers a whole service's groups`);
         }
       }
     }
@@ -400,24 +400,25 @@ export class UntrustedCodeSandboxes extends Construct {
     if (!(fn instanceof lambda.Function)) {
       throw new Error('UntrustedCodeSandboxes.bindRunCode takes a lambda.Function (ADR-0029)');
     }
+    const role = fn.role;
+    if (!(role instanceof iam.Role)) {
+      throw new Error('UntrustedCodeSandboxes.bindRunCode needs a function built with a role created in this app, not an imported one (ADR-0029)');
+    }
+    // Every refusal comes before the first change, so a caller that catches one is left with the function as it was.
+    const cfnRole = role.node.defaultChild as iam.CfnRole;
+    const managed = role === this.toolRole ? [] : ((Stack.of(role).resolve(cfnRole.managedPolicyArns) as unknown[] | undefined) ?? []);
+    const eventSource = managed.map(flatten).find((m) => /:iam::aws:policy\/service-role\/AWSLambda(SQSQueue|Kinesis|DynamoDB|MSK)ExecutionRole$/.test(m));
+    if (eventSource) {
+      throw new Error(`UntrustedCodeSandboxes.bindRunCode: the role carries ${eventSource.split('/').pop()}, which allows log writes on every group and also the event source rights; grant the event source with its L2 grant (for example queue.grantConsumeMessages(fn)) instead (ADR-0029)`);
+    }
     const cfn = fn.node.defaultChild as lambda.CfnFunction;
     const subnetIds = this.vpc.selectSubnets(this.toolSubnets).subnetIds;
     cfn.vpcConfig = { subnetIds, securityGroupIds: [this.toolSecurityGroup.securityGroupId] };
     cfn.timeout = this.config.toolBudget.toSeconds();
     for (const [key, value] of Object.entries(this.environment)) fn.addEnvironment(key, value);
-    const role = fn.role;
-    if (!(role instanceof iam.Role)) {
-      throw new Error('UntrustedCodeSandboxes.bindRunCode needs a function built with a role created in this app, not an imported one (ADR-0029)');
-    }
     if (role !== this.toolRole) {
       // The two managed policies a default function role carries allow log writes on every group; the statements
       // below replace them (ADR-0029).
-      const cfnRole = role.node.defaultChild as iam.CfnRole;
-      const managed = (Stack.of(role).resolve(cfnRole.managedPolicyArns) as unknown[] | undefined) ?? [];
-      const eventSource = managed.map(flatten).find((m) => /:iam::aws:policy\/service-role\/AWSLambda(SQSQueue|Kinesis|DynamoDB|MSK)ExecutionRole$/.test(m));
-      if (eventSource) {
-        throw new Error(`UntrustedCodeSandboxes.bindRunCode: the role carries ${eventSource.split('/').pop()}, which allows log writes on every group and also the event source rights; grant the event source with its L2 grant (for example queue.grantConsumeMessages(fn)) instead (ADR-0029)`);
-      }
       const keep = managed.filter((m) => !/:iam::aws:policy\/service-role\/AWSLambda(Basic|VPCAccess)ExecutionRole$/.test(flatten(m)));
       // The property itself, not an override, so cdk-nag sees the role as it is.
       if (keep.length !== managed.length) cfnRole.managedPolicyArns = keep.length > 0 ? (keep as string[]) : undefined;

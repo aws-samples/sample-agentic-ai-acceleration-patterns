@@ -367,6 +367,19 @@ describe('bindRunCode (spec 3.3)', () => {
     },
   );
 
+  test('a refused bind changes nothing on the function', () => {
+    synth({ standalone: false }, (stack, c) => {
+      const role = new iam.Role(stack, 'Source', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
+      role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaSQSQueueExecutionRole'));
+      const fn = new lambda.Function(stack, 'S', { ...inline, role });
+      expect(() => c.bindRunCode(fn)).toThrow(/L2 grant/);
+      const cfn = fn.node.defaultChild as lambda.CfnFunction;
+      expect(cfn.vpcConfig).toBeUndefined();
+      expect(cfn.timeout).toBeUndefined();
+      c.bindRunCode(new lambda.Function(stack, 'Ok', { ...inline, role: new iam.Role(stack, 'OkRole', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') }) }));
+    });
+  });
+
   test('the basic and VPC access policies are removed from a bound role; other managed policies stay', () => {
     const s = synth({ standalone: false }, (stack, c) => {
       const role = new iam.Role(stack, 'Mixed', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
@@ -820,13 +833,16 @@ describe('log groups the backends list (ADR-0030)', () => {
     [{ prefixes: [], names: ['/aws/lambda'] }, '/aws/lambda'],
     [{ prefixes: [''], names: [] }, ''],
     [{ prefixes: [], names: ['/aws/x/'] }, '/aws/x/'],
+    [{ prefixes: ['/aws'], names: [] }, '/aws'],
+    [{ prefixes: ['/aws/lambda/S'], names: [] }, '/aws/lambda/S'],
+    [{ prefixes: ['a'], names: [] }, 'a'],
   ])('%j is refused', (value, shown) => {
     logCleanupOverride.value = value;
     expect(() => synth()).toThrow(new RegExp(`"${shown}".*whole service`));
   });
 
   test('a narrow name and prefix are accepted', () => {
-    logCleanupOverride.value = { prefixes: ['/aws/bedrock-agentcore/runtimes/Rt-'], names: ['/aws/lambda-microvms/image-1'] };
+    logCleanupOverride.value = { prefixes: ['/aws/bedrock-agentcore/runtimes/Runtime_one-'], names: ['/aws/lambda-microvms/image-1'] };
     expect(() => synth()).not.toThrow();
   });
 });

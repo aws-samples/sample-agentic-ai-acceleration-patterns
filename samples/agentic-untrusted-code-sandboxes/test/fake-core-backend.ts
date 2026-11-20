@@ -18,10 +18,10 @@ import type { BackendName } from '../src/backend';
 import type { BackendConstruct, BackendContext, BackendFactory, NamedService, SandboxEndpoint } from '../src/backend-construct';
 import { NAME_RULES } from '../src/names';
 
-/** Every name the fakes asked for, by construct path of the backend, for the name tests. */
 /** A test sets this to make every fake backend list these log groups. */
 export const logCleanupOverride: { value?: { prefixes: string[]; names: string[] } } = {};
 
+/** Every name the fakes asked for, by construct path of the backend, for the name tests. */
 export const requestedNames: { path: string; service: NamedService; name: string }[] = [];
 
 const ENDPOINTS: Record<BackendName, SandboxEndpoint[]> = {
