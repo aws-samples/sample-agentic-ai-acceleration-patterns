@@ -94,6 +94,11 @@ export const KNOWN_WILDCARDS: readonly KnownWildcard[] = [
     reason: 'The wildcard is the object name under the caller\'s own prefix, resolved from the TenantId session tag; the role reaches no other prefix (spec 3.6, C-5, ADR-0030).',
   },
   {
+    resource: /\/sessions\/<aws:AgentCoreRuntimeSourceSid>\/\*$/,
+    actions: /^s3:(GetObject|PutObject)$/,
+    reason: 'The wildcard is the object name under the one prefix the platform derives from the session, so a session reaches only its own prefix (ADR-0007, spec 3.6 AgentCore runtime role).',
+  },
+  {
     resource: /:network-interface\/\*$/,
     actions: /^ec2:(CreateNetworkInterface|CreateTags)$/,
     reason: 'The connector operator role creates and tags network interfaces, which have no id before creation; its subnet and security group resources are the sample\'s and CreateTags needs the managed-operator condition (spec 3.6 MicroVM connector operator role).',

@@ -779,6 +779,9 @@ describe('known wildcards (ADR-0030)', () => {
     ['arn:<AWS::Partition>:ec2:<AWS::Region>:<AWS::AccountId>:network-interface/*', ['ec2:DeleteNetworkInterface'], false],
     ['<Bucket.Arn>/inputs/<aws:PrincipalTag/TenantId>/*', ['s3:GetObject'], true],
     ['<Bucket.Arn>/inputs/<aws:PrincipalTag/TenantId>/*', ['s3:DeleteObject'], false],
+    ['<Bucket.Arn>/sessions/<aws:AgentCoreRuntimeSourceSid>/*', ['s3:GetObject', 's3:PutObject'], true],
+    ['<Bucket.Arn>/sessions/<aws:AgentCoreRuntimeSourceSid>/*', ['s3:DeleteObject'], false],
+    ['<Bucket.Arn>/sessions/*', ['s3:GetObject'], false],
     ['<Bucket.Arn>/*', ['s3:GetObject'], false],
     ['<Bucket.Arn>/other/*', ['s3:GetObject'], false],
   ])('%s with %p is %s', (resource, actions, accepted) => {
