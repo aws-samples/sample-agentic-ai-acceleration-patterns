@@ -84,6 +84,13 @@ export interface BackendConstruct {
   drainStatements(): iam.PolicyStatement[];
   /** Sandbox endpoints this backend needs (spec §3.7 "Present when"). */
   endpoints(): SandboxEndpoint[];
+  /**
+   * Statements this backend needs in the policy of one sandbox endpoint (spec §3.7 "Policy allows").
+   * The core merges the statements of every backend that asks for the endpoint, so a shared endpoint
+   * (Logs) carries each backend's resources. Each statement names a principal of `*` and only this
+   * backend's own repository, bucket prefix or log groups. Optional: a backend without it adds none.
+   */
+  endpointStatements?(endpoint: SandboxEndpoint): iam.PolicyStatement[];
   /** Security groups the endpoints admit on 443 (spec §3.7 "Endpoints" row). */
   endpointClients(): ec2.ISecurityGroup[];
   /** Function environment for the tool, reaper, drain and offboard functions; read by the run-time backend class. */
