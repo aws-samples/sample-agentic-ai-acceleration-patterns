@@ -355,6 +355,25 @@ class HttpTest(unittest.TestCase):
             stop(srv)
 
 
+    def test_nitro_tls_refuses_a_client_that_offers_only_tls_1_2(self):
+        from runner.runner import tls_context
+        sb, _ = make("nitro")
+        context, sb.fingerprint = tls_context()
+        port = free_port()
+        srv = server.serve(sb, port, "jobs", host="127.0.0.1", tls=context)
+        try:
+            client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client.check_hostname = False
+            client.verify_mode = ssl.CERT_NONE
+            client.maximum_version = ssl.TLSVersion.TLSv1_2
+            with self.assertRaises(ssl.SSLError):
+                socket.create_connection(("127.0.0.1", port), timeout=5).close()
+                with client.wrap_socket(socket.create_connection(("127.0.0.1", port), timeout=5)):
+                    pass
+        finally:
+            stop(srv)
+
+
 class LimitsTest(unittest.TestCase):
     def raw(self, port, data, read=True):
         with socket.create_connection(("127.0.0.1", port), timeout=5) as s:

@@ -67,3 +67,4 @@
 | [0061](0061-write-down-the-run-order-and-the-step-by-instance-by-backend-matrix.md) | Write down the run order and the step by instance by backend matrix | Proposed | 2026-11-20 |
 | [0062](0062-check-leftovers-read-only-against-what-the-run-owned.md) | Check leftovers read-only against what the run owned | Proposed | 2026-11-20 |
 | [0063](0063-bound-the-answer-by-its-json-size-and-the-input-by-the-runner-limit.md) | Bound the answer by its JSON size and the input by the runner's limit | Proposed | 2026-11-20 |
+| [0064](0064-read-an-unframed-request-as-empty-and-bound-the-work-after-a-job.md) | Read an unframed request as empty and bound the work after a job | Proposed | 2026-11-20 |

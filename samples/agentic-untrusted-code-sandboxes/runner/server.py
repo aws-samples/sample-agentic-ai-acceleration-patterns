@@ -93,7 +93,7 @@ class Sandbox:
             except Exception as e:  # the hook answers, then the runner exits, so the MicroVM ends at once
                 log("claim_failed", error=type(e).__name__)
                 self.executor = None
-                self.boot_failed.set()
+                self.boot_failed.set()  # the hook still answers 200: the platform learns of the failure from `ready` (503) and the exit
             self.nonce_hash, self.hook_tenant = nonce_hash, tenant
             log("hook_accepted")
             return 200, {}

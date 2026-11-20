@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-20
+- Amended by: ADR-0064
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -74,6 +75,4 @@ The tool sees only the refusal codes the protocol names. A change to any
 point here that the tool must know about goes through `runner/PROTOCOL.md`
 by a maintainer decision.
 
-Note 2026-11-20: a request with neither `Content-Length` nor chunked encoding has an empty body (RFC 9112 section 6.3), not a broken one. The hook port answers it, because the MicroVM platform sends `suspend` bodiless and a 400 ended the sandbox instead of suspending it. The job port still refuses an empty body as a malformed job.
-
-Note 2026-11-20: amended by the round 1 review (N-1, N-5, M-2). The runner's TLS on `nitro` is TLS 1.3 only, as ADR-0047 requires. On `microvm`, a failed claim sets the same flag as a forced failed start, so the runner exits and the MicroVM start fails at once instead of waiting out its 20 s cap; jobs until then answer `tool_failed`. After a job ends, the kill, the sweep and the thread joins share one budget of 3 s.
+Note 2026-11-20: amended by ADR-0064. A request with no framing has an empty body, which the hook port answers and the job port refuses; a failed claim on `microvm` ends the start; the runner's TLS on `nitro` is TLS 1.3 only, not "TLS 1.2 and later"; the work after a job shares one 3 s budget.
