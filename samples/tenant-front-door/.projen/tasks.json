@@ -189,6 +189,24 @@
         }
       ]
     },
+    "integ": {
+      "name": "integ",
+      "description": "Run the integration test in single mode across the current account and $TFD_INTEG_ACCOUNT_B (hours; see integration-test.md)",
+      "steps": [
+        {
+          "exec": "bash scripts/integ.sh single"
+        }
+      ]
+    },
+    "integ:host": {
+      "name": "integ:host",
+      "description": "Run the integration test in host mode (integration-test.md)",
+      "steps": [
+        {
+          "exec": "bash scripts/integ.sh host"
+        }
+      ]
+    },
     "package": {
       "name": "package",
       "description": "Creates the distribution package"
