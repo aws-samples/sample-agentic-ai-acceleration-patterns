@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-16
-- Amended by: ADR-0017 (Proposed, takes effect on acceptance)
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -96,3 +96,6 @@ that runs the hook. A delete from the global hook role will read the
 record too (`DELETING` or missing). The registrar will also read
 `GetTenant` for the display name, in place of the hook's `TENANT_NAME`,
 which makes three of the control plane's reads, not two.
+
+Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
+effect.

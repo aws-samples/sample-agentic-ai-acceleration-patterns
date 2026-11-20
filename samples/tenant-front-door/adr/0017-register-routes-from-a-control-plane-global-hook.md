@@ -2,8 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0017: Register routes from a control-plane global hook
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
+- Supersedes: ADR-0013
 - Amends: ADR-0002, ADR-0003, ADR-0012, ADR-0014, ADR-0015
 - Deciders: Dave Roberts (PSA)
 
@@ -23,7 +24,7 @@ lifted. The placement check proves which account is calling. It cannot
 prove that the vendor's script is the caller.
 
 The control plane's global hooks (control-plane R-39 to R-46,
-control-plane ADR-0044, on `main` and Proposed) run vendor code on cell and deployment
+control-plane ADR-0044) run vendor code on cell and deployment
 events: `PRE` before the script, `POST` after it succeeded, global hooks
 wrapping application hooks. They run in CodeBuild in the control plane's
 account under `<fleet>-global-hook`, a role no cell account holds or
@@ -77,8 +78,8 @@ admitted, so a tenant cannot call the registrar at all. The registrar
 keeps every check. The route is written by the operation itself, so a
 failed registration fails the create or update, and `ACTIVE` means
 routed. A `PRE` delete hook removes the route before the delete script
-tears down what it points at. Cons: depends on control-plane ADR-0044,
-still Proposed. Each cell and deployment event runs one more CodeBuild
+tears down what it points at. Cons: depends on control-plane ADR-0044.
+Each cell and deployment event runs one more CodeBuild
 build: its start time plus the 45 s propagation wait. The front door
 takes two of the control plane's five global hook slots. The global
 hook role is shared by every global hook, so the registrar cannot trust
@@ -97,7 +98,7 @@ all.
 
 ## Decision
 
-Option 4; once accepted, it supersedes ADR-0013. `hooks/route-hook.sh` is registered
+Option 4. It supersedes ADR-0013. `hooks/route-hook.sh` is registered
 by `register-hooks.sh` with `PutHook` as two global hooks, because a
 hook has one phase: `front-door-post`, `POST` on `CELL_CREATE`,
 `CELL_UPDATE`, `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE`, puts the cell
@@ -234,10 +235,25 @@ printing the status and the response body.
   policy (spec §10, the steps that call the registrar from a provisioning
   role). Only the test registers the edge account as tenant-owned; a
   deployment's edge account is vendor-owned (spec §6.1).
-- This record stays Proposed, and ADR-0013 Accepted, until
-  control-plane ADR-0044 (on `main`, Proposed) is accepted. On
-  acceptance this record supersedes ADR-0013.
-- Revisit when control-plane ADR-0044 changes before it is accepted
-  (spec Q-5), or when the control plane offers a role per global hook
+- This record supersedes ADR-0013.
+- Revisit when the control plane's hook contract changes (control-plane
+  R-39 to R-46), or when the control plane offers a role per global hook
   (its §11 seam), which would let the registrar admit the route hook
   alone and close the residual above.
+
+Note 2026-11-20: accepted with control-plane ADR-0044 and ADR-0045,
+which are on `main`. Checked against the merged control plane: `POST`
+hooks run only after a successful script, `PRE` delete hooks get three
+attempts 60 and 120 seconds apart within a budget and are then skipped,
+every global hook runs under `<fleet>-global-hook` (no role path), a
+`POST` hook gets `SCRIPT_OUTPUTS` in compact form, and
+`globalHookManagedPolicyArns` takes customer-managed policies of the
+control plane's own account and partition. The build differs from what
+this record assumed in four points: `fleet` follows the narrowed
+`fleetName` pattern `[a-z0-9][a-z0-9-]{0,31}`; the hook also checks
+`HOOK_SCOPE` and its registration before it acts; the hooks are
+registered with `timeoutMinutes` 10, inside the control plane's 5 to
+30; and the hook parameter is one JSON document written from a
+`registrarUrl` input after the main stack deploys (ADR-0027). The
+record operations ADR-0045 makes asynchronous (202) run no front door
+hook, because the two hooks name only cell and deployment events.

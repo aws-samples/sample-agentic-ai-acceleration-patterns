@@ -20,7 +20,10 @@ import { TenantFrontDoor, TenantFrontDoorProps } from './index';
  *     --context issuer='{"clientId":"...","scopes":"openid","cognitoDomain":"https://<domain>"}'
  *
  * Every input is validated at synth (spec §3.6). The stacks deploy in order:
- * edge, main, edge logging (ADR-0010).
+ * edge, main, edge logging (ADR-0010). Then, with
+ * `--context registrarUrl=<the edge parameter's registrarUrl>`, the app adds
+ * `TenantFrontDoor-route-hook-access` in the control plane's account, which
+ * the deployer deploys with that account's credentials (spec §3.1, §6.1).
  */
 const app = new App();
 
@@ -46,6 +49,7 @@ const props: TenantFrontDoorProps = {
   ipRequestsPer5Min: optional('ipRequestsPer5Min', true),
   reportingEndpoint: optional('reportingEndpoint'),
   alarmTopicArn: optional('alarmTopicArn'),
+  registrarUrl: optional('registrarUrl'),
   // Seams to the router (build slice S1) and the registrar (S3): their
   // defaults are src/router/router.js and src/registrar/registrar.function.ts.
   routerSourcePath: optional('routerSourcePath'),

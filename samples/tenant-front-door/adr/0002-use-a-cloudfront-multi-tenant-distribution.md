@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-18
-- Amended by: ADR-0017 (Proposed, takes effect on acceptance), ADR-0018
+- Amended by: ADR-0017, ADR-0018
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -129,3 +129,6 @@ registrar issued for that tenant and that domain and stored next to
 repeat that finds this tenant's token goes on to the certificate step
 above. A former holder's validation record therefore no longer routes
 a domain.
+
+Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
+effect.

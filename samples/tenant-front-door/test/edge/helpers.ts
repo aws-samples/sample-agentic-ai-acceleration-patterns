@@ -57,6 +57,8 @@ export interface Synth {
   readonly edge: Template;
   readonly main: Template;
   readonly logging: Template;
+  /** Present when `registrarUrl` is set. */
+  readonly routeHook?: Template;
 }
 
 /** Synthesises the three stacks, bundling skipped, optionally with cdk-nag. */
@@ -71,6 +73,7 @@ export function synth(props: TenantFrontDoorProps = BASE_PROPS, withNag = false)
     edge: Template.fromStack(frontDoor.edgeStack),
     main: Template.fromStack(frontDoor.mainStack),
     logging: Template.fromStack(frontDoor.edgeLoggingStack),
+    routeHook: frontDoor.routeHookAccessStack === undefined ? undefined : Template.fromStack(frontDoor.routeHookAccessStack),
   };
 }
 

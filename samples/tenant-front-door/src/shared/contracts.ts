@@ -137,6 +137,13 @@ export const PARAM_FRONT_DOOR_CUSTOM_DOMAIN = 'PARAM_FRONT_DOOR_CUSTOM_DOMAIN';
 export const HOOK_POST = 'front-door-post';
 export const HOOK_PRE = 'front-door-pre';
 
+/** The control-plane events each hook runs on (§3.2; control-plane R-45). */
+export const HOOK_POST_EVENTS: readonly string[] = ['CELL_CREATE', 'CELL_UPDATE', 'DEPLOYMENT_CREATE', 'DEPLOYMENT_UPDATE'];
+export const HOOK_PRE_EVENTS: readonly string[] = ['CELL_DELETE', 'DEPLOYMENT_DELETE'];
+
+/** The route hook's path in this repository, the `script` of both hooks (§5.2). */
+export const ROUTE_HOOK_SCRIPT = 'samples/tenant-front-door/hooks/route-hook.sh';
+
 /** The route hook's bound on waiting for propagation after the registrar answers (§4.2). */
 export const ROUTE_PROPAGATION_WAIT_SECONDS = 45;
 
@@ -156,6 +163,13 @@ export function paramCellCopy(applicationId: string): string {
 export function paramHook(applicationId: string): string {
   return `/application-plane/applications/${applicationId}/shared/front-door-hook`;
 }
+
+/**
+ * A registrar stage URL, `https://<api id>.execute-api.<region>.<suffix>/<stage>/`,
+ * the form `RestApi.url` takes: the `registrarUrl` of `PARAM_EDGE` and of
+ * `paramHook`. Groups: the API id, the Region, the stage.
+ */
+export const REGISTRAR_URL = /^https:\/\/([a-z0-9]{10})\.execute-api\.([a-z0-9-]+)\.amazonaws\.com(?:\.cn)?\/([A-Za-z0-9_-]{1,128})\/$/;
 
 /** The value of `PARAM_EDGE`: one JSON document. */
 export interface EdgeParameter {
@@ -177,9 +191,17 @@ export interface EdgeParameter {
  */
 export type CellCopyParameter = string;
 
-/** The value of `paramHook`: what the route hook needs. */
+/**
+ * The value of `paramHook`: one JSON document, what the route hook needs.
+ * `appDomain` and `addressing` let it poll a tenant's host in `host` mode
+ * (§4.2).
+ */
 export interface HookParameter {
+  readonly version: 1;
+  /** The registrar's stage URL, ending in `/`. */
   readonly registrarUrl: string;
+  readonly appDomain: string;
+  readonly addressing: Addressing;
 }
 
 /**

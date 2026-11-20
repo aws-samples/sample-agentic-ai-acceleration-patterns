@@ -4,13 +4,16 @@ SPDX-License-Identifier: MIT-0
 -->
 # Script Conventions
 
-Conventions for the shell scripts in this directory. `smoke.sh` deploys the
-front door with one demo cell in a test account and checks the edge, the
-cell and the registrar live, before the control plane's hooks exist
-(design/spikes.md, Smoke run). What a script prints lands in the
-operator's terminal and, in CI, the job log. The scripts handle access
-tokens, temporary passwords and SigV4 credentials, so none of those ever
-reach output.
+Conventions for the shell scripts in this directory and for the route
+hook in `../hooks/`. `smoke.sh` and `smoke-domains.sh` deploy the front
+door with one demo cell and a stand-in control plane in a test account,
+and check the edge, the cell and the registrar live without the control
+plane's hooks (design/spikes.md, Smoke run). `register-hooks.sh` puts or
+deletes the front door's two global hooks on the control plane (spec
+§5.2). What a script prints lands in the operator's terminal and, in CI,
+the job log; what the route hook prints lands in the control plane's
+hook build log. The scripts handle access tokens, temporary passwords and
+SigV4 credentials, so none of those ever reach output.
 
 ## Log hygiene
 
@@ -57,8 +60,26 @@ published parameters (`/application-plane/shared/identity/*`) and its
 platform API with SigV4: `CreateTenant`, `IssueToken`, `DeleteTenant`. It
 never changes or removes the pool itself.
 
+## The route hook
+
+`hooks/route-hook.sh` is a control-plane hook script, so it also follows
+the hook section of the control plane's
+[`scripts/CONVENTIONS.md`](../../control-plane/scripts/CONVENTIONS.md):
+it checks `EVENT`, `PHASE` and `HOOK_SCOPE` first, takes ids only from
+the hook environment, treats `SCRIPT_OUTPUTS` as untrusted, logs ids and
+statuses and never an output value, and exits non-zero on any failure.
+Its credentials reach `curl` through a mode-0600 `-K` file in its own
+`mktemp -d` directory, which the `EXIT` trap removes.
+
+## Tests
+
+`test/hooks/` runs `hooks/route-hook.sh` and `register-hooks.sh` with
+bash against stub `curl`, `aws` and `sleep` commands placed first on
+`PATH`. A change to either script keeps those tests passing. The smoke
+scripts are checked by running them live.
+
 ## Scope
 
-These conventions apply to every script in this directory and any script
-added later. They are the local-script counterpart of
-`docs/sample-standard.md` §4.4.
+These conventions apply to every script in this directory, the route
+hook, and any script added later. They are the local-script counterpart
+of `docs/sample-standard.md` §4.4.

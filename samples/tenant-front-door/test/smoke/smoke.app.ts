@@ -3,8 +3,8 @@
 
 /**
  * Smoke-test fixtures for `scripts/smoke.sh` and `scripts/smoke-domains.sh`:
- * the parts of a deployment the front door needs before the control
- * plane's hooks exist (spec §10, without the control plane sample).
+ * the parts of a deployment the front door needs to run without the
+ * control plane sample and its hooks (spec §10).
  *
  * - `TfdSmoke-support`: the edge operator role the front door names as
  *   `edgeOperatorRoleArn`, and a role named like the control plane's
