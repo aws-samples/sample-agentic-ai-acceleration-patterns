@@ -770,7 +770,9 @@ build's record in the cell account names the tenant and the cell. The driver is
 [`test/stress/`](./test/stress/), the scripts
 [`scripts/stress/`](./scripts/stress/slice.sh); the manifest and the source zip
 stay outside the repository and hold no token or password. `--remove-fixtures`
-also deregisters the accounts and the application and destroys both stacks.
+also deregisters the accounts and the application and destroys both stacks. A
+seeded tenant left `CREATE_FAILED` stops every later seed with that status: run
+`slice.sh teardown --fixtures`, which deletes it, then seed again.
 
 The driver keeps every wave of creates and deletes at the build limit:
 CodeBuild refuses a build over a project's limit rather than queueing it, and
@@ -1322,10 +1324,11 @@ application's cells (threat T5, the highest-consequence open item).
   the two stacks and does not count them; delete them after the run, they
   hold test output only. The API access log group above can reappear the
   same way. Each `<STRESS_PREFIX>-control-plane` also leaves its REST API's
-  CloudWatch role (`<STRESS_PREFIX>-control-plane-ApiCloudWatchRole...`),
-  which the CDK retains on destroy because the account's API Gateway setting
-  may still point at it; `teardown --fixtures` lists them and does not count
-  them, whatever the case of `STRESS_PREFIX`. Delete one only when the account
+  CloudWatch role (`<STRESS_PREFIX>-control-plane-ApiCloudWatchRole...`,
+  shortened by CloudFormation for a long prefix), which the CDK retains on
+  destroy because the account's API Gateway setting may still point at it.
+  `teardown --fixtures` reads its name from the stack before the destroy,
+  then lists it and does not count it. Delete one only when the account
   setting names another role.
 - **Builds over the concurrent build limit are refused, not queued.**
   CodeBuild refuses a `StartBuild` above a project's `concurrentBuildLimit`

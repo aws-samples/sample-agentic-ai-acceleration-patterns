@@ -200,6 +200,9 @@ case "$verb" in
     fixtures=0
     [ "${1:-}" != "--fixtures" ] || fixtures=1
     status=0
+    mkdir -p -m 700 "$RUN_HOME"
+    cw_roles="${RUN_HOME}/cloudwatch-roles"
+    touch "$cw_roles"
     onboarding="$(jq -er .onboarding <<< "$STRESS_TIER_JSON")"
     if ! stack_exists "$CP_STACK"; then
       echo "teardown: no ${CP_STACK}; nothing registered to sweep"
@@ -219,6 +222,13 @@ case "$verb" in
       if [ "$status" -ne 0 ]; then
         echo "teardown: cells or registrations are left; the stacks stay so a rerun can reach them" >&2
       else
+        # The REST API's CloudWatch role is retained on destroy. Its name is read from the
+        # stack first, since CloudFormation shortens the stack part of a long role name.
+        if stack_exists "$CP_STACK"; then
+          aws cloudformation describe-stack-resources --stack-name "$CP_STACK" \
+            --query "StackResources[?ResourceType=='AWS::IAM::Role' && contains(LogicalResourceId, 'ApiCloudWatchRole')].PhysicalResourceId" \
+            --output text | tr '\t' '\n' | grep -v -e '^$' -e '^None$' > "$cw_roles" || true
+        fi
         for stack in "$CP_STACK" "$SETUP_STACK"; do
           if stack_exists "$stack"; then
             echo "teardown: destroying ${stack}"
@@ -237,14 +247,13 @@ case "$verb" in
         [ "$status" -ne 0 ] || rm -f "${RUN_HOME}/control-plane.json" "${RUN_HOME}"/source-*.zip
       fi
       # What of the fleet is left in the platform account: roles, projects, the workflow
-      # and log groups named after it (the stacks own them). The REST API's CloudWatch role
-      # is retained on destroy and listed below, not counted: with an all-lower-case prefix
-      # its name (after the stack, in the prefix's own case) also starts with ${FLEET}-.
-      cw_role="${CP_STACK}-ApiCloudWatchRole"
-      left="$(aws iam list-roles --query "Roles[?starts_with(RoleName, '${FLEET}-') && !starts_with(RoleName, '${cw_role}')].RoleName" --output text)"
+      # and log groups named after it (the stacks own them). The REST API's CloudWatch roles
+      # read from the stack before its destroy are retained, so they are listed below, not
+      # counted: with an all-lower-case prefix their names also start with ${FLEET}-.
+      left="$(aws iam list-roles --query "Roles[?starts_with(RoleName, '${FLEET}-')].RoleName" --output text)"
       left+=" $(aws codebuild list-projects --query "projects[?starts_with(@, '${FLEET}-')]" --output text)"
       left+=" $(aws stepfunctions list-state-machines --query "stateMachines[?starts_with(name, '${FLEET}-')].name" --output text)"
-      left="$(tr '\t ' '\n\n' <<< "$left" | grep -v -e '^$' -e '^None$' || true)"
+      left="$(tr '\t ' '\n\n' <<< "$left" | grep -v -e '^$' -e '^None$' | grep -vxF -f "$cw_roles" || true)"
       if [ -n "$left" ]; then
         echo "teardown: left in the platform account: $(printf '%s\n' "$left" | wc -l) roles, projects or state machines named ${FLEET}-*" >&2
         status=1
@@ -256,10 +265,15 @@ case "$verb" in
       fi
       # The REST API's CloudWatch role is retained on destroy (the CDK default), since the
       # account's API Gateway setting may still point at it.
-      kept="$(aws iam list-roles --query "Roles[?starts_with(RoleName, '${cw_role}')].RoleName" --output text | tr '\t' '\n' | grep -v -e '^$' -e '^None$' || true)"
+      kept=""
+      while read -r role; do
+        if aws iam get-role --role-name "$role" > /dev/null 2>&1; then
+          kept+="${role}"$'\n'
+        fi
+      done < "$cw_roles"
       if [ -n "$kept" ]; then
         echo "teardown: API Gateway CloudWatch roles the stack retains (listed, not counted; see README.md, Known issues):"
-        printf '  %s\n' $kept
+        printf '%s' "$kept" | sed 's/^/  /'
       fi
     fi
     # Cells go with the seeded fleet; at a fixture tier without --fixtures they stay.

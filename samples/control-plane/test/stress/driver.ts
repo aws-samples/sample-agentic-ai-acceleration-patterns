@@ -44,7 +44,7 @@ import {
 } from './plan';
 import { type Identity, Recorder, type ResultRecordJson } from './recorder';
 import { SCENARIOS, type ScenarioEnv } from './scenarios';
-import { awaitTenantsActive, existingTenants, pollRecord } from './seed';
+import { awaitTenantsActive, deleteTenants, existingTenants, pollRecord } from './seed';
 
 const SLICE = 'control-plane';
 const log = (line: string): void => {
@@ -392,6 +392,8 @@ async function collect(): Promise<number> {
  * Removes the run's deployments, then, with `seeded`, the seeded ones and every empty cell
  * of the application (their delete scripts destroy the cell stacks), then the tenants that
  * no longer have a deployment. Without `seeded` the seeded fleet stays (a fixture tier).
+ * A tenant leaves the manifest only once it is gone (`deleteTenants`); one that is kept
+ * fails the sweep, so the teardown keeps the stacks a rerun needs to delete it.
  */
 async function sweep(seeded: boolean): Promise<number> {
   const c = await connect();
@@ -434,15 +436,12 @@ async function sweep(seeded: boolean): Promise<number> {
   if (m !== undefined) {
     const after = await deploymentsOf(f);
     const tenants = (seeded ? allTenants(m) : transient).filter((t) => !after.has(t));
-    let removed = 0;
-    for (const t of tenants) {
-      const r = await f.api.call('delete-tenant', 'DELETE', `/tenants/${t}`, t, undefined, [404]);
-      if (r.status === 202 || r.status === 404) removed += 1;
-      else status = 1;
-    }
-    const keep = (ids: readonly string[]): string[] => ids.filter((t) => !tenants.includes(t));
+    const { gone, kept } = await deleteTenants(f.api, tenants);
+    const keep = (ids: readonly string[]): string[] => ids.filter((t) => !gone.includes(t));
     writeManifest(manifestFile(), { ...m, seeded: keep(m.seeded), churn: keep(m.churn), extra: keep(m.extra) });
-    log(`sweep: ${targets.length} deployments and ${removed} tenants removed`);
+    for (const k of kept) log(`sweep: tenant ${k.id} stays in the manifest: ${k.reason}`);
+    if (kept.length > 0) status = 1;
+    log(`sweep: ${targets.length} deployments and ${gone.length} tenants removed`);
   }
   return status;
 }

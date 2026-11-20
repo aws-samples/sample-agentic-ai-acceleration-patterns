@@ -26,6 +26,11 @@ const CELL = { cellId: 'C1', applicationId: 'stress', accountId: '2', status: 'A
 
 const ok = (status: number, body: any = {}, errorType?: string): CallResult => ({ status, body, errorType, seconds: 0.01 });
 
+// The control plane's two UpdateTenant conflicts (updateConflict, src/tenant/tenant.ts).
+const UPDATING = 'Tenant T1 is UPDATING; retry the request once it has finished';
+const DELETE_FAILED =
+  'Tenant T1 is DELETE_FAILED; it can be re-applied from ACTIVE or UPDATE_FAILED only, so a retry cannot succeed and the remedy is a delete';
+
 /** A fake fleet of one seeded tenant in one cell; `onUpdate` answers each UpdateTenant. */
 function fakeEnv(
   onUpdate: () => CallResult,
@@ -71,10 +76,17 @@ function fakeEnv(
 describe('readRate', () => {
   it('checks every UpdateTenant write, and takes a ConflictError on a tenant still UPDATING', async () => {
     let n = 0;
-    const { s, updates } = fakeEnv(() => (++n % 2 === 0 ? ok(409, { message: 'in flight' }, 'ConflictError') : ok(202)));
+    const { s, updates } = fakeEnv(() => (++n % 2 === 0 ? ok(409, { message: UPDATING }, 'ConflictError') : ok(202)));
     await readRate(s);
     expect(updates()).toBeGreaterThan(1);
     expect(s.rec.findings).toEqual([]);
+  });
+
+  it('makes a finding for a ConflictError on a tenant a retry cannot clear', async () => {
+    const { s, updates } = fakeEnv(() => ok(409, { message: DELETE_FAILED }, 'ConflictError'));
+    await readRate(s);
+    expect(updates()).toBeGreaterThan(0);
+    expect(s.rec.findings).toContain('UpdateTenant: HTTP 409 (ConflictError), expected 202');
   });
 
   it('makes a finding for a refused write, and one when no write was accepted', async () => {

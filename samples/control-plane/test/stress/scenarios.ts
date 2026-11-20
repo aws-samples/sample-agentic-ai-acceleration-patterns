@@ -200,6 +200,16 @@ export async function placementRace(s: ScenarioEnv): Promise<void> {
 }
 
 /**
+ * Whether an UpdateTenant answer is the 409 for a tenant still in flight (`CREATING` or
+ * `UPDATING`, usually from the scenario's last write), which ends in a state the update
+ * admits. The control plane's message names the status (`updateConflict`,
+ * src/tenant/tenant.ts); its 409 for `CREATE_FAILED`, `DELETING` or `DELETE_FAILED` says a
+ * retry cannot succeed, and the scenario's write did not run because the tenant is broken.
+ */
+const inFlightConflict = (r: CallResult): boolean =>
+  r.status === 409 && r.errorType === 'ConflictError' && / is (CREATING|UPDATING);/.test(String(r.body?.message ?? ''));
+
+/**
  * Read rate under writes (spec §5.2): ListDeployments by tenant, GetDeployment and ListCells
  * at the tier's steady rate for the scenario length, while the churn tenants are placed and
  * each seeded tenant's record is updated. Every read is checked: a tenant's list holds only
@@ -251,7 +261,8 @@ export async function readRate(s: ScenarioEnv): Promise<void> {
       })(),
     );
     // A record write every tenth tick: UpdateTenant runs the record event (no build). A
-    // ConflictError (409) is the tenant still UPDATING from its last write: expected, no refusal.
+    // ConflictError (409) on a tenant in flight is expected, no refusal; any other 409 is a
+    // finding below (inFlightConflict).
     if (i % 10 === 0) {
       const w = tenants[writeIndex % tenants.length];
       writeIndex += 1;
@@ -261,9 +272,7 @@ export async function readRate(s: ScenarioEnv): Promise<void> {
   }
   await Promise.all(inflight);
   const written = await Promise.all(updates);
-  for (const r of written) {
-    if (!(r.status === 409 && r.errorType === 'ConflictError')) expectStatus(s, r, 202, 'UpdateTenant');
-  }
+  for (const r of written) if (!inFlightConflict(r)) expectStatus(s, r, 202, 'UpdateTenant');
   const landed = written.filter((r) => r.status === 202).length;
   if (landed === 0) s.rec.finding(`no UpdateTenant write was accepted (${written.length} sent): the reads ran under no writes`);
   const results = await writes;
