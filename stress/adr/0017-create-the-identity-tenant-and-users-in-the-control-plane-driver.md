@@ -152,17 +152,21 @@ requests a second (tenant-identity ADR-0037).
 The first platform run at `small` onboards 20 tenants, and builds that start
 together finish close together, so the driver can have up to 20
 `CreateTenant` calls (40 `CreateGroup` calls) to make within seconds.
-Against 15 requests a second that can throttle, and the driver paces its
-calls under the 10 requests a second of the stage. A throttle shows in
-PS-1's time, which is a result, not an error. Spec §4.4 lists the draw in
-the `control-plane` column.
+Against 15 requests a second that can throttle. The platform API has a
+10 requests a second stage throttle, but Cognito's group quota gives out
+first: a seed at 8 requests a second answered 500 on most calls
+(tenant-identity ADR-0037). So the driver paces `CreateTenant` and
+`CreateUser` at about four calls a second, as the `tenant-identity` seed
+does (tenant-identity ADR-0042). A throttle that remains shows in PS-1's
+time, which is a result, not an error. Spec §4.4 lists the draw in the
+`control-plane` column.
 
 A throttled `CreateTenant` answers 503, and it may have created the tenant
 without its admin (tenant-identity ADR-0037). A blind repeat then answers
 409 and the tenant stays without an admin, which the runtime-isolation slice
-refuses as `no-user`. So on a 503 or a 409 the driver reads the tenant and
-calls `CreateUser` with `firstAdmin` when the admin is missing, and repeats
-the other calls with backoff.
+refuses as `no-user`. So on a 503 or a 409 the driver claims the first-admin
+slot with `CreateUser` and `firstAdmin`, where a 409 means the admin exists,
+and repeats the other calls with backoff.
 
 The stress test no longer exercises the sample's own mount, so a defect in
 `create.sh` or in `PlatformInvokePolicy` is not found by it. The sample's
@@ -180,8 +184,8 @@ W-9 implements: the driver's identity calls after each tenant's deployment
 is `ACTIVE`, with the scope and e-mail address above; `identity[]` in
 `control-plane.json`, read by the runtime-isolation slice for control-plane
 tenants; `execute-api:Invoke` on the platform API for the driver's session;
-pacing under the stage throttle, retry with backoff, and the rule above for
-a half-created tenant; the Cognito draw in the slice's `budget`; and the
+pacing at about four calls a second, retry with backoff, and the rule above
+for a half-created tenant; the Cognito draw in the slice's `budget`; and the
 cleanup, in the `control-plane` `teardown`, of the identity tenants of every
 deployment of the run that has one: the seeded tenants of `small` and
 `medium` and, at `large`, the churn tenants PS-1 is timed on, which PS-5
