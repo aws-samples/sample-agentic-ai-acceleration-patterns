@@ -294,6 +294,17 @@ export class NitroBackendResources extends Construct implements BackendConstruct
     return ['logs'];
   }
 
+  /** The Logs endpoint admits writes to the task log group only (spec §3.7 "Policy allows"). */
+  public endpointStatements(endpoint: SandboxEndpoint): iam.PolicyStatement[] {
+    if (endpoint !== 'logs') return [];
+    return [new iam.PolicyStatement({
+      sid: 'LogsNitroTaskGroup',
+      principals: [new iam.AnyPrincipal()],
+      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [this.taskLogGroup.logGroupArn],
+    })];
+  }
+
   public endpointClients(): ec2.ISecurityGroup[] {
     return [this.taskSecurityGroup, this.instanceSecurityGroup];
   }

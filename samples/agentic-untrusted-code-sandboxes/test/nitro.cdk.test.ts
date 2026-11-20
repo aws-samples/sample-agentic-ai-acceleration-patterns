@@ -532,6 +532,15 @@ describe('security groups (spec §3.7)', () => {
 });
 
 describe('what the core consumes', () => {
+  test('the Logs endpoint statement admits the task log group only, and no other endpoint gets one', () => {
+    const { stack, backend } = setup();
+    const [s] = statements(stack, backend.endpointStatements('logs'));
+    expect(s.Action).toEqual(['logs:CreateLogStream', 'logs:PutLogEvents']);
+    expect(s.Resource).toEqual([flat(stack, backend.taskLogGroup.logGroupArn)]);
+    expect(stack.resolve(backend.endpointStatements('logs')[0].toStatementJson().Principal)).toEqual({ AWS: '*' });
+    for (const other of ['s3-gateway', 'ecr-api', 'ecr-dkr'] as const) expect(backend.endpointStatements(other)).toEqual([]);
+  });
+
   test('endpoints, clients, outputs, log cleanup and drain order', () => {
     const { stack, backend } = setup();
     expect(backend.name).toBe('nitro');
