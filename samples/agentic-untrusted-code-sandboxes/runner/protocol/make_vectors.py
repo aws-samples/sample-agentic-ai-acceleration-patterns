@@ -1,0 +1,152 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+"""Write runner/protocol/vectors.json, the wire-protocol test vectors.
+
+This is the reference computation of every value runner/PROTOCOL.md pins.
+It uses only the Python standard library and shares no code with the
+TypeScript side (src/protocol.ts), so the TypeScript unit test that reads
+vectors.json is an independent cross-check, and so is the runner's own test.
+
+Run from the sample root: python3 -m runner.protocol.make_vectors
+Check without writing:    python3 -m runner.protocol.make_vectors --check
+"""
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import struct
+import sys
+
+VECTORS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vectors.json")
+
+
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def b64std(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def framed(data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + data
+
+
+def nonce_hash(nonce: bytes) -> str:
+    return hashlib.sha256(b"nonce" + nonce).hexdigest()
+
+
+def start_token(nonce: bytes) -> str:
+    return hashlib.sha256(b"start" + nonce).hexdigest()[:32]
+
+
+def session_id(tenant_id: str) -> str:
+    return "rc-" + hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
+
+
+def job_auth(nonce: bytes, run_id: str, tenant_id: str, code: str, input_bytes: bytes) -> str:
+    digest = hashlib.sha256(framed(code.encode("utf-8")) + framed(input_bytes)).digest()
+    message = framed(run_id.encode("utf-8")) + framed(tenant_id.encode("utf-8")) + digest
+    return b64url(hmac.new(nonce, message, hashlib.sha256).digest())
+
+
+def result_proof(nonce: bytes, run_id: str) -> str:
+    return b64url(hmac.new(nonce, run_id.encode("utf-8"), hashlib.sha256).digest())
+
+
+def hello_proof(nonce: bytes, challenge: bytes, cert_fingerprint: bytes) -> str:
+    return b64url(hmac.new(nonce, challenge + cert_fingerprint, hashlib.sha256).digest())
+
+
+def case(name, nonce, run_id, tenant_id, code, input_bytes, note):
+    job = {"v": 1, "runId": run_id, "tenantId": tenant_id, "nonce": b64url(nonce), "code": code,
+           "timeoutMs": 30000, "maxOutputBytes": 262144}
+    if input_bytes is not None:
+        job["input"] = b64std(input_bytes)
+    raw_input = input_bytes if input_bytes is not None else b""
+    job["jobAuth"] = job_auth(nonce, run_id, tenant_id, code, raw_input)
+    return {
+        "name": name,
+        "note": note,
+        "nonceHex": nonce.hex(),
+        "nonce": b64url(nonce),
+        "runId": run_id,
+        "tenantId": tenant_id,
+        "code": code,
+        "inputHex": None if input_bytes is None else input_bytes.hex(),
+        "expected": {
+            "nonceHash": nonce_hash(nonce),
+            "startToken": start_token(nonce),
+            "sessionId": session_id(tenant_id),
+            "jobAuth": job["jobAuth"],
+            "resultProof": result_proof(nonce, run_id),
+            "job": job,
+        },
+    }
+
+
+def build():
+    nonce_a = bytes(range(32))
+    nonce_b = bytes(range(0xFF, 0xDF, -1))
+    long_tenant = "t" + "-" * 62 + "z"
+    cases = [
+        case("basic", nonce_a, "00000000-0000-4000-8000-a00000000001", "tenant-a",
+             "print(open('input','rb').read())\n", b"hello\n", "ASCII code, small text input"),
+        case("absent-input", nonce_a, "00000000-0000-4000-8000-a00000000002", "tenant-a",
+             "print(1)\n", None, "no input field: the input counts as zero bytes"),
+        case("empty-input", nonce_a, "00000000-0000-4000-8000-a00000000002", "tenant-a",
+             "print(1)\n", b"", "an empty input object: same jobAuth as absent-input"),
+        case("non-ascii-code", nonce_b, "00000000-0000-4000-8000-a00000000003", "Tenant_9",
+             "print('h\u00e9llo \u4e16\u754c \U0001f600')\n", None, "UTF-8 code with 2-, 3- and 4-byte characters; lengths count bytes, not characters"),
+        case("binary-input", nonce_b, "00000000-0000-4000-8000-a00000000004", "Tenant_9",
+             "import sys\n", bytes([0x00, 0xFF, 0x80, 0x0A, 0x00]), "input bytes that are not UTF-8, with NUL"),
+        case("tenant-at-limit", nonce_a, "00000000-0000-4000-8000-a00000000005", long_tenant,
+             "", None, "64-character tenant id with hyphens, empty code"),
+        case("one-char-tenant", nonce_b, "00000000-0000-4000-8000-a00000000006", "a",
+             "x=1", b"\x00" * 300, "1-character tenant id, input longer than 255 bytes (the length is 4 bytes)"),
+    ]
+    challenge = bytes(range(0x40, 0x60))
+    fingerprint = hashlib.sha256(b"example certificate DER bytes").digest()
+    hello = {
+        "nonce": b64url(nonce_a),
+        "challenge": b64url(challenge),
+        "certFingerprint": fingerprint.hex(),
+        "expected": {"proof": hello_proof(nonce_a, challenge, fingerprint)},
+    }
+    return {
+        "comment": "Generated by runner/protocol/make_vectors.py. Do not edit by hand; see runner/PROTOCOL.md.",
+        "cases": cases,
+        "hello": hello,
+        "negative": {
+            "note": "jobAuth of case 'basic' must change when any one input changes",
+            "flipRunId": job_auth(nonce_a, "00000000-0000-4000-8000-a00000000009", "tenant-a",
+                                  "print(open('input','rb').read())\n", b"hello\n"),
+            "flipTenant": job_auth(nonce_a, "00000000-0000-4000-8000-a00000000001", "tenant-b",
+                                   "print(open('input','rb').read())\n", b"hello\n"),
+            "moveByteFromCodeToInput": job_auth(nonce_a, "00000000-0000-4000-8000-a00000000001", "tenant-a",
+                                                "print(open('input','rb').read())", b"\nhello\n"),
+        },
+    }
+
+
+def render():
+    return json.dumps(build(), indent=2, ensure_ascii=True) + "\n"
+
+
+def main(argv):
+    text = render()
+    if "--check" in argv:
+        with open(VECTORS, encoding="utf-8") as f:
+            if f.read() != text:
+                print("vectors.json is out of date: run python3 -m runner.protocol.make_vectors")
+                return 1
+        return 0
+    with open(VECTORS, "w", encoding="utf-8") as f:
+        f.write(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
