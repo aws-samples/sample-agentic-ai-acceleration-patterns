@@ -48,6 +48,11 @@
 | [0042](0042-build-the-microvm-image-from-a-staged-artifact-with-platform-hooks.md) | Build the MicroVM image from a staged artifact, with the platform hooks enabled | Proposed | 2026-11-20 |
 | [0043](0043-end-every-microvm-before-the-image-and-connector-go.md) | End every MicroVM before the image and the connector go | Proposed | 2026-11-20 |
 | [0044](0044-classify-microvm-data-channel-answers-and-start-failures.md) | Classify MicroVM data-channel answers and start failures | Proposed | 2026-11-20 |
+| [0045](0045-accept-nitro-instance-types-from-a-static-table-of-enclaves-families.md) | Accept nitro instance types from a static table of Nitro Enclaves families | Proposed | 2026-11-20 |
+| [0046](0046-write-the-nitro-task-definition-in-l1-with-no-task-role.md) | Write the nitro task definition in L1, with no task role and the isolation mode as an override | Proposed | 2026-11-20 |
+| [0047](0047-prove-and-run-on-one-pinned-tls-connection.md) | Prove the sandbox and run the job on one pinned TLS connection | Proposed | 2026-11-20 |
+| [0048](0048-scope-the-nitro-statements-by-the-keys-each-action-supports.md) | Scope the nitro statements by the condition keys each action supports | Proposed | 2026-11-20 |
+| [0049](0049-read-stopping-tasks-as-live-and-drain-instances-in-the-backend.md) | Read a stopping task as live, and end the instances in the backend | Proposed | 2026-11-20 |
 | [0050](0050-scope-the-tool-rights-to-the-runtime-and-derive-the-session-id-in-code.md) | Scope the tool's AgentCore rights to the runtime and derive the session id in code | Proposed | 2026-11-20 |
 | [0051](0051-keep-the-runtime-role-to-logs-and-the-image-and-let-the-core-open-the-network.md) | Keep the runtime role to logs and the image, and let the core open the network | Proposed | 2026-11-20 |
 | [0052](0052-treat-the-session-as-always-ready-and-read-every-answer-as-a-result-a-refusal-or-a-dead-handle.md) | Treat the session as always ready, and read every answer as a result, a refusal or a dead handle | Proposed | 2026-11-20 |

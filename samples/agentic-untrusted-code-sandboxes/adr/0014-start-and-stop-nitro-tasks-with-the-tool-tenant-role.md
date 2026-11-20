@@ -4,6 +4,7 @@
 
 - Status: Proposed
 - Date: 2026-11-18
+- Amended by: ADR-0048
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -43,3 +44,5 @@ The call path to a task stays filtered by address; ADR-0010 covers it. The
 reaper and the drain stop tasks with their own role, which is not
 tenant-scoped and reads no tenant data. If S-3 or S-8 find equivalent keys
 for MicroVMs or AgentCore sessions, the same move applies there.
+
+Note 2026-11-20: amended by ADR-0048. The conditions are checked against the keys each ECS action supports; the reaper lists tasks on `*` with the `ecs:cluster` key, because `ListTasks` authorises on a container instance. A tool-path `StopTask` for a task ECS has dropped from its history is treated as already stopped (ADR-0049).
