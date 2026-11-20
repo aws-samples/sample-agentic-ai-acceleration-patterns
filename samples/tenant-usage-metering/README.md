@@ -65,10 +65,10 @@ HTTPS (secret or SigV4) or the export bucket.
    is placed in a cell, so the role may report usage for that tenant.
    Deletes close the registration at once; events timed before the close
    are still admitted for a grace period (spec §3.4, §4.2). (With the
-   [`control-plane`](../control-plane/) sample, a
-   global vendor hook makes these calls: `PutCellEmitter` on
-   `CELL_CREATE`, `PutTenantBinding` on `DEPLOYMENT_CREATE` and
-   `DEPLOYMENT_UPDATE`, both in `PRE`, and the deletes in `POST`.)
+   [`control-plane`](../control-plane/) sample, a global vendor hook
+   makes these calls: `PutCellEmitter` on `CELL_CREATE`,
+   `PutTenantBinding` on `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE`,
+   both in `PRE`, and the deletes in `POST`.)
 2. **Define meters.** An operator creates meters (`COUNT`, `SUM`, `MAX`,
    `UNIQUE_COUNT`) and sinks. A change writes a new version that counts
    from the next whole hour (ADR-0004).
@@ -291,10 +291,9 @@ timer or after a number of events, not after every `record()`;
 `record()` throws once `maxPending` events (100,000 by default) wait.
 Storage grows with retention: the raw event storage of the third traffic
 row adds about 500 GB a month and reaches about 6.5 TB, about $160 a
-month, after 400 days. Usage
-records stay in the table, which has no TTL on them: at about 0.5 KB a
-record, 21.9 million records add about 11 GB a month, and with PITR each
-month adds about $6 to the monthly bill.
+month, after 400 days. Usage records stay in the table, which has no TTL
+on them: at about 0.5 KB a record, 21.9 million records add about 11 GB
+a month, and with PITR each month adds about $6 to the monthly bill.
 
 ## Security notes
 
