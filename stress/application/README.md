@@ -166,20 +166,22 @@ probe stacks, and only stacks tagged `stress:part=cell-policy-probe`.
 
 ## Results
 
-Run 2026-11-20, `eu-central-1`, in the two standalone non-production cell
-accounts (A and B) the path spike used, with `CELL_POLICY_SUFFIX=-w10`,
-because the spike's policies already held the default names there.
-`CDKToolkit-cell` in both accounts was bootstrapped against the `-w10`
-policies by `bootstrap-cell.sh` (39 s each). It names the policies, not
-their versions, so a policy change needs no new bootstrap.
+Run 2026-11-20 in the two standalone non-production cell accounts (A and B)
+the path spike used, in `us-west-2` with `CELL_POLICY_SUFFIX=-w10r`, beside
+other cell stacks those accounts hold in `eu-central-1`. Stacks are per
+Region, but IAM names are account-wide, so the second set of policies
+takes its own suffix. `bootstrap-cell.sh` bootstrapped `CDKToolkit-cell`
+in `us-west-2` against the `-w10r` policies. It names the policies, not
+their versions, so a later policy change needs no new bootstrap.
 
 | Step | Account A | Account B |
 |---|---|---|
-| `deploy-owner.sh` (`CellPolicies`, `CellAccountBase`, no identity parameters: the spike's base stack holds them); updates the policies in place | 32 s | 31 s |
-| `probe-deploy.sh` (`CellBoundaryProbe`, `CellWorkloadProbe`) | 56 s and 50 s | 55 s and 51 s |
+| `deploy-owner.sh` (`CellPolicies`, `CellAccountBase`, no identity parameters) | 74 s | 71 s |
+| `bootstrap-cell.sh` | 55 s | 54 s |
+| `probe-deploy.sh` (`CellBoundaryProbe`, `CellWorkloadProbe`) | 51 s and 54 s | 56 s and 60 s |
 | `probes.sh` | 50 of 50 pass: 24 deny and 8 allowed as the cell boundary probe; 16 deny, 1 refused by the stand-in's trust and 1 allowed as the workload probe | 50 of 50 pass, the same |
-| `probe-remove.sh` | 32 s and 32 s; no probe leftovers | 32 s and 32 s; no probe leftovers |
-| runtime-isolation cell (`api-gateway`, `tvm=true`, `publishParameters=false`) through the cell bootstrap, with `CellRolePath` and `cellSynthContext` | `CREATE_COMPLETE` in 417 s; 27 of 27 roles on `/cell/` under the workload boundary; destroyed in 527 s, nothing left | not deployed |
+| `probe-remove.sh` | 33 s and 32 s; no probe leftovers | 33 s and 32 s; no probe leftovers |
+| runtime-isolation cell (`api-gateway`, `tvm=true`, `publishParameters=false`) through the cell bootstrap in `eu-central-1`, with `CellRolePath` and `cellSynthContext` | `CREATE_COMPLETE` in 417 s; 27 of 27 roles on `/cell/` under the workload boundary; destroyed in 527 s, nothing left | not deployed |
 
 The cell deploy ran once, under the same execution policy and cell
 permissions boundary, and a workload boundary without the denies on log
