@@ -13,6 +13,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import type { Construct } from 'constructs';
+import { bundlingRoot } from './bundling-root.cdk';
 import { acknowledgeGranularFinding } from './nag';
 
 export function customResourceFunction(
@@ -27,6 +28,7 @@ export function customResourceFunction(
     removalPolicy: RemovalPolicy.DESTROY, // sample only
   });
   const fn = new NodejsFunction(scope, id, {
+    ...bundlingRoot(),
     entry,
     handler: 'handler',
     runtime: lambda.Runtime.NODEJS_24_X,

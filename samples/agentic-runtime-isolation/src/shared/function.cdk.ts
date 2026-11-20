@@ -12,11 +12,13 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction, NodejsFunctionProps } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import type { Construct } from 'constructs';
+import { bundlingRoot } from './bundling-root.cdk';
 import { acknowledgeGranularFinding } from './nag';
 
 /** Shared NodejsFunction properties: runtime, arch, tracing, JSON logs, bundling, log group. */
 export function functionProps(scope: Construct, logGroupId: string, timeout: Duration): Omit<NodejsFunctionProps, 'entry'> {
   return {
+    ...bundlingRoot(),
     handler: 'handler',
     runtime: lambda.Runtime.NODEJS_24_X,
     architecture: lambda.Architecture.ARM_64,

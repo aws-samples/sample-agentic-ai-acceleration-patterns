@@ -59,3 +59,4 @@ SPDX-License-Identifier: MIT-0
 | [0051](./0051-keep-the-ingress-minted-token-over-cognito-token-exchange.md) | Keep the ingress-minted transaction token over Cognito token exchange | Accepted | Amends ADR-0030, ADR-0031 | 2026-11-17 |
 | [0052](./0052-run-the-stress-test-as-a-slice-of-the-platform-stress-contract.md) | Run the stress test as a slice of the platform stress contract | Accepted | Amends the stress-test plan | 2026-11-19 |
 | [0053](./0053-log-the-client-correlation-id-at-the-ingress.md) | Log the client's correlation id at the ingress | Accepted | Meets ADR-0052's revisit trigger | 2026-11-20 |
+| [0054](./0054-bundle-from-the-package-directory-not-the-working-directory.md) | Bundle from the package directory, not the working directory | Accepted | - | 2026-11-20 |
