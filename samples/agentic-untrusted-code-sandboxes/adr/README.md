@@ -76,3 +76,4 @@ line and a dated trailing note saying what changed
 | [0065](0065-require-an-explicit-endpoint-choice-with-a-supplied-vpc.md) | Require an explicit endpoint choice with a supplied VPC | Proposed | 2026-11-20 |
 | [0066](0066-mark-the-integration-app-in-module-state-not-in-context.md) | Mark the integration app in module state, not in context | Proposed | 2026-11-20 |
 | [0067](0067-let-the-core-write-every-endpoint-policy-from-log-cleanup.md) | Let the core write every endpoint policy from its own resources and `logCleanup()` | Proposed | 2026-11-20 |
+| [0068](0068-trust-the-connector-operator-role-without-a-source-account-condition.md) | Trust the connector operator role without a source account condition | Proposed | 2026-11-20 |
