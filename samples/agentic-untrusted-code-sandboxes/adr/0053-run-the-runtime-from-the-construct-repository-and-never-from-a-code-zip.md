@@ -44,8 +44,8 @@ bootstrap repository, which holds every asset of the account and Region
 Option 1. The runtime's artifact is `fromImageUri(<repository>:<tag>)`, a
 container configuration only, and the backend refuses to build when the core
 names no tag. The core owns the copy, so the runtime (returned by
-`drainOrder()`) is ordered after it by the core; this backend has nothing to
-depend on.
+`drainOrder()`) is ordered after it by the core; this backend adds no
+dependency for the image.
 
 ## Consequences
 
