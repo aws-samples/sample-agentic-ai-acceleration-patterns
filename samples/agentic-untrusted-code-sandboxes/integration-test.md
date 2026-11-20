@@ -141,11 +141,20 @@ run in a non-production account follows. What to expect from the spikes: the
 `agentcore` runtime alone takes 200 to 550 s to create, and the whole stack
 more than 20 minutes; the waits are `sandboxIdle` (2 min, three times, partly
 overlapped), the `nitro` scale-in before `cold-from-zero` (about 3 to 6
-minutes), and the destroy (about 4 minutes for the drain and the delete, more
-when the runtime is slow). Cost is dominated by the NAT gateway, the endpoints,
+minutes), and the destroy. With sandboxes live, the stack delete took 23 to
+32 minutes in the three single-backend runs of spec §7 S-21, most of it the
+release of the network interfaces of the VPC-attached drain and reaper
+functions; plan 30 to 40 minutes for the integration stack. The driver waits
+up to 60 minutes for one delete and retries a failed one once. Plan the
+run budget from those parts: deploy 15 to 25 minutes, `cold-from-zero` up to
+15 minutes, destroy 30 to 40 minutes. Cost is dominated by the NAT gateway, the endpoints,
 `nitro` instance time and the DNS Firewall queries; the run record carries the
 timings. This section records the last green run (number, date, Region, steps
 passed) with a link to the `architecture.md` status block, once there is one.
+
+Run it on a fresh `INTEG_PREFIX` each time. A stack from an earlier run may
+still hold a tenant's `nitro` task, and then `parse` finds that sandbox
+`reused` instead of `started` and fails.
 
 ## After an interruption
 

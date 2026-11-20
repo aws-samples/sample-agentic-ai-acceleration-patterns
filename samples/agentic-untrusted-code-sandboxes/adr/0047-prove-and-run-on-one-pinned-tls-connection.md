@@ -43,7 +43,8 @@ size limit, a timeout) is `no_answer`, because the job may have run and a
 rerun in a fresh sandbox would run the tenant's code twice (ADR-0044). The
 reason of a dead handle is a code (`connect_failed: ECONNREFUSED`), never
 the error text, which carries the task's address. `run` waits at most
-`timeoutMs` plus 5 s from the call (`no_answer` after that), reads at most `6 × maxOutputBytes + 64 KiB` (stdout and
+`timeoutMs` plus 5 s from the call (`no_answer` after that), reads at most
+`6 × maxOutputBytes + 64 KiB` (stdout and
 stderr are cut by bytes, then decoded and JSON-escaped), refuses a result
 whose run id or proof does not match, and returns a runner refusal as
 `refused`. `ready` reads `DescribeTasks` first on every probe and takes the

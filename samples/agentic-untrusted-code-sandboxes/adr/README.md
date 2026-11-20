@@ -2,6 +2,10 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Decisions
 
+A change to a decision is a new record with an `Amends` line, or, for a
+detail, a dated note at the end of the record; the decision text itself is
+not edited ([sample standard §2.2](../../../docs/sample-standard.md#22-architecture-decision-records-adr)).
+
 | Number | Title | Status | Date |
 | --- | --- | --- | --- |
 | [0001](0001-serve-every-boundary-behind-one-run-code-tool-target.md) | Serve every boundary behind one run_code tool target | Proposed | 2026-11-18 |
