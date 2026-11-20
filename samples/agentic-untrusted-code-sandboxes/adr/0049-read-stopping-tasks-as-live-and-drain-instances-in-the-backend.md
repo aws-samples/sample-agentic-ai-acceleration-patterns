@@ -33,8 +33,10 @@ code that it cannot test.
 Option 1. `list()` reads `ListTasks` with desired status `RUNNING` and
 `STOPPED`, describes the tasks in chunks of 100 with their tags, and
 yields each once; `live` is false only when `lastStatus` is `STOPPED`.
-`isAlive` is true only for a task that is starting or running and whose
-desired status is not `STOPPED`. `cleanup(deadlineMs)`, with the deadline
+`isAlive` follows `live`: true until ECS reports the task `STOPPED`, a
+stopping task included, so the offboard function keeps a row while the task
+stops and the reaper does not stop it again as an orphan.
+`cleanup(deadlineMs)`, with the deadline
 as an absolute time in epoch milliseconds, lists the cluster's `ACTIVE` and
 `DRAINING` container instances, deregisters each with `force`, waits until
 `DescribeInstances` shows each one `terminated` (or no longer known), and
@@ -67,3 +69,10 @@ The integration run also checks that `DescribeTasks` with `include: TAGS`,
 which `list` uses to read each task's `TenantId`, needs no
 `ecs:ListTagsForResource` beyond `ecs:DescribeTasks`. The reaper and tool
 statements grant only the latter, and a denial would fail every `list`.
+
+`isAlive` has no grace for a task that `DescribeTasks` does not show yet,
+because the backend cannot see how old the row is. The reaper calls it for a
+starting row whose task it did not list (the list is read before the rows),
+so a start that began after the list could be read as failed on the first
+pass if ECS shows the task late. The integration run checks whether ECS
+does; the reaper can skip a starting row younger than the `ready` grace.

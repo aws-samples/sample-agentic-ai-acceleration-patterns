@@ -9,6 +9,8 @@
 
 import { App, CfnResource, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
+import { AwsSolutionsChecks } from 'cdk-nag';
+import type { IConstruct } from 'constructs';
 import { NITRO_ENV } from '../src/backends/nitro';
 import type { NitroBackendResources } from '../src/backends/nitro.cdk';
 import { NAME_PATTERNS } from '../src/names';
@@ -19,86 +21,94 @@ function build(id = 'Sandboxes', stack = new Stack(new App(), 'S')) {
   return { stack, sandboxes, nitro: sandboxes.backends.nitro as NitroBackendResources };
 }
 
-/** Every statement of every IAM policy in the template, by Sid. */
-function statementsBySid(t: Template): Map<string, { policy: string; statement: Record<string, unknown> }[]> {
-  const out = new Map<string, { policy: string; statement: Record<string, unknown> }[]>();
-  for (const [logicalId, p] of Object.entries(t.findResources('AWS::IAM::Policy'))) {
-    for (const s of p.Properties.PolicyDocument.Statement as Record<string, unknown>[]) {
-      const sid = s.Sid as string | undefined;
-      if (sid === undefined) continue;
-      out.set(sid, [...(out.get(sid) ?? []), { policy: logicalId, statement: s }]);
-    }
-  }
-  return out;
+type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+/** The CloudFormation resource of a given type inside a construct subtree. */
+function cfnOf(root: IConstruct, cfnResourceType: string): CfnResource {
+  const found = root.node.findAll().find((n) => n instanceof CfnResource && n.cfnResourceType === cfnResourceType);
+  if (found === undefined) throw new Error(`no ${cfnResourceType} under ${root.node.path}`);
+  return found as CfnResource;
 }
 
 describe('nitro inside the core construct', () => {
-  const { stack, nitro } = build();
+  const { stack, sandboxes, nitro } = build();
   const t = Template.fromStack(stack);
-  const sids = statementsBySid(t);
+  const idOf = (c: IConstruct, type: string) => stack.getLogicalId(cfnOf(c, type));
+
+  /** Sid -> the roles (by construct id under the core) whose policy holds it. */
+  const policies = Object.values(t.findResources('AWS::IAM::Policy')) as Json[];
+  const rolesWithSid = (sid: string): string[] => {
+    const roleIds = ['ToolRole', 'ReaperRole', 'DrainRole', 'ToolTenantRole'].map((n) => [n, idOf(sandboxes.node.findChild(n), 'AWS::IAM::Role')] as const);
+    return policies
+      .filter((p) => (p.Properties.PolicyDocument.Statement as Json[]).some((s) => s.Sid === sid))
+      .flatMap((p) => (p.Properties.Roles as Json[]).map((r) => roleIds.find(([, id]) => id === r.Ref)?.[0] ?? `other:${String(r.Ref)}`));
+  };
 
   test('the core hands the backend a repository and an image tag, and the task starts that image', () => {
     const def = Object.values(t.findResources('AWS::ECS::TaskDefinition'))[0].Properties.ContainerDefinitions[0];
     expect(JSON.stringify(def.Image)).toMatch(/runner-amd64-/);
   });
 
-  test('every statement of the backend lands on a policy', () => {
-    for (const s of [
-      ...nitro.toolStatements(), ...nitro.tenantStatements(), ...nitro.reaperStatements(), ...nitro.drainStatements(),
-    ]) {
-      expect(sids.has(s.toStatementJson().Sid)).toBe(true);
-    }
-  });
-
-  test('the instance drain is on the drain role only; the reaper statements are on the reaper and the drain roles; the tenant statements on neither', () => {
-    const roleOf = (sid: string) => sids.get(sid)!.map((x) => x.policy);
+  test('every statement of each kind lands on exactly the roles of spec §3.6', () => {
+    expect(rolesWithSid('DescribeNitroTasks')).toEqual(['ToolRole']);
     for (const sid of ['RunNitroTask', 'TagNitroTaskAtRunTask', 'StopOwnNitroTask', 'PassNitroExecutionRole']) {
-      expect(roleOf(sid)).toHaveLength(1);
+      expect(rolesWithSid(sid)).toEqual(['ToolTenantRole']);
     }
-    const drainPolicies = roleOf('DrainNitroInstances');
-    expect(drainPolicies).toHaveLength(1);
-    expect(roleOf('ListNitroTasks')).toHaveLength(2);
-    expect(roleOf('ListNitroTasks')).toContain(drainPolicies[0]);
-    for (const sid of ['RunNitroTask', 'StopOwnNitroTask', 'PassNitroExecutionRole']) {
-      expect(roleOf(sid)).not.toContain(drainPolicies[0]);
-      expect(roleOf(sid)).not.toContain(roleOf('ListNitroTasks').find((p) => p !== drainPolicies[0]));
+    for (const sid of ['ListNitroTasks', 'DescribeAndStopNitroTasks']) {
+      expect(rolesWithSid(sid).sort()).toEqual(['DrainRole', 'ReaperRole']);
+    }
+    for (const sid of ['DrainNitroInstances', 'DescribeNitroInstances', 'WaitForInstanceTermination']) {
+      expect(rolesWithSid(sid)).toEqual(['DrainRole']);
     }
   });
 
-  test('the Logs endpoint policy names the task log group and the task group may reach the endpoint group only', () => {
-    const endpoints = Object.values(t.findResources('AWS::EC2::VPCEndpoint'))
-      .filter((e) => JSON.stringify(e.Properties.ServiceName).includes('logs'));
+  test('the Logs endpoint policy names the task log group, and the task group reaches the Logs endpoint group only', () => {
+    const endpoints = Object.values(t.findResources('AWS::EC2::VPCEndpoint')).filter((e) => JSON.stringify(e.Properties.ServiceName).includes('logs'));
     expect(endpoints).toHaveLength(1);
     expect(JSON.stringify(endpoints[0].Properties.PolicyDocument)).toContain(nitro.logGroupName);
-    const taskGroupId = JSON.stringify(stack.resolve(nitro.taskSecurityGroup.securityGroupId));
-    const egress = Object.values(t.findResources('AWS::EC2::SecurityGroupEgress'))
-      .filter((e) => JSON.stringify(e.Properties.GroupId) === taskGroupId);
+
+    const taskGroup = stack.getLogicalId(nitro.taskSecurityGroup.node.defaultChild as CfnResource);
+    const endpointGroups = (endpoints[0].Properties.SecurityGroupIds as Json[]).map((g) => JSON.stringify(g));
+    const egress = Object.values(t.findResources('AWS::EC2::SecurityGroupEgress')).filter((e) => e.Properties.GroupId?.['Fn::GetAtt']?.[0] === taskGroup);
     expect(egress).toHaveLength(1);
     expect(egress[0].Properties).toMatchObject({ IpProtocol: 'tcp', FromPort: 443, ToPort: 443 });
+    expect(endpointGroups).toContain(JSON.stringify(egress[0].Properties.DestinationSecurityGroupId));
+    // no inline egress rule on the group itself other than CDK's "disallow all" placeholder
+    const inline = (t.toJSON().Resources[taskGroup].Properties.SecurityGroupEgress ?? []) as Json[];
+    expect(inline.filter((r) => r.CidrIp !== '255.255.255.255/32')).toEqual([]);
   });
 
-  test('the log cleanup resource deletes the task log group by name', () => {
-    expect(JSON.stringify(t.toJSON())).toContain(nitro.logGroupName);
+  test('the log cleanup resource is told to delete the task log group by name', () => {
+    const cleanup = cfnOf(sandboxes.node.findChild('LogCleanup'), 'AWS::CloudFormation::CustomResource');
+    expect(JSON.stringify(stack.resolve((cleanup as unknown as { _cfnProperties: unknown })._cfnProperties))).toContain(nitro.logGroupName);
   });
 
-  test('the drain is deleted before the cluster, the capacity provider and the groups the tasks hold', () => {
-    const logicalId = (c: { node: { findAll(): unknown[] } }) => {
-      const cfn = c.node.findAll().find((n) => n instanceof CfnResource) as CfnResource;
-      return stack.getLogicalId(cfn);
-    };
-    const wanted = [nitro.cluster, nitro.capacityProvider, nitro.taskSecurityGroup, nitro.instanceSecurityGroup].map(logicalId);
-    const resources = Object.values(t.toJSON().Resources as Record<string, { DependsOn?: string[] }>);
-    const drain = resources.filter((r) => wanted.every((id) => (r.DependsOn ?? []).includes(id)));
-    expect(drain).toHaveLength(1);
+  test('the drain is deleted before the cluster, the capacity provider, the task definition and the groups the tasks hold', () => {
+    const wanted = [
+      idOf(nitro.cluster, 'AWS::ECS::Cluster'),
+      idOf(nitro.capacityProvider, 'AWS::ECS::CapacityProvider'),
+      idOf(nitro.taskDefinition, 'AWS::ECS::TaskDefinition'),
+      idOf(nitro.taskSecurityGroup, 'AWS::EC2::SecurityGroup'),
+      idOf(nitro.instanceSecurityGroup, 'AWS::EC2::SecurityGroup'),
+    ];
+    const drain = cfnOf(sandboxes.node.findChild('DrainResource'), 'AWS::CloudFormation::CustomResource');
+    const depends = (t.toJSON().Resources[stack.getLogicalId(drain)].DependsOn ?? []) as string[];
+    for (const id of wanted) expect(depends).toContain(id);
   });
 
-  test('the function environment carries the names the run-time class reads, from the core\'s own environment', () => {
+  test('the function environment carries every name the run-time class reads', () => {
     const fns = Object.values(t.findResources('AWS::Lambda::Function'));
     const withNitro = fns.filter((f) => f.Properties.Environment?.Variables?.[NITRO_ENV.CLUSTER_ARN] !== undefined);
     expect(withNitro.length).toBeGreaterThan(0);
     for (const f of withNitro) {
       for (const name of Object.values(NITRO_ENV)) expect(f.Properties.Environment.Variables[name]).toBeDefined();
     }
+  });
+
+  test('cdk-nag finds nothing under the backend', () => {
+    const found = new AwsSolutionsChecks(stack).validateScope(stack).violations
+      .flatMap((v) => v.violatingResources.map((r) => `${v.ruleName}: ${r.constructPath}`));
+    expect(found.filter((f) => f.includes('Backend-nitro'))).toEqual([]);
   });
 
   test('two instances in one stack get distinct, valid names', () => {
@@ -116,8 +126,7 @@ describe('nitro inside the core construct', () => {
       expect(new Set(ns).size).toBe(2);
       for (const n of ns) expect(n).toMatch(NAME_PATTERNS[service]);
     }
-    const logs = Object.values(tt.findResources('AWS::Logs::LogGroup')).map((r) => r.Properties.LogGroupName as string).filter((n) => n !== undefined);
-    const taskLogs = logs.filter((n) => /nitro/.test(n));
+    const taskLogs = names('AWS::Logs::LogGroup', 'LogGroupName').filter((n) => n !== undefined && /nitro/.test(n));
     expect(taskLogs).toHaveLength(2);
     expect(new Set(taskLogs).size).toBe(2);
     for (const n of taskLogs) expect(n).toMatch(NAME_PATTERNS['log-group']);

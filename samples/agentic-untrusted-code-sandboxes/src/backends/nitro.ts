@@ -96,7 +96,6 @@ const STOP_REASON = 'Stopped by the untrusted code sandboxes';
 
 /** Task states from which a task will not serve again (spec §4.1 "a start has failed"). */
 const ENDING_STATUSES = new Set(['DEACTIVATING', 'STOPPING', 'DEPROVISIONING', 'STOPPED']);
-const STARTING_STATUSES = new Set(['PROVISIONING', 'PENDING', 'ACTIVATING']);
 
 /** One HTTP reply from the runner. */
 export interface HttpReply {
@@ -539,14 +538,15 @@ export class NitroBackend implements SandboxBackend {
   }
 
   /**
-   * A task that ECS does not list is not alive. Right after `start` ECS may not describe the new task
-   * yet; `ready` allows for that, and a caller that checks a task it just started must as well.
+   * Alive until ECS reports the task `STOPPED`, a stopping task included: the same meaning as `live` in
+   * `list()` (a task stays listed for 45 to 78 s after `StopTask`, and a caller that deleted its row
+   * on a false answer would see the reaper stop the task again as an orphan). A task that ECS does not
+   * list is not alive. Right after `start` ECS may not describe the new task yet; `ready` allows for
+   * that, and a caller that checks a task it just started must as well.
    */
   public async isAlive(handle: SandboxHandle): Promise<boolean> {
     const task = await this.describeOne(handle.handle);
-    if (task === undefined || task.desiredStatus === 'STOPPED') return false;
-    const status = task.lastStatus ?? '';
-    return status === 'RUNNING' || STARTING_STATUSES.has(status);
+    return task !== undefined && task.lastStatus !== 'STOPPED';
   }
 
   public async stopReason(handle: SandboxHandle): Promise<StopFacts> {

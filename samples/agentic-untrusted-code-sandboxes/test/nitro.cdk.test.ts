@@ -538,7 +538,9 @@ describe('what the core consumes', () => {
     expect(backend.endpoints()).toEqual(['logs']);
     expect(backend.endpointClients()).toEqual([backend.taskSecurityGroup, backend.instanceSecurityGroup]);
     expect(backend.logCleanup()).toEqual({ prefixes: [], names: ['u-log-group-nitro-task'] });
-    expect(backend.drainOrder()).toEqual([backend.cluster, backend.capacityProvider, backend.taskSecurityGroup, backend.instanceSecurityGroup]);
+    expect(backend.drainOrder()).toEqual([
+      backend.cluster, backend.capacityProvider, backend.taskDefinition, backend.taskSecurityGroup, backend.instanceSecurityGroup,
+    ]);
     expect(Object.keys(backend.outputs()).sort()).toEqual(['clusterArn', 'taskDefinitionArn']);
     expect(flat(stack, backend.outputs().taskDefinitionArn)).toMatch(/^<[A-Za-z0-9]*TaskDefinition[A-Za-z0-9]*>$/);
   });

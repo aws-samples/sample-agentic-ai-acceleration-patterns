@@ -21,6 +21,7 @@ import { Construct, type IConstruct } from 'constructs';
 import type { BackendConstruct, BackendContext, SandboxEndpoint } from '../backend-construct';
 import { NITRO_ENV, RUNNER_CONTAINER_NAME, TENANT_TAG } from './nitro';
 import { checkInstanceTypes } from './nitro-instance-types';
+import { acknowledge } from '../core/nag';
 import { RUNNER_PORTS } from '../protocol';
 
 /**
@@ -138,10 +139,11 @@ export class NitroBackendResources extends Construct implements BackendConstruct
       actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
       resources: [this.taskLogGroup.logGroupArn],
     }));
-    Validations.of(this.executionRole).acknowledge({
-      id: 'AwsSolutions::AwsSolutions-IAM5',
-      reason: 'ecr:GetAuthorizationToken takes no resource, and the log group ARN ends in :* because streams are named at run time. ECR pull and Logs write are scoped to the runner repository and the task log group (spec 3.6).',
-    });
+    acknowledge(
+      this.executionRole,
+      'AwsSolutions-IAM5',
+      'ecr:GetAuthorizationToken takes no resource, and the log group ARN ends in :* because streams are named at run time. ECR pull and Logs write are scoped to the runner repository and the task log group (spec 3.6).',
+    );
 
     // ---- task definition (spec §3.4, ADR-0023) ------------------------------------------------------
     this.taskDefinition = new ecs.CfnTaskDefinition(this, 'TaskDefinition', {
@@ -176,10 +178,11 @@ export class NitroBackendResources extends Construct implements BackendConstruct
     });
     // Neither the L1 nor the L2 types carry the isolation mode at the pin (ADR-0023).
     this.taskDefinition.addPropertyOverride('TrustedExecutionConfiguration', { IsolationMode: 'ISOLATED_SANDBOX' });
-    Validations.of(this.taskDefinition).acknowledge({
-      id: 'AwsSolutions::AwsSolutions-ECS2',
-      reason: 'RUNNER_BACKEND is a fixed, non-secret selector (the value nitro) that the runner needs at start (ADR-0037). The per-start nonce hash is not here: the tool sets it in the RunTask container override (ADR-0018).',
-    });
+    acknowledge(
+      this.taskDefinition,
+      'AwsSolutions-ECS2',
+      'RUNNER_BACKEND is a fixed, non-secret selector (the value nitro) that the runner needs at start (ADR-0037). The per-start nonce hash is not here: the tool sets it in the RunTask container override (ADR-0018).',
+    );
     Validations.of(this.taskDefinition).acknowledge({
       id: 'CloudFormation-Validate::F3002',
       reason: 'The CloudFormation schema that aws-cdk-lib 2.274.0 validates against predates TrustedExecutionConfiguration. The spikes deployed this property in raw CloudFormation (S-6, S-14, S-19, S-20); the synth test asserts it (ADR-0023, ADR-0046).',
@@ -311,7 +314,7 @@ export class NitroBackendResources extends Construct implements BackendConstruct
    * holds them.
    */
   public drainOrder(): IConstruct[] {
-    return [this.cluster, this.capacityProvider, this.taskSecurityGroup, this.instanceSecurityGroup];
+    return [this.cluster, this.capacityProvider, this.taskDefinition, this.taskSecurityGroup, this.instanceSecurityGroup];
   }
 
   public logCleanup(): { prefixes: string[]; names: string[] } {

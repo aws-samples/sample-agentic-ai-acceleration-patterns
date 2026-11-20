@@ -658,8 +658,9 @@ describe('list, isAlive, stopReason', () => {
     ['RUNNING', 'RUNNING', true],
     ['PENDING', 'RUNNING', true],
     ['PROVISIONING', 'RUNNING', true],
-    ['RUNNING', 'STOPPED', false],
-    ['DEPROVISIONING', 'STOPPED', false],
+    ['RUNNING', 'STOPPED', true],
+    ['DEPROVISIONING', 'STOPPED', true],
+    ['STOPPING', 'STOPPED', true],
     ['STOPPED', 'STOPPED', false],
   ])('isAlive(last %s, desired %s) is %s', async (lastStatus, desiredStatus, alive) => {
     ecsMock.on(DescribeTasksCommand).resolves({ tasks: [eniTask({ lastStatus, desiredStatus })] });
