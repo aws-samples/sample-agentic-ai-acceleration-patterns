@@ -437,13 +437,17 @@ echo "stack=\${STRESS_PREFIX}-driver destroy_seconds=1"
     expect(fs.existsSync(path.join(fake, 'stacks', `${P}-ingress`))).toBe(false);
     expect(recorded()).toEqual([`registry ${registry}`, 'restapi abc123', `runtime ${P}IngressRt-AAAA`]);
 
+    const execGroup = 'API-Gateway-Execution-Logs_abc123/stress';
+    fs.writeFileSync(path.join(fake, 'logs.txt'), `${execGroup}\n`);
     const rerun = teardown();
     expect(rerun.status).toBe(1);
     expect(rerun.stdout).toContain('finishing the leftover check of an earlier teardown');
     expect(rerun.stdout).toContain('runtime log groups: 1 runtimes');
     expect(rerun.stderr).toContain(`parameters ${param}`);
+    expect(rerun.stderr).toContain(execGroup);
     expect(fs.existsSync(LIST())).toBe(true);
 
+    fs.writeFileSync(path.join(fake, 'logs.txt'), '');
     fs.writeFileSync(path.join(fake, 'params.txt'), '');
     const last = teardown();
     expect(last.stderr).toBe('');

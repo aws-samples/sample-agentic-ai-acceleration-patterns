@@ -17,9 +17,9 @@
 # the stacks owned, a Runtime log group or a registry parameter with this
 # prefix is still there. What that check needs (the log-group lists, the
 # Runtime ids, the REST API id and the registry prefix) is written to
-# $STRESS_STATE_DIR/teardown-state before any destroy and kept until the check
-# passes, so a rerun also checks what the stacks an earlier teardown already
-# destroyed left behind.
+# $STRESS_STATE_DIR/teardown-state before the stacks that own it are destroyed
+# and kept until the check passes, so a rerun also checks what the stacks an
+# earlier teardown already destroyed left behind.
 #
 # The seeded tenants are kept for the next run (§8.2: Cognito bills per
 # monthly active user). With --tenants, they are deleted first, at 2 a second
@@ -171,7 +171,7 @@ mapfile -t LIVE_AGENTS < <(aws cloudformation list-stacks --output text \
 # destroy too. Those groups, and only those, are removed (ADR-0052, "Teardown").
 # Both lists persist in the state file (`owned <name>` and `provider <name>` lines) with the
 # Runtime ids, the REST API id and the registry prefix collected below (`runtime <id>`,
-# `restapi <id>`, `registry <path>`), all de-duplicated and written before any destroy. A
+# `restapi <id>`, `registry <path>`), de-duplicated and written before their stack's destroy. A
 # rerun reads them back: a stack an earlier, failed teardown destroyed is no longer there to
 # list, so without them its provider groups would fail the leftover check on every rerun,
 # and its Runtime log groups, agent runtimes, execution log group and registry parameters
@@ -337,7 +337,7 @@ done
 # line written after its Delete recreates outside the stack (ADR-0047; what
 # scripts/integ.sh removes too), the stacks' log groups (above), and the
 # registry prefix the ingress published under, to check no parameter stays behind.
-# All of it goes into the state file before the first destroy.
+# All of it goes into the state file before the agents or ingress destroy.
 for s in "${STACKS[@]}"; do
   log_groups_of "$s"
   aws cloudformation list-stack-resources --stack-name "$s" \
