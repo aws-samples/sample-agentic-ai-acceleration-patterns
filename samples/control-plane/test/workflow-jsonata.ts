@@ -1,21 +1,31 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { createHash } from 'crypto';
 import jsonata from 'jsonata';
 
 /**
  * Evaluates the JSONata of a synthesized workflow state the way Step
  * Functions does: the expression between `{%` and `%}`, with `$states`
- * bound and `$parse` (a Step Functions addition to JSONata) registered.
+ * bound, the workflow variables (`$TRY`, `$HOOK`, ...) bound when given, and
+ * `$parse` and `$hash` (Step Functions additions to JSONata) registered.
+ * `$hash` takes MD5, SHA-1, SHA-256, SHA-384 and SHA-512 and returns lowercase
+ * hexadecimal, as `sha256sum` does (spike H-8).
  */
-export async function evaluateJsonata(field: string, states: Record<string, unknown>): Promise<any> {
+export async function evaluateJsonata(
+  field: string,
+  states: Record<string, unknown>,
+  variables: Record<string, unknown> = {},
+): Promise<any> {
   const match = /^\{%([\s\S]*)%\}$/.exec(field);
   if (match === null) {
     throw new Error(`Not a JSONata field: ${field}`);
   }
   const expression = jsonata(match[1]);
   expression.registerFunction('parse', (text: string) => JSON.parse(text));
-  return expression.evaluate({}, { states });
+  expression.registerFunction('hash', (text: string, algorithm: string) =>
+    createHash(algorithm.replace('-', '').toLowerCase()).update(text, 'utf8').digest('hex'));
+  return expression.evaluate({}, { states, ...variables });
 }
 
 /**

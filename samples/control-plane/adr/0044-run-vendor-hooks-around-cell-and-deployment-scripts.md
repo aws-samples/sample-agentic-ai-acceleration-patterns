@@ -1,9 +1,10 @@
 # ADR-0044: Run vendor hooks around cell and deployment scripts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-17
 - Amends: ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0025,
   ADR-0032, ADR-0042
+- Amended by: ADR-0045
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -125,13 +126,14 @@ never the file's bytes. It exports it always, `{}` when there is none,
 and exports nothing else, so the build stays under the limit spike H-1
 found. That check runs in the container the script ran in, so it is a
 format check, not a trust boundary. The workflow checks the value
-again, by the same rule, in the script task's `Output`, with a linear
-regular expression that admits only the compact form, and never
-`$parse`, whose error would reach the task's failure write: an empty,
-over-long or malformed value fails a create or update and becomes `{}`
-on a delete. The pattern cannot see a repeated key, so a hook refuses
-an object that has one. The control plane never reads the outputs, and
-hooks treat them as untrusted data.
+again, by the same rule, in a state of its own after the script task
+(a `Pass` in a one-branch `Parallel`, so the guard has a `Catch` apart
+from the task's), with a linear regular expression that admits only
+the compact form, and never `$parse`, which raises on bad input: an
+empty, over-long or malformed value fails a create or update and
+becomes `{}` on a delete. The pattern cannot see a repeated key, so a
+hook refuses an object that has one. The control plane never reads
+the outputs, and hooks treat them as untrusted data.
 
 Hooks run in two hook build projects in the control plane account, one
 per scope, each with its own role (`<fleet>-global-hook`,
@@ -294,8 +296,10 @@ does not recognise, such as a throttle's generic
 that `Retry` under the same token, never to the refusal `Catch`,
 because a refused request does not bind its token (H-8) and a new
 token could leave a second build. The token is
-`$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK_ID, $string(ATTEMPT),
-$string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal characters. Every
+`$hash($join([EXECUTION_ID, EVENT, PHASE, HOOK.scope, HOOK_ID,
+$string(ATTEMPT), $string(TRY)], '|'), 'SHA-256')`, 64 hexadecimal
+characters. The scope keeps a global hook and an application hook
+with the same `hookId` on one event apart. Every
 field of the start task's `Arguments`, the token included, reads only
 variables and the start task's state input, both fixed for the try.
 Every state on the way back to the start task, the entry and begin-try
@@ -411,28 +415,27 @@ as a consumer of a global post hook.
   timeout and the API function's own timeout after (a) completes
   (90 s with the reference values; the API function's timeout stays at
   or below the 29 s integration timeout, because the function keeps
-  running after API Gateway stops waiting). Then, when `ListExecutions` with status
-  `RUNNING` on the old workflow is empty, deploy the upgrade with that
-  `allowedRoles` kept. (c) Redeploy with `allowedRoles` restored; a
-  refusal cached during the drain can last one TTL after this.
-  Deploy (b) must not restore the roles: CloudFormation may update
-  the authorizer before the API function points at the new workflow,
-  and it deletes the old state machine only at cleanup, so an
-  operation accepted in between would start on the old workflow and be
-  stranded. The gate treats people and machine clients alike (R-38):
-  a machine client with an operator role gets 403 on every route until
-  (c), so automation that uses an operator role, status polling
-  included, must hold off or retry. The README gains
-  this upgrade step when the change is built.
+  running after API Gateway stops waiting). Then, when
+  `ListExecutions` with status `RUNNING` on the old workflow is empty,
+  deploy the upgrade with that `allowedRoles` kept. (c) Redeploy with
+  `allowedRoles` restored; a refusal cached during the drain can last
+  one TTL after this. Deploy (b) must not restore the roles:
+  CloudFormation may update the authorizer before the API function
+  points at the new workflow, and it deletes the old state machine
+  only at cleanup, so an operation accepted in between would start on
+  the old workflow and be stranded. The gate treats people and machine
+  clients alike (R-38): a machine client with an operator role gets
+  403 on every route until (c), so automation that uses an operator
+  role, status polling included, must hold off or retry. The README
+  lists this upgrade step.
 - `fleetName` narrows from `[a-z0-9-]{1,32}` to
   `[a-z0-9][a-z0-9-]{0,31}` (spec §3.3), because it now names
   CodeBuild projects, whose names start with a letter or digit. A
   fleet whose name starts with a hyphen fails synth after the upgrade.
   Renaming it replaces every fleet role, so the role pair must be
   reinstalled under the new name in every registered account.
-  `architecture.md`, the README and `src/shared/fleet.ts` keep the
-  built pattern until this change is built, and then take the new
-  one.
+  `architecture.md`, the README and `src/shared/fleet.ts` use the
+  new pattern.
 - Every build role, every hook role and the two pair roles of the
   control plane's own account carry the deny, one standalone policy
   that nothing depends on, so a deployer can no longer grant them,
@@ -572,8 +575,8 @@ as a consumer of a global post hook.
   outputs from a pre hook into the script; a hook role per application
   or per global hook; publishing to an event bus as a built-in.
 - ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0025, ADR-0032
-  and ADR-0042 get "Amended by ADR-0044" lines and dated trailing notes
-  when this record is accepted.
+  and ADR-0042 carry "Amended by ADR-0044" lines and dated trailing
+  notes.
 - Revisit if a downstream system needs to veto a delete (today a delete
   cannot be gated), if per-application or per-hook permissions are
   needed, if hook latency on every operation becomes the larger cost, if
@@ -586,3 +589,9 @@ as a consumer of a global post hook.
   after a 5xx or a task timeout; and in H-9, one case, the account
   quota's error name together with whether a repeat under a bound
   token returns its build at that quota.
+
+**Amended by ADR-0045 (2026-11-18):** hooks also run on application,
+tenant and account events, and the seven operations that change those
+records become asynchronous. It closes the seam this record lists as
+"hooks on tenant record events and on account events"; hooks on hook
+operations stay out.

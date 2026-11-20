@@ -1,6 +1,6 @@
 # ADR-0012: Cell-based deployment model with a deployment-configured CellDefinition
 
-**Status:** Accepted (2026-09-07)
+**Status:** Accepted (2026-09-07) — amended by ADR-0044 (application hooks are stamped with the definition; four build projects)
 
 **Context:** The silo model gives every tenant a fully dedicated deployment
 defined by tenant-supplied `source` + `scripts`. Moving to a cell model — a
@@ -41,3 +41,5 @@ noted extension, deliberately excluded.
 ---
 
 **Amended by ADR-025 (2026-11-09):** the cell/tenant permission asymmetry moves from the two CodeBuild project roles to a role pair installed in every account that hosts cells, the control plane's own included. Cells also gain an immutable `accountId` (ADR-024).
+
+**Amended by ADR-0044 (2026-11-17):** the definition stamped onto a cell includes the application's hooks. The build runners are four projects: the two provisioning projects, whose roles assume the account's pair, and two hook projects in the control plane account, whose roles never do.

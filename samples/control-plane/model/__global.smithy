@@ -51,6 +51,7 @@ service TenantService {
         Deployment
         Cell
         Account
+        Hook
     ]
     errors: [
         ValidationException
@@ -87,9 +88,13 @@ string EmailAddress
 @timestampFormat("date-time")
 timestamp IsoTimestamp
 
-/// Lifecycle status of a cell or a deployment. Transitional statuses
-/// (CREATING, UPDATING, DELETING) act as an optimistic concurrency guard:
-/// mutations on an in-flight record are rejected with ConflictError.
+/// Lifecycle status of a cell, a deployment, an application, a tenant or an
+/// account. Transitional statuses (CREATING, UPDATING, DELETING) act as an
+/// optimistic concurrency guard: mutations on an in-flight record are
+/// rejected with ConflictError. For an application, a tenant or an account
+/// the record commit takes the script's place (ADR-045), and a record is live
+/// (its values in force) when ACTIVE, UPDATING or UPDATE_FAILED. A record
+/// stored before these records had a status reads as ACTIVE.
 enum LifecycleStatus {
     /// The create script is running; the deployment is being provisioned.
     CREATING
@@ -106,6 +111,13 @@ enum LifecycleStatus {
     /// The delete script failed; delete may be retried.
     DELETE_FAILED
 }
+
+/// The name of the workflow execution a record's last accepted operation
+/// started (ADR-045): `<recordId>-<record type>-<operation>-<ms>-<8 hex>`, at
+/// most 74 characters. Hook builds receive it as EXECUTION_ID.
+@length(min: 1, max: 74)
+@pattern("^[A-Za-z0-9-]+$")
+string OperationId
 
 /// Opaque pagination token.
 @length(min: 1, max: 4096)
@@ -152,23 +164,27 @@ enum SourceType {
 
 /// Location of the provisioning source: an HTTPS clone URL for repository
 /// types, or bucket/path for S3, per CodeBuild ProjectSource.location
-/// semantics. Must start with a non-blank character.
+/// semantics. URL characters without `@`, so it carries no userinfo, and no
+/// control character or character JSON escapes (spec §4.1, R-39, ADR-044).
 @length(min: 1, max: 2048)
-@pattern("^\\S")
+@pattern("^[A-Za-z0-9._~:/?#\\[\\]!$&'()*+,;=%-]+$")
 string SourceLocation
 
 /// Path to a provisioning script, relative to the source root
-/// (for example "scripts/create.sh"). Must start with a non-blank character.
+/// (for example "scripts/create.sh"). Letters, digits and `._/-` only
+/// (spec §4.1, R-39, ADR-044).
 @length(min: 1, max: 1024)
-@pattern("^\\S")
+@pattern("^[A-Za-z0-9._/-]+$")
 string ScriptPath
 
 /// A git ref forwarded to CodeBuild StartBuild as SourceVersion. A full
 /// 40-character commit SHA pins the provisioning source immutably (threat
 /// model T5, mitigation M10); a branch or tag is a mutable ref and is
-/// accepted with a logged warning (ADR-020).
+/// accepted with a logged warning (ADR-020). The characters of a branch, a
+/// tag (a SemVer `+` included), a commit SHA, a `<ref>^{<commit>}` pin or an
+/// object version (spec §4.1, ADR-044).
 @length(min: 1, max: 256)
-@pattern("^[^\\s]+$")
+@pattern("^[A-Za-z0-9._/^{}+-]+$")
 string SourceVersion
 
 /// The build input source for lifecycle provisioning - a modelled subset of
@@ -296,8 +312,8 @@ list ParameterNameList {
 // Errors
 // ---------------------------------------------------------------------------
 
-/// The requested tenant, deployment, cell, account or application does not
-/// exist - including an unregistered accountId or applicationId named by
+/// The requested tenant, deployment, cell, account, application or global
+/// hook does not exist - including an unregistered accountId or applicationId named by
 /// CreateDeployment, and an unregistered application named in
 /// PutAccount.applicationIds.
 @error("client")
@@ -320,8 +336,10 @@ structure ResourceNotFoundError {
 /// PutApplication that keeps a declaration list whose read went stale
 /// (retry - spec R-14), or a CreateDeployment that lost every bounded
 /// placement claim on candidate cells while no account had a free cell
-/// slot (nothing was written; retry - ADR-031). The message says when a
-/// retry can succeed.
+/// slot (nothing was written; retry - ADR-031), or a PutHook that raced a
+/// create or delete of the same hook (retry) or found five global hooks
+/// registered (no retry; delete a hook first - spec R-39). The message says
+/// when a retry can succeed.
 @error("client")
 @httpError(409)
 structure ConflictError {

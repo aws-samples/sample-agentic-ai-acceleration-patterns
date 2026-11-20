@@ -18,8 +18,10 @@ use aws.apigateway#authorizer
 /// keeps that stamp, so a replaced definition reaches only cells created
 /// afterwards (P-4). The record carries the authoritative count of the
 /// application's cells, claimed in the new-cell placement transaction and
-/// released in the cell delete transaction. There is no status - application
-/// operations are synchronous and run no build.
+/// released in the cell delete transaction. Application operations run no
+/// build, but PutApplication and DeleteApplication are asynchronous (202 +
+/// status + polling) so that hooks on application events can gate them
+/// (ADR-045).
 resource Application {
     identifiers: {
         applicationId: ApplicationId
@@ -40,9 +42,9 @@ resource Application {
 @pattern("^[a-z0-9-]{1,32}$")
 string ApplicationId
 
-/// A list of application ids, each at most once; never empty — omit the
-/// field to admit every application.
-@length(min: 1)
+/// A list of application ids, each at most once, at most 100; never empty —
+/// omit the field to admit every application.
+@length(min: 1, max: 100)
 @uniqueItems
 list ApplicationIdList {
     member: ApplicationId
@@ -99,9 +101,40 @@ structure ApplicationSummary {
     @required
     cellParameters: CellParameterDeclarationList
 
+    /// The application hooks (ADR-044), part of the definition: each new
+    /// cell is stamped with the list current at its creation. Empty when
+    /// none.
+    @required
+    hooks: HookDefinitionList
+
     /// Current number of this application's cells.
     @required
     cellCount: ApplicationCellCount
+
+    /// Lifecycle status (ADR-045). The record is live (its values in force)
+    /// when ACTIVE, UPDATING or UPDATE_FAILED. A record stored before records
+    /// of this type had a status reads as ACTIVE.
+    @required
+    status: LifecycleStatus
+
+    /// Failure detail, populated when status is a *_FAILED value.
+    statusReason: String
+
+    /// The global hooks that ran in the record's last application event, in run
+    /// order; empty when none ran.
+    @required
+    lastGlobalHooks: LastGlobalHookList
+
+    /// The name of the workflow execution the record's last accepted
+    /// operation started; hook builds receive it as EXECUTION_ID. Absent on
+    /// a record stored before ADR-045.
+    operationId: OperationId
+
+    /// The definition, strategy and declaration lists a replacing
+    /// PutApplication staged, present only while the application is
+    /// UPDATING. Placement, parameter validation and stamping use the live
+    /// values until the workflow commits them.
+    pending: ApplicationPending
 
     /// When the application was registered.
     @required
@@ -112,13 +145,48 @@ structure ApplicationSummary {
     updatedAt: IsoTimestamp
 }
 
+/// The values a replacing PutApplication staged (ADR-045). The definition
+/// fields and the strategy are always staged; a declaration list or the
+/// hooks list is present only when the request sent it, and an absent one is
+/// kept by the commit.
+structure ApplicationPending {
+    /// The staged build input source.
+    @required
+    source: SourceDefinition
+
+    /// The staged cell lifecycle scripts.
+    @required
+    cellScripts: ScriptLocations
+
+    /// The staged tenant lifecycle scripts.
+    @required
+    tenantScripts: ScriptLocations
+
+    /// The staged maximum number of tenants per cell.
+    @required
+    maxTenants: MaxTenants
+
+    /// The staged placement strategy.
+    @required
+    placementStrategy: PlacementStrategy
+
+    /// The staged tenant parameter declarations; absent: kept.
+    parameters: ParameterDeclarationList
+
+    /// The staged cell parameter declarations; absent: kept.
+    cellParameters: CellParameterDeclarationList
+
+    /// The staged application hooks; absent: kept.
+    hooks: HookDefinitionList
+}
+
 /// A page of applications.
 list ApplicationList {
     member: ApplicationSummary
 }
 
 // ---------------------------------------------------------------------------
-// PutApplication - PUT /applications/{applicationId} -> 200
+// PutApplication - PUT /applications/{applicationId} -> 202
 // ---------------------------------------------------------------------------
 
 /// Registers an application or replaces its definition (create-or-replace).
@@ -132,13 +200,22 @@ list ApplicationList {
 /// existing application the definition and placement strategy are replaced
 /// and cellCount is never touched; cells already created keep their stamp.
 /// Each declaration list is replaced only when sent: an absent list keeps
-/// the current one, an empty list clears it (ADR-039, ADR-040). A put that
-/// keeps a list is conditioned on that list being unchanged since the
-/// service read it; ConflictError when it changed in between (retry).
-/// Synchronous.
+/// the current one, an empty list clears it (ADR-039, ADR-040); the hooks
+/// list follows the same rule (ADR-044) without a write condition. A source
+/// or script path outside its charset (letters, digits and a few
+/// punctuation characters, no control character) is a ValidationException,
+/// as is a hook definition that fails the hook rules. A put that
+/// keeps a declaration list is conditioned on that list being unchanged since the
+/// service read it; ConflictError when it changed in between (retry). An
+/// application hook may not name a TENANT_* or ACCOUNT_* event. A new
+/// application (or a re-put of a CREATE_FAILED one) is written CREATING and
+/// runs APPLICATION_CREATE; on a live application the values are staged in
+/// pending and the record moves to UPDATING while APPLICATION_UPDATE runs.
+/// ConflictError when the application is CREATING, UPDATING, DELETING or
+/// DELETE_FAILED. Asynchronous (ADR-045).
 @authorizer("vendor-authorizer")
 @idempotent
-@http(method: "PUT", uri: "/applications/{applicationId}", code: 200)
+@http(method: "PUT", uri: "/applications/{applicationId}", code: 202)
 operation PutApplication {
     input := {
         /// The application to register.
@@ -172,10 +249,16 @@ operation PutApplication {
         /// The parameters the cell scripts take. Absent keeps the current
         /// list (none on a new application); an empty list clears it.
         cellParameters: CellParameterDeclarationList
+
+        /// The application's hooks (ADR-044), at most five, each one a hook
+        /// definition with an id unique in the list. Absent keeps the current
+        /// list (none on a new application); an empty list clears it. A
+        /// changed list reaches only cells created afterwards.
+        hooks: HookDefinitionList
     }
 
     output := {
-        /// The registered application.
+        /// The application, CREATING or UPDATING.
         @required
         application: ApplicationSummary
     }
@@ -190,7 +273,8 @@ operation PutApplication {
 // ---------------------------------------------------------------------------
 
 /// Returns a registered application: its definition, placement strategy,
-/// both sets of parameter declarations and cell count.
+/// both sets of parameter declarations, cell count, status and any staged
+/// replace - the polling endpoint of the application operations.
 @authorizer("vendor-authorizer")
 @readonly
 @http(method: "GET", uri: "/applications/{applicationId}", code: 200)
@@ -214,16 +298,18 @@ operation GetApplication {
 }
 
 // ---------------------------------------------------------------------------
-// DeleteApplication - DELETE /applications/{applicationId} -> 200
+// DeleteApplication - DELETE /applications/{applicationId} -> 202
 // ---------------------------------------------------------------------------
 
-/// Deregisters an empty application. A single conditional delete on
-/// cellCount = 0 - the counterpart of the cell-slot claim; an application
-/// that still has cells is rejected with ConflictError. Accounts that name
-/// the application in applicationIds are not touched. Synchronous.
+/// Deregisters an empty application. One conditional write on
+/// cellCount = 0 moves it to DELETING - the counterpart of the cell-slot
+/// claim; an application that still has cells is rejected with
+/// ConflictError. The APPLICATION_DELETE workflow then deletes the record;
+/// no hook can stop it. Accounts that name the application in
+/// applicationIds are not touched. Asynchronous (ADR-045).
 @authorizer("vendor-authorizer")
 @idempotent
-@http(method: "DELETE", uri: "/applications/{applicationId}", code: 200)
+@http(method: "DELETE", uri: "/applications/{applicationId}", code: 202)
 operation DeleteApplication {
     input := {
         /// The application to deregister.
@@ -233,7 +319,7 @@ operation DeleteApplication {
     }
 
     output := {
-        /// The application as it was before deletion.
+        /// The application, DELETING.
         @required
         application: ApplicationSummary
     }
@@ -249,7 +335,7 @@ operation DeleteApplication {
 // ---------------------------------------------------------------------------
 
 /// Lists registered applications with pagination: id, maxTenants, placement
-/// strategy and cellCount per application.
+/// strategy, cellCount and status per application.
 @authorizer("vendor-authorizer")
 @readonly
 @paginated(inputToken: "nextToken", outputToken: "nextToken", pageSize: "maxResults", items: "applications")

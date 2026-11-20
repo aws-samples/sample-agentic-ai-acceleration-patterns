@@ -5,6 +5,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SFNClient } from '@aws-sdk/client-sfn';
 import { STSClient } from '@aws-sdk/client-sts';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { convertEvent, convertVersion1Response } from '@smithy/server-apigateway';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { AccountDataModel, AccountItem, AccountRecord } from './account.data-model';
@@ -12,11 +13,14 @@ import { stsHandshakeProbe } from './account.handshake';
 import { ApplicationDataModel, ApplicationItem, ApplicationRecord } from './application.data-model';
 import { CellDataModel, CellItem, CellRecord } from './cell.data-model';
 import { DeploymentDataModel, DeploymentItem, DeploymentRecord } from './deployment.data-model';
+import { HookDataModel, HookItem } from './hook.data-model';
+import { GlobalHookRecord } from './hook.types';
 import { IdempotencyDataModel, IdempotencyItem, IdempotencyRecord } from './idempotency.data-model';
 import { TenantService, TenantServiceConfig } from './tenant';
 import { TenantDataModel, TenantItem, TenantRecord } from './tenant.data-model';
 import { GRANTS, Grant } from '../shared/authorizer-policy';
 import { withGrantCheck } from '../shared/grant-check';
+import { HookTransactions } from '../shared/hook-transactions';
 import { DynamoDBRepository, PlacementTransactions } from '../shared/repository';
 import { CallerContext, requireEnv } from '../shared/service-config';
 import { getTenantServiceServiceHandler } from '../smithy/source/typescript-ssdk-codegen/src';
@@ -32,6 +36,37 @@ import { getTenantServiceServiceHandler } from '../smithy/source/typescript-ssdk
  * below is initialised once at cold start.
  */
 
+/**
+ * Socket timeouts for both Step Functions clients (R-51). The API function
+ * runs for at most 25 s (`tenant.cdk.ts`). An unknown record start makes at
+ * most five Step Functions attempts: the start (one attempt),
+ * `DescribeExecution` (the SDK default of three attempts, with sub-second
+ * backoff) and the second start (one attempt). At 1 s to connect plus 2 s
+ * for the answer each, that is at most about 16 s (about 19 s with
+ * throttling backoff on `DescribeExecution`), which leaves the rest of the
+ * 25 s for the reads and the staging write before the start and the
+ * compensation write and read after it. Without them the SDK waits on a
+ * slow call with no bound, and the invocation can end before R-51
+ * classifies and compensates the start. Only these calls are bounded: a
+ * DynamoDB or STS call that hangs is the T47 residual (spec R-51, §7.4).
+ *
+ * The same bound applies to the cell and deployment starts on `sfnClient`.
+ * There every start error is compensated as a refusal, so a start that did
+ * begin but answered slower than 2 s on all three SDK attempts is marked
+ * `*_FAILED` while its execution runs (T47). Without the bound the same
+ * slow call would run into the function timeout with no compensation at
+ * all, which leaves the record in flight; the bound is the better failure.
+ */
+export const SFN_CONNECTION_TIMEOUT_MS = 1_000;
+export const SFN_REQUEST_TIMEOUT_MS = 2_000;
+
+function sfnRequestHandler(): NodeHttpHandler {
+  return new NodeHttpHandler({
+    connectionTimeout: SFN_CONNECTION_TIMEOUT_MS,
+    requestTimeout: SFN_REQUEST_TIMEOUT_MS,
+  });
+}
+
 const tableName = requireEnv('TABLE_NAME');
 // ADR-025: the fleet name derives every provisioning role ARN; the partition
 // those ARNs live in follows from the Region the function runs in.
@@ -40,6 +75,7 @@ const partition = partitionForRegion(requireEnv('AWS_REGION'));
 const tenantDataModel = new TenantDataModel();
 const deploymentDataModel = new DeploymentDataModel();
 const cellDataModel = new CellDataModel();
+const hookDataModel = new HookDataModel();
 // One document client shared by every repository and the placement
 // transactions — same marshalling behaviour everywhere.
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
@@ -77,6 +113,16 @@ const config: TenantServiceConfig = {
     new ApplicationDataModel(),
     documentClient,
   ),
+  hookRepository: new DynamoDBRepository<GlobalHookRecord, HookItem>(
+    tableName,
+    hookDataModel,
+    documentClient,
+  ),
+  hookTransactions: new HookTransactions<GlobalHookRecord, HookItem>(
+    tableName,
+    hookDataModel,
+    documentClient,
+  ),
   placement: new PlacementTransactions<CellRecord, CellItem, DeploymentRecord, DeploymentItem>(
     tableName,
     cellDataModel,
@@ -89,7 +135,9 @@ const config: TenantServiceConfig = {
   // credentials — registration fails closed when the account is not ready.
   handshake: stsHandshakeProbe(new STSClient({}), partition, fleetName),
   stateMachineArn: requireEnv('STATE_MACHINE_ARN'),
-  sfnClient: new SFNClient({}),
+  sfnClient: new SFNClient({ requestHandler: sfnRequestHandler() }),
+  // R-51: one attempt, so a pre-creation error on a record event's start is a definite refusal.
+  recordStartClient: new SFNClient({ maxAttempts: 1, requestHandler: sfnRequestHandler() }),
 };
 
 // R-36 second wall: every operation checks the caller's grant by name

@@ -1,25 +1,28 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
+import { randomBytes } from 'crypto';
+import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { ulid } from 'ulid';
 import {
-  ACCOUNT_EMPTY_CONDITION,
   AccountItem,
+  AccountPending,
   AccountRecord,
   accountKey,
   listAccountsQuery,
   putAccountUpdate,
+  PutAccountPath,
 } from './account.data-model';
 import { HandshakeProbe, HandshakeRefusal, HandshakeUnavailableError } from './account.handshake';
 import {
-  APPLICATION_EMPTY_CONDITION,
   ApplicationItem,
+  ApplicationPending,
   ApplicationRecord,
   applicationKey,
   DEFAULT_PLACEMENT_STRATEGY,
   listApplicationsQuery,
   putApplicationUpdate,
+  PutApplicationPath,
 } from './application.data-model';
 import {
   CellItem,
@@ -39,6 +42,21 @@ import {
   listDeploymentsByTenantQuery,
   listDeploymentsQuery,
 } from './deployment.data-model';
+import { HookItem, hookCounterKey, hookKey, listHooksQuery, replaceHookUpdate } from './hook.data-model';
+import {
+  GlobalHookRecord,
+  HookDefinition,
+  HookExecutionInput,
+  LastGlobalHookEntry,
+  MAX_GLOBAL_HOOKS,
+} from './hook.types';
+import {
+  hookPinningWarning,
+  resolveHooks,
+  validateApplicationDefinition,
+  validateApplicationHooks,
+  validateHookDefinition,
+} from './hooks';
 import {
   IDEMPOTENCY_TTL_SECONDS,
   IdempotencyDataModel,
@@ -53,21 +71,51 @@ import {
   ParameterValues,
   parametersAsReadCondition,
   resolveParameters,
+  StoredCellParameterDeclaration,
+  StoredParameterDeclaration,
   validateCreateParameters,
   validateDeclarations,
 } from './parameters';
 import {
-  TENANT_EMPTY_CONDITION,
+  isLive,
+  newOperationId,
+  RecordEvent,
+  RecordEventInput,
+  recordEventEnvironment,
+  RecordEventSubject,
+  RecordEventWorkflowInput,
+  recordCommit,
+  RecordPending,
+  RecordType,
+  recordTypeOf,
+} from './record-event.types';
+import {
+  compensateRecordTransition,
+  deleteRecordTransition,
+  freshInsertDeleteCondition,
+  operationIdAsRead,
+  RECORD_DELETABLE_STATUSES,
+  RECORD_FAILED_STATUS,
+  RECORD_UPDATABLE_STATUSES,
+  RecordInFlightStatus,
+  stageRecordTransition,
+} from './record-writes';
+import {
   TENANT_NOT_EXISTS_CONDITION,
   TenantItem,
+  TenantPending,
   TenantRecord,
   listTenantsQuery,
   tenantKey,
 } from './tenant.data-model';
 import { provisioningRoleArn, sessionNameFor } from '../shared/fleet';
+import { HookExistsError, HookGoneError, HookLimitError, HookTransactions } from '../shared/hook-transactions';
 import {
   AccountFullError,
+  AccountNotLiveError,
+  AmbiguousTransactionError,
   ApplicationGoneError,
+  ApplicationNotLiveError,
   ConditionFailedError,
   DeploymentExistsError,
   DuplicateTokenError,
@@ -79,6 +127,7 @@ import {
   RecordGoneError,
   StaleTransitionError,
   TenantGoneError,
+  TenantNotLiveError,
 } from '../shared/repository';
 import { CallerContext, ServiceConfig, sourcePinningWarning } from '../shared/service-config';
 import {
@@ -99,6 +148,8 @@ import {
   DeleteCellServerOutput,
   DeleteDeploymentServerInput,
   DeleteDeploymentServerOutput,
+  DeleteHookServerInput,
+  DeleteHookServerOutput,
   DeleteTenantServerInput,
   DeleteTenantServerOutput,
   DeploymentSummary,
@@ -110,6 +161,10 @@ import {
   GetCellServerOutput,
   GetDeploymentServerInput,
   GetDeploymentServerOutput,
+  GetHookServerInput,
+  GetHookServerOutput,
+  HookDefinition as ApiHookDefinition,
+  HookSummary,
   GetTenantServerInput,
   GetTenantServerOutput,
   InsufficientCapacityError,
@@ -123,6 +178,9 @@ import {
   ListCellsServerOutput,
   ListDeploymentsServerInput,
   ListDeploymentsServerOutput,
+  ListHooksServerInput,
+  ListHooksServerOutput,
+  LastGlobalHook,
   ListTenantsServerInput,
   ListTenantsServerOutput,
   PlacementStrategy,
@@ -130,6 +188,8 @@ import {
   PutAccountServerOutput,
   PutApplicationServerInput,
   PutApplicationServerOutput,
+  PutHookServerInput,
+  PutHookServerOutput,
   ResourceNotFoundError,
   TenantServiceService,
   TenantSummary,
@@ -160,6 +220,12 @@ interface BuildPhaseInput {
   readonly scriptPath: string;
   readonly failedStatus: FailedLifecycleStatus;
   readonly parameters: ParameterValues;
+  /**
+   * The hooks of this build's event (spec R-40, R-45), resolved before the
+   * operation's first write and already in run order. Always present, with
+   * empty lists when no hook applies; the workflow runs it as given.
+   */
+  readonly hooks: HookExecutionInput;
 }
 
 /**
@@ -227,6 +293,10 @@ export interface TenantServiceConfig extends ServiceConfig {
   readonly accountRepository: DynamoDBRepository<AccountRecord, AccountItem>;
   /** Repository over application items in the same table (ADR-032). */
   readonly applicationRepository: DynamoDBRepository<ApplicationRecord, ApplicationItem>;
+  /** Repository over global hook items in the same table (ADR-044). */
+  readonly hookRepository: DynamoDBRepository<GlobalHookRecord, HookItem>;
+  /** The two transactions that touch the hook counter (P-6, R-39). */
+  readonly hookTransactions: HookTransactions<GlobalHookRecord, HookItem>;
   /** Names the provisioning role pair in every account (§3.3, ADR-025). */
   readonly fleetName: string;
   /** The deployment's partition, for role ARNs. */
@@ -238,7 +308,13 @@ export interface TenantServiceConfig extends ServiceConfig {
   /** Step Functions client (shared across invocations). */
   readonly sfnClient: SFNClient;
   /**
-   * Where the PutApplication supply-chain warning goes (ADR-020, ADR-032);
+   * The Step Functions client of a record event's `StartExecution` (R-51), built with
+   * `maxAttempts: 1`: with no SDK retry, a pre-creation error answers the one attempt
+   * there was, so it is a definite refusal. `DescribeExecution` stays on `sfnClient`.
+   */
+  readonly recordStartClient: SFNClient;
+  /**
+   * Where the PutApplication and PutHook supply-chain warnings go (ADR-020, ADR-032, ADR-044);
    * defaults to `console.warn`. Injectable for tests.
    */
   readonly warn?: (message: string) => void;
@@ -319,7 +395,7 @@ const idempotencyDataModel = new IdempotencyDataModel();
 
 /**
  * The cell-based control plane service. Implements the Smithy-generated
- * `TenantServiceService` interface (all twenty-two operations). Receives
+ * `TenantServiceService` interface (all twenty-six operations). Receives
  * static config in the constructor (cold start) and an immutable
  * `CallerContext` per operation — it never sees the raw event or a JWT
  * (context separation).
@@ -328,19 +404,30 @@ export class TenantService implements TenantServiceService<CallerContext> {
   constructor(private readonly config: TenantServiceConfig) {}
 
   // -------------------------------------------------------------------
-  // Tenant operations (§5.1) — all synchronous; a tenant is the customer
+  // Tenant operations (§5.1) — a tenant is the customer. The mutations run
+  // no build but are asynchronous, so that hooks on tenant events can gate
+  // them (§8.4, ADR-045).
   // -------------------------------------------------------------------
 
   CreateTenant = async (
     input: CreateTenantServerInput,
-    _context: CallerContext,
+    context: CallerContext,
   ): Promise<CreateTenantServerOutput> => {
+    const name = requireField(input.name, 'name');
+    // R-40, R-48: the global hooks are read before the insert, so a failed
+    // read is a 500 with nothing written.
+    const globalHooks = await this.readGlobalHooks();
+    const tenantId = ulid();
+    const operationId = this.newOperationId(tenantId, 'TENANT_CREATE');
     const now = new Date();
     const tenant: TenantRecord = {
-      tenantId: ulid(),
-      name: requireField(input.name, 'name'),
-      description: input.description,
+      tenantId,
+      name,
+      ...(input.description === undefined ? {} : { description: input.description }),
       deploymentCount: 0,
+      // Not live until TENANT_CREATE's post hooks pass (R-47, R-50).
+      status: LifecycleStatus.CREATING,
+      operationId,
       createdAt: now,
       updatedAt: now,
     };
@@ -350,11 +437,26 @@ export class TenantService implements TenantServiceService<CallerContext> {
       if (error instanceof ConditionFailedError) {
         // A fresh ULID collided — negligible, and the client retry mints
         // another. Never a client error.
-        throw new InternalServerError({ message: `Tenant id ${tenant.tenantId} already exists; retry` });
+        throw new InternalServerError({ message: `Tenant id ${tenantId} already exists; retry` });
       }
       throw error;
     }
-    return { tenant: toTenantSummary(tenant) };
+    const accepted = await this.acceptRecordEvent({
+      what: `Tenant ${tenantId}`,
+      repository: this.config.tenantRepository,
+      written: tenant,
+      freshInsert: true,
+      input: this.recordEventInput({
+        event: 'TENANT_CREATE',
+        recordId: tenantId,
+        key: tenantKey(tenantId),
+        operationId,
+        globalHooks,
+        subject: { recordType: 'TENANT', tenantId, tenantName: name },
+        context,
+      }),
+    });
+    return { tenant: toTenantSummary(accepted) };
   };
 
   GetTenant = async (
@@ -367,69 +469,104 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
   UpdateTenant = async (
     input: UpdateTenantServerInput,
-    _context: CallerContext,
+    context: CallerContext,
   ): Promise<UpdateTenantServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
-
-    // Metadata only (field-ownership write, ADR-011, R-21): the update never
-    // touches `deploymentCount`, which the two counter paths own.
-    const setExpressions = ['#updatedAt = :updatedAt'];
-    const expressionAttributeNames: Record<string, string> = {
-      '#updatedAt': 'updatedAt',
-    };
-    const expressionAttributeValues: Record<string, unknown> = {
-      ':updatedAt': new Date().toISOString(),
-    };
-    if (input.name !== undefined) {
-      setExpressions.push('#name = :name');
-      expressionAttributeNames['#name'] = 'name';
-      expressionAttributeValues[':name'] = input.name;
+    const what = `Tenant ${tenantId}`;
+    const existing = await this.getTenantOrThrow(tenantId, { consistentRead: true });
+    // R-48: from ACTIVE or UPDATE_FAILED only; in flight is a 409 with the
+    // retry hint, CREATE_FAILED, DELETING or DELETE_FAILED one without (R-14).
+    if (!RECORD_UPDATABLE_STATUSES.includes(existing.status)) {
+      throw updateConflict(what, existing.status);
     }
-    if (input.description !== undefined) {
-      setExpressions.push('#description = :description');
-      expressionAttributeNames['#description'] = 'description';
-      expressionAttributeValues[':description'] = input.description;
-    }
-
+    // Metadata only (R-21): `pending` holds the merged name and description
+    // the commit makes live; an omitted field keeps its stored value. Never
+    // `deploymentCount`, which the two counter paths own.
+    const description = input.description ?? existing.description;
+    const pending: TenantPending = {
+      name: input.name ?? existing.name,
+      ...(description === undefined ? {} : { description }),
+    };
+    const globalHooks = await this.readGlobalHooks();
+    const operationId = this.newOperationId(tenantId, 'TENANT_UPDATE');
+    let updating: TenantRecord;
     try {
-      const updated = await this.config.tenantRepository.updateExisting(tenantKey(tenantId), {
-        updateExpression: `SET ${setExpressions.join(', ')}`,
-        expressionAttributeNames,
-        expressionAttributeValues,
-      });
-      return { tenant: toTenantSummary(updated) };
+      // ONE conditional write stages the values and moves the tenant to
+      // UPDATING (R-48). The live name and description are not touched. The
+      // operationId as read keeps the merge from landing on a record another
+      // update has since committed.
+      updating = await this.config.tenantRepository.transitionStatus(
+        tenantKey(tenantId),
+        stageRecordTransition({
+          pending,
+          operationId,
+          updatedAt: new Date().toISOString(),
+          extraCondition: operationIdAsRead(existing.operationId),
+        }),
+      );
     } catch (error) {
-      if (error instanceof RecordGoneError) {
-        // The metadata write lost a race with a concurrent delete — 404, not
-        // an unmodelled 500 (R-14).
-        throw new ResourceNotFoundError({ message: `Tenant ${tenantId} not found` });
+      if (error instanceof StaleTransitionError) {
+        throw staleUpdateFailure(what, error.current as TenantRecord | undefined);
       }
       throw error;
     }
+    const accepted = await this.acceptRecordEvent({
+      what,
+      repository: this.config.tenantRepository,
+      written: updating,
+      freshInsert: false,
+      input: this.recordEventInput({
+        event: 'TENANT_UPDATE',
+        recordId: tenantId,
+        key: tenantKey(tenantId),
+        operationId,
+        globalHooks,
+        subject: { recordType: 'TENANT', tenantId, tenantName: pending.name },
+        pending,
+        context,
+      }),
+    });
+    return { tenant: toTenantSummary(accepted) };
   };
 
   DeleteTenant = async (
     input: DeleteTenantServerInput,
-    _context: CallerContext,
+    context: CallerContext,
   ): Promise<DeleteTenantServerOutput> => {
     const tenantId = requireField(input.tenantId, 'tenantId');
-    const existing = await this.getTenantOrThrow(tenantId);
+    const what = `Tenant ${tenantId}`;
+    await this.getTenantOrThrow(tenantId);
+    const globalHooks = await this.readGlobalHooks();
+    const operationId = this.newOperationId(tenantId, 'TENANT_DELETE');
 
-    // Empty tenants only (P-10): ONE conditional delete on
-    // deploymentCount = 0 — the counterpart of the deployment claim
-    // (ADR-037). A read-then-delete would let a concurrent CreateDeployment
-    // claim the count in between; the condition rejects that as the 409.
-    try {
-      await this.config.tenantRepository.delete(tenantKey(tenantId), TENANT_EMPTY_CONDITION);
-    } catch (error) {
-      if (error instanceof ConditionFailedError) {
-        throw new ConflictError({
-          message: `Tenant ${tenantId} cannot be deleted — it still has deployments (delete them first with DeleteDeployment) or was modified concurrently`,
-        });
-      }
-      throw error;
-    }
-    return { tenant: toTenantSummary(existing) };
+    // Empty tenants only (P-10, R-49): ONE conditional write moves the
+    // tenant to DELETING on deploymentCount = 0 — the counterpart of the
+    // deployment claim, which needs a live tenant (§7.1). The workflow runs
+    // the TENANT_DELETE pre hooks, deletes the record, then the post hooks.
+    const deleting = await this.moveRecordToDeleting(
+      this.config.tenantRepository,
+      'TENANT',
+      tenantKey(tenantId),
+      what,
+      operationId,
+      'it still has deployments (delete them first with DeleteDeployment)',
+    );
+    const accepted = await this.acceptRecordEvent({
+      what,
+      repository: this.config.tenantRepository,
+      written: deleting,
+      freshInsert: false,
+      input: this.recordEventInput({
+        event: 'TENANT_DELETE',
+        recordId: tenantId,
+        key: tenantKey(tenantId),
+        operationId,
+        globalHooks,
+        subject: { recordType: 'TENANT', tenantId, tenantName: deleting.name },
+        context,
+      }),
+    });
+    return { tenant: toTenantSummary(accepted) };
   };
 
   ListTenants = async (
@@ -500,12 +637,26 @@ export class TenantService implements TenantServiceService<CallerContext> {
     // checks are repeated inside the transaction as conditions, so a delete
     // in between is still a 404 and never a phantom count.
     const tenant = await this.getTenantOrThrow(tenantId);
+    // R-13: the tenant and the application must be live (R-47); the
+    // placement transaction repeats the check as a condition.
+    if (!isLive(tenant.status)) {
+      throw notLiveConflict(`Tenant ${tenantId}`, tenant.status);
+    }
     const application = await this.getApplicationOrThrow(applicationId);
+    if (!isLive(application.status)) {
+      throw notLiveConflict(`Application ${applicationId}`, application.status);
+    }
 
     // R-33: the values are checked against the declarations just read -
     // after the replay read, before placement - and stored as supplied
     // (never a default). A 400 here writes nothing.
     const parameters = validateCreateParameters(input.parameters, application.parameters, application.cellParameters);
+
+    // R-40, §7.1 step 0: the global hooks are read before the first write,
+    // so a failed read is a 500 with nothing written. The application hooks
+    // need no read: a new cell is stamped from the application record read
+    // above, an existing one holds its own stamp.
+    const globalHooks = await this.readGlobalHooks();
 
     // Optional idempotency (ADR-017): the item joins the placement
     // transaction, conditional on attribute_not_exists(PK). Its cancelled
@@ -569,6 +720,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(placed.cell.tenantScripts.create, 'cell.tenantScripts.create'),
           failedStatus: 'CREATE_FAILED',
           parameters: tenantParameters,
+          hooks: resolveHooks('DEPLOYMENT_CREATE', placed.cell.hooks, globalHooks),
           tenantName: tenant.name,
           adminEmail,
         },
@@ -610,6 +762,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
           failedStatus: 'CREATE_FAILED',
           // R-34: a new cell has no values of its own - the defaults.
           parameters: resolveParameters(cell.parameters, application.cellParameters),
+          // R-45: the cell event runs first, post hooks included, before the
+          // deployment event's pre hooks start.
+          hooks: resolveHooks('CELL_CREATE', cell.hooks, globalHooks),
         },
         tenantId,
         tenantBuild: {
@@ -617,6 +772,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(cell.tenantScripts.create, 'application.tenantScripts.create'),
           failedStatus: 'CREATE_FAILED',
           parameters: tenantParameters,
+          hooks: resolveHooks('DEPLOYMENT_CREATE', cell.hooks, globalHooks),
           tenantName: tenant.name,
           adminEmail,
         },
@@ -657,6 +813,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
       deployment: toDeploymentSummary(deployment),
       source: cell.source,
       scripts: cell.tenantScripts,
+      // The application hooks stamped on the cell (R-31, §5.2).
+      hooks: (cell.hooks ?? []).map(toApiHookDefinition),
       accountId: cell.accountId,
       // The supplied values only; defaults are not merged in (§5.2).
       parameters: { ...(deployment.parameters ?? {}) },
@@ -704,6 +862,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
     const account = await this.getAccountForCell(cell);
     const tenant = await this.getTenantForDeployment(existing);
+    // R-40: read before the transitional write, so a failed read leaves
+    // the record in its current status.
+    const globalHooks = await this.readGlobalHooks();
     const updating = (await this.mergeTransition(
       this.config.deploymentRepository,
       deploymentKey(tenantId, applicationId),
@@ -722,6 +883,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(cell.tenantScripts.update, 'cell.tenantScripts.update'),
           failedStatus: 'UPDATE_FAILED',
           parameters: resolveParameters(merged, application.parameters),
+          hooks: resolveHooks('DEPLOYMENT_UPDATE', cell.hooks, globalHooks),
           tenantName: tenant.name,
           adminEmail: '',
         },
@@ -755,6 +917,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
     // R-32, P-9: cleanup runs with what is stored, never validated against
     // the current declarations; the application supplies defaults only.
     const declarations = (await this.config.applicationRepository.get(applicationKey(applicationId)))?.parameters;
+    // R-40: read before the transitional write.
+    const globalHooks = await this.readGlobalHooks();
 
     const deleting = await this.transitionDeployment(
       tenantId,
@@ -773,6 +937,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(cell.tenantScripts.delete, 'cell.tenantScripts.delete'),
           failedStatus: 'DELETE_FAILED',
           parameters: resolveParameters(existing.parameters, declarations),
+          hooks: resolveHooks('DEPLOYMENT_DELETE', cell.hooks, globalHooks),
           tenantName: tenant.name,
           adminEmail: '',
         },
@@ -885,6 +1050,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
     }
 
     const account = await this.getAccountForCell(existing);
+    // R-40: read before the transitional write.
+    const globalHooks = await this.readGlobalHooks();
     // The map, not updatedAt, guards the write: placements and deployment
     // deletes write the cell's counter and updatedAt while it is ACTIVE and
     // must not fail an UpdateCell that has nothing to do with them (R-34).
@@ -905,6 +1072,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(existing.cellScripts.update, 'cell.cellScripts.update'),
           failedStatus: 'UPDATE_FAILED',
           parameters: resolveParameters(merged, application.cellParameters),
+          hooks: resolveHooks('CELL_UPDATE', existing.hooks, globalHooks),
         },
       },
       this.cellCompensation(cellId, 'UPDATING', 'UPDATE_FAILED'),
@@ -922,6 +1090,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
     // R-34: never validated; the application supplies defaults only.
     const cellDeclarations = (await this.config.applicationRepository.get(applicationKey(existing.applicationId)))
       ?.cellParameters;
+    // R-40: read before the transitional write.
+    const globalHooks = await this.readGlobalHooks();
 
     // ADR-014: the emptiness check and the DELETING transition are ONE
     // atomic conditional UpdateItem (status IN {ACTIVE, *_FAILED} AND
@@ -952,6 +1122,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
           scriptPath: requireField(existing.cellScripts.delete, 'cell.cellScripts.delete'),
           failedStatus: 'DELETE_FAILED',
           parameters: resolveParameters(existing.parameters, cellDeclarations),
+          hooks: resolveHooks('CELL_DELETE', existing.hooks, globalHooks),
         },
       },
       this.cellCompensation(cellId, 'DELETING', 'DELETE_FAILED'),
@@ -970,6 +1141,7 @@ export class TenantService implements TenantServiceService<CallerContext> {
     const accountId = requireField(input.accountId, 'accountId');
     const owner = requireField(input.owner, 'owner');
     const maxCells = requireField(input.maxCells, 'maxCells');
+    const what = `Account ${accountId}`;
 
     // §6.4 (ADR-029): a tenant-owned account is a third party handing the
     // control plane a role, so its pair MUST carry an external id. Checked
@@ -986,29 +1158,34 @@ export class TenantService implements TenantServiceService<CallerContext> {
     }
 
     // ADR-033: an allowlist names registered applications only (404
-    // otherwise). An empty list would admit nothing — omit the field to
-    // make the account shared.
+    // otherwise), each at most once, at most 100 of them (R-42 bounds
+    // ACCOUNT_APPLICATION_IDS by it). An empty list would admit nothing —
+    // omit the field to make the account shared. The generated validators
+    // enforce the length and uniqueness too; this is defence in depth.
     const applicationIds = input.applicationIds;
     if (applicationIds !== undefined) {
-      if (applicationIds.length === 0) {
+      if (applicationIds.length === 0 || applicationIds.length > MAX_ACCOUNT_APPLICATION_IDS) {
         throw new ValidationException({
-          message: `Account ${accountId}: applicationIds must name at least one application, or be omitted to admit every application (ADR-033)`,
+          message: `Account ${accountId}: applicationIds must name 1 to ${MAX_ACCOUNT_APPLICATION_IDS} applications, or be omitted to admit every application (ADR-033)`,
         });
+      }
+      if (new Set(applicationIds).size !== applicationIds.length) {
+        throw new ValidationException({ message: `Account ${accountId}: applicationIds names an application twice` });
       }
       for (const applicationId of applicationIds) {
         await this.getApplicationOrThrow(applicationId);
       }
     }
 
-    // Owner is immutable (R-24). A re-registration with another owner is
+    // The path comes from a strongly consistent read (R-48). Owner is
+    // immutable (R-24), and a status that admits no put is a 409: both are
     // refused from the stored record before any STS traffic, so a
-    // misdirected PutAccount costs no probe; the conditional write below
-    // still carries the same check for the race between this read and the
-    // write.
-    const existing = await this.config.accountRepository.get(accountKey(accountId));
-    if (existing !== undefined && existing.owner !== owner) {
-      throw ownerImmutableError(accountId);
-    }
+    // misdirected PutAccount costs no probe. The conditional write carries
+    // the same checks for the race between this read and the write.
+    const key = accountKey(accountId);
+    let current = await this.config.accountRepository.get(key, { consistentRead: true });
+    const request = { owner, maxCells, applicationIds };
+    putAccountPath(what, current, request);
 
     // R-26 (ADR-027, ADR-030): verify the handshake BEFORE writing — assume
     // both halves of the pair with the supplied external id, prove the pair
@@ -1042,27 +1219,92 @@ export class TenantService implements TenantServiceService<CallerContext> {
       });
     }
 
-    // One conditional create-or-replace write (R-24): owner is immutable,
-    // cellCount is never touched, policy fields are replaced.
+    const now = () => new Date().toISOString();
+    const write = { accountId, owner, maxCells, applicationIds, externalId: input.externalId };
+    let path = putAccountPath(what, current, request);
+    if (path === 'ROTATE') {
+      // R-48: a rotation on an UPDATING account writes externalId alone,
+      // starts no execution and runs no hook, so a security rotation never
+      // waits on a gate. A lost condition (the event ended, or another
+      // began) reads the record once more and takes the path its new
+      // status selects, without a second probe: the probe has passed.
+      try {
+        const rotated = await this.config.accountRepository.update(
+          key,
+          putAccountUpdate({ ...write, path, operationId: current?.operationId, now: now() }),
+          { returnCurrentOnFailure: true },
+        );
+        return { account: toAccountSummary(rotated) };
+      } catch (error) {
+        if (!(error instanceof StaleTransitionError)) {
+          throw error;
+        }
+        const failed = error.current as AccountRecord | undefined;
+        if (failed !== undefined && failed.owner !== owner) {
+          throw ownerImmutableError(accountId);
+        }
+      }
+      current = await this.config.accountRepository.get(key, { consistentRead: true });
+      path = putAccountPath(what, current, request);
+      if (path === 'ROTATE') {
+        try {
+          const rotated = await this.config.accountRepository.update(
+            key,
+            putAccountUpdate({ ...write, path, operationId: current?.operationId, now: now() }),
+            { returnCurrentOnFailure: true },
+          );
+          return { account: toAccountSummary(rotated) };
+        } catch (error) {
+          if (error instanceof StaleTransitionError) {
+            throw putAccountFailure(accountId, owner, error.current as AccountRecord | undefined);
+          }
+          throw error;
+        }
+      }
+    }
+
+    // R-40: read after the probe, before the first write.
+    const globalHooks = await this.readGlobalHooks();
+    const event: RecordEvent = path === 'REPLACE' ? 'ACCOUNT_UPDATE' : 'ACCOUNT_CREATE';
+    const operationId = this.newOperationId(accountId, event);
+    let written: AccountRecord;
     try {
-      const account = await this.config.accountRepository.update(
-        accountKey(accountId),
-        putAccountUpdate({
-          accountId,
-          owner,
-          maxCells,
-          applicationIds,
-          externalId: input.externalId,
-          now: new Date().toISOString(),
-        }),
+      // ONE conditional write (R-24, R-48): a create or a re-put writes the
+      // policy fields into the record (CREATING); a replace writes
+      // externalId into the record at once and stages maxCells and
+      // applicationIds in pending (UPDATING). cellCount is never touched.
+      written = await this.config.accountRepository.update(
+        key,
+        putAccountUpdate({ ...write, path, operationId, now: now() }),
+        { returnCurrentOnFailure: true },
       );
-      return { account: toAccountSummary(account) };
     } catch (error) {
-      if (error instanceof ConditionFailedError) {
-        throw ownerImmutableError(accountId);
+      if (error instanceof StaleTransitionError) {
+        throw putAccountFailure(accountId, owner, error.current as AccountRecord | undefined);
       }
       throw error;
     }
+    const pending: AccountPending | undefined = path === 'REPLACE'
+      ? { maxCells, ...(applicationIds === undefined ? {} : { applicationIds: [...applicationIds] }) }
+      : undefined;
+    const accepted = await this.acceptRecordEvent({
+      what,
+      repository: this.config.accountRepository,
+      written,
+      freshInsert: path === 'CREATE',
+      input: this.recordEventInput({
+        event,
+        recordId: accountId,
+        key,
+        operationId,
+        globalHooks,
+        // The values being written: the request's (R-42).
+        subject: { recordType: 'ACCOUNT', accountId, owner, applicationIds },
+        pending,
+        context,
+      }),
+    });
+    return { account: toAccountSummary(accepted) };
   };
 
   GetAccount = async (
@@ -1090,26 +1332,43 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
   DeleteAccount = async (
     input: DeleteAccountServerInput,
-    _context: CallerContext,
+    context: CallerContext,
   ): Promise<DeleteAccountServerOutput> => {
     const accountId = requireField(input.accountId, 'accountId');
-    const existing = await this.getAccountOrThrow(accountId);
+    const what = `Account ${accountId}`;
+    await this.getAccountOrThrow(accountId);
+    const globalHooks = await this.readGlobalHooks();
+    const operationId = this.newOperationId(accountId, 'ACCOUNT_DELETE');
 
-    // Empty accounts only (P-10): ONE conditional delete on cellCount = 0 —
-    // the counterpart of the cell-slot claim (ADR-024). A read-then-delete
-    // would let a concurrent new-cell placement claim a slot in between;
-    // the condition rejects that as the 409.
-    try {
-      await this.config.accountRepository.delete(accountKey(accountId), ACCOUNT_EMPTY_CONDITION);
-    } catch (error) {
-      if (error instanceof ConditionFailedError) {
-        throw new ConflictError({
-          message: `Account ${accountId} cannot be deregistered — it still holds cells (delete them first) or was modified concurrently`,
-        });
-      }
-      throw error;
-    }
-    return { account: toAccountSummary(existing) };
+    // Empty accounts only (P-10, R-49): ONE conditional write moves the
+    // account to DELETING on cellCount = 0 — the counterpart of the
+    // cell-slot claim, which needs a live account (§7.1). The account's
+    // roles stay installed; removing them is the owner's act.
+    const deleting = await this.moveRecordToDeleting(
+      this.config.accountRepository,
+      'ACCOUNT',
+      accountKey(accountId),
+      what,
+      operationId,
+      'it still holds cells (delete them first)',
+    );
+    const accepted = await this.acceptRecordEvent({
+      what,
+      repository: this.config.accountRepository,
+      written: deleting,
+      freshInsert: false,
+      input: this.recordEventInput({
+        event: 'ACCOUNT_DELETE',
+        recordId: accountId,
+        key: accountKey(accountId),
+        operationId,
+        globalHooks,
+        // The stored values (R-42).
+        subject: { recordType: 'ACCOUNT', accountId, owner: deleting.owner, applicationIds: deleting.applicationIds },
+        context,
+      }),
+    });
+    return { account: toAccountSummary(accepted) };
   };
 
   // -------------------------------------------------------------------
@@ -1118,28 +1377,57 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
   PutApplication = async (
     input: PutApplicationServerInput,
-    _context: CallerContext,
+    context: CallerContext,
   ): Promise<PutApplicationServerOutput> => {
     const applicationId = requireField(input.applicationId, 'applicationId');
     const source = requireField(input.source, 'source');
     const cellScripts = requireField(input.cellScripts, 'cellScripts');
     const tenantScripts = requireField(input.tenantScripts, 'tenantScripts');
     const maxTenants = requireField(input.maxTenants, 'maxTenants');
+    const what = `Application ${applicationId}`;
+    const sourceDefinition = {
+      type: requireField(source.type, 'source.type'),
+      location: requireField(source.location, 'source.location'),
+      ...(source.sourceVersion === undefined ? {} : { sourceVersion: source.sourceVersion }),
+    };
+    const cellScriptPaths = {
+      create: requireField(cellScripts.create, 'cellScripts.create'),
+      update: requireField(cellScripts.update, 'cellScripts.update'),
+      delete: requireField(cellScripts.delete, 'cellScripts.delete'),
+    };
+    const tenantScriptPaths = {
+      create: requireField(tenantScripts.create, 'tenantScripts.create'),
+      update: requireField(tenantScripts.update, 'tenantScripts.update'),
+      delete: requireField(tenantScripts.delete, 'tenantScripts.delete'),
+    };
 
-    // A list the request does not send is kept (R-29, §5.5), so the current
-    // record is read whenever one is missing: the "one name in one list"
-    // check runs against the kept list, and the write is conditioned on it
-    // being unchanged. On a new application an absent list declares none.
-    const current =
-      input.parameters === undefined || input.cellParameters === undefined
-        ? await this.config.applicationRepository.get(applicationKey(applicationId))
-        : undefined;
+    // §4.1, R-39 (ADR-044): the source and every script path are held to the
+    // hook charsets, and each hook definition to R-39, before any read. A
+    // list that is not sent stays undefined: it is kept (R-29).
+    validateApplicationDefinition(applicationId, sourceDefinition, {
+      cellScripts: cellScriptPaths,
+      tenantScripts: tenantScriptPaths,
+    });
+    const hooks = validateApplicationHooks(input.hooks, applicationId);
+
+    // The path comes from a strongly consistent read (R-48): no record, a
+    // create; CREATE_FAILED, a re-put; a live record, a replace staged in
+    // pending; CREATING, UPDATING, DELETING or DELETE_FAILED, a 409. A list
+    // the request does not send is kept (R-29, §5.5): the "one name in one
+    // list" check runs against the kept list, and the write is conditioned
+    // on it being unchanged. On a new application an absent list declares
+    // none.
+    const key = applicationKey(applicationId);
+    const current = await this.config.applicationRepository.get(key, { consistentRead: true });
+    // Validation first, so a request that is both invalid and in flight is
+    // a 400 (R-48); then the path, whose refusal is the 409.
     const declarations = validateDeclarations({
       parameters: input.parameters,
       cellParameters: input.cellParameters,
       keptParameters: current?.parameters,
       keptCellParameters: current?.cellParameters,
     });
+    const path = putApplicationPath(what, current);
 
     // The generated validators have already enforced the definition's shape
     // (every script path non-empty, maxTenants >= 1, the id's charset) —
@@ -1150,49 +1438,65 @@ export class TenantService implements TenantServiceService<CallerContext> {
     if (pinningWarning !== undefined) {
       (this.config.warn ?? console.warn)(`PutApplication ${applicationId}: ${pinningWarning}`);
     }
+    for (const hook of hooks ?? []) {
+      const hookWarning = hookPinningWarning(hook);
+      if (hookWarning !== undefined) {
+        (this.config.warn ?? console.warn)(`PutApplication ${applicationId}: ${hookWarning}`);
+      }
+    }
 
-    // One create-or-replace write (R-29): the definition and the strategy
-    // are replaced, a declaration list only when sent, cellCount is never
+    // The values the write makes live (create, re-put) or stages (replace):
+    // the definition and the strategy always, each list only when sent.
+    const values: ApplicationPending = {
+      source: sourceDefinition,
+      cellScripts: cellScriptPaths,
+      tenantScripts: tenantScriptPaths,
+      maxTenants,
+      placementStrategy: input.placementStrategy ?? DEFAULT_PLACEMENT_STRATEGY,
+      ...(declarations.parameters === undefined ? {} : { parameters: declarations.parameters }),
+      ...(declarations.cellParameters === undefined ? {} : { cellParameters: declarations.cellParameters }),
+      ...(hooks === undefined ? {} : { hooks }),
+    };
+    // R-40: read before the write.
+    const globalHooks = await this.readGlobalHooks();
+    const event: RecordEvent = path === 'REPLACE' ? 'APPLICATION_UPDATE' : 'APPLICATION_CREATE';
+    const operationId = this.newOperationId(applicationId, event);
+
+    // ONE conditional write on every path (R-29, R-48), cellCount never
     // touched. Cells already stamped keep their definition (P-4).
-    let application: ApplicationRecord;
+    let written: ApplicationRecord;
     try {
-      application = await this.config.applicationRepository.update(
-        applicationKey(applicationId),
-        putApplicationUpdate({
-          applicationId,
-          source: {
-            type: requireField(source.type, 'source.type'),
-            location: requireField(source.location, 'source.location'),
-            sourceVersion: source.sourceVersion,
-          },
-          cellScripts: {
-            create: requireField(cellScripts.create, 'cellScripts.create'),
-            update: requireField(cellScripts.update, 'cellScripts.update'),
-            delete: requireField(cellScripts.delete, 'cellScripts.delete'),
-          },
-          tenantScripts: {
-            create: requireField(tenantScripts.create, 'tenantScripts.create'),
-            update: requireField(tenantScripts.update, 'tenantScripts.update'),
-            delete: requireField(tenantScripts.delete, 'tenantScripts.delete'),
-          },
-          maxTenants,
-          placementStrategy: input.placementStrategy ?? DEFAULT_PLACEMENT_STRATEGY,
-          parameters: declarations.parameters ?? { read: current?.parameters },
-          cellParameters: declarations.cellParameters ?? { read: current?.cellParameters },
-          now: new Date().toISOString(),
-        }),
+      written = await this.config.applicationRepository.update(
+        key,
+        putApplicationUpdate({ path, applicationId, operationId, values, read: current, now: new Date().toISOString() }),
+        { returnCurrentOnFailure: true },
       );
     } catch (error) {
-      if (error instanceof ConditionFailedError) {
-        // A kept list changed between the read and the write (R-14): the
-        // checks ran against a list that is no longer there.
-        throw new ConflictError({
-          message: `Application ${applicationId}: a parameter declaration list this request keeps changed after it was read; re-read and ${RETRY_HINT}`,
-        });
+      if (error instanceof StaleTransitionError) {
+        throw putApplicationFailure(what, error.current as ApplicationRecord | undefined);
       }
       throw error;
     }
-    return { application: toApplicationSummary(application) };
+    const accepted = await this.acceptRecordEvent({
+      what,
+      repository: this.config.applicationRepository,
+      written,
+      freshInsert: path === 'CREATE',
+      input: this.recordEventInput({
+        event,
+        recordId: applicationId,
+        key,
+        operationId,
+        // R-40: the hooks of the definition being written — the request's
+        // when it sent them, the stored list otherwise.
+        applicationHooks: hooks ?? current?.hooks,
+        globalHooks,
+        subject: { recordType: 'APPLICATION', applicationId },
+        pending: path === 'REPLACE' ? values : undefined,
+        context,
+      }),
+    });
+    return { application: toApplicationSummary(accepted) };
   };
 
   GetApplication = async (
@@ -1220,26 +1524,140 @@ export class TenantService implements TenantServiceService<CallerContext> {
 
   DeleteApplication = async (
     input: DeleteApplicationServerInput,
-    _context: CallerContext,
+    context: CallerContext,
   ): Promise<DeleteApplicationServerOutput> => {
     const applicationId = requireField(input.applicationId, 'applicationId');
-    const existing = await this.getApplicationOrThrow(applicationId);
+    const what = `Application ${applicationId}`;
+    await this.getApplicationOrThrow(applicationId);
+    const globalHooks = await this.readGlobalHooks();
+    const operationId = this.newOperationId(applicationId, 'APPLICATION_DELETE');
 
-    // Empty applications only (P-10): ONE conditional delete on
-    // cellCount = 0 — the counterpart of the application's cell-count claim
-    // (ADR-032). Accounts naming the application in their allowlist are left
-    // alone: the id is inert once nothing can be placed for it (ADR-033).
-    try {
-      await this.config.applicationRepository.delete(applicationKey(applicationId), APPLICATION_EMPTY_CONDITION);
-    } catch (error) {
-      if (error instanceof ConditionFailedError) {
-        throw new ConflictError({
-          message: `Application ${applicationId} cannot be deregistered — it still has cells (delete them first) or was modified concurrently`,
+    // Empty applications only (P-10, R-49): ONE conditional write moves the
+    // application to DELETING on cellCount = 0 — the counterpart of the
+    // cell-slot claim, which needs a live application (§7.1). Accounts
+    // naming the application in their allowlist are left alone: the id is
+    // inert once nothing can be placed for it (ADR-033).
+    const deleting = await this.moveRecordToDeleting(
+      this.config.applicationRepository,
+      'APPLICATION',
+      applicationKey(applicationId),
+      what,
+      operationId,
+      'it still has cells (delete them first)',
+    );
+    const accepted = await this.acceptRecordEvent({
+      what,
+      repository: this.config.applicationRepository,
+      written: deleting,
+      freshInsert: false,
+      input: this.recordEventInput({
+        event: 'APPLICATION_DELETE',
+        recordId: applicationId,
+        key: applicationKey(applicationId),
+        operationId,
+        // R-40: the stored list, as the DELETING write left it.
+        applicationHooks: deleting.hooks,
+        globalHooks,
+        subject: { recordType: 'APPLICATION', applicationId },
+        context,
+      }),
+    });
+    return { application: toApplicationSummary(accepted) };
+  };
+
+  // -------------------------------------------------------------------
+  // Hook operations (§5.5, §4.8, ADR-044) - global hooks, operator-only writes
+  // -------------------------------------------------------------------
+
+  PutHook = async (
+    input: PutHookServerInput,
+    _context: CallerContext,
+  ): Promise<PutHookServerOutput> => {
+    const hookId = requireField(input.hookId, 'hookId');
+    // R-39: the whole definition is validated before anything is read or
+    // written (400). The timeout is stored resolved.
+    const definition = validateHookDefinition({ ...input, hookId }, `Hook ${hookId}`);
+    const pinningWarning = hookPinningWarning(definition);
+    if (pinningWarning !== undefined) {
+      (this.config.warn ?? console.warn)(`PutHook ${hookId}: ${pinningWarning}`);
+    }
+
+    // R-39: the path - create or replace - is chosen from a strongly
+    // consistent read; the writes below decide (P-5).
+    const key = hookKey(hookId);
+    const existing = await this.config.hookRepository.get(key, { consistentRead: true });
+    const now = new Date();
+    if (existing === undefined) {
+      const hook: GlobalHookRecord = { ...definition, revision: 1, createdAt: now, updatedAt: now };
+      try {
+        // ONE transaction: the hook inserted and hookCount claimed (P-6).
+        await this.config.hookTransactions.createHook({
+          hook,
+          counterKey: hookCounterKey(),
+          maxHooks: MAX_GLOBAL_HOOKS,
+          updatedAt: now.toISOString(),
         });
+      } catch (error) {
+        throw mapHookWriteError(hookId, error);
+      }
+      return { hook: toHookSummary(hook) };
+    }
+    try {
+      // ONE update conditioned on the hook's existence: revision + 1. The
+      // counter is untouched.
+      const replaced = await this.config.hookRepository.updateExisting(key, replaceHookUpdate(definition, now.toISOString()));
+      return { hook: toHookSummary(replaced) };
+    } catch (error) {
+      throw mapHookWriteError(hookId, error);
+    }
+  };
+
+  GetHook = async (
+    input: GetHookServerInput,
+    _context: CallerContext,
+  ): Promise<GetHookServerOutput> => {
+    return { hook: toHookSummary(await this.getHookOrThrow(requireField(input.hookId, 'hookId'))) };
+  };
+
+  ListHooks = async (
+    input: ListHooksServerInput,
+    _context: CallerContext,
+  ): Promise<ListHooksServerOutput> => {
+    // Pinned to the static HOOK partition (R-10); hookId order is the order
+    // global hooks run in (R-45).
+    const page = await this.config.hookRepository.queryPartition(
+      listHooksQuery(),
+      input.maxResults,
+      input.nextToken,
+    );
+    return { hooks: page.items.map(toHookSummary), nextToken: page.nextToken };
+  };
+
+  DeleteHook = async (
+    input: DeleteHookServerInput,
+    _context: CallerContext,
+  ): Promise<DeleteHookServerOutput> => {
+    const hookId = requireField(input.hookId, 'hookId');
+    const existing = await this.getHookOrThrow(hookId);
+    try {
+      // ONE transaction: the hook deleted (it must exist) and hookCount
+      // released (it must be above zero) (P-6, R-39). No guard on
+      // executions in flight: each runs the snapshot it was accepted with.
+      await this.config.hookTransactions.deleteHook({
+        hookKey: hookKey(hookId),
+        counterKey: hookCounterKey(),
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      if (error instanceof HookGoneError) {
+        throw new ResourceNotFoundError({ message: `Hook ${hookId} is not registered` });
+      }
+      if (error instanceof AmbiguousTransactionError) {
+        throw new InternalServerError({ message: `Hook ${hookId}: the delete could not be confirmed (${errorMessage(error)})` });
       }
       throw error;
     }
-    return { application: toApplicationSummary(existing) };
+    return { hook: toHookSummary(existing) };
   };
 
   // -------------------------------------------------------------------
@@ -1270,6 +1688,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
           message: `Account ${accountId} is not registered; register it with PutAccount first`,
         });
       }
+      if (!isLive(account.status)) {
+        throw notLiveConflict(`Account ${accountId}`, account.status);
+      }
       if (!admits(account, applicationId)) {
         // The request names a wrong account, not a full one — a 400, not a
         // capacity error (ADR-033).
@@ -1293,7 +1714,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
       const page = await this.config.accountRepository.queryIndex(listAccountsQuery(), undefined, nextToken);
       nextToken = page.nextToken;
       eligible.push(
-        ...page.items.filter((account) => account.owner === AccountOwner.VENDOR && admits(account, applicationId)),
+        ...page.items.filter((account) =>
+          account.owner === AccountOwner.VENDOR && isLive(account.status) && admits(account, applicationId)),
       );
     } while (nextToken !== undefined);
     eligible.sort(accountOrder(application.placementStrategy));
@@ -1377,7 +1799,8 @@ export class TenantService implements TenantServiceService<CallerContext> {
           if (
             error instanceof DuplicateTokenError ||
             error instanceof DeploymentExistsError ||
-            error instanceof TenantGoneError
+            error instanceof TenantGoneError ||
+            error instanceof TenantNotLiveError
           ) {
             throw error;
           }
@@ -1421,6 +1844,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
         source: application.source,
         cellScripts: application.cellScripts,
         tenantScripts: application.tenantScripts,
+        // R-40, P-4: the application's hook list at this moment, immutable
+        // for the cell's lifetime.
+        hooks: application.hooks ?? [],
         // R-34, §7.1 step 3: no request supplies cell values at birth; the
         // cell starts on the defaults, resolved per build.
         parameters: {},
@@ -1444,11 +1870,21 @@ export class TenantService implements TenantServiceService<CallerContext> {
         if (error instanceof AccountFullError) {
           continue;
         }
+        if (error instanceof AccountNotLiveError) {
+          // §7.1: a targeted account refused for its status, not its
+          // capacity, is a ConflictError, never InsufficientCapacityError.
+          if (target.targeted) {
+            throw notLiveConflict(`Account ${account.accountId}`, error.status);
+          }
+          continue;
+        }
         if (
           error instanceof DuplicateTokenError ||
           error instanceof DeploymentExistsError ||
           error instanceof TenantGoneError ||
-          error instanceof ApplicationGoneError
+          error instanceof TenantNotLiveError ||
+          error instanceof ApplicationGoneError ||
+          error instanceof ApplicationNotLiveError
         ) {
           throw error;
         }
@@ -1496,6 +1932,12 @@ export class TenantService implements TenantServiceService<CallerContext> {
     if (error instanceof ApplicationGoneError) {
       throw new ResourceNotFoundError({ message: `Application ${applicationId} is not registered` });
     }
+    if (error instanceof TenantNotLiveError) {
+      throw notLiveConflict(`Tenant ${tenantId}`, error.status);
+    }
+    if (error instanceof ApplicationNotLiveError) {
+      throw notLiveConflict(`Application ${applicationId}`, error.status);
+    }
     if (
       !(error instanceof DuplicateTokenError) ||
       clientToken === undefined ||
@@ -1534,12 +1976,232 @@ export class TenantService implements TenantServiceService<CallerContext> {
   }
 
   // -------------------------------------------------------------------
+  // Record events (§8.4, R-48 to R-51, ADR-045)
+  // -------------------------------------------------------------------
+
+  /**
+   * The `operationId` of a newly accepted record operation and the name of
+   * its execution (R-51): the record id, the event and the accept time in
+   * milliseconds, plus 8 random hex characters so two operations accepted
+   * in the same millisecond on two hosts never share a name.
+   */
+  private newOperationId(recordId: string, event: RecordEvent): string {
+    return newOperationId(recordId, event, Date.now(), randomBytes(4).toString('hex'));
+  }
+
+  /**
+   * The execution input of one record event (R-50, §8.1): the hooks in run
+   * order (application hooks only for an application event, R-40), the
+   * event-level hook environment (R-42) and the commit's field names,
+   * decided now, never the values.
+   */
+  private recordEventInput(params: {
+    readonly event: RecordEvent;
+    readonly recordId: string;
+    readonly key: ItemKey;
+    readonly operationId: string;
+    readonly applicationHooks?: readonly HookDefinition[];
+    readonly globalHooks: readonly GlobalHookRecord[];
+    readonly subject: RecordEventSubject;
+    readonly pending?: RecordPending;
+    readonly context: CallerContext;
+  }): RecordEventInput {
+    const { event, operationId } = params;
+    return {
+      event,
+      recordType: recordTypeOf(event),
+      recordId: params.recordId,
+      key: params.key,
+      operationId,
+      hooks: resolveHooks(event, params.applicationHooks, params.globalHooks),
+      environment: recordEventEnvironment({
+        event,
+        subject: params.subject,
+        operatorId: params.context.operatorId,
+        operationId,
+      }),
+      commit: recordCommit(event, params.pending),
+    };
+  }
+
+  /**
+   * R-49: the ONE conditional write that moves an application, a tenant or
+   * an account to `DELETING`, conditioned on a deletable status and its
+   * count still 0, storing the operation's `operationId`. A failure is
+   * classified from the item that failed it (`ALL_OLD`, R-14): no item is
+   * the 404; an in-flight record a 409 with the retry hint; an occupied or
+   * `DELETING` one a 409 without it.
+   */
+  private async moveRecordToDeleting<TRecord extends { readonly status: LifecycleStatus }>(
+    repository: RecordRepository<TRecord>,
+    recordType: RecordType,
+    key: ItemKey,
+    what: string,
+    operationId: string,
+    occupied: string,
+  ): Promise<TRecord> {
+    try {
+      return await repository.transitionStatus(key, deleteRecordTransition(recordType, operationId, new Date().toISOString()));
+    } catch (error) {
+      if (!(error instanceof StaleTransitionError)) {
+        throw error;
+      }
+      const failed = error.current as (TRecord & Record<string, unknown>) | undefined;
+      if (failed === undefined) {
+        throw new ResourceNotFoundError({ message: `${what} no longer exists` });
+      }
+      if (failed.status === 'CREATING' || failed.status === 'UPDATING') {
+        throw new ConflictError({ message: `${what} is ${failed.status}; ${RETRY_HINT} once it has finished` });
+      }
+      if (RECORD_DELETABLE_STATUSES.includes(failed.status)) {
+        throw new ConflictError({ message: `${what} cannot be deleted: ${occupied}` });
+      }
+      throw new ConflictError({ message: `${what} is ${failed.status}; it is already being deleted` });
+    }
+  }
+
+  /**
+   * Starts the execution of an accepted record operation and, when the
+   * start did not go through, compensates the exact in-flight state (R-51).
+   * Returns the record to answer 202 with: the one the operation wrote when
+   * the start went through, or the one a compensation found the execution
+   * had already moved on. Every other outcome is a 500, with the record
+   * compensated:
+   *
+   * - a fresh insert whose start was refused is deleted again (conditioned
+   *   on `CREATING`, the `operationId` and a count of 0);
+   * - a fresh insert whose start is unknown, and every re-put, goes to
+   *   `CREATE_FAILED`, never deleted: an execution may be running its
+   *   create hooks, and only the record's delete runs the delete hooks;
+   * - `UPDATING` goes to `UPDATE_FAILED` with `pending` removed (only while
+   *   `pending` exists), `DELETING` to `DELETE_FAILED`.
+   *
+   * A compensation whose condition fails reads the record once: the same
+   * `operationId` in a status the execution writes (`ACTIVE` or the
+   * matching `*_FAILED`), or `UPDATING` without `pending` (committed, post
+   * hooks running), or the record gone after a delete, means the execution
+   * ran, and the request answers 202 with the record as read (the
+   * `DELETING` record for a delete).
+   */
+  private async acceptRecordEvent<TRecord extends RecordEventRecord>(params: {
+    readonly what: string;
+    readonly repository: RecordRepository<TRecord>;
+    /** The record as the operation's conditional write left it. */
+    readonly written: TRecord;
+    /** The write inserted a record where none was (not a re-put). */
+    readonly freshInsert: boolean;
+    readonly input: RecordEventInput;
+  }): Promise<TRecord> {
+    const { what, repository, written, input } = params;
+    const outcome = await this.startRecordWorkflow(input.operationId, { recordEvent: input });
+    if (outcome.kind === 'STARTED') {
+      return written;
+    }
+    const inFlight = written.status as RecordInFlightStatus;
+    const reason =
+      `${input.event}: the workflow start ${outcome.kind === 'REFUSED' ? 'was refused' : 'had an unknown outcome'}`
+      + ` (${errorMessage(outcome.error)})`;
+    const deleteFresh = params.freshInsert && outcome.kind === 'REFUSED';
+    try {
+      if (deleteFresh) {
+        await repository.delete(input.key, freshInsertDeleteCondition(input.recordType, input.operationId));
+      } else {
+        await repository.transitionStatus(
+          input.key,
+          compensateRecordTransition({
+            inFlight,
+            operationId: input.operationId,
+            statusReason: reason,
+            updatedAt: new Date().toISOString(),
+          }),
+        );
+      }
+    } catch (error) {
+      if (!(error instanceof ConditionFailedError)) {
+        // The residual of §7.4 (T47): the record stays in flight.
+        throw new InternalServerError({
+          message: `${what}: ${reason}, and its compensation failed too (${errorMessage(error)}); the record stays ${inFlight}`,
+        });
+      }
+      const read = await repository.get(input.key, { consistentRead: true });
+      if (read === undefined ? inFlight === 'DELETING' : executionRan(read, input.operationId, inFlight)) {
+        return read ?? written;
+      }
+      throw new InternalServerError({ message: `${what}: ${reason}; the record changed meanwhile and was left as it is` });
+    }
+    throw new InternalServerError({
+      message: deleteFresh
+        ? `${what}: ${reason}; nothing was kept, ${RETRY_HINT}`
+        : `${what}: ${reason}; the record is ${RECORD_FAILED_STATUS[inFlight]}`,
+    });
+  }
+
+  /**
+   * Starts a record event's execution under its `operationId` and says
+   * whether the start went through (R-51). `REFUSED` only when this call
+   * itself answered with an error Step Functions raises before it creates
+   * an execution. The call goes through `recordStartClient`, which makes
+   * one attempt, so the error answers that attempt (an error after an SDK
+   * retry would prove nothing about the earlier one). `STARTED` when the call
+   * succeeded, or answered `ExecutionAlreadyExists` (only this operation
+   * starts executions under this name and input), or when the outcome was
+   * unknown and `DescribeExecution` finds the execution or a retry under
+   * the same name answers with it. Everything else is `UNKNOWN`:
+   * `DescribeExecution` is eventually consistent, so a miss proves nothing.
+   */
+  private async startRecordWorkflow(name: string, input: RecordEventWorkflowInput): Promise<StartOutcome> {
+    const start = () =>
+      this.config.recordStartClient.send(
+        new StartExecutionCommand({
+          stateMachineArn: this.config.stateMachineArn,
+          name,
+          input: JSON.stringify(input),
+        }),
+      );
+    let unknown: unknown;
+    try {
+      await start();
+      return { kind: 'STARTED' };
+    } catch (error) {
+      if (isExecutionAlreadyExists(error)) {
+        return { kind: 'STARTED' };
+      }
+      if (isStartRefusal(error)) {
+        return { kind: 'REFUSED', error };
+      }
+      unknown = error;
+    }
+    try {
+      await this.config.sfnClient.send(
+        new DescribeExecutionCommand({ executionArn: executionArnOf(this.config.stateMachineArn, name) }),
+      );
+      return { kind: 'STARTED' };
+    } catch {
+      // ExecutionDoesNotExist or a failed call: proves nothing.
+    }
+    try {
+      // The same name and input: Step Functions answers with the running
+      // execution, or ExecutionAlreadyExists once it has closed.
+      await start();
+      return { kind: 'STARTED' };
+    } catch (error) {
+      if (isExecutionAlreadyExists(error)) {
+        return { kind: 'STARTED' };
+      }
+    }
+    return { kind: 'UNKNOWN', error: unknown };
+  }
+
+  // -------------------------------------------------------------------
   // Shared internals
   // -------------------------------------------------------------------
 
   /** Reads a tenant or throws the modelled 404. */
-  private async getTenantOrThrow(tenantId: string): Promise<TenantRecord> {
-    const tenant = await this.config.tenantRepository.get(tenantKey(tenantId));
+  private async getTenantOrThrow(
+    tenantId: string,
+    options?: { readonly consistentRead?: boolean },
+  ): Promise<TenantRecord> {
+    const tenant = await this.config.tenantRepository.get(tenantKey(tenantId), options);
     if (tenant === undefined) {
       throw new ResourceNotFoundError({ message: `Tenant ${tenantId} not found` });
     }
@@ -1573,6 +2235,39 @@ export class TenantService implements TenantServiceService<CallerContext> {
       throw new ResourceNotFoundError({ message: `Account ${accountId} is not registered` });
     }
     return account;
+  }
+
+  /** Reads a global hook (strongly consistent) or throws the modelled 404. */
+  private async getHookOrThrow(hookId: string): Promise<GlobalHookRecord> {
+    const hook = await this.config.hookRepository.get(hookKey(hookId), { consistentRead: true });
+    if (hook === undefined) {
+      throw new ResourceNotFoundError({ message: `Hook ${hookId} is not registered` });
+    }
+    return hook;
+  }
+
+  /**
+   * Reads every global hook in one strongly consistent query of the `HOOK`
+   * partition (R-40, §4.7), in `hookId` order. Runs before the operation's
+   * first write: a failed read is a 500 with nothing written, never a
+   * record left in flight with no execution. At most five hooks exist, so
+   * one page holds them; the loop is a guard, not a scan.
+   */
+  private async readGlobalHooks(): Promise<GlobalHookRecord[]> {
+    const hooks: GlobalHookRecord[] = [];
+    try {
+      let nextToken: string | undefined;
+      do {
+        const page = await this.config.hookRepository.queryPartition(listHooksQuery(), undefined, nextToken);
+        hooks.push(...page.items);
+        nextToken = page.nextToken;
+      } while (nextToken !== undefined);
+    } catch (error) {
+      throw new InternalServerError({
+        message: `The global hooks could not be read, so the operation was not started and nothing was written; ${RETRY_HINT} (${errorMessage(error)})`,
+      });
+    }
+    return hooks;
   }
 
   /** Reads an application or throws the modelled 404. */
@@ -1855,13 +2550,20 @@ function requireAtMostOneFilter(filters: Record<string, string | undefined>): vo
   }
 }
 
-/** Projects the tenant domain record to the API summary. */
+/** Projects the tenant domain record to the API summary, its status and any staged update included (§5.1). */
 function toTenantSummary(record: TenantRecord): TenantSummary {
   return {
     tenantId: record.tenantId,
     name: record.name,
     description: record.description,
     deploymentCount: record.deploymentCount,
+    status: record.status,
+    statusReason: record.statusReason,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
+    operationId: record.operationId,
+    pending: record.pending === undefined
+      ? undefined
+      : { name: record.pending.name, description: record.pending.description },
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
@@ -1876,6 +2578,7 @@ function toDeploymentSummary(record: DeploymentRecord): DeploymentSummary {
     status: record.status,
     statusReason: record.statusReason,
     lastBuildId: record.lastBuildId,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
@@ -1883,7 +2586,8 @@ function toDeploymentSummary(record: DeploymentRecord): DeploymentSummary {
 
 /**
  * Projects the account record to the API summary. The external id is never
- * returned (N-10) — only whether one is configured.
+ * returned (N-10) — only whether one is configured; `pending` holds
+ * `maxCells` and `applicationIds` only (§5.4).
  */
 function toAccountSummary(record: AccountRecord): AccountSummary {
   return {
@@ -1893,13 +2597,24 @@ function toAccountSummary(record: AccountRecord): AccountSummary {
     maxCells: record.maxCells,
     cellCount: record.cellCount,
     externalIdConfigured: record.externalId !== undefined,
+    status: record.status,
+    statusReason: record.statusReason,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
+    operationId: record.operationId,
+    pending: record.pending === undefined
+      ? undefined
+      : {
+        maxCells: record.pending.maxCells,
+        applicationIds: record.pending.applicationIds === undefined ? undefined : [...record.pending.applicationIds],
+      },
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
 }
 
-/** Projects the application record to the API summary. */
+/** Projects the application record to the API summary, its status and any staged replace included (§5.5). */
 function toApplicationSummary(record: ApplicationRecord): ApplicationSummary {
+  const { pending } = record;
   return {
     applicationId: record.applicationId,
     source: record.source,
@@ -1907,21 +2622,46 @@ function toApplicationSummary(record: ApplicationRecord): ApplicationSummary {
     tenantScripts: record.tenantScripts,
     maxTenants: record.maxTenants,
     placementStrategy: record.placementStrategy,
-    parameters: (record.parameters ?? []).map((declaration) => ({
-      name: declaration.name,
-      required: declaration.required,
-      default: declaration.default,
-      description: declaration.description,
-    })),
-    cellParameters: (record.cellParameters ?? []).map((declaration) => ({
-      name: declaration.name,
-      default: declaration.default,
-      description: declaration.description,
-    })),
+    parameters: toApiParameterDeclarations(record.parameters ?? []),
+    cellParameters: toApiCellParameterDeclarations(record.cellParameters ?? []),
+    hooks: (record.hooks ?? []).map(toApiHookDefinition),
     cellCount: record.cellCount,
+    status: record.status,
+    statusReason: record.statusReason,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
+    operationId: record.operationId,
+    pending: pending === undefined
+      ? undefined
+      : {
+        source: pending.source,
+        cellScripts: pending.cellScripts,
+        tenantScripts: pending.tenantScripts,
+        maxTenants: pending.maxTenants,
+        placementStrategy: pending.placementStrategy,
+        parameters: pending.parameters === undefined ? undefined : toApiParameterDeclarations(pending.parameters),
+        cellParameters: pending.cellParameters === undefined ? undefined : toApiCellParameterDeclarations(pending.cellParameters),
+        hooks: pending.hooks?.map(toApiHookDefinition),
+      },
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
+}
+
+function toApiParameterDeclarations(declarations: readonly StoredParameterDeclaration[]) {
+  return declarations.map((declaration) => ({
+    name: declaration.name,
+    required: declaration.required,
+    default: declaration.default,
+    description: declaration.description,
+  }));
+}
+
+function toApiCellParameterDeclarations(declarations: readonly StoredCellParameterDeclaration[]) {
+  return declarations.map((declaration) => ({
+    name: declaration.name,
+    default: declaration.default,
+    description: declaration.description,
+  }));
 }
 
 /** Projects the cell domain record to the API summary (stamped definition included). */
@@ -1936,11 +2676,83 @@ function toCellSummary(record: CellRecord): CellSummary {
     source: record.source,
     cellScripts: record.cellScripts,
     tenantScripts: record.tenantScripts,
+    hooks: (record.hooks ?? []).map(toApiHookDefinition),
     lastBuildId: record.lastBuildId,
+    lastGlobalHooks: (record.lastGlobalHooks ?? []).map(toLastGlobalHook),
     statusReason: record.statusReason,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
+}
+
+/** Projects a stored hook definition (global or stamped) to the API shape; the timeout is always resolved. */
+function toApiHookDefinition(hook: HookDefinition): ApiHookDefinition {
+  return {
+    hookId: hook.hookId,
+    events: [...hook.events],
+    phase: hook.phase,
+    source: {
+      type: hook.source.type,
+      location: hook.source.location,
+      sourceVersion: hook.source.sourceVersion,
+    },
+    script: hook.script,
+    timeoutMinutes: hook.timeoutMinutes,
+  };
+}
+
+/** Projects the global hook record to the API summary. */
+function toHookSummary(record: GlobalHookRecord): HookSummary {
+  return {
+    hookId: record.hookId,
+    events: [...record.events],
+    phase: record.phase,
+    source: toApiHookDefinition(record).source,
+    script: record.script,
+    timeoutMinutes: record.timeoutMinutes,
+    revision: record.revision,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+/** Projects one `lastGlobalHooks` entry (R-40); the two ref fields only when set. */
+function toLastGlobalHook(entry: LastGlobalHookEntry): LastGlobalHook {
+  return {
+    hookId: entry.hookId,
+    phase: entry.phase,
+    revision: entry.revision,
+    sourceVersion: entry.sourceVersion,
+    resolvedSourceVersion: entry.resolvedSourceVersion,
+  };
+}
+
+/**
+ * Maps a failed `PutHook` write to its 409 (R-39, R-14): a create that met a
+ * new hook, or a replace that met a delete, lost a race with the same hook
+ * and a retry succeeds; a create the counter refuses has the remedy
+ * `DeleteHook`, so its message carries no retry hint.
+ */
+function mapHookWriteError(hookId: string, error: unknown): unknown {
+  if (error instanceof HookExistsError) {
+    return new ConflictError({
+      message: `Hook ${hookId} was created by a concurrent request; ${RETRY_HINT} to replace it`,
+    });
+  }
+  if (error instanceof RecordGoneError) {
+    return new ConflictError({
+      message: `Hook ${hookId} was deleted by a concurrent request; ${RETRY_HINT} to create it again`,
+    });
+  }
+  if (error instanceof HookLimitError) {
+    return new ConflictError({
+      message: `${MAX_GLOBAL_HOOKS} global hooks are registered, the maximum; delete one with DeleteHook before registering another`,
+    });
+  }
+  if (error instanceof AmbiguousTransactionError) {
+    return new InternalServerError({ message: `Hook ${hookId}: the write could not be confirmed (${errorMessage(error)})` });
+  }
+  return error;
 }
 
 /**
@@ -1982,6 +2794,232 @@ function mergeFailure(what: string, current: { readonly status: LifecycleStatus 
     });
   }
   return updateConflict(what, current.status);
+}
+
+/** The most applications an account's allowlist may name (§4.5): it bounds `ACCOUNT_APPLICATION_IDS` (R-42). */
+const MAX_ACCOUNT_APPLICATION_IDS = 100;
+
+/** A record whose operations run record events (§8.4): application, tenant or account. */
+interface RecordEventRecord {
+  readonly status: LifecycleStatus;
+  readonly operationId?: string;
+  readonly pending?: unknown;
+}
+
+/** The repository of an application, a tenant or an account. */
+type RecordRepository<TRecord> =
+  | DynamoDBRepository<TRecord, TenantItem>
+  | DynamoDBRepository<TRecord, AccountItem>
+  | DynamoDBRepository<TRecord, ApplicationItem>;
+
+/** What a record event's workflow start came to (R-51). */
+type StartOutcome =
+  | { readonly kind: 'STARTED' }
+  | { readonly kind: 'REFUSED' | 'UNKNOWN'; readonly error: unknown };
+
+/**
+ * The errors Step Functions answers `StartExecution` with before it creates
+ * an execution (R-51): validation, throttling, limit, access and
+ * missing-state-machine errors. Never `ExecutionAlreadyExists`, which means
+ * an execution under the name exists.
+ */
+const START_REFUSALS: ReadonlySet<string> = new Set([
+  'ValidationException',
+  'InvalidArn',
+  'InvalidName',
+  'InvalidExecutionInput',
+  'ExecutionLimitExceeded',
+  'StateMachineDoesNotExist',
+  'StateMachineDeleting',
+  'ThrottlingException',
+  'AccessDeniedException',
+  'KmsAccessDeniedException',
+  'KmsInvalidStateException',
+  'KmsThrottlingException',
+  'UnrecognizedClientException',
+  'InvalidSignatureException',
+  'ExpiredTokenException',
+]);
+
+/**
+ * Whether a failed `StartExecution` was refused before an execution existed
+ * (R-51): a pre-creation error on the call's only attempt. `recordStartClient`
+ * makes one attempt; the attempt count still guards a client that retried,
+ * because after a retried attempt the earlier one's outcome is unknown and
+ * the same error proves nothing.
+ */
+function isStartRefusal(error: unknown): boolean {
+  if (!(error instanceof Error) || !START_REFUSALS.has(error.name)) {
+    return false;
+  }
+  const attempts = (error as { $metadata?: { attempts?: number } }).$metadata?.attempts;
+  return attempts === undefined || attempts <= 1;
+}
+
+function isExecutionAlreadyExists(error: unknown): boolean {
+  return error instanceof Error && error.name === 'ExecutionAlreadyExists';
+}
+
+/** The ARN of the execution named `name` of the state machine `stateMachineArn`. */
+function executionArnOf(stateMachineArn: string, name: string): string {
+  return `${stateMachineArn.replace(':stateMachine:', ':execution:')}:${name}`;
+}
+
+/**
+ * Whether a record read after a failed compensation shows that the
+ * operation's execution ran (R-51): its `operationId` in `ACTIVE` or the
+ * in-flight status's `*_FAILED` status, or `UPDATING` without `pending`
+ * (the commit landed and the post hooks are running).
+ */
+function executionRan(record: RecordEventRecord, operationId: string, inFlight: RecordInFlightStatus): boolean {
+  if (record.operationId !== operationId) {
+    return false;
+  }
+  return record.status === 'ACTIVE'
+    || record.status === RECORD_FAILED_STATUS[inFlight]
+    || (inFlight === 'UPDATING' && record.status === 'UPDATING' && record.pending === undefined);
+}
+
+/**
+ * The 409 for a deployment claim on a tenant, an application or an account
+ * that is not live (R-13, R-14): a retry hint only when it is `CREATING`,
+ * which ends live; from `CREATE_FAILED`, `DELETING` or `DELETE_FAILED` a
+ * retry cannot succeed and the remedy is the record's own (§5.6).
+ */
+function notLiveConflict(what: string, status: LifecycleStatus | undefined): ConflictError {
+  if (status === 'CREATING') {
+    return new ConflictError({ message: `${what} is CREATING; poll it to ACTIVE, then ${RETRY_HINT}` });
+  }
+  return new ConflictError({
+    message: status === undefined
+      ? `${what} was deleted meanwhile; a retry cannot succeed`
+      : `${what} is ${status}, not live; a retry cannot succeed, the remedy is the record's own (spec §5.6)`,
+  });
+}
+
+/**
+ * The path of a `PutApplication` from the record it read (R-48): none, a
+ * create; `CREATE_FAILED`, a re-put; live, a replace; any other status a
+ * 409, with the retry hint while `CREATING` or `UPDATING` (R-14).
+ */
+function putApplicationPath(what: string, current: ApplicationRecord | undefined): PutApplicationPath {
+  if (current === undefined) {
+    return 'CREATE';
+  }
+  if (current.status === 'CREATE_FAILED') {
+    return 'RE_PUT';
+  }
+  if (RECORD_UPDATABLE_STATUSES.includes(current.status)) {
+    return 'REPLACE';
+  }
+  throw putConflict(what, current.status);
+}
+
+/** The 409 for a put on a record in flight or being deleted (R-48, R-14). */
+function putConflict(what: string, status: LifecycleStatus): ConflictError {
+  if (status === 'CREATING' || status === 'UPDATING') {
+    return new ConflictError({ message: `${what} is ${status}; ${RETRY_HINT} once it has finished` });
+  }
+  return new ConflictError({
+    message: `${what} is ${status}; it cannot be put until the delete is finished, and a retry cannot succeed`,
+  });
+}
+
+/**
+ * Classifies a failed `PutApplication` write from the item that failed it
+ * (`ALL_OLD`, R-14): no item means the record was deleted in between, and a
+ * `CREATE_FAILED` or live item that a kept list changed under; both are
+ * 409s with the retry hint (the retry is a create, a re-put or a replace
+ * that succeeds). Any other status is {@link putConflict}.
+ */
+function putApplicationFailure(what: string, failed: ApplicationRecord | undefined): ConflictError {
+  if (failed === undefined || failed.status === 'CREATE_FAILED' || RECORD_UPDATABLE_STATUSES.includes(failed.status)) {
+    return new ConflictError({
+      message: `${what} changed after this request read it (a parameter declaration list it keeps, its status, or another accepted put); re-read and ${RETRY_HINT}`,
+    });
+  }
+  return putConflict(what, failed.status);
+}
+
+/**
+ * The path of a `PutAccount` from the record it read (R-48): another
+ * `owner` is the 409 of R-24 on every path but the create; none, a create;
+ * `CREATE_FAILED`, a re-put; live, a replace; `UPDATING`, a rotation, whose
+ * `maxCells` and `applicationIds` MUST equal the change in flight
+ * (`pending`, or the live fields once the commit removed it), 409
+ * otherwise; `CREATING`, `DELETING` or `DELETE_FAILED`, a 409.
+ */
+function putAccountPath(
+  what: string,
+  current: AccountRecord | undefined,
+  request: { readonly owner: AccountOwner; readonly maxCells: number; readonly applicationIds?: readonly string[] },
+): PutAccountPath {
+  if (current === undefined) {
+    return 'CREATE';
+  }
+  if (current.owner !== request.owner) {
+    throw ownerImmutableError(current.accountId);
+  }
+  if (current.status === 'CREATE_FAILED') {
+    return 'RE_PUT';
+  }
+  if (RECORD_UPDATABLE_STATUSES.includes(current.status)) {
+    return 'REPLACE';
+  }
+  if (current.status === 'UPDATING') {
+    const inFlight = current.pending ?? current;
+    if (inFlight.maxCells !== request.maxCells || !sameIds(inFlight.applicationIds, request.applicationIds)) {
+      throw new ConflictError({
+        message:
+          `${what} is UPDATING with maxCells = ${inFlight.maxCells} and applicationIds = [${(inFlight.applicationIds ?? []).join(', ')}];`
+          + ` while it is in flight a PutAccount may only rotate the externalId with those values. ${RETRY_HINT} once it has finished`,
+      });
+    }
+    return 'ROTATE';
+  }
+  throw putConflict(what, current.status);
+}
+
+/** Whether two allowlists admit the same applications; absent (shared) equals only absent. */
+function sameIds(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  return a.length === b.length && [...a].sort().join(',') === [...b].sort().join(',');
+}
+
+/**
+ * Classifies a failed `PutAccount` write from the item that failed it
+ * (`ALL_OLD`, R-14): an item holding another `owner`, whatever its status,
+ * is the owner-change 409 without a hint; no item, or a `CREATE_FAILED` or
+ * live item, a 409 with the retry hint (the retry is a create, a re-put or
+ * a replace that succeeds); any other status is {@link putConflict}.
+ */
+function putAccountFailure(accountId: string, owner: AccountOwner, failed: AccountRecord | undefined): ConflictError {
+  if (failed !== undefined && failed.owner !== owner) {
+    return ownerImmutableError(accountId);
+  }
+  if (failed === undefined || failed.status === 'CREATE_FAILED' || RECORD_UPDATABLE_STATUSES.includes(failed.status)) {
+    return new ConflictError({
+      message: `Account ${accountId} changed after this request read it; re-read and ${RETRY_HINT}`,
+    });
+  }
+  return putConflict(`Account ${accountId}`, failed.status);
+}
+
+/**
+ * Classifies a failed `UpdateTenant` staging write from `ALL_OLD` (R-14):
+ * no item, the 404; an updatable status, another operation was accepted in
+ * between (409, retry); any other status is {@link updateConflict}.
+ */
+function staleUpdateFailure(what: string, failed: { readonly status: LifecycleStatus } | undefined): Error {
+  if (failed === undefined) {
+    return new ResourceNotFoundError({ message: `${what} no longer exists` });
+  }
+  if (RECORD_UPDATABLE_STATUSES.includes(failed.status)) {
+    return new ConflictError({ message: `${what} changed after this request read it; re-read and ${RETRY_HINT}` });
+  }
+  return updateConflict(what, failed.status);
 }
 
 function errorMessage(error: unknown): string {

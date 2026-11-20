@@ -1,7 +1,8 @@
 # ADR-0002: One shared CodeBuild project with per-execution StartBuild overrides
 
 **Status:** Accepted for the implemented silo baseline; refined by ADR-012
-for the cell design, which uses separate shared cell and tenant projects/roles
+for the cell design, which uses separate shared cell and tenant projects/roles;
+amended by ADR-0044 (two hook projects beside the two provisioning projects)
 
 **Context:** Each tenant carries its own `ProjectSource`. Options: create a
 CodeBuild project per tenant (control plane mutates build infrastructure), or
@@ -24,3 +25,5 @@ acceptable for a sample; per-tenant `auth` support is a noted extension.
 ---
 
 **Amended by ADR-025 (2026-11-09):** the projects' roles no longer hold application-plane permissions; each build assumes the hosting account's provisioning role before the script runs. The per-execution override model is unchanged.
+
+**Amended by ADR-0044 (2026-11-17):** two hook build projects, `<fleet>-global-hook` and `<fleet>-app-hook`, sit beside the two provisioning projects and take the same per-execution source and buildspec overrides; no role override is ever sent. All four projects take physical names from the fleet name. The per-execution override model is unchanged.

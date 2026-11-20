@@ -36,7 +36,9 @@ Validations.of(app).addPlugins(
 // (default ["operator"]) and readerRoles (default none) (spec R-36, ADR-042),
 // vendorIdpClientIds (default none), the client ids accepted on a token
 // without `aud`, and vendorIdpRequiredScope (default none), the scope such a
-// token must also carry (spec R-38, ADR-043).
+// token must also carry (spec R-38, ADR-043), and globalHookManagedPolicyArns
+// and appHookManagedPolicyArns (default none), the customer-managed policies
+// attached to the two hook roles (spec R-41, ADR-044).
 //
 // A second mode (ADR-025): `--context cellAccount='{...}'` synthesizes ONLY
 // the account role pair stack, for deployment into another account by its
@@ -81,6 +83,12 @@ if (cellAccount !== undefined) {
   // A JSON number from cdk.json or a string from --context; the stack
   // validates the range.
   const concurrentBuildLimit = parseJsonContext<number>('concurrentBuildLimit');
+  // Optional (R-41, ADR-044): customer-managed policy ARNs attached to the
+  // global hook role and to the application hook role, validated in the stack
+  // as tenantBuildManagedPolicyArns is; an ARN in both lists fails synth.
+  // Default: none, so a hook can write its logs and nothing else.
+  const globalHookManagedPolicyArns = parseJsonContext<string[]>('globalHookManagedPolicyArns');
+  const appHookManagedPolicyArns = parseJsonContext<string[]>('appHookManagedPolicyArns');
   // Optional, DEMO ONLY: the applications the sample scripts will be
   // registered under, so their shared parameter exists in the home account.
   const demoApplicationIds = parseJsonContext<string[]>('demoApplicationIds');
@@ -100,6 +108,8 @@ if (cellAccount !== undefined) {
     tenantBuildManagedPolicyArns,
     cellBuildManagedPolicyArns,
     concurrentBuildLimit,
+    globalHookManagedPolicyArns,
+    appHookManagedPolicyArns,
     demoApplicationIds,
     allowedRoles,
     readerRoles,

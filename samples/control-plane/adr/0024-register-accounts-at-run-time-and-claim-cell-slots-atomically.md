@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-11-09
 - Amends: ADR-0013, ADR-0014
+- Amended by: ADR-0045
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -23,3 +24,5 @@ Option 2. The account stores something no neighbour does — the authoritative `
 
 ## Consequences
 Over-provisioning races from ADR-013 are now bounded by `maxCells` per account instead of unbounded. The cell record gains an immutable `accountId`; the cell delete terminal write becomes a two-item transaction (cell delete plus account decrement) with the same absence-is-success read as the tenant delete. `CREATE_FAILED` cells hold their account slot until deleted, as `CREATE_FAILED` tenants hold theirs. GSI-2 gains an `ACCOUNT#<id>` partition for `ListCells?accountId=` and the targeted candidate scan. The home account is registered like any other; a deployment that forgets to register one gets a 409 on the first onboard, which the README deploy steps call out. Revisit if accounts need a Region of their own (spec §11) or a placement policy beyond owner and capacity.
+
+**Amended by ADR-0045 (2026-11-18):** the account lifecycle is no longer synchronous. `PutAccount` and `DeleteAccount` answer 202 and start an `ACCOUNT_CREATE`, `ACCOUNT_UPDATE` or `ACCOUNT_DELETE` event, and the account gains `status`, `statusReason`, `lastGlobalHooks`, `pending` and `operationId`; a record stored before has no status and reads as `ACTIVE`. `PutAccount` still writes policy fields only and never `cellCount`: a create inserts the account `CREATING`, and a replace writes `externalId` at once and stages `maxCells` and `applicationIds` in `pending` until the workflow commits them after the pre hooks. `owner` stays immutable on every path. `DeleteAccount` becomes one conditional move to `DELETING` on `cellCount = 0`, and the workflow deletes the record conditioned on the count still being 0. The new-cell claim also requires the account to be live (`ACTIVE`, `UPDATING`, `UPDATE_FAILED` or no status), so no cell is counted against an account being created or deleted.

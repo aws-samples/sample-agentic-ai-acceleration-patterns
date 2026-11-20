@@ -1,9 +1,10 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { expectPlaceholdersMatch } from './expression-placeholders';
 import {
-  ACCOUNT_EMPTY_CONDITION,
   AccountDataModel,
+  AccountItem,
   AccountRecord,
   accountKey,
   listAccountsQuery,
@@ -18,6 +19,7 @@ const record: AccountRecord = {
   maxCells: 2,
   cellCount: 1,
   externalId: 'fleet-handshake-7f3a',
+  status: 'ACTIVE',
   createdAt: new Date('2026-11-09T00:00:00.000Z'),
   updatedAt: new Date('2026-11-09T01:00:00.000Z'),
 };
@@ -64,79 +66,121 @@ describe('AccountDataModel', () => {
   });
 });
 
-describe('putAccountUpdate (R-24: create-or-replace that never touches cellCount)', () => {
-  const update = putAccountUpdate({
+describe('putAccountUpdate (R-24, R-48: one conditional write per path, never cellCount)', () => {
+  const base = {
     accountId: '111111111111',
-    owner: 'TENANT',
+    owner: 'TENANT' as const,
     maxCells: 1,
     externalId: 'fleet-handshake-7f3a',
+    operationId: '111111111111-account-create-1763460000000-0a1b2c3d',
     now: '2026-11-09T00:00:00.000Z',
-  });
+  };
 
-  test('initialises owner, cellCount, and createdAt with if_not_exists only', () => {
-    expect(update.updateExpression).toContain('#owner = if_not_exists(#owner, :owner)');
+  test.each(['CREATE', 'RE_PUT', 'REPLACE', 'ROTATE'] as const)(
+    '%s uses every placeholder it defines and defines every one it uses',
+    (path) => {
+      for (const applicationIds of [undefined, ['app-x']]) {
+        for (const externalId of [undefined, 'fleet-handshake-7f3a']) {
+          expectPlaceholdersMatch(putAccountUpdate({ ...base, path, applicationIds, externalId }));
+        }
+      }
+    },
+  );
+
+  test('CREATE inserts the policy fields CREATING with the operationId, cellCount and createdAt through if_not_exists', () => {
+    const update = putAccountUpdate({ ...base, path: 'CREATE' });
+    expect(update.conditionExpression).toBe('attribute_not_exists(PK)');
     expect(update.updateExpression).toContain('#cellCount = if_not_exists(#cellCount, :zero)');
     expect(update.updateExpression).toContain('#createdAt = if_not_exists(#createdAt, :now)');
-    // The counter is never SET outright: the two transactional paths own it.
     expect(update.updateExpression).not.toMatch(/#cellCount = :/);
-  });
-
-  test('replaces the policy fields and stamps the GSI-1 attributes', () => {
-    expect(update.updateExpression).toContain('#maxCells = :maxCells');
     expect(update.updateExpression).toContain('#externalId = :externalId');
-    expect(update.updateExpression).toContain('#gsi1pk = :gsi1pk');
+    expect(update.updateExpression).not.toContain('REMOVE');
     expect(update.expressionAttributeValues).toMatchObject({
+      ':status': 'CREATING',
+      ':operationId': base.operationId,
       ':owner': 'TENANT',
       ':maxCells': 1,
-      ':zero': 0,
-      ':externalId': 'fleet-handshake-7f3a',
       ':gsi1pk': 'ACCOUNT',
       ':gsi1sk': 'ACCOUNT#111111111111',
     });
   });
 
-  test('the condition makes an owner change fail (immutable owner)', () => {
-    expect(update.conditionExpression).toBe('attribute_not_exists(PK) OR #owner = :owner');
+  test('RE_PUT writes the values into the record and back to CREATING on CREATE_FAILED with the same owner', () => {
+    const update = putAccountUpdate({ ...base, path: 'RE_PUT', externalId: undefined });
+    expect(update.conditionExpression).toBe('#status = :createFailed AND #owner = :owner');
+    expect(update.expressionAttributeValues).toMatchObject({ ':status': 'CREATING', ':createFailed': 'CREATE_FAILED' });
+    // Shared again and without an id: both removed; the old reason cleared.
+    expect(update.updateExpression).toMatch(/ REMOVE #externalId, #applicationIds, #statusReason$/);
   });
 
-  test('omitting externalId removes a previously stored one', () => {
-    const noExternalId = putAccountUpdate({
-      accountId: '111111111111',
-      owner: 'VENDOR',
-      maxCells: 3,
-      now: '2026-11-09T00:00:00.000Z',
-    });
-    expect(noExternalId.updateExpression).toMatch(/ REMOVE #externalId, #applicationIds$/);
-    expect(noExternalId.expressionAttributeValues).not.toHaveProperty(':externalId');
+  test('REPLACE writes externalId at once, stages maxCells and applicationIds, moves to UPDATING (R-48)', () => {
+    const update = putAccountUpdate({ ...base, path: 'REPLACE', maxCells: 4, applicationIds: ['app-x'] });
+    expect(update.conditionExpression).toBe(
+      '#owner = :owner AND (attribute_not_exists(#status) OR #status IN (:active, :updateFailed))',
+    );
+    expect(update.updateExpression).toContain('#externalId = :externalId');
+    expect(update.updateExpression).toContain('#pending = :pending');
+    // The live policy fields are untouched.
+    expect(update.updateExpression).not.toContain('#maxCells');
+    expect(update.updateExpression).not.toContain('#applicationIds');
+    expect(update.updateExpression).not.toContain('#owner =');
+    expect(update.expressionAttributeValues[':pending']).toEqual({ maxCells: 4, applicationIds: ['app-x'] });
+    expect(update.expressionAttributeValues[':pending']).not.toHaveProperty('externalId');
+    expect(update.expressionAttributeValues[':status']).toBe('UPDATING');
   });
 
-  test('omitting applicationIds removes the allowlist — the account becomes shared (ADR-033)', () => {
-    expect(update.updateExpression).toMatch(/ REMOVE #applicationIds$/);
-    expect(update.updateExpression).not.toContain('#applicationIds = :applicationIds');
-    expect(update.expressionAttributeValues).not.toHaveProperty(':applicationIds');
+  test('REPLACE without applicationIds stages none: the commit makes the account shared', () => {
+    const update = putAccountUpdate({ ...base, path: 'REPLACE', maxCells: 4 });
+    expect(update.expressionAttributeValues[':pending']).toEqual({ maxCells: 4 });
   });
 
-  test('a given applicationIds is SET as a list copy — the account becomes dedicated (ADR-033)', () => {
-    const ids = ['app-x'];
-    const dedicated = putAccountUpdate({
-      accountId: '111111111111',
-      owner: 'VENDOR',
-      maxCells: 2,
-      applicationIds: ids,
-      externalId: 'fleet-handshake-7f3a',
-      now: '2026-11-09T00:00:00.000Z',
-    });
-    expect(dedicated.updateExpression).toContain('#applicationIds = :applicationIds');
-    expect(dedicated.updateExpression).not.toContain('REMOVE');
-    expect(dedicated.expressionAttributeNames).toMatchObject({ '#applicationIds': 'applicationIds' });
-    expect(dedicated.expressionAttributeValues[':applicationIds']).toEqual(['app-x']);
-    expect(dedicated.expressionAttributeValues[':applicationIds']).not.toBe(ids);
+  test('ROTATE writes externalId and updatedAt only, conditioned on owner, UPDATING and the operationId read (R-48)', () => {
+    const update = putAccountUpdate({ ...base, path: 'ROTATE', externalId: 'rotated' });
+    expect(update.updateExpression).toBe('SET #updatedAt = :now, #externalId = :externalId');
+    expect(update.conditionExpression).toBe('#owner = :owner AND #status = :updating AND #operationId = :readOperationId');
+    expect(update.expressionAttributeValues[':readOperationId']).toBe(base.operationId);
+  });
+
+  test('a ROTATE that drops a vendor account\'s externalId removes it', () => {
+    const update = putAccountUpdate({ ...base, owner: 'VENDOR', path: 'ROTATE', externalId: undefined });
+    expect(update.updateExpression).toBe('SET #updatedAt = :now REMOVE #externalId');
+  });
+
+  test('every path but the rotation needs an operationId', () => {
+    expect(() => putAccountUpdate({ ...base, path: 'REPLACE', operationId: undefined })).toThrow(/operationId/);
   });
 });
 
-describe('ACCOUNT_EMPTY_CONDITION (DeleteAccount, ADR-024)', () => {
-  test('requires the record to exist with cellCount = 0', () => {
-    expect(ACCOUNT_EMPTY_CONDITION.conditionExpression).toBe('attribute_exists(PK) AND #cellCount = :zero');
-    expect(ACCOUNT_EMPTY_CONDITION.expressionAttributeValues).toEqual({ ':zero': 0 });
+describe('account record status and staged replace (R-47, R-48, ADR-045)', () => {
+  const stored = dataModel.toItem(record);
+
+  test('an item stored before ADR-045 has no status and reads as ACTIVE', () => {
+    const legacy: AccountItem = { ...stored, status: undefined };
+    expect(dataModel.fromItem(legacy).status).toBe('ACTIVE');
+  });
+
+  test('round-trips pending: dedicated, and shared once committed', () => {
+    for (const pending of [{ maxCells: 4, applicationIds: ['app-x'] }, { maxCells: 4 }]) {
+      const updating: AccountRecord = {
+        ...record,
+        status: 'UPDATING',
+        operationId: '111111111111-account-update-1763460000000-0a1b2c3d',
+        pending,
+      };
+      const item = dataModel.toItem(updating);
+      expect(item.pending).toEqual(pending);
+      expect(dataModel.fromItem(item)).toEqual(updating);
+    }
+  });
+
+  test('never writes or reads an externalId in pending (R-48)', () => {
+    const smuggled = { maxCells: 4, applicationIds: ['app-x'], externalId: 'leaked-id' };
+    const item = dataModel.toItem({ ...record, status: 'UPDATING', pending: smuggled });
+    expect(item.pending).toEqual({ maxCells: 4, applicationIds: ['app-x'] });
+    expect(item.pending).not.toHaveProperty('externalId');
+    const read = dataModel.fromItem({ ...stored, pending: smuggled } as AccountItem);
+    expect(read.pending).toEqual({ maxCells: 4, applicationIds: ['app-x'] });
+    expect(read.pending).not.toHaveProperty('externalId');
+    expect(read.externalId).toBe('fleet-handshake-7f3a');
   });
 });

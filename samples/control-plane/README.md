@@ -13,10 +13,15 @@ up to a cell limit, may be shared by every application or dedicated to some,
 and when every vendor account an application may use is full the fleet moves
 on to the next registered one; a customer account receives only the
 deployments that name it. Each account is reached through a role pair
-installed in that account, which the account owner can revoke. One service,
-one API (22 operations), one DynamoDB table, one Step Functions workflow, two
-shared AWS CodeBuild projects, one role pair per account — for any number of
-applications.
+installed in that account, which the account owner can revoke. **Vendor
+hooks** run the vendor's own code before or after each cell and deployment
+script, and around each change to an application, a tenant or an account,
+in the control plane account under roles no cell account holds, so a
+downstream system (a route registrar, metering, an audit export, a policy
+gate) can admit the vendor without admitting a tenant. One service, one API
+(26 operations), one DynamoDB table, one Step Functions workflow, four shared
+AWS CodeBuild projects (two run scripts, two run hooks), one role pair per
+account — for any number of applications.
 
 - Design: [`architecture.md`](./architecture.md)
 - Decisions and their reasoning trail: [`adr/`](./adr/) (one file per ADR, indexed in [`adr/README.md`](./adr/README.md))
@@ -48,27 +53,43 @@ tenant create, `UpdateCell` and `UpdateDeployment` run the update scripts,
 creation, so a replaced definition applies to new cells only and existing
 cells keep their version. One control plane serves any number of
 applications: their cells share the registered accounts, each account's role
-pair and the two build projects. Diagram source:
+pair and the two provisioning projects. Diagram source:
 [`diagrams/control-plane.drawio`](./diagrams/control-plane.drawio).
+
+Application code and hook code both come from the vendor, never from a stack
+input and never from a tenant. An application's scripts come from the
+`source` registered with `PutApplication`; a hook's script comes from the
+hook's own `source`, registered with `PutHook` for a global hook or in the
+application's `hooks` for an application hook. CodeBuild fetches either
+source at the start of every build, from a git repository or an S3 location
+CodeBuild can reach, so a full commit SHA in `sourceVersion` is what fixes
+the code that runs (ADR-020).
 
 ## How it works
 
 ```
-PutApplication (200)   ─► register an application: source, cell and tenant
-                          scripts, maxTenants, placementStrategy
-PutAccount (200)       ─► register an account: verify its role pair (handshake),
+PutApplication (202)   ─► register an application: source, cell and tenant
+                          scripts, maxTenants, placementStrategy, hooks
+PutHook (200)          ─► optionally, register a global hook that runs for
+                          every application
+PutAccount (202)       ─► register an account: verify its role pair (handshake),
                           record owner (VENDOR | TENANT), maxCells and the
                           applications it admits
-CreateTenant (200)     ─► record a customer; nothing is provisioned
+CreateTenant (202)     ─► record a customer; nothing is provisioned
+                       ─► Step Functions ─► per record event: pre hooks, then
+                                            the commit, then post hooks
+GetApplication, GetAccount,
+GetTenant            ◄─ poll each until ACTIVE / CREATE_FAILED
 CreateDeployment (202) ─► placement: claim a slot in an ACTIVE cell of the
                           application with capacity, or claim a cell slot on an
                           eligible account and create a new cell record there,
                           atomically (implicit creation)
-                       ─► Step Functions ─► CodeBuild assumes the account's
-                                            provisioning role, runs the
-                                            application's cell create script
-                                            (new cell only), then its tenant
-                                            create script
+                       ─► Step Functions ─► per event: pre hooks, then
+                                            CodeBuild assumes the account's
+                                            provisioning role and runs the
+                                            script, then post hooks; the cell
+                                            create event (new cell only)
+                                            before the tenant create event
 GetDeployment        ◄─ poll until ACTIVE / CREATE_FAILED
 ```
 
@@ -77,6 +98,9 @@ GetDeployment        ◄─ poll until ACTIVE / CREATE_FAILED
 plus the authoritative count of those cells. Neither the definition nor the
 application list is a deployment input: a new application needs no
 redeploy. An application with cells cannot be deleted (409).
+`PutApplication` and `DeleteApplication` answer 202 and run the
+application's record event (see Hooks on applications, tenants and
+accounts); a replaced definition takes effect when that event commits it.
 
 **Parameters.** An application declares the values its scripts take per
 deployment or per cell. A tenant parameter is `{name, required, default?,
@@ -95,9 +119,122 @@ their next build. Values are plain text, readable in the table, the
 workflow history and the build's environment: never put a secret there;
 pass a secret's name and let the script read it (spec N-11).
 
+**Hooks.** A hook is vendor code that the workflow runs before (`PRE`) or
+after (`POST`) a cell or deployment script, on the events it names:
+`CELL_CREATE`, `CELL_UPDATE`, `CELL_DELETE`, `DEPLOYMENT_CREATE`,
+`DEPLOYMENT_UPDATE` and `DEPLOYMENT_DELETE` (ADR-044). A definition is
+`{hookId, events, phase, source, script, timeoutMinutes}`, with a timeout of
+5 to 30 minutes (default 10). **Global hooks** apply to every application and
+are registered with `PutHook`, at most five; **application hooks** are part
+of an application's definition (`hooks` on `PutApplication`, at most five)
+and are stamped onto each new cell with the rest of it, so a changed list
+reaches new cells only. For each event, pre hooks run global then
+application, the script runs, and post hooks run application then global,
+one at a time and within a scope in `hookId` order. A pre hook that fails on
+create or update stops the operation before the script runs, and a post hook
+that fails marks it `*_FAILED` with the script's changes in place; either
+way `statusReason` names the scope and the hook. On delete a failing hook is
+tried three times, 60 and 120 seconds apart, then logged, counted in an
+alarmed metric and skipped, so a delete always reaches its script. Global
+hooks are read when the operation is accepted, and `GetCell` and
+`GetDeployment` report in `lastGlobalHooks` which global hooks ran for the
+last event, at which revision and on which commit. No operation runs a hook
+on demand.
+
+A hook build receives `EVENT`, `PHASE`, `HOOK_ID`, `HOOK_SCOPE`,
+`APPLICATION_ID`, `CELL_ID`, `CELL_ACCOUNT_ID`, `OPERATOR_ID`,
+`EXECUTION_ID`, `ATTEMPT`, `HOOK_SCRIPT`, the record's `PARAM_<NAME>` values,
+`TENANT_ID` and `TENANT_NAME` on deployment events, and, on `POST` only,
+`SCRIPT_OUTPUTS`: the outputs the script wrote, as a compact JSON object. A
+script hands its post hooks those outputs by writing a JSON object of string
+values (printable ASCII, keys `[A-Za-z][A-Za-z0-9_]{0,63}`, each once, at most
+4,096 bytes compact) to the path in `OUTPUTS_FILE`; `{}` when it writes none.
+An invalid file fails a create or update and is dropped on a delete. Outputs
+come from the cell's account, which a tenant may own, so a hook validates
+every value it uses and takes the identity it acts on from the variables
+above. Hook builds run in the control plane account, global hooks under
+`<fleet>-global-hook` and application hooks under `<fleet>-app-hook`; they
+assume no role and never see the external id or the pair.
+
+**Hooks on applications, tenants and accounts.** Hooks also run on nine
+record events: `APPLICATION_CREATE`, `APPLICATION_UPDATE`,
+`APPLICATION_DELETE`, `TENANT_CREATE`, `TENANT_UPDATE`, `TENANT_DELETE`,
+`ACCOUNT_CREATE`, `ACCOUNT_UPDATE` and `ACCOUNT_DELETE` (ADR-045).
+`PutApplication`, `DeleteApplication`, `CreateTenant`, `UpdateTenant`,
+`DeleteTenant`, `PutAccount` and `DeleteAccount` validate the request
+(`PutAccount` also probes the handshake), make one conditional write and
+answer 202 with the record. The workflow then runs the event's pre hooks,
+commits the change, runs its post hooks and writes the record `ACTIVE` or
+`*_FAILED`. No build runs in a cell account, and post hooks get
+`SCRIPT_OUTPUTS` `{}`. A create inserts the record `CREATING`, and nothing
+is placed into or against it until it is `ACTIVE`. An update stages the new
+values in `pending`, which the `Get` operation returns, and the stored
+values stay in force until the pre hooks pass, so a failing pre hook leaves
+the record `UPDATE_FAILED` with its old values. A delete moves the record to
+`DELETING`, under the same empty check as before, and the workflow deletes
+it; delete hooks are retried and skipped as above, so a delete always
+completes. An account's `externalId` is the one value never staged:
+`PutAccount` writes it in the request, once the probe has passed, so no hook
+can refuse or delay a rotation, and on an `UPDATING` account a put with the
+values in flight writes only the new id and runs no hook.
+
+Application events run the global hooks and the application hooks of the
+definition being written (the stored ones on delete); tenant and account
+events run global hooks only, and `PutApplication` refuses an application
+hook that names one. A record event's hook build gets `EVENT`, `PHASE`,
+`HOOK_ID`, `HOOK_SCOPE`, `HOOK_SCRIPT`, `OPERATOR_ID`, `EXECUTION_ID`,
+`ATTEMPT` and the record's fields: `APPLICATION_ID`; `TENANT_ID` and
+`TENANT_NAME`; or `ACCOUNT_ID`, `ACCOUNT_OWNER` and
+`ACCOUNT_APPLICATION_IDS` (comma-separated, empty for a shared account). It
+never gets an external id, a parameter, a source or a script.
+`GetApplication`, `GetTenant` and `GetAccount` report `status`,
+`statusReason`, `lastGlobalHooks` and `operationId`, the name of the last
+operation's execution and its hooks' `EXECUTION_ID`.
+
+A `CREATE_FAILED` application or account is put again or deleted, a
+`CREATE_FAILED` tenant is deleted, an `UPDATE_FAILED` record takes another
+update or a delete, and a `DELETE_FAILED` one another delete. When the
+workflow cannot be started the call answers 500 and leaves the record
+`*_FAILED`, except a first create that Step Functions refused, which leaves
+no record. `PutHook` and `DeleteHook` stay synchronous and run no hook.
+
+**Extending the control plane with hooks.** Hooks are how a vendor adds
+its own steps to the control plane without changing it: a `PRE` hook can
+check or prepare before a change and refuse it, and a `POST` hook can act on
+what the change made. Each entity the control plane manages has its own
+events, so a hook can attach where its job belongs:
+
+| Entity | Events | Example `PRE` use | Example `POST` use | Scopes |
+|---|---|---|---|---|
+| Application | `APPLICATION_CREATE`, `_UPDATE`, `_DELETE` | check the application id against an approved list (a record hook gets ids, never the source or scripts) | publish the application to a catalogue | global, application |
+| Tenant | `TENANT_CREATE`, `_UPDATE`, `_DELETE` | refuse a name or a customer that fails a check (CRM, sanctions list) | open a billing or CRM record; on delete, close it | global |
+| Account | `ACCOUNT_CREATE`, `_UPDATE`, `_DELETE` | check an account against an approved list before it takes cells | add the account to an inventory or CMDB | global |
+| Cell | `CELL_CREATE`, `_UPDATE`, `_DELETE` | check capacity or a change window | register the cell's endpoints (from `SCRIPT_OUTPUTS`) in DNS or monitoring | global, application |
+| Deployment | `DEPLOYMENT_CREATE`, `_UPDATE`, `_DELETE` | check the tenant's entitlement to the application | register the tenant's route at a front door; start metering | global, application |
+
+Use a global hook for a concern of the whole fleet (audit, metering,
+inventory, policy) and an application hook for one application's own needs
+(its route, its catalogue entry). On delete, `PRE` hooks run while the
+record and what it made still exist, so a hook that removes a route or a
+DNS record removes it before the script tears down what it points at. A
+delete hook cannot refuse: it is retried and then skipped. On a cell or
+deployment delete, put cleanup that must happen in the script and use the
+hook for the outside world. An application, tenant or account delete runs
+no script, so cleanup outside the control plane can only live in a hook,
+and a skipped one leaves that state behind; the `HookSkipped` metric and
+its alarm show it.
+Two hooks to start from are in [`scripts/sample-hook/`](./scripts/sample-hook/):
+`audit.sh`, a `POST` hook that logs one JSON line per event, and
+`name-gate.sh`, a `PRE` hook on tenant events that refuses names outside a
+house rule. The End-to-end demo registers both. A hook gets only the
+permissions you attach to its scope's role (Deploy). Every hook of a scope
+shares that one role, so a policy you attach for one global hook reaches
+every global hook; give each scope the least its hooks need.
+
 **Tenants and deployments.** A tenant (`CreateTenant`) is a customer record:
-a name, a description, and the count of its deployments. Its operations are
-synchronous. A **deployment** (`CreateDeployment` on
+a name, a description, and the count of its deployments. Its operations
+run no build and answer 202 (see Hooks on applications, tenants and
+accounts). A **deployment** (`CreateDeployment` on
 `/tenants/{tenantId}/deployments`) is that tenant in one application,
 addressed by tenant and application id; it owns the cell placement and the
 build state (ADR-037). A tenant has at most one deployment per application
@@ -151,7 +288,8 @@ overrides, under the cell account's provisioning role. Cell scripts receive
 application the tenant uses), `TENANT_NAME` (the tenant's stored name, on
 every operation — ADR-023), `APPLICATION_ID`, `CELL_ID`, `CELL_ACCOUNT_ID`,
 `OPERATION`, `OPERATOR_ID`, and (on create) `ADMIN_EMAIL` for
-application-plane user bootstrap. Each script also gets `PARAM_<NAME>` for
+application-plane user bootstrap. Every script gets `OUTPUTS_FILE`, the path
+for its outputs (see Hooks). Each script also gets `PARAM_<NAME>` for
 its own set only: cell scripts the cell's parameters, tenant scripts the
 deployment's; a declared name with neither a value nor a default is unset,
 not empty. All four SSM namespaces live in the cell's
@@ -167,7 +305,7 @@ write their own state under
 Every API operation requires a JWT from your **vendor IdP**, validated by a
 Lambda Authorizer. The token's `role` claim decides what the caller may do
 (spec R-36): a value in `allowedRoles` (`operator` by default) holds every
-operation, and a value in `readerRoles` (none by default) holds the ten
+operation, and a value in `readerRoles` (none by default) holds the twelve
 `GET` operations only. A token whose role is in neither list is denied
 (403), so configure your IdP to mint `role: "operator"` on operator tokens
 (ADR-018) and your reader value on reader tokens (ADR-042).
@@ -224,6 +362,13 @@ curl -s -X PUT "${API_URL}applications/demo" \
   }'
 ```
 
+The call answers 202 with the application `CREATING`. Repeat this until
+`status` is `ACTIVE`, seconds when no hook matches the event:
+
+```bash
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/demo" | jq -r .application.status
+```
+
 The stack also installs the role pair in its own account, so the next step
 is to register that account (the stack's `ControlPlaneAccountId` output is
 its id). Without `applicationIds` the account is shared and admits every
@@ -234,10 +379,12 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 curl -s -X PUT "${API_URL}accounts/${ACCOUNT_ID}" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "owner": "VENDOR", "maxCells": 10 }'
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts/${ACCOUNT_ID}" | jq -r .account.status
 ```
 
-Without a registered vendor-owned account that admits the application, the
-first `CreateDeployment` is a 409 `InsufficientCapacityError` that says so.
+Poll the account the same way until it is `ACTIVE`. Without a registered
+vendor-owned account that is `ACTIVE` and admits the application, the first
+`CreateDeployment` is a 409 `InsufficientCapacityError` that says so.
 
 ### Teardown
 
@@ -252,8 +399,10 @@ control plane can no longer reach.
    in each cell's account and the account's and application's cell slots are
    released.
 2. `DeleteTenant` every tenant, `DeleteAccount` every account
-   (`ListAccounts` shows them all at `0/n`), and `DeleteApplication` every
-   application (`ListApplications` shows `cellCount` 0).
+   (`ListAccounts` shows them all at `0/n`) and `DeleteApplication` every
+   application (`ListApplications` shows `cellCount` 0); each answers 202
+   and is done when its `Get` answers 404. Then `DeleteHook` every global
+   hook (`ListHooks`).
 3. `npx cdk destroy` the control plane stack with the same context inputs
    you deployed with.
 4. In every other account, its owner runs `npx cdk destroy` on the pair
@@ -316,8 +465,15 @@ only deployments whose `CreateDeployment` carries
 `"accountId": "<ACCOUNT_B_ID>"` and names an application it admits. Leave
 `applicationIds` out to admit every application; re-run `PutAccount` to
 change the list (existing cells stay). `fleetName` is the one deployment
-input both stacks must agree on; two control planes in one account need
-different fleet names because the five role names are physical.
+input both stacks must agree on. It matches `[a-z0-9][a-z0-9-]{0,31}`
+(checked at synth) and names the seven roles (`<fleet>-api`,
+`<fleet>-cell-build`, `<fleet>-tenant-build`, `<fleet>-global-hook`,
+`<fleet>-app-hook` in the control plane account, and the pair), the four
+CodeBuild projects (`<fleet>-cell-build`, `<fleet>-tenant-build`,
+`<fleet>-global-hook`, `<fleet>-app-hook`) and the workflow
+(`<fleet>-workflow`). Role names are account-wide and project and workflow
+names per Region, so two control planes in one account need different fleet
+names, in every Region.
 
 One optional context input, `tenantBuildManagedPolicyArns`, attaches
 deployer-supplied customer-managed IAM policies to the tenant provisioning
@@ -341,8 +497,9 @@ npx cdk deploy \
   --context tenantBuildManagedPolicyArns='["arn:aws:iam::123456789012:policy/PlatformInvokePolicy"]'
 ```
 
-`cellBuildManagedPolicyArns` does the same for the cell provisioning role
-(ADR-0047), with the same check, on the control plane stack and in the
+`cellBuildManagedPolicyArns` does for the cell provisioning role what
+`tenantBuildManagedPolicyArns` does for the tenant role (ADR-0047), with the
+same check, on the control plane stack and in the
 `cellAccount` context. Use it when a cell script deploys with a tool the
 account owner allows, such as a CDK bootstrap kept for cells. The cell role
 also trusts the control plane's API role, for the `PutAccount` handshake
@@ -372,14 +529,16 @@ context lookups commits them to `cdk.context.json` instead. Replace
 
 That policy is safe only in an account that holds nothing but cells, with a
 cell bootstrap whose execution role and every cell role carry a permissions
-boundary, and every cell role sits on a `/cell/` role path (ADR-0047).
-The control plane's own account never qualifies, because it holds the
-control plane: on the control plane stack, attach only policies scoped to
-the cell's own resources. A policy that reaches an administrator role, the
-default CDK bootstrap (`cdk-hnb659fds-*`), or any role other than the three
-`cdk-cell-*` roles above and the cell lookup role makes the cell build and
-the API role administrators of the account; one that reaches the cell
-lookup role lets both read the whole account. Without the lookup role, `cdk deploy` prints a
+boundary, and every cell role sits on a `/cell/` role path (ADR-0047). The
+control plane's own account never qualifies, because it holds the control
+plane: on the control plane stack, attach only policies scoped to the cell's
+own resources. There the cell role also carries the control plane's explicit
+deny (spec R-41, below), which overrides any attached policy that grants a
+denied action. A policy that reaches an administrator role, the default CDK
+bootstrap (`cdk-hnb659fds-*`), or any role other than the three `cdk-cell-*`
+roles above and the cell lookup role makes the cell build and the API role
+administrators of the account; one that reaches the cell lookup role lets
+both read the whole account. Without the lookup role, `cdk deploy` prints a
 warning that it could not assume it and goes on with the deploy role.
 
 `concurrentBuildLimit` (default 5, ADR-0046) caps concurrent builds on every
@@ -390,8 +549,8 @@ minute. Raise it for a large onboarding wave. The value must be an integer
 from 1 to 100, or synth fails; above 20 the synth warns. Raise the account's
 CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds first, to at
 least the value times the number of CodeBuild projects the stack creates
-(two: the cell and the tenant project); the service default is 1. The
-synth warning prints the figure. The
+(four: the cell and tenant projects and the two hook projects); the service
+default is 1. The synth warning prints the figure. The
 execution surge alarm (more than 20 executions in five minutes, no actions)
 fires during any large onboarding:
 
@@ -402,10 +561,40 @@ npx cdk deploy \
   --context concurrentBuildLimit=50
 ```
 
+Two more optional inputs give the hook roles what their hooks need:
+`globalHookManagedPolicyArns` attaches customer-managed policies to
+`<fleet>-global-hook`, the role every global hook runs under, and
+`appHookManagedPolicyArns` to `<fleet>-app-hook`, the role every application
+hook runs under (spec R-41, ADR-044). Both are validated as
+`tenantBuildManagedPolicyArns` is (the stack's own partition and account),
+and an ARN in both lists fails synth, so no policy reaches both scopes.
+Without them a hook role can write its logs and nothing else. The stack
+grants no read on a hook source: when a hook's source needs one (an S3
+location, a private repository), grant it yourself, as for the provisioning
+projects (spec N-6), for example in a policy of one of these two lists.
+Every hook of a scope shares its role, so a policy attached for one hook is
+held by all of them. An explicit deny on both hook roles, both build roles
+and the home account's pair (spec R-41) keeps any attached policy from
+changing or starting the control plane's own workflow, projects, table, API,
+functions or roles; on the home pair that includes the policies of
+`tenantBuildManagedPolicyArns` and `cellBuildManagedPolicyArns`. It does not
+stop reads: table reads and `states:DescribeExecution` or
+`codebuild:BatchGetBuilds` on the control plane's executions and builds stay
+open to an attached policy, and those carry an account's `externalId` (spec
+N-10):
+
+```bash
+npx cdk deploy \
+  --context vendorIdpIssuerUrl=https://YOUR_ISSUER \
+  --context vendorIdpAudience=YOUR_AUDIENCE \
+  --context globalHookManagedPolicyArns='["arn:aws:iam::123456789012:policy/RouteRegistrarWrite"]' \
+  --context appHookManagedPolicyArns='["arn:aws:iam::123456789012:policy/AppHookMetering"]'
+```
+
 Two optional context inputs choose which `role` claim values the authorizer
 admits and what each may do (spec R-36, ADR-042). `allowedRoles` (default
 `["operator"]`) gets every operation. `readerRoles` (default none) gets the
-ten `GET` operations and nothing else, for a system that only looks
+twelve `GET` operations and nothing else, for a system that only looks
 placement up, such as a route registrar or a dashboard. Use a namespaced
 reader value, not a word a broader issuer may already mint. A value in both
 lists, or outside `[A-Za-z0-9:._-]{1,64}`, fails synth:
@@ -438,6 +627,62 @@ npx cdk deploy \
   --context vendorIdpRequiredScope=YOUR_RESOURCE_SERVER/read
 ```
 
+### Upgrading a deployment whose projects and workflow have generated names
+
+The four CodeBuild projects and the workflow have physical names built from
+the fleet name, so the trust and deny policies can name them by ARN before
+they exist (ADR-044). A control plane deployed from a version whose two
+provisioning projects and workflow had CDK-generated names replaces them on
+this upgrade. CloudFormation deletes the old state machine, which terminates
+each of its running executions at the next state transition and strands that
+execution's cell or deployment in `CREATING`, `UPDATING` or `DELETING`. Drain
+the control plane first, in three deploys (spec R-41):
+
+1. **Close.** Redeploy the version you run, unchanged except for
+   `--context allowedRoles='["control-plane:closed"]'`, a role your issuer
+   never mints and that is not in `readerRoles`. Once the authorizer's cached
+   results expire, every call from a token whose role is not in
+   `readerRoles` is refused with 403, reads included; watch the drain with a
+   reader token.
+2. **Upgrade.** Wait at least 90 seconds after the Close deploy completes
+   (the 60-second authorizer cache plus the 29-second integration timeout;
+   the API function's own timeout stays at or below it). Then check that
+   `aws stepfunctions list-executions --state-machine-arn <old workflow ARN>
+   --status-filter RUNNING` is empty, and deploy this version with
+   `allowedRoles` still `["control-plane:closed"]`. Restoring the roles in
+   this deploy would let an operation accepted mid-update start on the old
+   workflow.
+3. **Open.** Redeploy this version with `allowedRoles` restored. A refusal
+   cached during the drain can last up to 60 seconds after this.
+
+The gate refuses machine clients with an operator role as it refuses people,
+so automation that uses one, status polling included, holds off or retries
+after Open. The fleet name must start with a letter or digit, as a
+CodeBuild project name does, so a fleet whose name starts with a hyphen
+fails synth and needs a new name. Renaming a fleet replaces every fleet
+role, so the role pair is reinstalled under the new name in every
+registered account.
+
+### Upgrading to asynchronous application, tenant and account operations
+
+`PutApplication`, `DeleteApplication`, `CreateTenant`, `UpdateTenant`,
+`DeleteTenant`, `PutAccount` and `DeleteAccount` answer 202 from this
+version on, where they answered 200 before (ADR-045). This is a breaking
+change for every API client. The response carries the record and its
+`status`, and the record is usable only once it is live: `ACTIVE`, or
+`UPDATING` or `UPDATE_FAILED` after a replace, whose stored values stay in
+force. A client that uses a record straight after creating it, such as a
+sign-up flow that calls `CreateTenant` and then `CreateDeployment`, polls
+the record's `Get` operation until `ACTIVE` first, or retries the 409 the
+deployment gets meanwhile. A client that needs the new values of an update
+polls until the record leaves `UPDATING`, and a client that deletes polls
+until the `Get` answers 404. Change the clients with the upgrade.
+
+Records stored before the upgrade have no `status` and read as `ACTIVE`,
+so the upgrade writes nothing to the table and needs no data migration. It
+needs no drain of its own. The drain in the previous section still applies
+when the version you run has generated project and workflow names.
+
 ### Example: mounting tenant-identity
 
 The [`tenant-identity`](../tenant-identity/) sample is the worked consumer of
@@ -461,9 +706,11 @@ export CP_INTEG_ACCOUNT_B=<ACCOUNT_B_ID>
 npx projen integ
 ```
 
-A run takes about 55 minutes across two non-production accounts and two
-applications and costs well under a dollar in throwaway resources; see
-[integration-test.md](./integration-test.md) for the second account's
+A run takes about two hours (an estimate from its build count)
+across two non-production accounts and three applications, with global and
+application hooks, and costs under a dollar in throwaway resources; each run
+takes its own fleet name, so two runs can share the accounts and the Region.
+See [integration-test.md](./integration-test.md) for the second account's
 bootstrap, what the run stands up in each account, its steps and its knobs.
 
 ## End-to-end demo
@@ -474,7 +721,9 @@ shared parameter, then publish and clean up the cell's SSM namespace, and the
 tenant scripts in [`scripts/sample-tenant/`](./scripts/sample-tenant/) read it
 and write one parameter per deployment.
 [`scripts/sample-noop/`](./scripts/sample-noop/) is an explicit no-op set for
-sides of the model that provision nothing. Host the scripts in a repo or S3
+sides of the model that provision nothing, and
+[`scripts/sample-hook/`](./scripts/sample-hook/) holds two global hooks. Host
+the scripts in a repo or S3
 bucket CodeBuild can reach and deploy with `demoApplicationIds` naming the
 application id used below (`demo`), as in Deploy.
 
@@ -484,6 +733,40 @@ Set the API URL, an operator token and the home account id:
 API_URL=$(aws ssm get-parameter --name /control-plane/tenant-api-url --query Parameter.Value --output text)
 TOKEN="<a JWT from your vendor IdP>"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+```
+
+Register two global hooks first, so every later step runs them. `audit`
+is a `POST` hook on all fifteen events and logs one JSON line per event to
+its build log; `name-gate` is a `PRE` hook on tenant creates and updates
+and refuses names outside a house rule. Both answer 200 at once. They need
+no permission beyond their logs when the source is a GitHub repository
+CodeBuild can already read; for an S3 or private source, grant
+`<fleet>-global-hook` read on it through `globalHookManagedPolicyArns`
+(Deploy). With `audit` on every event, each later step also runs a hook
+build, so each takes a minute or two longer:
+
+```bash
+curl -s -X PUT "${API_URL}hooks/audit" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+  -d '{
+    "events": ["APPLICATION_CREATE", "APPLICATION_UPDATE", "APPLICATION_DELETE",
+               "TENANT_CREATE", "TENANT_UPDATE", "TENANT_DELETE",
+               "ACCOUNT_CREATE", "ACCOUNT_UPDATE", "ACCOUNT_DELETE",
+               "CELL_CREATE", "CELL_UPDATE", "CELL_DELETE",
+               "DEPLOYMENT_CREATE", "DEPLOYMENT_UPDATE", "DEPLOYMENT_DELETE"],
+    "phase": "POST",
+    "source": { "type": "GITHUB", "location": "https://github.com/YOUR_ORG/YOUR_REPO.git" },
+    "script": "samples/control-plane/scripts/sample-hook/audit.sh"
+  }'
+curl -s -X PUT "${API_URL}hooks/name-gate" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+  -d '{
+    "events": ["TENANT_CREATE", "TENANT_UPDATE"],
+    "phase": "PRE",
+    "source": { "type": "GITHUB", "location": "https://github.com/YOUR_ORG/YOUR_REPO.git" },
+    "script": "samples/control-plane/scripts/sample-hook/name-gate.sh"
+  }'
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}hooks"
 ```
 
 Register the application. Its definition is the only place the source and
@@ -508,25 +791,60 @@ curl -s -X PUT "${API_URL}applications/demo" \
   }'
 ```
 
+The 202 leaves the application `CREATING`; repeat the `GetApplication` call
+until `status` is `ACTIVE`:
+
+```bash
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/demo"
+```
+
 Register this account as vendor-owned, shared fleet capacity. The call
 verifies the role pair the stack installed here and answers 400 if the
-handshake fails:
+handshake fails; otherwise it answers 202, and you repeat the `GetAccount`
+call until `status` is `ACTIVE`:
 
 ```bash
 curl -s -X PUT "${API_URL}accounts/${ACCOUNT_ID}" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "owner": "VENDOR", "maxCells": 2 }'
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts/${ACCOUNT_ID}"
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts"
 ```
 
-Create the tenant. This is a synchronous 200 that records the customer and
-provisions nothing:
+Create the tenant. The 202 records the customer `CREATING` and provisions
+nothing; repeat the `GetTenant` call until `status` is `ACTIVE` before
+creating a deployment, which is a 409 until then:
 
 ```bash
 TENANT_ID=$(curl -s -X POST "${API_URL}tenants" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
   -d '{ "name": "acme", "description": "demo tenant" }' | jq -r .tenant.tenantId)
 echo "${TENANT_ID}"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
+```
+
+Once it is `ACTIVE`, `lastGlobalHooks` on the tenant lists the hooks that
+ran for its create, in run order: `name-gate` (`PRE`) and `audit` (`POST`),
+each with its revision and the commit it ran. Now try a name the gate
+refuses. The create answers 202 as before, and the tenant stays `CREATING`
+while the `name-gate` build runs. The `PRE` hook fails, so the tenant ends
+`CREATE_FAILED` and its `statusReason` names `name-gate`; it never becomes
+`ACTIVE`, and nothing can be placed against it. Repeat the `GetTenant` call
+until `status` is `CREATE_FAILED`:
+
+```bash
+BAD_ID=$(curl -s -X POST "${API_URL}tenants" \
+  -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+  -d '{ "name": "acme; drop" }' | jq -r .tenant.tenantId)
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${BAD_ID}" | jq '.tenant | {status, statusReason}'
+```
+
+Then delete the failed record. The delete answers 202 and runs `audit` on
+`TENANT_DELETE`; repeat the `GetTenant` call until it answers 404:
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${BAD_ID}"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${BAD_ID}"
 ```
 
 Create the tenant's deployment of `demo`. The 202 response carries no
@@ -549,8 +867,9 @@ echo "${CELL_ID}"
 ```
 
 Poll the deployment until `status` is `ACTIVE`, or `CREATE_FAILED`, in which
-case `statusReason` and `lastBuildId` say why. A new cell runs two builds, so
-expect a few minutes:
+case `statusReason` and `lastBuildId` say why. A new cell runs four builds,
+one after another (the cell script, `audit`, the tenant script, `audit`), so
+expect several minutes:
 
 ```bash
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}/deployments/demo"
@@ -558,7 +877,9 @@ curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}/depl
 
 Inspect the result: the tenant's deployment count, its deployments, the
 implicitly created cell with its application, account and stamped
-definition, the fleet, and the counters on the account and the application:
+definition, the fleet, and the counters on the account and the application.
+On the cell and the deployment, `lastGlobalHooks` shows that `audit` ran
+after the cell script and after the tenant script:
 
 ```bash
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
@@ -610,44 +931,63 @@ curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}cells/${CELL_ID
 curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}cells/${CELL_ID}"
 ```
 
-Finally the tenant, the account and the application, each a synchronous 200
-that is a 409 while it still has deployments or cells:
+Finally the tenant, the account and the application. Each delete is a 202
+that is a 409 while the record still has deployments or cells; poll each
+until its `Get` answers 404:
 
 ```bash
 curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
 curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts/${ACCOUNT_ID}"
 curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/demo"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}tenants/${TENANT_ID}"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}accounts/${ACCOUNT_ID}"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}applications/demo"
+```
+
+Last, remove the two global hooks. Each delete answers 200 at once and
+changes only operations accepted after it:
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}hooks/name-gate"
+curl -s -X DELETE -H "Authorization: Bearer ${TOKEN}" "${API_URL}hooks/audit"
+curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}hooks"
 ```
 
 ## API
 
 | Operation | HTTP | Returns |
 |---|---|---|
-| PutApplication | `PUT /applications/{applicationId}` | 200 — register or replace the definition (`source`, `cellScripts`, `tenantScripts`, `maxTenants`), `placementStrategy` and the declarations `parameters` and `cellParameters`; an absent list keeps the current one, `[]` clears it; 400 on an invalid definition or declaration; 409 when a kept list changed during the call (retry); existing cells keep their stamp |
-| GetApplication | `GET /applications/{applicationId}` | 200 — the definition, `placementStrategy`, `parameters`, `cellParameters`, `cellCount` |
-| ListApplications | `GET /applications` | 200 — paginated: `maxTenants`, `placementStrategy`, `cellCount` per application |
-| DeleteApplication | `DELETE /applications/{applicationId}` | 200 — empty applications only (409 while it has cells) |
-| CreateTenant | `POST /tenants` | 200 — a customer record (`name`, `description`), nothing provisioned |
-| GetTenant | `GET /tenants/{tenantId}` | 200 — `name`, `description`, `deploymentCount` |
-| UpdateTenant | `PUT /tenants/{tenantId}` | 200 — metadata only, no build |
-| DeleteTenant | `DELETE /tenants/{tenantId}` | 200 — empty tenants only (409 while it has deployments) |
-| ListTenants | `GET /tenants` | 200 — paginated |
+| PutApplication | `PUT /applications/{applicationId}` | 202 — register or replace the definition (`source`, `cellScripts`, `tenantScripts`, `maxTenants`, `hooks`), `placementStrategy` and the declarations `parameters` and `cellParameters`; an absent list keeps the current one, `[]` clears it; a create (or a put of a `CREATE_FAILED` application) answers `CREATING`, a replace `UPDATING` with the new values in `pending`, live once the `APPLICATION_*` pre hooks pass; 400 on an invalid definition, hook or declaration, an application hook on a tenant or account event, or a source or script path outside its charset; 409 while it is in flight, `DELETING` or `DELETE_FAILED`, or when a kept declaration list changed during the call (retry); existing cells keep their stamp |
+| GetApplication | `GET /applications/{applicationId}` | 200 — the polling endpoint: the definition (`hooks` included), `placementStrategy`, `parameters`, `cellParameters`, `cellCount`, `status`, `statusReason`, `lastGlobalHooks`, `operationId`, and `pending` while a replace is staged |
+| ListApplications | `GET /applications` | 200 — paginated: `maxTenants`, `placementStrategy`, `cellCount` and `status` per application |
+| DeleteApplication | `DELETE /applications/{applicationId}` | 202 — empty applications only (409 while it has cells or is in flight); `DELETING` until the workflow has run the `APPLICATION_DELETE` hooks and deleted the record, then 404 |
+| PutHook | `PUT /hooks/{hookId}` | 200 — register or replace a global hook (`events`, `phase`, `source`, `script`, `timeoutMinutes`); a replace increments `revision`; 400 on an invalid definition; 409 for a sixth hook (delete one first) or a race with a create or delete of the same hook (retry); applies to operations accepted afterwards |
+| GetHook | `GET /hooks/{hookId}` | 200 — the definition, `revision`, timestamps |
+| ListHooks | `GET /hooks` | 200 — paginated, in `hookId` order, the order global hooks run in |
+| DeleteHook | `DELETE /hooks/{hookId}` | 200 — deletes the hook and frees its slot; executions already accepted keep the hooks they started with |
+| CreateTenant | `POST /tenants` | 202 — a customer record (`name`, `description`), `CREATING` until the `TENANT_CREATE` hooks pass; nothing provisioned |
+| GetTenant | `GET /tenants/{tenantId}` | 200 — the polling endpoint: `name`, `description`, `deploymentCount`, `status`, `statusReason`, `lastGlobalHooks`, `operationId`, and `pending` while an update is staged |
+| UpdateTenant | `PUT /tenants/{tenantId}` | 202 — metadata only, no build: `name` and `description` staged in `pending` (`UPDATING`), live once the `TENANT_UPDATE` pre hooks pass; 409 while it is in flight, `CREATE_FAILED`, `DELETING` or `DELETE_FAILED` |
+| DeleteTenant | `DELETE /tenants/{tenantId}` | 202 — empty tenants only (409 while it has deployments or is in flight); `DELETING` until the `TENANT_DELETE` hooks have run and the record is deleted, then 404 |
+| ListTenants | `GET /tenants` | 200 — paginated, with each tenant's `status` |
 | CreateDeployment | `POST /tenants/{tenantId}/deployments` | 202 — placement into a cell of `applicationId` + tenant create build (cell create build first if a new cell is needed); optional `parameters` (400 on an undeclared name, a bad value or a missing required one, before placement); optional `accountId` pins the account (400 if it does not admit the application); optional `clientToken`; 409 when the tenant already has a deployment of the application; 409 `InsufficientCapacityError` when no eligible account has room |
-| GetDeployment | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 — the polling endpoint: status, `cellId`, the account, the effective definition (from the cell) and the stored `parameters` (no defaults) |
+| GetDeployment | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 — the polling endpoint: status, `cellId`, the account, the effective definition (from the cell, its hooks included), `lastGlobalHooks` and the stored `parameters` (no defaults) |
 | UpdateDeployment | `PUT /tenants/{tenantId}/deployments/{applicationId}` | 202 — optional body `{parameters?, removeParameters?}` merged into the stored values, then runs the tenant update script; 400 on a validation failure, nothing written; 409 when the deployment or its cell is not in a state to re-apply, or the stored values changed during the call (retry) |
 | DeleteDeployment | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | 202 — runs the tenant delete script with the stored values (never validated), frees the slot and the tenant's count |
 | ListDeployments | `GET /deployments[?tenantId=\|?cellId=\|?applicationId=]` | 200 — paginated, at most one filter (400 for two) |
 | ListCells | `GET /cells[?accountId=\|?applicationId=]` | 200 — fleet topology: `applicationId`, `accountId`, status, `tenantCount`/`maxTenants`; at most one filter (400 for two) |
-| GetCell | `GET /cells/{cellId}` | 200 — full record including the application, the account, the stamped definition and the stored cell `parameters` (no defaults; empty for a new cell) |
+| GetCell | `GET /cells/{cellId}` | 200 — full record including the application, the account, the stamped definition (its hooks included), `lastGlobalHooks` and the stored cell `parameters` (no defaults; empty for a new cell) |
 | UpdateCell | `PUT /cells/{cellId}` | 202 — optional body `{parameters?, removeParameters?}` merged into the cell's stored values (removing one returns the cell to the default), then runs the cell update script; 400 on a validation failure, nothing written |
 | DeleteCell | `DELETE /cells/{cellId}` | 202 — empty cells only (409 while occupied); frees the account's cell slot and the application's count |
-| PutAccount | `PUT /accounts/{accountId}` | 200 — register or replace `maxCells`, `applicationIds` (absent: shared), `externalId` (required for `TENANT`); `owner` is set on first write and immutable (409 on change); 404 for an unregistered application id; verifies the role pair first (400 if not assumable) |
-| GetAccount | `GET /accounts/{accountId}` | 200 — `owner`, `applicationIds`, `cellCount`/`maxCells`, whether an external id is set |
-| ListAccounts | `GET /accounts` | 200 — the capacity view above `ListCells` |
-| DeleteAccount | `DELETE /accounts/{accountId}` | 200 — empty accounts only (409 while it holds cells) |
+| PutAccount | `PUT /accounts/{accountId}` | 202 — register or replace `maxCells`, `applicationIds` (absent: shared; at most 100), `externalId` (required for `TENANT`); `owner` is set on first write and immutable (409 on change); 404 for an unregistered application id; verifies the role pair first (400 if not assumable); a create (or a put of a `CREATE_FAILED` account) answers `CREATING`; a replace writes `externalId` at once and stages `maxCells` and `applicationIds` in `pending` (`UPDATING`) until the `ACCOUNT_UPDATE` pre hooks pass; on an `UPDATING` account a put with the values in flight writes only the new `externalId` and runs no hook (409 with other values); 409 while `CREATING`, `DELETING` or `DELETE_FAILED` |
+| GetAccount | `GET /accounts/{accountId}` | 200 — the polling endpoint: `owner`, `applicationIds`, `cellCount`/`maxCells`, whether an external id is set, `status`, `statusReason`, `lastGlobalHooks`, `operationId`, and `pending` while a replace is staged |
+| ListAccounts | `GET /accounts` | 200 — the capacity view above `ListCells`, with each account's `status` |
+| DeleteAccount | `DELETE /accounts/{accountId}` | 202 — empty accounts only (409 while it holds cells or is in flight); `DELETING` until the `ACCOUNT_DELETE` hooks have run and the record is deleted, then 404 |
 
-Twenty-two operations; there is deliberately no `POST /cells` — cells are
-created implicitly by placement — and no implicit account registration. A
+Twenty-six operations, twelve of them `GET` reads and twelve answering 202
+with a record to poll; there is deliberately no
+`POST /cells` — cells are created implicitly by placement — no implicit
+account registration, and no operation that runs a hook on demand. A
 list filter with an unknown id returns an empty page, not a 404.
 `CreateDeployment` accepts an optional `clientToken` for retry safety:
 resending the same token returns the originally created deployment instead of
@@ -686,8 +1026,26 @@ generated from it (`smithy build`).
   name, so the account owner's CloudTrail attributes each provisioning call
   to the operator who caused it (M23). Role chaining caps a script's
   credentials at one hour, which is also the build task budget.
+- **Hooks run on the vendor's side of the boundary.** Hook builds run in
+  the control plane account under `<fleet>-global-hook` or
+  `<fleet>-app-hook`. No pair trusts either role, neither may assume one,
+  and a hook build never receives the external id or the pair's role ARNs,
+  so a downstream system that admits only a hook role admits only the
+  vendor. Each hook role trusts CodeBuild only on its own project, as each
+  build role does; only the workflow role may start a hook build, with no
+  `iam:PassRole` on either hook role; only the API role may start the
+  workflow. One standalone deny on both build roles, both hook roles and the
+  home pair refuses passing the stack's roles, writing their policies,
+  starting or changing the projects or the workflow, changing or invoking
+  the API function, writing the REST API and writing the table (T41, M30).
+  It does not cover an attached `sts:AssumeRole` on another role in the
+  account, CloudFormation writes, IAM role creation (`iam:CreateRole` with
+  a policy write and `iam:PassRole` on the new role, which mints a role the
+  deny does not name), admin writes on the vendor IdP or writes to a script
+  or hook source; grant none of those to a hook role.
 - Private source repos need a CodeConnections/credentials setup on the
-  CodeBuild projects; the sample assumes a public repo or an S3 source.
+  CodeBuild projects, hook projects included; the sample assumes a public
+  repo or an S3 source.
 - The Lambda Authorizer result is cached for an explicit 60 seconds (not the
   implicit 300s default): the cached policy covers the whole stage per token,
   so the TTL bounds how long a revoked or expired token keeps access — a
@@ -716,12 +1074,23 @@ code), and the cross-account items
 T22, T23, T26, T27, and mitigations M9, M10, M11, M19, M20 in
 [`threat-model.md`](./threat-model.md).
 
-- **Watch `PutApplication` (T34).** An application's definition names the
-  code every one of its cells will run, in every account that admits it.
-  Alert on the operation (API Gateway access logs carry the operator
-  principal and the path), treat a definition change as a release with the
-  same review as a deployment, and require a full commit SHA in
-  `source.sourceVersion` so a changed branch cannot change what builds.
+- **Watch `PutApplication` and `PutHook` (T34).** An application's
+  definition names the code every one of its cells will run, in every
+  account that admits it; a global hook names code that runs on every
+  matching event of every application. Alert on both operations (API
+  Gateway access logs carry the operator principal and the path), treat a
+  definition or hook change as a release with the same review as a
+  deployment, and require a full commit SHA in each `sourceVersion` so a
+  changed branch cannot change what builds.
+- **Put gates and registrars in global hooks (T43).** A stamped
+  application hook that always fails can only be removed by deleting the
+  cell's deployments and then the cell; a global hook is replaced with
+  `PutHook`. A failing global pre hook stops every create and update, so
+  alert on a rise in `*_FAILED`. One on `TENANT_CREATE` or `ACCOUNT_CREATE`
+  stops every sign-up or account registration the same way (T45).
+- **Treat hooks on tenant and account events as holding customer data
+  (T46).** They receive every tenant's id and name and every account's id,
+  owner and admitted applications, never an external id.
 
 ### Identity (M9)
 
@@ -803,6 +1172,16 @@ application's cells (threat T5, the highest-consequence open item).
 - [ ] **Size `concurrentBuildLimit` to the onboarding you expect**, not to
       the largest you can imagine. It is the cost cap of T16; keep it at 5
       or close to it outside an onboarding wave (M17, ADR-0046).
+- [ ] **Review every policy in `globalHookManagedPolicyArns` and
+      `appHookManagedPolicyArns` the same way (T41, M30).** Every hook of a
+      scope holds what any hook of that scope needs, in the vendor's most
+      sensitive account. Grant no hook role `sts:AssumeRole` on another
+      role, CloudFormation writes, IAM role creation, admin writes on the
+      vendor IdP or write access to any script or hook source.
+- [ ] **Give the skipped-hook alarm an action (T42, M31).** A delete hook
+      skipped after its retries can leave a route, a meter or an inventory
+      entry behind for a record that is gone; the sample's alarm has no
+      action.
 - [ ] Optionally, add an **API Gateway resource policy** restricting source
       IPs to vendor operator networks, so a stolen token alone is not
       sufficient to reach the API.
@@ -830,7 +1209,7 @@ application's cells (threat T5, the highest-consequence open item).
       cleanup, or accept manual record repair.
 - [ ] **Choose a fleet name the vendor owns** (`fleetName`, not the default
       `control-plane`) for any fleet that registers accounts outside the
-      vendor's own: the five role names and the pair stack's name are
+      vendor's own: the role names and the pair stack's name are
       physical, and a name already taken in a customer's account fails the
       install or, worse, names someone else's pair (T31; the handshake
       refuses a pair that trusts another control plane).
@@ -859,9 +1238,8 @@ application's cells (threat T5, the highest-consequence open item).
   teardown removes them. The test-only functions do not: the setup stack's
   CDK custom resources (bucket deployment, auto-delete), its operator-minting
   and SSM-probe functions, and integ-runner's assertion provider let Lambda
-  create `/aws/lambda/control-plane-integ-setup-*` and
-  `/aws/lambda/ControlPlaneIntegDefaultTest*` groups on first invoke, which
-  `cdk destroy` does not know about. Delete them after a run (`aws logs
-  describe-log-groups --log-group-name-prefix /aws/lambda/control-plane-integ-setup`
-  and the same for `ControlPlaneIntegDefaultTest`); they hold test output
-  only.
+  create default `/aws/lambda/...` groups on first invoke, which
+  `cdk destroy` does not know about. Their names carry the run's fleet name
+  (`cp-integ-<run id>`); [integration-test.md](./integration-test.md),
+  After an interruption, lists them. Delete them after a run; they hold test
+  output only.

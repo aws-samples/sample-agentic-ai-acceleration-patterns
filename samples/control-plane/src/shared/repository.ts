@@ -14,6 +14,7 @@ import {
 import { unmarshall } from '@aws-sdk/util-dynamodb';
 import { DataModel, DynamoDBItem } from './data-model';
 import { LifecycleStatus, ValidationException } from '../smithy/source/typescript-ssdk-codegen/src';
+import { LIVE_STATUSES, readRecordStatus } from '../tenant/record-event.types';
 
 /** A composite primary key locating one item. */
 export interface ItemKey {
@@ -62,6 +63,14 @@ export interface StatusTransition {
    */
   readonly extraCondition?: WriteCondition;
   /**
+   * Read an absent `status` as `ACTIVE` (R-47): when `fromAnyOf` holds
+   * `ACTIVE`, the status check becomes `(attribute_not_exists(#status) OR
+   * #status IN (...))`, so an application, tenant or account stored before
+   * these records had a status still matches. Ignored when `ACTIVE` is not
+   * accepted.
+   */
+  readonly absentStatusIsActive?: boolean;
+  /**
    * Ask DynamoDB for the item as it was when the condition failed
    * (`ReturnValuesOnConditionCheckFailure: ALL_OLD`) and carry it on the
    * {@link StaleTransitionError} as `current` (`undefined` when there was
@@ -93,6 +102,12 @@ export interface GsiQuery {
 export interface PartitionQuery {
   readonly partitionKey: string;
   readonly sortKeyPrefix: string;
+  /**
+   * Ask DynamoDB for a strongly consistent read. The hook queries set it:
+   * hook resolution at accept time reads the global hooks this way (spec
+   * 4.7, R-40), so a hook put a moment ago is seen.
+   */
+  readonly consistentRead?: boolean;
 }
 
 /** One page of a paginated read. */
@@ -217,6 +232,47 @@ export class ApplicationGoneError extends ConditionFailedError {
 }
 
 /**
+ * A placement transaction was cancelled because the tenant's
+ * `deploymentCount` claim found the tenant not live (R-13, R-47):
+ * `CREATING`, `CREATE_FAILED`, `DELETING` or `DELETE_FAILED`, read from the
+ * item the failed condition returned (`ALL_OLD`, R-14). The service maps it
+ * to a 409.
+ */
+export class TenantNotLiveError extends ConditionFailedError {
+  constructor(readonly status: LifecycleStatus) {
+    super(`The tenant is ${status}, not live`);
+    this.name = 'TenantNotLiveError';
+  }
+}
+
+/**
+ * A new-cell placement transaction was cancelled because the application's
+ * `cellCount` claim found the application not live (R-13, R-47), read from
+ * `ALL_OLD`. The service maps it to a 409.
+ */
+export class ApplicationNotLiveError extends ConditionFailedError {
+  constructor(readonly status: LifecycleStatus) {
+    super(`The application is ${status}, not live`);
+    this.name = 'ApplicationNotLiveError';
+  }
+}
+
+/**
+ * A new-cell placement transaction was cancelled because the account's
+ * cell-slot claim, the only failed check, found the account not live (R-13,
+ * R-47) or gone (`status` undefined), read from `ALL_OLD`; a live account
+ * that failed the claim is {@link AccountFullError}. Untargeted placement
+ * moves to the next account; a targeted one answers a 409 `ConflictError`,
+ * never `InsufficientCapacityError` (§7.1).
+ */
+export class AccountNotLiveError extends ConditionFailedError {
+  constructor(readonly status: LifecycleStatus | undefined) {
+    super(status === undefined ? 'The account no longer exists' : `The account is ${status}, not live`);
+    this.name = 'AccountNotLiveError';
+  }
+}
+
+/**
  * A placement transaction failed for any reason other than a classified
  * cancellation. The outcome is ambiguous — the request must fail; the same
  * deployment must NEVER be retargeted at another cell (§7 step 2).
@@ -281,14 +337,14 @@ function throwIfInvalidStartKey(error: unknown): void {
 }
 
 /** Creates the default document client shared by the repository classes. */
-function defaultDocumentClient(): DynamoDBDocumentClient {
+export function defaultDocumentClient(): DynamoDBDocumentClient {
   return DynamoDBDocumentClient.from(new DynamoDBClient({}), {
     marshallOptions: { removeUndefinedValues: true },
   });
 }
 
 /** Per-transaction-item cancellation codes, when the error carries them. */
-function cancellationCodes(error: unknown): string[] | undefined {
+export function cancellationCodes(error: unknown): string[] | undefined {
   if (error instanceof Error && error.name === 'TransactionCanceledException') {
     const reasons = (error as { CancellationReasons?: { Code?: string }[] }).CancellationReasons;
     return reasons?.map((reason) => reason?.Code ?? 'None');
@@ -340,6 +396,7 @@ function throwIfDuplicateToken(codes: string[] | undefined, item: DynamoDBItem |
  * sole failed check. Anything else is ambiguous.
  */
 function classifyPlacementCancellation(
+  error: unknown,
   codes: string[],
   indexes: {
     readonly deployment: number;
@@ -354,10 +411,17 @@ function classifyPlacementCancellation(
     return new DeploymentExistsError('The tenant already has a deployment of this application');
   }
   if (failed(indexes.tenant)) {
-    return new TenantGoneError('The tenant no longer exists');
+    // ALL_OLD (R-14): no item is a deleted tenant; an item failed the live check.
+    const tenant = cancellationItem(error, indexes.tenant);
+    return tenant === undefined
+      ? new TenantGoneError('The tenant no longer exists')
+      : new TenantNotLiveError(cancelledStatus(tenant));
   }
-  if (failed(indexes.application)) {
-    return new ApplicationGoneError('The application no longer exists');
+  if (indexes.application !== undefined && failed(indexes.application)) {
+    const application = cancellationItem(error, indexes.application);
+    return application === undefined
+      ? new ApplicationGoneError('The application no longer exists')
+      : new ApplicationNotLiveError(cancelledStatus(application));
   }
   if (
     codes[0] === 'ConditionalCheckFailed' &&
@@ -368,22 +432,55 @@ function classifyPlacementCancellation(
   return undefined;
 }
 
-/** The tenant `deploymentCount` claim, shared by both placement transactions (P-6). */
+/**
+ * The item a cancelled transaction returned for the member at `index`
+ * (`ReturnValuesOnConditionCheckFailure: ALL_OLD`), unmarshalled; the
+ * document client leaves it in the low-level attribute-value form.
+ * `undefined` when the member's item did not exist.
+ */
+function cancellationItem(error: unknown, index: number): Record<string, unknown> | undefined {
+  const reasons = (error as { CancellationReasons?: { Item?: Parameters<typeof unmarshall>[0] }[] })
+    .CancellationReasons;
+  const item = reasons?.[index]?.Item;
+  return item === undefined ? undefined : unmarshall(item);
+}
+
+/** The stored status of a cancelled member's `ALL_OLD` item; an absent attribute reads as `ACTIVE` (R-47). */
+function cancelledStatus(item: Record<string, unknown>): LifecycleStatus {
+  return readRecordStatus(item.status as LifecycleStatus | undefined);
+}
+
+/**
+ * The live-status condition of a placement claim (R-13, R-47): `ACTIVE`,
+ * `UPDATING` or `UPDATE_FAILED`, an absent status read as `ACTIVE`. Placed
+ * on the tenant, account and application members, so nothing counts toward
+ * a record that left a live status after the step-0 read.
+ */
+const LIVE_CONDITION = `(attribute_not_exists(#status) OR #status IN (${LIVE_STATUSES.map((_, i) => `:live${i}`).join(', ')}))`;
+const LIVE_VALUES: Record<string, LifecycleStatus> = Object.fromEntries(
+  LIVE_STATUSES.map((status, i) => [`:live${i}`, status]),
+);
+
+/** The tenant `deploymentCount` claim, shared by both placement transactions (P-6), conditioned on a live tenant (R-13). */
 function tenantClaimUpdate(tableName: string, tenantKey: ItemKey, updatedAt: string) {
   return {
     Update: {
       TableName: tableName,
       Key: tenantKey,
       UpdateExpression: 'SET #deploymentCount = #deploymentCount + :one, #updatedAt = :updatedAt',
-      ConditionExpression: 'attribute_exists(PK)',
+      ConditionExpression: `attribute_exists(PK) AND ${LIVE_CONDITION}`,
       ExpressionAttributeNames: {
         '#deploymentCount': 'deploymentCount',
+        '#status': 'status',
         '#updatedAt': 'updatedAt',
       },
       ExpressionAttributeValues: {
         ':one': 1,
         ':updatedAt': updatedAt,
+        ...LIVE_VALUES,
       },
+      // R-14: tells a deleted tenant (no item, 404) from one not live (409).
+      ReturnValuesOnConditionCheckFailure: 'ALL_OLD' as const,
     },
   };
 }
@@ -404,10 +501,17 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
     this.client = client ?? defaultDocumentClient();
   }
 
-  /** Reads one item; `undefined` when it does not exist. */
-  async get(key: ItemKey): Promise<TSchema | undefined> {
+  /**
+   * Reads one item; `undefined` when it does not exist. `consistentRead`
+   * asks for a strongly consistent read (the hook paths use it, R-39).
+   */
+  async get(key: ItemKey, options?: { readonly consistentRead?: boolean }): Promise<TSchema | undefined> {
     const result = await this.client.send(
-      new GetCommand({ TableName: this.tableName, Key: key }),
+      new GetCommand({
+        TableName: this.tableName,
+        Key: key,
+        ...(options?.consistentRead === true ? { ConsistentRead: true } : {}),
+      }),
     );
     return result.Item === undefined ? undefined : this.dataModel.fromItem(result.Item as TItem);
   }
@@ -436,12 +540,28 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
     }
   }
 
-  /** Atomically updates owned fields and returns the complete post-update item. */
-  async update(key: ItemKey, update: ItemUpdate): Promise<TSchema> {
+  /**
+   * Atomically updates owned fields and returns the complete post-update
+   * item. With `returnCurrentOnFailure` a failed condition throws a
+   * {@link StaleTransitionError} carrying the item as it was (`ALL_OLD`,
+   * `undefined` when there was none), so the service classifies the failure
+   * from the state that failed it (R-14); otherwise a plain
+   * {@link ConditionFailedError}.
+   */
+  async update(
+    key: ItemKey,
+    update: ItemUpdate,
+    options?: { readonly returnCurrentOnFailure?: boolean },
+  ): Promise<TSchema> {
+    const returnCurrent = options?.returnCurrentOnFailure === true;
     return this.sendUpdate(
       key,
       update,
-      () => new ConditionFailedError('Conditional update failed'),
+      (current) =>
+        returnCurrent
+          ? new StaleTransitionError('Conditional update failed', current)
+          : new ConditionFailedError('Conditional update failed'),
+      returnCurrent,
     );
   }
 
@@ -501,6 +621,9 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
       return `:from${index}`;
     });
     let conditionExpression = `#status IN (${fromPlaceholders.join(', ')})`;
+    if (transition.absentStatusIsActive === true && transition.fromAnyOf.includes(LifecycleStatus.ACTIVE)) {
+      conditionExpression = `(attribute_not_exists(#status) OR ${conditionExpression})`;
+    }
     if (transition.extraCondition !== undefined) {
       conditionExpression += ` AND (${transition.extraCondition.conditionExpression})`;
       Object.assign(names, transition.extraCondition.expressionAttributeNames);
@@ -588,6 +711,7 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
         KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :skPrefix)',
         ExpressionAttributeNames: { '#pk': 'PK', '#sk': 'SK' },
         ExpressionAttributeValues: { ':pk': query.partitionKey, ':skPrefix': query.sortKeyPrefix },
+        ...(query.consistentRead === true ? { ConsistentRead: true } : {}),
       },
       maxResults,
       nextToken,
@@ -597,6 +721,7 @@ export class DynamoDBRepository<TSchema, TItem extends DynamoDBItem> {
   private async queryPage(
     query: {
       readonly IndexName?: string;
+      readonly ConsistentRead?: boolean;
       readonly KeyConditionExpression: string;
       readonly ExpressionAttributeNames: Record<string, string>;
       readonly ExpressionAttributeValues: Record<string, unknown>;
@@ -777,6 +902,7 @@ export class PlacementTransactions<
         codes === undefined
           ? undefined
           : classifyPlacementCancellation(
+            error,
             codes,
             { tenant: 1, deployment: 2 },
             () => new PlacementRaceLostError('Lost the placement race for the candidate cell'),
@@ -836,16 +962,20 @@ export class PlacementTransactions<
         TableName: this.tableName,
         Key: key,
         UpdateExpression: 'SET #cellCount = #cellCount + :one, #updatedAt = :updatedAt',
-        ConditionExpression: condition,
+        ConditionExpression: `${condition} AND ${LIVE_CONDITION}`,
         ExpressionAttributeNames: {
           '#cellCount': 'cellCount',
           ...(condition.includes('#maxCells') ? { '#maxCells': 'maxCells' } : {}),
+          '#status': 'status',
           '#updatedAt': 'updatedAt',
         },
         ExpressionAttributeValues: {
           ':one': 1,
           ':updatedAt': params.updatedAt,
+          ...LIVE_VALUES,
         },
+        // R-14: tells a gone, a not-live and a full record apart.
+        ReturnValuesOnConditionCheckFailure: 'ALL_OLD' as const,
       },
     });
     try {
@@ -881,9 +1011,21 @@ export class PlacementTransactions<
         codes === undefined
           ? undefined
           : classifyPlacementCancellation(
+            error,
             codes,
             { application: 1, tenant: 3, deployment: 4 },
-            () => new AccountFullError('The account has no free cell slot'),
+            () => {
+              // ALL_OLD (R-14): a live account failed on capacity; one gone
+              // or not live failed on its status (§7.1).
+              const account = cancellationItem(error, 0);
+              if (account === undefined) {
+                return new AccountNotLiveError(undefined);
+              }
+              const status = cancelledStatus(account);
+              return LIVE_STATUSES.includes(status)
+                ? new AccountFullError('The account has no free cell slot')
+                : new AccountNotLiveError(status);
+            },
           );
       if (classified !== undefined) {
         throw classified;

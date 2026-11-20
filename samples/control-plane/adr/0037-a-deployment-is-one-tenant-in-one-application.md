@@ -4,6 +4,7 @@
 - Date: 2026-11-11
 - Supersedes: ADR-0001
 - Amends: ADR-0009, ADR-0012, ADR-0013, ADR-0017, ADR-0023, ADR-0032
+- Amended by: ADR-0045
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -24,3 +25,5 @@ Option 2. `Deployment` is keyed `PK=TENANT#<tenantId>`, `SK=DEPLOYMENT#<applicat
 
 ## Consequences
 Four counters, two transactional code paths each (P-6). The API has 22 operations: five tenant (all synchronous), five deployment, four cell, four account, four application; `GetResource` and `UpdateResource` become `GetDeployment` and `UpdateDeployment`, `DeleteTenant`'s build path becomes `DeleteDeployment`. The status state machine applies to cells and deployments; a tenant has no status. The acceptance test onboards one tenant into two applications and shows both deployments in one account. The §11 seam "standalone resource service" is now the deployment collection itself. Revisit if a deployment ever needs more than one cell (an application spanning cells), which would make the deployment-to-cell link 1:N in turn.
+
+**Amended by ADR-0045 (2026-11-18):** the tenant operations are no longer synchronous and a tenant has a status. `CreateTenant`, `UpdateTenant` and `DeleteTenant` answer 202 and start a `TENANT_CREATE`, `TENANT_UPDATE` or `TENANT_DELETE` event, which runs global hooks only. A new tenant is `CREATING` until its post hooks pass; an update stages `name` and `description` in `pending` until the pre hooks pass; `DeleteTenant` is one conditional move to `DELETING` on `deploymentCount = 0`, and the workflow deletes the record conditioned on the count still being 0. The placement transaction's `deploymentCount` claim is also conditioned on a live tenant (`ACTIVE`, `UPDATING`, `UPDATE_FAILED` or no status), so `CreateDeployment` into a tenant being created or deleted is a 409. Tenant builds still read `TENANT_NAME` from the live name.

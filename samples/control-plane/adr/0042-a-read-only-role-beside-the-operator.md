@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-11-13
 - Amends: ADR-0015, ADR-0018
+- Amended by: ADR-0044
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -83,3 +84,5 @@ would target. That disclosure is the price, recorded as T36.
   which this record does not.
 - Revisit when a read operation needs a method other than `GET`, or a
   reader needs a subset of the reads (the registrar uses two of the ten).
+
+**Amended by ADR-0044 (2026-11-17):** the reader grant covers twelve `GET` operations: `GetHook` and `ListHooks` join the ten. Both meet R-37; a hook's source location is disclosed as a script's is.

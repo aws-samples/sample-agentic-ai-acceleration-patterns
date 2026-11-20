@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-26
-- Amended by: ADR-0025
+- Amended by: ADR-0025, ADR-0044
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -27,3 +27,5 @@ The reach of the build role becomes deployer-defined; the blast-radius bound of 
 ---
 
 **Amended by ADR-0025 (2026-11-09):** the policies attach to the tenant provisioning role of the stack's own account (the control plane stack for the home account, the `CellAccountStack` for any other), not to the CodeBuild project role. The input name and the same-account ARN check are unchanged.
+
+**Amended by ADR-0044 (2026-11-17):** the tenant provisioning role of the stack's own account carries the control plane deny, so a policy in `tenantBuildManagedPolicyArns` cannot grant it a denied action. Two inputs validated the same way, `globalHookManagedPolicyArns` and `appHookManagedPolicyArns`, attach policies to the two hook roles; an ARN in both lists fails synth.

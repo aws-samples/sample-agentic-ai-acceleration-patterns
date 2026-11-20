@@ -1,10 +1,11 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { expectPlaceholdersMatch } from './expression-placeholders';
 import { PlacementStrategy, SourceType } from '../../src/smithy/source/typescript-ssdk-codegen/src';
 import {
-  APPLICATION_EMPTY_CONDITION,
   ApplicationDataModel,
+  ApplicationItem,
   applicationKey,
   ApplicationRecord,
   DEFAULT_PLACEMENT_STRATEGY,
@@ -22,6 +23,7 @@ const record: ApplicationRecord = {
   maxTenants: 3,
   placementStrategy: PlacementStrategy.ROUND_ROBIN,
   cellCount: 2,
+  status: 'ACTIVE',
   createdAt: new Date('2026-11-10T00:00:00.000Z'),
   updatedAt: new Date('2026-11-10T01:00:00.000Z'),
 };
@@ -57,8 +59,8 @@ describe('ApplicationDataModel', () => {
     expect(item.createdAt).toBe('2026-11-10T00:00:00.000Z');
   });
 
-  test('has no status (§4.1)', () => {
-    expect(item).not.toHaveProperty('status');
+  test('persists its status (§4.1, ADR-045)', () => {
+    expect(item.status).toBe('ACTIVE');
   });
 
   test('round-trips through fromItem', () => {
@@ -77,90 +79,107 @@ describe('ApplicationDataModel', () => {
   });
 });
 
-describe('putApplicationUpdate (R-29: create-or-replace that never touches cellCount)', () => {
-  const update = putApplicationUpdate({
-    applicationId: 'app-x',
+describe('putApplicationUpdate (R-29, R-48: one conditional write per path, never cellCount)', () => {
+  const values = {
     source: record.source,
     cellScripts: record.cellScripts,
     tenantScripts: record.tenantScripts,
     maxTenants: 3,
     placementStrategy: PlacementStrategy.FILL,
-    parameters: [],
-    cellParameters: [],
-    now: '2026-11-10T00:00:00.000Z',
-  });
-
-  test('initialises cellCount and createdAt with if_not_exists only', () => {
-    expect(update.updateExpression).toContain('#cellCount = if_not_exists(#cellCount, :zero)');
-    expect(update.updateExpression).toContain('#createdAt = if_not_exists(#createdAt, :now)');
-    expect(update.updateExpression).not.toMatch(/#cellCount = :/);
-  });
-
-  test('replaces the definition fields and the strategy, and stamps GSI-1', () => {
-    for (const field of [
-      '#source = :source',
-      '#cellScripts = :cellScripts',
-      '#tenantScripts = :tenantScripts',
-      '#maxTenants = :maxTenants',
-      '#placementStrategy = :placementStrategy',
-      '#gsi1pk = :gsi1pk',
-      '#gsi1sk = :gsi1sk',
-      '#updatedAt = :now',
-    ]) {
-      expect(update.updateExpression).toContain(field);
-    }
-    expect(update.expressionAttributeValues).toMatchObject({
-      ':zero': 0,
-      ':applicationId': 'app-x',
-      ':gsi1pk': 'APPLICATION',
-      ':gsi1sk': 'APPLICATION#app-x',
-      ':maxTenants': 3,
-      ':placementStrategy': 'FILL',
-      ':source': record.source,
-    });
-  });
-});
-
-describe('putApplicationUpdate declaration lists (§5.5, ADR-039, ADR-040)', () => {
+  };
   const base = {
     applicationId: 'app-x',
-    source: record.source,
-    cellScripts: record.cellScripts,
-    tenantScripts: record.tenantScripts,
-    maxTenants: 3,
-    placementStrategy: PlacementStrategy.FILL,
-    now: '2026-11-12T00:00:00.000Z',
+    operationId: 'app-x-application-create-1763460000000-0a1b2c3d',
+    values,
+    now: '2026-11-10T00:00:00.000Z',
   };
   const tenantList = [{ name: 'LOG_LEVEL', required: false, default: 'info' }];
   const cellList = [{ name: 'CELL_SIZE', default: 'small' }];
 
-  test('both lists sent: both SET, and the write carries no condition (P-5)', () => {
-    const update = putApplicationUpdate({ ...base, parameters: tenantList, cellParameters: [] });
-    expect(update.updateExpression).toContain('#parameters = :parameters');
+  test.each(['CREATE', 'RE_PUT', 'REPLACE'] as const)('%s uses every placeholder it defines and defines every one it uses', (path) => {
+    for (const read of [undefined, { parameters: tenantList, cellParameters: [] }]) {
+      expectPlaceholdersMatch(putApplicationUpdate({ ...base, path, read }));
+      expectPlaceholdersMatch(putApplicationUpdate({ ...base, path, read, values: { ...values, parameters: [], hooks: [] } }));
+    }
+  });
+
+  test('CREATE inserts the definition CREATING with the operationId, cellCount and createdAt through if_not_exists', () => {
+    const update = putApplicationUpdate({ ...base, path: 'CREATE' });
+    expect(update.conditionExpression).toBe('attribute_not_exists(PK)');
+    expect(update.updateExpression).toContain('#cellCount = if_not_exists(#cellCount, :zero)');
+    expect(update.updateExpression).toContain('#createdAt = if_not_exists(#createdAt, :now)');
+    expect(update.updateExpression).not.toMatch(/#cellCount = :/);
+    for (const field of ['#source = :source', '#cellScripts = :cellScripts', '#tenantScripts = :tenantScripts',
+      '#maxTenants = :maxTenants', '#placementStrategy = :placementStrategy', '#gsi1pk = :gsi1pk', '#gsi1sk = :gsi1sk']) {
+      expect(update.updateExpression).toContain(field);
+    }
+    expect(update.expressionAttributeValues).toMatchObject({
+      ':status': 'CREATING',
+      ':operationId': base.operationId,
+      ':gsi1pk': 'APPLICATION',
+      ':gsi1sk': 'APPLICATION#app-x',
+      ':maxTenants': 3,
+    });
+    // A new application declares no list it was not sent.
+    expect(update.updateExpression).not.toMatch(/#parameters|#cellParameters|#hooks/);
+  });
+
+  test('RE_PUT writes the values into the record and back to CREATING, conditioned on CREATE_FAILED and the kept lists', () => {
+    const update = putApplicationUpdate({
+      ...base,
+      path: 'RE_PUT',
+      values: { ...values, cellParameters: cellList },
+      read: { parameters: tenantList, cellParameters: undefined },
+    });
+    expect(update.conditionExpression).toBe('#status = :createFailed AND attribute_not_exists(#operationId) AND #parameters = :read_parameters');
     expect(update.updateExpression).toContain('#cellParameters = :cellParameters');
-    expect(update.expressionAttributeValues).toMatchObject({ ':parameters': tenantList, ':cellParameters': [] });
-    expect(update.conditionExpression).toBeUndefined();
+    expect(update.updateExpression).toMatch(/ REMOVE #statusReason$/);
+    expect(update.expressionAttributeValues[':status']).toBe('CREATING');
   });
 
-  test('a kept list is not written; an absent read conditions on attribute_not_exists', () => {
-    const update = putApplicationUpdate({ ...base, parameters: tenantList, cellParameters: { read: undefined } });
-    expect(update.updateExpression).not.toContain('#cellParameters =');
-    expect(update.conditionExpression).toBe('attribute_not_exists(#cellParameters)');
-    expect(update.expressionAttributeNames).toMatchObject({ '#cellParameters': 'cellParameters' });
+  test('REPLACE stages the values in pending and moves to UPDATING; the live definition is untouched', () => {
+    const staged = { ...values, parameters: tenantList };
+    const update = putApplicationUpdate({ ...base, path: 'REPLACE', values: staged, read: { parameters: [], cellParameters: [] } });
+    expect(update.conditionExpression).toBe(
+      '(attribute_not_exists(#status) OR #status IN (:active, :updateFailed)) AND attribute_not_exists(#operationId) AND #cellParameters = :read_cellParameters',
+    );
+    expect(update.expressionAttributeValues[':pending']).toBe(staged);
+    expect(update.expressionAttributeValues[':read_cellParameters']).toEqual([]);
+    expect(update.expressionAttributeValues[':status']).toBe('UPDATING');
+    expect(update.updateExpression).not.toMatch(/#source|#cellScripts|#maxTenants|#parameters =|#hooks/);
   });
 
-  test('a kept list read as [] conditions on equality with [], not on absence', () => {
-    const update = putApplicationUpdate({ ...base, parameters: { read: [] }, cellParameters: cellList });
-    expect(update.conditionExpression).toBe('#parameters = :read_parameters');
-    expect(update.expressionAttributeValues[':read_parameters']).toEqual([]);
+  test('a kept list read as absent conditions on attribute_not_exists, one read as [] on equality with []', () => {
+    const absent = putApplicationUpdate({ ...base, path: 'REPLACE', values: { ...values, cellParameters: [] }, read: {} });
+    expect(absent.conditionExpression).toContain('attribute_not_exists(#parameters)');
+    const empty = putApplicationUpdate({ ...base, path: 'REPLACE', values: { ...values, cellParameters: [] }, read: { parameters: [] } });
+    expect(empty.conditionExpression).toContain('#parameters = :read_parameters');
+    expect(empty.expressionAttributeValues[':read_parameters']).toEqual([]);
   });
 
-  test('two kept lists condition on both, each exactly as read; never on updatedAt', () => {
-    const update = putApplicationUpdate({ ...base, parameters: { read: tenantList }, cellParameters: { read: undefined } });
-    expect(update.conditionExpression).toBe('#parameters = :read_parameters AND attribute_not_exists(#cellParameters)');
-    expect(update.expressionAttributeValues[':read_parameters']).toBe(tenantList);
+  test('a kept hooks list adds no condition of its own, and nothing is conditioned on updatedAt', () => {
+    const update = putApplicationUpdate({ ...base, path: 'REPLACE', values: { ...values, parameters: [], cellParameters: [] }, read: {} });
+    expect(update.conditionExpression).toBe(
+      '(attribute_not_exists(#status) OR #status IN (:active, :updateFailed)) AND attribute_not_exists(#operationId)',
+    );
     expect(update.conditionExpression).not.toContain('updatedAt');
-    expect(update.updateExpression).not.toMatch(/#parameters =|#cellParameters =/);
+  });
+
+  test.each(['RE_PUT', 'REPLACE'] as const)('%s is conditioned on the operationId as read, so a put accepted since the read refuses this one (R-48, R-40)', (path) => {
+    const read = { parameters: [], cellParameters: [], operationId: 'app-x-application-update-1763460000000-ffffffff' };
+    const update = putApplicationUpdate({ ...base, path, values: { ...values, parameters: [], cellParameters: [] }, read });
+    expect(update.conditionExpression).toContain('#operationId = :readOperationId');
+    expect(update.expressionAttributeValues[':readOperationId']).toBe(read.operationId);
+    expect(update.expressionAttributeNames?.['#operationId']).toBe('operationId');
+    expectPlaceholdersMatch(update);
+    // A record from before ADR-045 has none: the write requires it still has none.
+    const legacy = putApplicationUpdate({ ...base, path, values: { ...values, parameters: [], cellParameters: [] }, read: {} });
+    expect(legacy.conditionExpression).toContain('attribute_not_exists(#operationId)');
+    expect(legacy.expressionAttributeValues[':readOperationId']).toBeUndefined();
+  });
+
+  test('CREATE carries no operationId condition: there is no record to read one from', () => {
+    expect(putApplicationUpdate({ ...base, path: 'CREATE' }).conditionExpression).not.toContain('#operationId');
   });
 });
 
@@ -174,12 +193,36 @@ describe('ApplicationDataModel keeps the declaration lists exactly as read', () 
   });
 });
 
-describe('APPLICATION_EMPTY_CONDITION (DeleteApplication, ADR-032)', () => {
-  test('requires the record to exist with cellCount = 0', () => {
-    expect(APPLICATION_EMPTY_CONDITION).toEqual({
-      conditionExpression: 'attribute_exists(PK) AND #cellCount = :zero',
-      expressionAttributeNames: { '#cellCount': 'cellCount' },
-      expressionAttributeValues: { ':zero': 0 },
-    });
+describe('application record status and staged replace (R-47, R-48, ADR-045)', () => {
+  const stored = dataModel.toItem(record);
+  const staged = {
+    source: { type: SourceType.GITHUB, location: 'https://example/v2.git', sourceVersion: 'a'.repeat(40) },
+    cellScripts: { create: 'c2/create.sh', update: 'c2/update.sh', delete: 'c2/delete.sh' },
+    tenantScripts: { create: 't2/create.sh', update: 't2/update.sh', delete: 't2/delete.sh' },
+    maxTenants: 5,
+    placementStrategy: PlacementStrategy.FILL,
+  };
+
+  test('an item stored before ADR-045 has no status and reads as ACTIVE', () => {
+    const legacy: ApplicationItem = { ...stored, status: undefined };
+    expect(dataModel.fromItem(legacy).status).toBe('ACTIVE');
+  });
+
+  test('round-trips pending with every list sent, and with every list kept (absent)', () => {
+    const withLists = { ...staged, parameters: [], cellParameters: [{ name: 'SIZE', default: 'S' }], hooks: [] };
+    for (const pending of [withLists, staged]) {
+      const updating: ApplicationRecord = { ...record, status: 'UPDATING', pending };
+      const item = dataModel.toItem(updating);
+      expect(item.pending).toEqual(pending);
+      expect(dataModel.fromItem(item)).toEqual(updating);
+    }
+    // A kept list stays absent: it is not cleared by the commit (§5.5).
+    expect(dataModel.fromItem(dataModel.toItem({ ...record, status: 'UPDATING', pending: staged })).pending)
+      .not.toHaveProperty('parameters');
+  });
+
+  test('copies only the staged fields out of a stored pending', () => {
+    const item = { ...stored, pending: { ...staged, cellCount: 7 } } as unknown as ApplicationItem;
+    expect(dataModel.fromItem(item).pending).toEqual(staged);
   });
 });

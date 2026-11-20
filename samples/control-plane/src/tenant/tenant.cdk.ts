@@ -14,6 +14,8 @@ import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { controlPlaneDenyStatements } from './control-plane-deny';
+import { validateHookManagedPolicyArns } from './hook.infra-validation';
 import { ProvisioningWorkflow } from './tenant.sfn';
 import {
   CONCURRENT_BUILD_LIMIT_WARNING,
@@ -26,7 +28,16 @@ import {
   validateTenantBuildManagedPolicyArns,
 } from './validation';
 import { CellAccountRoles } from '../cell-account/cell-account.cdk';
-import { apiRoleName, DEFAULT_FLEET_NAME, provisioningRoleArn, validateFleetName } from '../shared/fleet';
+import {
+  apiRoleName,
+  buildProjectArn,
+  DEFAULT_FLEET_NAME,
+  hookRoleName,
+  HookRoleKind,
+  provisioningRoleArn,
+  validateFleetName,
+  workflowExecutionArnPattern,
+} from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
 
 export interface TenantStackProps extends StackProps {
@@ -61,13 +72,26 @@ export interface TenantStackProps extends StackProps {
    */
   readonly demoApplicationIds?: string[];
   /**
-   * Names the five physical roles of the fleet (spec §3.3, ADR-025/028):
-   * the pair every account installs, `<fleetName>-cell-provisioning` and
-   * `<fleetName>-tenant-provisioning`; the control plane's build roles,
-   * `<fleetName>-cell-build` and `<fleetName>-tenant-build`; and its API
-   * role, `<fleetName>-api`. `[a-z0-9-]{1,32}`; default `control-plane`.
-   * Two control planes in one account need different fleet names, and the
-   * names must be free in every account the fleet will register (T31).
+   * Names seven physical roles, four build projects and the workflow (spec
+   * §3.3, R-41, ADR-025/028/044): the pair every account installs,
+   * `<fleetName>-cell-provisioning` and `<fleetName>-tenant-provisioning`;
+   * the control plane's build roles, `<fleetName>-cell-build` and
+   * `<fleetName>-tenant-build`; its API role, `<fleetName>-api`; and its hook
+   * roles, `<fleetName>-global-hook` and `<fleetName>-app-hook`, which no
+   * pair trusts. The four CodeBuild projects take the names of the roles
+   * that run in them, and the state machine is `<fleetName>-workflow`, so
+   * their ARNs are computable before they exist (a role's trust and the
+   * stack's deny name them). `[a-z0-9][a-z0-9-]{0,31}`: a project name starts
+   * with a letter or digit; default `control-plane`. Two control planes in
+   * one account need different fleet names in every Region, and the names
+   * must be free in every account the fleet will register (T31).
+   *
+   * Upgrading a stack that predates the physical names replaces both
+   * provisioning projects and the workflow. Deploy that upgrade only after
+   * the drain of spec R-41 (close with `allowedRoles` set to
+   * `control-plane:closed`, wait the authorizer TTL plus 90 s, upgrade with
+   * the gate kept, open): replacing the state machine strands the record of
+   * every running execution.
    */
   readonly fleetName?: string;
   /**
@@ -100,13 +124,30 @@ export interface TenantStackProps extends StackProps {
    */
   readonly concurrentBuildLimit?: number;
   /**
+   * Optional (spec R-41, ADR-044, M30): customer-managed IAM policy ARNs
+   * attached to `<fleetName>-global-hook`, the role every global hook runs
+   * under, validated exactly as `tenantBuildManagedPolicyArns` (this stack's
+   * own partition and account; synth fails otherwise). The stack grants that
+   * role its project's logs and these policies, nothing else: it never reads
+   * what a policy grants (P-3). The explicit deny attached to the role
+   * overrides any policy that grants a denied action. Default none.
+   */
+  readonly globalHookManagedPolicyArns?: string[];
+  /**
+   * Optional (spec R-41): as `globalHookManagedPolicyArns`, for
+   * `<fleetName>-app-hook`, the role every application hook runs under. An
+   * ARN in both lists fails synth, so no policy reaches both scopes by
+   * accident (T41). Default none.
+   */
+  readonly appHookManagedPolicyArns?: string[];
+  /**
    * Role claim values that get the operator grant, every operation (spec
    * R-36, M13). Non-empty; each value matches `[A-Za-z0-9:._-]{1,64}`.
    * Default `['operator']`.
    */
   readonly allowedRoles?: string[];
   /**
-   * Role claim values that get the reader grant, the ten `GET` operations
+   * Role claim values that get the reader grant, the twelve `GET` operations
    * only (spec R-36, ADR-042, M26). Default none: no reader is admitted
    * until the deployer names one. Use a namespaced value such as
    * `control-plane:reader`, not a word a broader issuer may already mint
@@ -121,6 +162,12 @@ export const GSI1_NAME = 'GSI1';
 export const GSI2_NAME = 'GSI2';
 /** GSI-3: per-application cell and deployment lookup (§4.7). */
 export const GSI3_NAME = 'GSI3';
+/**
+ * The API function's timeout (R-51): room for a record operation's start to
+ * be classified and compensated. At or below 29 s, the API's integration
+ * timeout, which the R-41 upgrade drain counts on.
+ */
+export const API_FUNCTION_TIMEOUT_SECONDS = 25;
 
 // Re-exported so existing imports of the input validators keep working.
 export {
@@ -160,6 +207,13 @@ export class TenantStack extends Stack {
     validateCellBuildManagedPolicyArns(props.cellBuildManagedPolicyArns, identity);
     // M17 (ADR-0046): one build cap for every project; fail synth outside 1-100.
     const concurrentBuildLimit = validateConcurrentBuildLimit(props.concurrentBuildLimit);
+    // R-41: the two hook roles' policies, validated the same way; an ARN in
+    // both lists fails synth (T41).
+    const hookPolicies = validateHookManagedPolicyArns(
+      props.globalHookManagedPolicyArns,
+      props.appHookManagedPolicyArns,
+      identity,
+    );
     // R-36: the two role lists the authorizer maps to grants; fail synth on
     // an empty operator list, a bad value or a value in both lists.
     const roles = validateRoleLists(props.allowedRoles, props.readerRoles);
@@ -212,12 +266,24 @@ export class TenantStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // --- Provisioning workflow (Step Functions + two shared CodeBuild
+    // --- Hook roles (R-41, ADR-044) ---------------------------------------
+    // One role per hook scope, created here so the stack owns its trust, its
+    // attached policies and (below) its deny. Each trusts CodeBuild only on
+    // its own project, by the project ARN computed from the fleet name, so
+    // the trust names no resource and closes no cycle (H-7). No pair trusts
+    // either role and neither holds sts:AssumeRole on the pair.
+    const globalHookRole = hookRole(this, 'GlobalHookRole', this.fleetName, 'global-hook', hookPolicies.global);
+    const appHookRole = hookRole(this, 'AppHookRole', this.fleetName, 'app-hook', hookPolicies.app);
+
+    // --- Provisioning workflow (Step Functions + shared CodeBuild
     //     projects with distinct service roles, §3/§7) ---------------------
-    // The workflow grants itself least-privilege table access internally.
+    // The workflow grants itself least-privilege table access internally,
+    // and starts hook builds only in the hook projects (R-41).
     const workflow = new ProvisioningWorkflow(this, 'Provisioning', {
       table,
       fleetName: this.fleetName,
+      globalHookRole,
+      appHookRole,
       concurrentBuildLimit,
     });
     this.provisioning = workflow;
@@ -300,6 +366,16 @@ export class TenantStack extends Stack {
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_24_X,
       role: apiRole,
+      // R-51: a record operation chains a consistent read, the hook query,
+      // the staging write and the start, and on an unknown start
+      // DescribeExecution, a second start, the compensation and a read; the
+      // 3 s Lambda default can end the call before the compensation runs.
+      // 25 s holds that chain with the Step Functions client timeouts of
+      // tenant.function.ts (at most about 16 s of Step Functions calls). It
+      // MUST stay at or below 29 s, the API's integration timeout: the R-41
+      // upgrade drain waits the authorizer TTL plus the longer of the two
+      // (90 s with these values).
+      timeout: Duration.seconds(API_FUNCTION_TIMEOUT_SECONDS),
       // M15 (T13) — see AuthorizerFunction.
       logGroup: functionLogGroup(this, 'ApiFunctionLogs'),
       bundling: {
@@ -333,6 +409,23 @@ export class TenantStack extends Stack {
     });
     table.grantReadWriteData(apiFn);
     workflow.stateMachine.grantStartExecution(apiFn);
+    // R-51 (ADR-045): a record operation whose start had an unknown outcome
+    // looks its own execution up by name before it compensates. Read-only,
+    // on the workflow's executions only; the explicit deny (R-41) is on
+    // other roles and lists no Describe action.
+    const workflowExecutions = workflowExecutionArnPattern(this.partition, this.region, this.account, this.fleetName);
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'DescribeOwnRecordEventExecution',
+        actions: ['states:DescribeExecution'],
+        resources: [workflowExecutions],
+      }),
+    );
+    acknowledgeGranularFinding(
+      apiRole,
+      `AwsSolutions-IAM5[Resource::${nagFindingResource(this, workflowExecutions)}]`,
+      'R-51: the API looks up the execution it started under a generated name; the wildcard is the execution-name segment of this stack\'s own workflow.',
+    );
     // ADR-027 (M20): PutAccount probes both halves of the pair in the account
     // being registered. The resource is the role NAME in any account (N-8) -
     // the same bound the build roles carry; the target trust policy is the
@@ -477,6 +570,46 @@ export class TenantStack extends Stack {
       }),
     });
 
+    // --- The explicit deny (R-41, ADR-044, M30, T41) ------------------------
+    // ONE standalone AWS::IAM::Policy, created outside every role construct
+    // and attached through its Roles list, so nothing in the stack depends on
+    // it: in a role's default policy it would close a cycle (the home pair
+    // depends on every child of the build role constructs, and the deny names
+    // the home pair), and as a managed policy every role would depend on it
+    // while it names the projects, which depend on their roles. Roles,
+    // projects and the workflow that have a physical name are named by an ARN
+    // computed from the name; the CDK-named roles, the two functions, the REST
+    // API and the table are named by attribute, which is safe because nothing
+    // references this policy. Created last, so it is the last policy in the
+    // template.
+    const cloudWatchRole = api.node.tryFindChild('CloudWatchRole') as iam.IRole | undefined;
+    new iam.CfnPolicy(this, 'ControlPlaneDeny', {
+      policyName: `${this.fleetName}-control-plane-deny`,
+      policyDocument: new iam.PolicyDocument({
+        statements: controlPlaneDenyStatements({
+          partition: this.partition,
+          region: this.region,
+          account: this.account,
+          fleetName: this.fleetName,
+          workflowRoleArn: workflow.stateMachine.role.roleArn,
+          authorizerRoleArn: authorizerFn.role!.roleArn,
+          apiGatewayCloudWatchRoleArn: cloudWatchRole?.roleArn,
+          apiFunctionArn: apiFn.functionArn,
+          authorizerFunctionArn: authorizerFn.functionArn,
+          restApiId: api.restApiId,
+          tableArn: table.tableArn,
+        }),
+      }),
+      roles: [
+        workflow.cellBuildRole,
+        workflow.tenantBuildRole,
+        this.homeAccountRoles.cellRole,
+        this.homeAccountRoles.tenantRole,
+        globalHookRole,
+        appHookRole,
+      ].map((role) => role.roleName),
+    });
+
     // --- Discovery + outputs ----------------------------------------------
     new ssm.StringParameter(this, 'ApiUrlParameter', {
       parameterName: '/control-plane/tenant-api-url',
@@ -497,12 +630,49 @@ export class TenantStack extends Stack {
 
     new CfnOutput(this, 'ApiUrl', { value: api.url });
     new CfnOutput(this, 'StateMachineArn', { value: workflow.stateMachine.stateMachineArn });
+    // The deny's integration test names the generated function (spec §10).
+    new CfnOutput(this, 'ApiFunctionName', { value: apiFn.functionName });
     new CfnOutput(this, 'FleetName', { value: this.fleetName });
     new CfnOutput(this, 'ControlPlaneAccountId', {
       value: this.account,
       description: 'Pass as controlPlaneAccountId when installing the account role pair in another account (spec §6.4)',
     });
   }
+}
+
+/**
+ * A hook role (spec R-41, ADR-044): trusts `codebuild.amazonaws.com` only on
+ * `aws:SourceArn` equal to its own project's ARN, computed from the project's
+ * fleet-derived name (never taken from the project, whose `ServiceRole` is
+ * this role: a reference would close a cycle, H-7). It carries the
+ * deployer's customer-managed policies and, from the project construct, its
+ * project's logs; the stack grants it nothing else. No `sts:AssumeRole` on
+ * the pair, and no pair trusts it (spec §6.4).
+ */
+function hookRole(
+  stack: Stack,
+  id: string,
+  fleetName: string,
+  kind: HookRoleKind,
+  managedPolicyArns: readonly string[],
+): iam.Role {
+  const scope = kind === 'global-hook' ? 'global' : 'application';
+  const role = new iam.Role(stack, id, {
+    roleName: hookRoleName(fleetName, kind),
+    assumedBy: new iam.PrincipalWithConditions(new iam.ServicePrincipal('codebuild.amazonaws.com'), {
+      ArnEquals: {
+        'aws:SourceArn': buildProjectArn(stack.partition, stack.region, stack.account, fleetName, kind),
+      },
+    }),
+    description: `${fleetName} control plane ${scope} hooks: runs every ${scope} hook build; holds only the policies the deployer attaches, never the account role pair (spec R-41, ADR-044)`,
+  });
+  managedPolicyArns.forEach((arn, index) => {
+    role.addManagedPolicy(iam.ManagedPolicy.fromManagedPolicyArn(stack, `${id}ManagedPolicy${index}`, arn));
+  });
+  suppressTemplateScanners(role, {
+    cfnNag: [{ id: 'W28', reason: 'The physical name is the contract of the hook role: the stack\'s deny and the integration test name it, and no account role pair trusts it (spec R-41).' }],
+  });
+  return role;
 }
 
 /**

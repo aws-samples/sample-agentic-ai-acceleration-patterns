@@ -10,7 +10,7 @@ import { UnauthorizedError } from '../smithy/source/typescript-ssdk-codegen/src'
  *
  * It is defined independently of the policy: by operation name, not by HTTP
  * method, so one mistake in a method-based helper cannot open both walls.
- * The ten read operations are open to every grant; every other operation
+ * The twelve read operations are open to every grant; every other operation
  * requires `operator`. An operation that is not in this list is refused to a
  * reader, so a new operation is an operator operation until it is listed.
  */
@@ -25,6 +25,8 @@ export const READER_OPERATIONS: ReadonlySet<string> = new Set([
   'ListAccounts',
   'GetApplication',
   'ListApplications',
+  'GetHook',
+  'ListHooks',
 ]);
 
 /** Whether a caller with this context may run the named operation. */

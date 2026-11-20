@@ -15,8 +15,10 @@ import { mockClient } from 'aws-sdk-client-mock';
 import { DataModel, DynamoDBItem } from '../../src/shared/data-model';
 import {
   AccountFullError,
+  AccountNotLiveError,
   AmbiguousTransactionError,
   ApplicationGoneError,
+  ApplicationNotLiveError,
   ConditionFailedError,
   DeploymentExistsError,
   DuplicateTokenError,
@@ -26,6 +28,7 @@ import {
   RecordGoneError,
   StaleTransitionError,
   TenantGoneError,
+  TenantNotLiveError,
 } from '../../src/shared/repository';
 import { ValidationException } from '../../src/smithy/source/typescript-ssdk-codegen/src';
 
@@ -54,14 +57,24 @@ function conditionalCheckFailed(): Error {
   return error;
 }
 
-function transactionCanceled(codes: (string | undefined)[]): Error {
+/**
+ * A cancelled transaction. `items` holds the `ALL_OLD` item a failed member
+ * returned, by index, in the low-level attribute-value form DynamoDB sends.
+ */
+function transactionCanceled(codes: (string | undefined)[], items: Record<number, Record<string, unknown>> = {}): Error {
   const error = new Error('transaction canceled');
   error.name = 'TransactionCanceledException';
-  (error as any).CancellationReasons = codes.map((code) =>
-    code === undefined ? {} : { Code: code },
-  );
+  (error as any).CancellationReasons = codes.map((code, index) => ({
+    ...(code === undefined ? {} : { Code: code }),
+    ...(items[index] === undefined ? {} : { Item: items[index] }),
+  }));
   return error;
 }
+
+/** A stored record's `ALL_OLD` item with the given status, low-level form. */
+const withStatus = (status: string) => ({ PK: { S: 'X' }, status: { S: status } });
+/** A record stored before ADR-045: no status, read as ACTIVE (R-47). */
+const legacyItem = { PK: { S: 'X' } };
 
 beforeEach(() => ddbMock.reset());
 
@@ -127,6 +140,22 @@ describe('DynamoDBRepository', () => {
         },
       ),
     ).rejects.toBeInstanceOf(ConditionFailedError);
+  });
+
+  test('update with returnCurrentOnFailure asks for ALL_OLD and carries the item on a StaleTransitionError', async () => {
+    const error = conditionalCheckFailed();
+    (error as any).Item = { PK: { S: 'TEST#1' }, SK: { S: 'META' }, id: { S: '1' }, name: { S: 'old' } };
+    ddbMock.on(UpdateCommand).rejects(error);
+    const update = {
+      updateExpression: 'SET #name = :name',
+      conditionExpression: 'attribute_exists(PK)',
+      expressionAttributeNames: { '#name': 'name' },
+      expressionAttributeValues: { ':name': 'renamed' },
+    };
+    const failure = await repo.update({ PK: 'TEST#1', SK: 'META' }, update, { returnCurrentOnFailure: true }).catch((e) => e);
+    expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
+    expect(failure).toBeInstanceOf(StaleTransitionError);
+    expect(failure.current).toEqual({ id: '1', name: 'old' });
   });
 
   test('delete maps ConditionalCheckFailedException to ConditionFailedError', async () => {
@@ -385,6 +414,20 @@ describe('DynamoDBRepository.transitionStatus returnCurrentOnFailure (spec R-14,
     expect(failure.current).toBeUndefined();
   });
 
+  test('absentStatusIsActive reads an absent status as ACTIVE when ACTIVE is accepted (R-47)', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { PK: 'TEST#1', SK: 'META', id: '1', name: 'a' } });
+    await repo.transitionStatus({ PK: 'TEST#1', SK: 'META' }, { ...transition, absentStatusIsActive: true });
+    expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ConditionExpression).toBe(
+      '(attribute_not_exists(#status) OR #status IN (:from0, :from1)) AND (#parameters = :readParameters)',
+    );
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { PK: 'TEST#1', SK: 'META', id: '1', name: 'a' } });
+    await repo.transitionStatus({ PK: 'TEST#1', SK: 'META' }, { ...transition, fromAnyOf: ['UPDATING'], absentStatusIsActive: true });
+    expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ConditionExpression).toBe(
+      '#status IN (:from0) AND (#parameters = :readParameters)',
+    );
+  });
+
   test('without the flag no return value is requested', async () => {
     ddbMock.on(UpdateCommand).resolves({ Attributes: { PK: 'TEST#1', SK: 'META', id: '1', name: 'a' } });
     await repo.transitionStatus({ PK: 'TEST#1', SK: 'META' }, { ...transition, returnCurrentOnFailure: undefined });
@@ -522,8 +565,18 @@ describe('PlacementTransactions', () => {
     expect(update.UpdateExpression).toBe(
       'SET #deploymentCount = #deploymentCount + :one, #updatedAt = :updatedAt',
     );
-    expect(update.ConditionExpression).toBe('attribute_exists(PK)');
-    expect(update.ExpressionAttributeValues).toEqual({ ':one': 1, ':updatedAt': updatedAt });
+    // R-13: only a live tenant (absent status read as ACTIVE) takes a deployment.
+    expect(update.ConditionExpression).toBe(
+      'attribute_exists(PK) AND (attribute_not_exists(#status) OR #status IN (:live0, :live1, :live2))',
+    );
+    expect(update.ExpressionAttributeValues).toEqual({
+      ':one': 1,
+      ':updatedAt': updatedAt,
+      ':live0': 'ACTIVE',
+      ':live1': 'UPDATING',
+      ':live2': 'UPDATE_FAILED',
+    });
+    expect(update.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
   }
 
   describe('placeDeploymentInCell (§7.1 step 2)', () => {
@@ -592,6 +645,15 @@ describe('PlacementTransactions', () => {
       );
     });
 
+    test('a failed tenant claim whose ALL_OLD item exists is TenantNotLiveError (→ 409, R-13)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'ConditionalCheckFailed', 'None'], { 1: withStatus('DELETE_FAILED') }));
+      const error = await transactions.placeDeploymentInCell(placement).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(TenantNotLiveError);
+      expect((error as TenantNotLiveError).status).toBe('DELETE_FAILED');
+    });
+
     test('a cancellation with no failed condition is ambiguous — never retarget', async () => {
       ddbMock
         .on(TransactWriteCommand)
@@ -623,16 +685,23 @@ describe('PlacementTransactions', () => {
       expect(accountClaim.UpdateExpression).toBe(
         'SET #cellCount = #cellCount + :one, #updatedAt = :updatedAt',
       );
-      expect(accountClaim.ConditionExpression).toBe('attribute_exists(PK) AND #cellCount < #maxCells');
+      expect(accountClaim.ConditionExpression).toBe(
+        'attribute_exists(PK) AND #cellCount < #maxCells AND (attribute_not_exists(#status) OR #status IN (:live0, :live1, :live2))',
+      );
       expect(accountClaim.ExpressionAttributeNames).toEqual({
         '#cellCount': 'cellCount',
         '#maxCells': 'maxCells',
+        '#status': 'status',
         '#updatedAt': 'updatedAt',
       });
       expect(accountClaim.ExpressionAttributeValues).toEqual({
         ':one': 1,
         ':updatedAt': '2026-11-09T00:00:00.000Z',
+        ':live0': 'ACTIVE',
+        ':live1': 'UPDATING',
+        ':live2': 'UPDATE_FAILED',
       });
+      expect(accountClaim.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
 
       // The application counter has no cap — only existence (§7.1)
       const applicationClaim = input.TransactItems![1].Update!;
@@ -640,11 +709,15 @@ describe('PlacementTransactions', () => {
       expect(applicationClaim.UpdateExpression).toBe(
         'SET #cellCount = #cellCount + :one, #updatedAt = :updatedAt',
       );
-      expect(applicationClaim.ConditionExpression).toBe('attribute_exists(PK)');
+      expect(applicationClaim.ConditionExpression).toBe(
+        'attribute_exists(PK) AND (attribute_not_exists(#status) OR #status IN (:live0, :live1, :live2))',
+      );
       expect(applicationClaim.ExpressionAttributeNames).toEqual({
         '#cellCount': 'cellCount',
+        '#status': 'status',
         '#updatedAt': 'updatedAt',
       });
+      expect(applicationClaim.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
 
       const cellPut = input.TransactItems![2].Put!;
       expect(cellPut.Item).toEqual({ PK: 'CELL#c-new', SK: 'META', cellId: 'c-new' });
@@ -657,13 +730,49 @@ describe('PlacementTransactions', () => {
       expect(deploymentPut.ConditionExpression).toBe('attribute_not_exists(PK)');
     });
 
-    test('a failed account condition alone is AccountFullError (try the next account)', async () => {
+    test('a failed account condition alone on a live account is AccountFullError (try the next account)', async () => {
+      for (const item of [withStatus('ACTIVE'), withStatus('UPDATING'), withStatus('UPDATE_FAILED'), legacyItem]) {
+        ddbMock
+          .on(TransactWriteCommand)
+          .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None', 'None'], { 0: item }));
+        await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(AccountFullError);
+      }
+    });
+
+    test.each(['CREATING', 'CREATE_FAILED', 'DELETING', 'DELETE_FAILED'])(
+      'a failed account condition on a %s account is AccountNotLiveError carrying the status (R-13, R-14)',
+      async (status) => {
+        ddbMock
+          .on(TransactWriteCommand)
+          .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None', 'None'], { 0: withStatus(status) }));
+        const error = await transactions.createCellWithDeployment(newCell).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(AccountNotLiveError);
+        expect((error as AccountNotLiveError).status).toBe(status);
+      },
+    );
+
+    test('a failed account condition with no ALL_OLD item is a gone account: AccountNotLiveError without a status', async () => {
       ddbMock
         .on(TransactWriteCommand)
         .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None', 'None']));
-      await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(
-        AccountFullError,
-      );
+      const error = await transactions.createCellWithDeployment(newCell).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(AccountNotLiveError);
+      expect((error as AccountNotLiveError).status).toBeUndefined();
+    });
+
+    test('a failed application claim on an item is ApplicationNotLiveError; a failed tenant claim on an item TenantNotLiveError', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'ConditionalCheckFailed', 'None', 'None', 'None'], { 1: withStatus('DELETING') }));
+      const application = await transactions.createCellWithDeployment(newCell).catch((e: unknown) => e);
+      expect(application).toBeInstanceOf(ApplicationNotLiveError);
+      expect((application as ApplicationNotLiveError).status).toBe('DELETING');
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'None', 'None', 'ConditionalCheckFailed', 'None'], { 3: withStatus('CREATING') }));
+      const tenant = await transactions.createCellWithDeployment(newCell).catch((e: unknown) => e);
+      expect(tenant).toBeInstanceOf(TenantNotLiveError);
+      expect((tenant as TenantNotLiveError).status).toBe('CREATING');
     });
 
     test('a failed application existence claim is ApplicationGoneError (→ 404)', async () => {
@@ -799,7 +908,7 @@ describe('PlacementTransactions', () => {
     test('createCellWithDeployment: a full account with a clean token is still AccountFullError', async () => {
       ddbMock
         .on(TransactWriteCommand)
-        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None', 'None', 'None']));
+        .rejects(transactionCanceled(['ConditionalCheckFailed', 'None', 'None', 'None', 'None', 'None'], { 0: withStatus('ACTIVE') }));
       await expect(
         transactions.createCellWithDeployment({ ...newCell, idempotencyItem }),
       ).rejects.toBeInstanceOf(AccountFullError);
