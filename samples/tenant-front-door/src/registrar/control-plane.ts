@@ -74,7 +74,8 @@ const CALL_TIMEOUT_MS = 3_000;
  * within this long, so the reads of a write (made at once, not one after
  * the other) leave most of the function's 30 s and API Gateway's 29 s to
  * the store write. The worst case is exactly this, because every call's
- * limit and the pause are cut to what is left of it.
+ * limit is cut to what is left of it, and a retry starts only when the
+ * longest pause plus 1 s is still left.
  */
 export const READ_BUDGET_MS = 10_000;
 
