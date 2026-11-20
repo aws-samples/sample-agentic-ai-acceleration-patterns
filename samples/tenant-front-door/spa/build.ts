@@ -109,7 +109,7 @@ export function cspHashes(html: string): CspHashes {
   if (/<style\b/i.test(html)) throw new Error("spa build: inline <style> (the policy is style-src 'self')");
   if (/javascript:/i.test(html)) throw new Error('spa build: javascript: URL');
   const script: string[] = [];
-  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)) {
     const [, attrs, body] = m;
     if (/\ssrc\s*=/i.test(attrs)) {
       const integrity = /\sintegrity="([^"]+)"/.exec(attrs)?.[1];

@@ -153,6 +153,11 @@ describe('build checks (§7.1, §10 step 10)', () => {
   ])('fails on %s', (_n, h) => {
     expect(() => cspHashes(h)).toThrow();
   });
+
+  test('hashes an inline script whose end tag has whitespace, and checks an external one closed that way', () => {
+    expect(cspHashes('<script>a()</script >')['script-src']).toEqual([`'${digest(CSP_HASH_ALG, 'a()')}'`]);
+    expect(() => cspHashes('<script src="/a.js"></script\n>')).toThrow('integrity');
+  });
 });
 
 describe('inline callback script (§3.5 step 4, §7.1 Reports)', () => {
