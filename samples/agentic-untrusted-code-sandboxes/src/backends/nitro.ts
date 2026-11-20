@@ -296,7 +296,7 @@ function isTaskMissing(err: unknown): boolean {
  */
 function connectionReason(stage: 'connect' | 'hello', err: unknown): string {
   if (err instanceof RunnerTimeoutError) return `${stage}_timeout`;
-  const errno = /\b(E[A-Z0-9]{3,})\b/.exec((err as Error).message ?? '')?.[1];
+  const errno = /\b(E[A-Z0-9]{3,})\b/.exec((err as Error | undefined)?.message ?? '')?.[1];
   return errno === undefined ? `${stage}_failed` : `${stage}_failed: ${errno}`;
 }
 

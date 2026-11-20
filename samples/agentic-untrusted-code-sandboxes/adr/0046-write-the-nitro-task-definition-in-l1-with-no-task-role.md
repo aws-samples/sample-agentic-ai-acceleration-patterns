@@ -46,7 +46,10 @@ still lack the property; when that last test fails, the override goes.
 ## Consequences
 
 The exact CloudFormation spelling of the override is the one from the spec
-and ADR-0004 and has not been deployed by this sample's own template yet;
-the integration test is the first deploy of it. The tenant role starts the
+and ADR-0004. The first smoke deploy in a test account accepted it, and
+ECS refused every task until the capacity provider also set
+`InstanceLaunchTemplate.NitroEnclavesEnabled`: a task with the isolation
+mode launches only on a provider that enables Nitro Enclaves. The
+construct sets both. The tenant role starts the
 pinned revision, so a change to the task definition replaces the revision
 and the tool functions' environment in one deploy.

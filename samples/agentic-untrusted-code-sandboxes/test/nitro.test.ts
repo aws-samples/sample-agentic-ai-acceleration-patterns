@@ -83,6 +83,8 @@ class FakeRunner {
   public closed = 0;
   /** Nonce the runner holds; the tool's own by default. */
   public heldNonce?: string;
+  /** Thrown by `/hello`, as a connection or timeout error would. */
+  public helloError?: Error;
   public constructor(private readonly nonce: string) {}
 
   public readonly connect: Connect = async (host, port) => {
@@ -100,6 +102,7 @@ class FakeRunner {
     this.requests.push({ path, body, timeoutMs, maxBytes });
     const held = this.heldNonce ?? this.nonce;
     if (path === '/hello') {
+      if (this.helloError) throw this.helloError;
       switch (this.hello) {
         case 'unavailable': return { status: 503, body: 'busy booting' };
         case 'garbage': return { status: 200, body: 'not json' };
@@ -488,6 +491,23 @@ describe('run', () => {
     const { backend, runner, handle } = make(nonce);
     runner.run = 'oversize';
     expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'no_answer' });
+  });
+
+  test('a /hello timeout is a dead handle with a code, and no job is sent', async () => {
+    const nonce = newNonce();
+    const { backend, runner, handle } = make(nonce);
+    runner.helloError = new RunnerTimeoutError('the runner did not answer in time');
+    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'hello_timeout' });
+    expect(runner.requests.map((r) => r.path)).toEqual(['/hello']);
+  });
+
+  test('a /hello connection error reason is a code: the task address and port never reach it', async () => {
+    const nonce = newNonce();
+    const { backend, runner, handle } = make(nonce);
+    runner.helloError = new RunnerConnectionError('connection lost: read ECONNRESET 10.0.12.34:8443');
+    const out = await backend.run(handle, jobFor(handle));
+    expect(out).toEqual({ kind: 'dead', reason: 'hello_failed: ECONNRESET' });
+    expect(JSON.stringify(out)).not.toMatch(/10\.0\.12\.34|8443/);
   });
 
   test('a connect error reason is a code: the task address and port never reach the reason', async () => {
