@@ -5,9 +5,10 @@ import { javascript, typescript } from 'projen';
 
 // The shared contract of the platform stress test (docs/stress-test.spec.md,
 // stress ADR-0001): tiers, the slice declaration, the quota budget, the
-// result records and the runner, plus the driver host (driver/, ADR-0007) and the
-// k6 library (k6/). Test assets only: the driver stack is the one thing deployed,
-// and only while a run needs it.
+// result records and the runner, plus the driver host (driver/, ADR-0007), the
+// k6 library (k6/) and the cell account owner's stacks (application/, ADR-0006). Test
+// assets only: the driver stack is deployed only while a run needs it; the owner stacks
+// live in the standalone cell accounts.
 const project = new typescript.TypeScriptProject({
   defaultReleaseBranch: 'main',
   github: false,
@@ -56,8 +57,19 @@ new javascript.TypescriptConfig(project, {
   include: ['**/*.ts'],
   compilerOptions: { noEmit: true, rootDir: '..', skipLibCheck: true },
 });
+// application/ holds the cell account owner's stacks, the cell policies and the /cell/ aspect
+// (spec §8, decision 7; W-10), linted and type-checked like driver/.
+project.eslint?.addLintPattern('application');
+new javascript.TypescriptConfig(project, {
+  fileName: 'application/tsconfig.json',
+  extends: javascript.TypescriptConfigExtends.fromPaths(['../tsconfig.json']),
+  include: ['**/*.ts'],
+  compilerOptions: { noEmit: true, rootDir: '..', skipLibCheck: true },
+});
 // Machine output of the driver app (driver/deploy.sh) and its AZ lookup, which is keyed by account id.
 project.gitignore.exclude('cdk.driver.out/');
+// Machine output of the cell account apps (application/*.sh).
+project.gitignore.exclude('cdk.application.out/');
 project.gitignore.exclude('cdk.context.json');
 
 // Spikes are records of runs, not part of the contract's build.

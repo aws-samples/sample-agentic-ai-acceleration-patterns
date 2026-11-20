@@ -131,6 +131,7 @@
             "test",
             "build-tools",
             "driver",
+            "application",
             "projenrc",
             ".projenrc.ts"
           ],
