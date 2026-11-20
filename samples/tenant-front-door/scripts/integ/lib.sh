@@ -52,7 +52,7 @@ timed() {
 # teardown reads it after an interruption. Only the names below are written
 # or read, so a hand-edited file cannot set PATH, IFS or another shell
 # variable.
-STATE_NAMES='^(APP_REGISTERED|A_SUSPENDED|B_DEPLOYMENT_DELETED|CELL_[AB]|CP_SETUP_REMOVED|DEPLOY_PHASE|FIXTURE_WRITTEN|HOOKS_REGISTERED|HOOK_PARAMETER_BROKEN|HOOK_POLICY_ATTACHED|MT_API|MT_TENANT|MT_USER|PLAIN_CELL|PLAIN_REGISTERED|PROBE_HOOK|TENANT_[A-Z]|TI_USER_[A-Z]|TXT_PUBLISHED)$'
+STATE_NAMES='^(CELL_[AB]|CP_SETUP_REMOVED|DEPLOY_PHASE|FIXTURE_WRITTEN|HOOKS_REGISTERED|HOOK_PARAMETER_BROKEN|HOOK_POLICY_ATTACHED|MT_API|MT_TENANT|MT_USER|PLAIN_CELL|PROBE_HOOK|TENANT_[A-Z]|TI_USER_[A-Z])$'
 state_set() { # NAME VALUE
   [[ "$1" =~ $STATE_NAMES && "$2" =~ ^[A-Za-z0-9._:/@+=-]*$ ]] || { die "state value for $1 has an unknown name or unexpected characters"; return 1; }
   printf -v "$1" '%s' "$2"

@@ -45,7 +45,6 @@ step_01() {
     cellParameters: [{name: "FRONT_DOOR_OUTPUT", default: "on"}, {name: "TFD_CELL_PROBE", default: "off"}, {name: "TFD_CELL_PROBE_PEER", default: "none"}]}' <<<"$definition")"
   api_expect "PutApplication demo application 202" 202 PUT "applications/${APP}" "$definition"
   need api_poll "applications/${APP}" .application.status ACTIVE 300 5
-  state_set APP_REGISTERED yes
 }
 # application_definition CELL_DIR TENANT_DIR CREATE UPDATE DELETE: the PutApplication body, from the run's source zip.
 application_definition() {
@@ -317,7 +316,6 @@ txt_publish() {
   id="$(as_test aws route53 change-resource-record-sets --hosted-zone-id "$ZONE_ID" --change-batch "$change" --query ChangeInfo.Id --output text)" \
     || { check "TXT change accepted" yes no; return 1; }
   TXT_VALUES=("$@")
-  state_set TXT_PUBLISHED "$(( $# > 0 ? 1 : 0 ))"
   start=$(date +%s)
   until [[ "$(as_test aws route53 get-change --id "$id" --query ChangeInfo.Status --output text)" == INSYNC ]]; do
     (( $(elapsed "$start") > 300 )) && { check "TXT change INSYNC" INSYNC timeout; return 1; }
@@ -490,7 +488,6 @@ step_16() {
   local t0; t0="$(now_ms)"
   api_expect "DeleteDeployment b 202" 202 DELETE "$(deployment_path "$TENANT_B")"
   check "b's deployment is gone" yes "$(yes_no api_gone "$(deployment_path "$TENANT_B")")"
-  state_set B_DEPLOYMENT_DELETED yes
   check "b's entry is gone" null "$(entry "tenant#${TENANT_B,,}")"
   token_for b B_TOKEN
   wait_status "b's token 403 once the entry is gone" 403 "$APP_DOMAIN" /api/whoami B_TOKEN 180
@@ -587,7 +584,6 @@ step_19() {
   definition="$(application_definition test/integ/app/plain test/integ/app/plain noop.sh noop.sh noop.sh | jq -c '.maxTenants = 1')"
   api_expect "PutApplication ${PLAIN_APP} 202" 202 PUT "applications/${PLAIN_APP}" "$definition"
   need api_poll "applications/${PLAIN_APP}" .application.status ACTIVE 300 5
-  state_set PLAIN_REGISTERED yes
   before="$(entry "tenant#${TENANT_A,,}")"
   need create_deployment a "" "$PLAIN_APP"
   state_set PLAIN_CELL "$DEPLOYED_CELL"
@@ -721,12 +717,10 @@ step_23() {
   test_fn POST /agents/support-bot/invocations "$host" '' "$(auth_headers A_TOKEN '{"sec-fetch-site":"same-site"}')"
   check "agent route, same-site 403" 403 "$(tf_status)"
   st="$(as "$EDGE_OPERATOR" PUT "tenants/${TENANT_A}/status" '{"status":"suspended"}')"; check "operator suspends a 200" 200 "$st"
-  state_set A_SUSPENDED yes
   propagate 90
   st="$(edge POST "$APP_DOMAIN" /agents/support-bot/invocations A_TOKEN)"
   check "suspended a on the agent route 503, Retry-After 300" "503:300" "${st}:$(header retry-after)"
   st="$(as "$EDGE_OPERATOR" PUT "tenants/${TENANT_A}/status" '{"status":"active"}')"; check "operator resumes a 200" 200 "$st"
-  state_set A_SUSPENDED no
   propagate 90
   # One streamed call through the real distribution; each line is stamped on arrival.
   t0="$(now_ms)"
