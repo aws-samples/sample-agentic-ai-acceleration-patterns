@@ -13,9 +13,11 @@ import { sleep } from '../aws';
 import { insights } from '../cloud';
 import { type Backend, TENANT } from '../common';
 import { type Ctx, type CallResult } from '../ctx';
+import { INPUT_AT_CAP, INPUT_OVER_CAP, inputAtCap, sha256Hex } from '../fixtures';
 import { presignUrl } from '../sigv4';
 import { type Unit } from '../steps';
 import { attempt, field } from './basic';
+import { MAX_INPUT_BYTES_CAP, MAX_OUTPUT_BYTES_CAP } from '../../../src/props';
 
 const { a: A, b: B } = TENANT;
 
@@ -30,12 +32,72 @@ const blocked = (out: Record<string, unknown>, name: string): boolean => {
   return a.ok === false && (a.err === 'PermissionError' || a.errno === 1);
 };
 
+/** The probe errors (test/integ/hostile/_lib.py) that never count as blocked: a completed connect, and a lookup with no answer. */
+export const CONNECTED = 'ProbeConnected';
+export const LOOKUP_SLOW = 'ProbeLookupSlow';
+const NOT_BLOCKED: ReadonlySet<string> = new Set([CONNECTED, LOOKUP_SLOW]);
+
+/** True when a probe got no connection at all: an error, and not one that leaves the path open or unknown. */
+export const noConnection = (o: unknown): boolean => {
+  const r = (o ?? {}) as { error?: string };
+  return r.error !== undefined && !NOT_BLOCKED.has(r.error);
+};
+
+/** The status of a probe's answer, from either field the scripts write (`status` or `outcome`). */
+const statusOf = (o: unknown): number | undefined => {
+  const r = (o ?? {}) as { status?: unknown; outcome?: unknown };
+  const v = r.status ?? r.outcome;
+  return typeof v === 'number' ? v : undefined;
+};
+
+/**
+ * A read or write of B's data, or a post out, is denied. Where the sandbox has a route to the service (S3 on
+ * `agentcore`, through the gateway endpoint), it must reach it and be refused with 403. Everywhere else (S3 on
+ * `microvm` and `nitro`, DynamoDB and the internet on every backend) it must make no connection at all, so an
+ * unreachable service and a denial never look the same.
+ */
+export function denied(target: 's3' | 'dynamodb' | 'internet', o: unknown, backend: Backend): boolean {
+  if (target === 's3' && backend === 'agentcore') return statusOf(o) === 403;
+  return noConnection(o) && statusOf(o) === undefined;
+}
+
+/** A no-egress attempt fails (see `denied`); the TCP probes report `connected` when their connect completes. */
+export function egressFailed(name: string, o: unknown, backend: Backend): boolean {
+  if (name === 'put_presigned') return denied('s3', o, backend);
+  const r = (o ?? {}) as { outcome?: string | number };
+  if (r.outcome === 'connected') return false;
+  return denied('internet', o, backend);
+}
+
+/** The positive control of no-egress: the same request code, under the same deadline, got a status from an allowed address. */
+export const controlAnswered = (o: unknown): boolean => statusOf(o) !== undefined;
+
+/** How long a blocked no-egress probe may take: a lookup of up to 5 s, then 2 s per address tried (at most four), plus 1 s. */
+export const PROBE_BOUND_MS = 14_000;
+
+/** The 6 MB Lambda response limit; the tool's answer must stay under it. */
+export const LAMBDA_RESPONSE_BYTES = 6_000_000;
+
+/** The control-byte print returned cut, under the response limit, and holding only 0x01 bytes. */
+export function controlOutputOk(r: { truncated?: boolean; stdout?: string } | undefined): boolean {
+  if (r === undefined || r.truncated !== true || typeof r.stdout !== 'string' || r.stdout.length === 0) return false;
+  return Buffer.byteLength(JSON.stringify(r)) < LAMBDA_RESPONSE_BYTES && r.stdout.split('\u0001').join('') === '';
+}
+
 export async function limits(c: Ctx, u: Unit): Promise<void> {
   const backend = backendOf(u);
-  const big = await c.call('run-code', A, { code: 'print(1)', input: 'big6.bin', backend }, { once: true });
-  c.rec.check(`a 6 MiB input returns input_too_large (got ${big.outcome.kind === 'error' ? big.outcome.code : big.outcome.kind})`, big.outcome.kind === 'error' && big.outcome.code === 'input_too_large');
-  const print = await c.probe('run-code', A, backend, 'limits', { mode: 'print' });
-  c.rec.check(`a 1 MiB print returns truncated (got ${String(print.call.result?.truncated)})`, print.call.result?.truncated === true);
+  // The run-code instance sets maxInputBytes and maxOutputBytes to their caps (test/integ.sandboxes.ts).
+  const over = await c.call('run-code', A, { code: 'print(1)', input: INPUT_OVER_CAP, backend }, { once: true });
+  c.rec.check(`an input one byte over maxInputBytes returns input_too_large (got ${over.outcome.kind === 'error' ? over.outcome.code : over.outcome.kind})`, over.outcome.kind === 'error' && over.outcome.code === 'input_too_large');
+  const at = await c.probe('run-code', A, backend, 'limits', { mode: 'input' }, { input: INPUT_AT_CAP });
+  c.rec.check(`an input of exactly maxInputBytes is read back whole (size ${String(field(at.out, 'size'))}, exit ${String(at.call.result?.exitCode)})`,
+    at.call.result?.exitCode === 0 && field(at.out, 'size') === MAX_INPUT_BYTES_CAP && field(at.out, 'sha256') === sha256Hex(inputAtCap()));
+  const ctl = await c.probe('run-code', A, backend, 'limits', { mode: 'control', bytes: MAX_OUTPUT_BYTES_CAP });
+  const r = ctl.call.result;
+  const size = r === undefined ? 0 : Buffer.byteLength(JSON.stringify(r));
+  // The stdout length shows which bound cut it: the runner's maxOutputBytes, or the tool's 5 MiB JSON bound (ADR-0063).
+  c.rec.check(`a print of maxOutputBytes control bytes returns truncated under ${LAMBDA_RESPONSE_BYTES} bytes (truncated ${String(r?.truncated)}, ${size} bytes, stdout ${String(r?.stdout.length)} of ${MAX_OUTPUT_BYTES_CAP} characters)`,
+    controlOutputOk(r));
 
   const lock = await c.probe('run-code', A, backend, 'limits', { mode: 'shm_write' });
   const mp = attempt(lock.out, 'mp_lock');
@@ -66,10 +128,6 @@ const seen = (o: unknown): string => {
   const r = (o ?? {}) as { status?: number; error?: string };
   return r.status !== undefined ? String(r.status) : (r.error ?? 'none');
 };
-const failedProbe = (o: unknown): boolean => {
-  const r = (o ?? {}) as { status?: number; error?: string; outcome?: string };
-  return r.error !== undefined || (r.status !== undefined && r.status >= 400);
-};
 
 export async function noCredentials(c: Ctx, u: Unit): Promise<void> {
   const backend = backendOf(u);
@@ -86,12 +144,12 @@ export async function noCredentials(c: Ctx, u: Unit): Promise<void> {
       c.rec.check(`the MicroVM metadata path iam/security-credentials/ gives 404, with or without the token flow (got ${seen(role)}, ${String(withToken.status)})`,
         (role.status === 404 || withToken.status === 404) && role.status !== 200 && withToken.status !== 200);
     } else {
-      c.rec.check(`IMDS on nitro gives no answer within the script's timeout (got ${seen(role)})`, role.error !== undefined);
+      c.rec.check(`IMDS on nitro gives no connection within the script's timeout (got ${seen(role)})`, noConnection(role));
       c.rec.check(`the ECS credentials path gives 404 (got ${seen(out.ecs_credentials_path)})`, ((out.ecs_credentials_path ?? {}) as { status?: number }).status === 404);
     }
   }
-  c.rec.check(`GetObject on B's invoice fails (got ${seen(out.get_object_b)})`, failedProbe(out.get_object_b));
-  c.rec.check(`GetItem on B's registry row fails (got ${seen(out.get_row_b)})`, failedProbe(out.get_row_b));
+  c.rec.check(`GetObject on B's invoice is ${backend === 'agentcore' ? 'refused with 403' : 'unreachable'} (got ${seen(out.get_object_b)})`, denied('s3', out.get_object_b, backend));
+  c.rec.check(`GetItem on B's registry row is unreachable (got ${seen(out.get_row_b)})`, denied('dynamodb', out.get_row_b, backend));
 }
 
 export async function noEgress(c: Ctx, u: Unit): Promise<void> {
@@ -118,23 +176,23 @@ export async function noEgress(c: Ctx, u: Unit): Promise<void> {
   }
   const { call, out } = await c.probe('run-code', A, backend, 'noegress', { presigned, public_ip: '1.1.1.1', ...peer });
   c.rec.check(`the probe ran (exit ${call.result?.exitCode})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
+  c.rec.check(`the positive control: the same request code gets a status from the sandbox's own allowed address within the deadline (got ${seen(out.control)})`, controlAnswered(out.control));
   const names = ['https_name', 'tcp_public_ip', 'put_presigned', ...(peer.peer_ip ? ['tcp_peer'] : []), ...(peer.peer_url ? ['https_peer'] : [])];
   for (const n of names) {
     const r = (out[n] ?? {}) as { outcome?: string | number; error?: string; ms?: number };
-    // An HTTP answer, whatever its status, means the connection completed; only the presigned PUT may be refused by status (the endpoint policy).
-    const answered = typeof r.outcome === 'number' && n !== 'put_presigned';
-    const failed = !answered && (r.error !== undefined || (typeof r.outcome === 'number' && r.outcome >= 400) || (typeof r.outcome === 'string' && r.outcome !== 'connected' && !/^2/.test(r.outcome)));
-    c.rec.check(`${n} fails (got ${r.error ?? String(r.outcome)})`, failed && r.outcome !== 'connected');
-    c.rec.check(`${n} fails within 3 s (took ${String(r.ms)} ms)`, typeof r.ms === 'number' && r.ms <= 3000);
+    const what = n === 'put_presigned' && backend === 'agentcore' ? 'reaches S3 and is refused with 403 by the endpoint policy' : 'fails before a connection is made';
+    c.rec.check(`${n} ${what} (got ${r.error ?? String(r.outcome)})`, egressFailed(n, r, backend));
+    const done = n === 'put_presigned' && backend === 'agentcore' ? 'answers' : 'fails';
+    // A lookup of up to 5 s, then 2 s per address tried, at most four (test/integ/hostile/_lib.py), plus a second.
+    c.rec.check(`${n} ${done} within ${PROBE_BOUND_MS / 1000} s (took ${String(r.ms)} ms)`, typeof r.ms === 'number' && r.ms <= PROBE_BOUND_MS);
   }
   c.rec.check('the IP-literal TCP connect did not complete', ((out.tcp_public_ip ?? {}) as { outcome?: string }).outcome !== 'connected');
   // The hostile "one bad script": reads B's invoice and row, posts what it has out, then runs past the time cap.
   const bad = await c.probe('run-code', A, backend, 'hostile_one_bad', { presigned });
-  const reads = ['read_invoice_b', 'read_row_b', 'post_internet', 'post_presigned'];
+  const reads = [['read_invoice_b', 's3'], ['read_row_b', 'dynamodb'], ['post_internet', 'internet'], ['post_presigned', 's3']] as const;
   c.rec.check('the hostile job ran and reported', Object.keys(bad.out).length > 0);
-  for (const n of reads) {
-    const o = (bad.out[n] ?? {}) as { error?: string };
-    c.rec.check(`the hostile job's ${n} fails (got ${seen(bad.out[n])})`, n === 'post_internet' ? o.error !== undefined : failedProbe(bad.out[n]));
+  for (const [n, target] of reads) {
+    c.rec.check(`the hostile job's ${n} is denied (got ${seen(bad.out[n])})`, denied(target, bad.out[n], backend));
   }
   c.rec.check('the hostile job leaked nothing', field(bad.out, 'leaked') === false);
   c.rec.check(`the time cap kills the hostile job (timedOut ${String(bad.call.result?.timedOut)})`, bad.call.result?.timedOut === true);

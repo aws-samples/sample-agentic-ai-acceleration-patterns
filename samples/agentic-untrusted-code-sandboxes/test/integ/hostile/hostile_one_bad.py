@@ -51,11 +51,13 @@ threads = [threading.Thread(target=run, args=(n, f)) for n, f in
            (("read_invoice_b", read_invoice_b), ("read_row_b", read_row_b), ("post_internet", post_internet), ("post_presigned", post_presigned))]
 for t in threads:
     t.start()
-for t in threads:
-    t.join(4)
-# Any answer to the post to the internet means the connection was made; a 200 or 204 to a read or the presigned PUT means it worked.
+# The requests get what is left of the shared deadline after the credential lookup above; one that does not
+# finish leaves its key out of R, and the check fails.
+join_all(threads)
+# Any answer to the post to the internet, or a completed connect to it, means the connection was made;
+# a 200 or 204 to a read or the presigned PUT means it worked.
 R["leaked"] = any(isinstance(R.get(k), dict) and R[k].get("status") in (200, 204) for k in ("read_invoice_b", "read_row_b", "post_presigned")) \
-    or "status" in (R.get("post_internet") or {})
+    or "status" in (R.get("post_internet") or {}) or (R.get("post_internet") or {}).get("error") == "ProbeConnected"
 done()
 while True:
     time.sleep(1)

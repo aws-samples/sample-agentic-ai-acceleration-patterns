@@ -12,6 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { GetParameterCommand } from '@aws-sdk/client-ssm';
 import { type Aws } from '../aws';
+import { logsPoliciesNeeded } from '../common';
 import { run } from '../deploy';
 import { policySnapshot } from '../leftovers';
 import { type Recorder } from '../record';
@@ -32,6 +33,11 @@ export function neededQuotaGb(memoryMiB: number = MICROVM_MEMORY_MIB): number {
   return (MICROVM_QUOTA_FACTOR * memoryMiB) / 1024;
 }
 
+/** Whether `needed` Logs resource policies still fit with `used` of the Region's `limit` taken. */
+export function slotsFree(used: number, needed: number, limit: number = LOGS_POLICY_LIMIT): boolean {
+  return limit - used >= needed;
+}
+
 /** Returns the problems with the account before the deploy; empty when it is ready. Read-only, apart from `npm ci` in the producer. */
 export async function preconditions(aws: Aws, rec: Recorder): Promise<{ policyBaseline: Record<string, string> }> {
   rec.check(`the stack ${IDENTITY_STACK} exists (a shared fixture; deploy it with the commands in integration-test.md, "How to run it")`, (await aws.stackStatus(IDENTITY_STACK)) !== undefined);
@@ -45,7 +51,10 @@ export async function preconditions(aws: Aws, rec: Recorder): Promise<{ policyBa
   const have = quota.Quota?.Value ?? 0;
   rec.check(`the MicroVM memory quota ${MICROVM_QUOTA_CODE} is at least ${neededQuotaGb()} GB (is ${have})`, have >= neededQuotaGb());
   const policies = await policySnapshot(aws);
-  rec.check(`a free CloudWatch Logs resource policy slot exists (${Object.keys(policies).length} of ${LOGS_POLICY_LIMIT} used)`, Object.keys(policies).length < LOGS_POLICY_LIMIT);
+  const used = Object.keys(policies).length;
+  const needed = logsPoliciesNeeded();
+  // A deploy that runs out of slots fails after the VPC and the AgentCore runtime are up (8 to 9 min), so check them all here.
+  rec.check(`${needed} free CloudWatch Logs resource policy slots exist, one per dnsFirewall instance and one per agentcore backend (${used} of ${LOGS_POLICY_LIMIT} used)`, slotsFree(used, needed));
   const docker = await run('docker', ['info'], 'docker.log').catch(() => ({ code: 1, tail: '', log: '' }));
   rec.check('docker answers (the runner image is built at synth, ADR-0024)', docker.code === 0);
   if (!existsSync(path.join(PRODUCER_DIR, 'node_modules'))) {

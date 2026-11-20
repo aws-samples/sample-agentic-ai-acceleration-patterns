@@ -17,7 +17,8 @@
  *  - the test-only token mint (test/integ/mint.function.ts), granted
  *    `tokenSigner.grantSign` on the ingress's key (S-12);
  *  - `run-code`: all three backends, `sandboxIdle` 2 min, `dnsFirewall` on,
- *    `standalone` on, behind a `RunCodeToolTarget` named `run-code`;
+ *    `standalone` on, `maxInputBytes` and `maxOutputBytes` at their caps,
+ *    behind a `RunCodeToolTarget` named `run-code`;
  *  - `run-code-files`: `agentcore` only, `sessionFiles` on, `dnsFirewall`
  *    off, behind a `RunCodeToolTarget` named `run-code-files`;
  *  - two roles for the standalone step (one with the invoke grant, one
@@ -43,11 +44,12 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { type Construct } from 'constructs';
-import { type Backend, INSTANCE_BACKENDS, type Instance, RUN_TIMEOUT_SECONDS, SANDBOX_IDLE_MINUTES, stackPrefix, START_WAIT_SECONDS, TENANT, TOOL_TARGET, TOOLS_GATEWAY } from './integ/common';
+import { type Backend, INSTANCE_BACKENDS, INSTANCE_DNS_FIREWALL, type Instance, RUN_TIMEOUT_SECONDS, SANDBOX_IDLE_MINUTES, stackPrefix, START_WAIT_SECONDS, TENANT, TOOL_TARGET, TOOLS_GATEWAY } from './integ/common';
 import { backendOutputKey, outputKey } from './integ/ctx';
 import { INTEG_MINT_ENV } from './integ/mint.function';
 import { enableIntegOverrides, markIntegApp } from './integ/overrides';
 import { RunCodeToolTarget } from '../src/gateway';
+import { MAX_INPUT_BYTES_CAP, MAX_OUTPUT_BYTES_CAP } from '../src/props';
 import { UntrustedCodeSandboxes } from '../src/untrusted-code-sandboxes.cdk';
 
 /** tenant-identity's published parameters, which the integration ingress trusts as its issuer (a shared fixture, never destroyed). */
@@ -136,10 +138,17 @@ export function createIntegApp(options: IntegAppOptions): App {
   };
   const instances: Record<Instance, UntrustedCodeSandboxes> = {
     'run-code': new UntrustedCodeSandboxes(stack, 'RunCode', {
-      ...common, backends: [...INSTANCE_BACKENDS['run-code']], defaultBackend: 'microvm', standalone: true, dnsFirewall: true,
+      ...common,
+      backends: [...INSTANCE_BACKENDS['run-code']],
+      defaultBackend: 'microvm',
+      standalone: true,
+      dnsFirewall: INSTANCE_DNS_FIREWALL['run-code'],
+      // The limits step sends an input and an output at the caps through every platform (spec §8).
+      maxInputBytes: MAX_INPUT_BYTES_CAP,
+      maxOutputBytes: MAX_OUTPUT_BYTES_CAP,
     }),
     'run-code-files': new UntrustedCodeSandboxes(stack, 'RunCodeFiles', {
-      ...common, backends: [...INSTANCE_BACKENDS['run-code-files']], agentcore: { sessionFiles: true }, dnsFirewall: false,
+      ...common, backends: [...INSTANCE_BACKENDS['run-code-files']], agentcore: { sessionFiles: true }, dnsFirewall: INSTANCE_DNS_FIREWALL['run-code-files'],
     }),
   };
   const targets: Record<Instance, RunCodeToolTarget> = {

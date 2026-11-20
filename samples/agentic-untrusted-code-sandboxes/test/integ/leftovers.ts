@@ -101,6 +101,18 @@ async function exists<T>(fn: () => Promise<T>): Promise<boolean> {
   }
 }
 
+/**
+ * The log group prefixes of the groups AgentCore and Lambda create for the run's runtimes and MicroVM images.
+ * A blank name has no prefix (undefined): listing with it would match groups the run does not own. Pure.
+ */
+export function serviceLogPrefixes(state: Pick<RunState, 'runtimeNames' | 'imageNames'>): Array<{ kind: 'runtime' | 'image'; prefix?: string }> {
+  const blank = (n: string): boolean => n.trim() === '';
+  return [
+    ...state.runtimeNames.map((n) => ({ kind: 'runtime' as const, prefix: blank(n) ? undefined : `/aws/bedrock-agentcore/runtimes/${n}-` })),
+    ...state.imageNames.map((n) => ({ kind: 'image' as const, prefix: blank(n) ? undefined : `/aws/lambda-microvms/${n}` })),
+  ];
+}
+
 async function logGroupsWithPrefix(aws: Aws, prefix: string): Promise<string[]> {
   const names: string[] = [];
   let token: string | undefined;
@@ -182,9 +194,15 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
       add('check-failed', `${r.type}:${r.physicalId}`, e instanceof Error ? e.name : 'error');
     }
   }
-  // Log groups the services create after the deploy.
-  for (const name of state.runtimeNames) for (const g of await logGroupsWithPrefix(aws, `/aws/bedrock-agentcore/runtimes/${name}-`)) add('log-group', g, 'an AgentCore runtime group is still there');
-  for (const name of state.imageNames) for (const g of await logGroupsWithPrefix(aws, `/aws/lambda-microvms/${name}`)) add('log-group', g, 'a MicroVM image group is still there');
+  // Log groups the services create after the deploy. An empty name would widen the prefix to every such group of
+  // the account (or be refused by the API), so it is reported instead of listed.
+  for (const p of serviceLogPrefixes(state)) {
+    if (p.prefix === undefined) {
+      add('check-failed', p.kind, 'an empty service name in the run state; its log groups were not checked');
+      continue;
+    }
+    for (const g of await logGroupsWithPrefix(aws, p.prefix)) add('log-group', g, `${p.kind === 'runtime' ? 'an AgentCore runtime' : 'a MicroVM image'} group is still there`);
+  }
 
   // The Logs resource policies, compared with the state before the deploy.
   const current: Array<{ name: string; document: string }> = [];

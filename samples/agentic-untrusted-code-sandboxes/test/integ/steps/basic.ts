@@ -14,12 +14,13 @@ import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { REGISTRY, registryPk, registrySk } from '../../../src/env';
+import { MAX_INPUT_BYTES_CAP } from '../../../src/props';
 import { agentPath } from '../agent-path';
 import { callStandalone, sleep, until } from '../aws';
-import { clusterArn, liveHandles, sandboxState, stopOutOfBand, waitEnded } from '../cloud';
+import { clusterArn, liveHandles, microvmTerminatedAt, sandboxState, stopOutOfBand, waitEnded } from '../cloud';
 import { type Backend, TENANT } from '../common';
 import { type Ctx } from '../ctx';
-import { INVOICES } from '../fixtures';
+import { INPUT_AT_CAP, INPUT_OVER_CAP, INVOICES, inputAtCap } from '../fixtures';
 import { probeCode } from '../hostile';
 import { type Unit } from '../steps';
 import { parseFunctionResponse, lastJsonLine, type RunResult } from '../tool-result';
@@ -55,9 +56,11 @@ export async function seed(c: Ctx): Promise<void> {
       c.rec.check(`the test mint answers a token for tenant ${tenant} on ${instance}`, (await c.token(instance, tenant)).split('.').length === 3);
     }
   }
-  // 6 MiB of zeros, over the 5 MiB `maxInputBytes` (limits).
-  await c.aws.s3.send(new PutObjectCommand({ Bucket: c.output('run-code', 'Bucket'), Key: `inputs/${A}/big6.bin`, Body: Buffer.alloc(6 * 1024 * 1024) }));
-  c.rec.note('invoices of tenants A and B, the 6 MiB input, and mint tokens on both instances');
+  // Inputs at the run-code instance's `maxInputBytes` (the cap) and one byte over it (limits).
+  const bucket = c.output('run-code', 'Bucket');
+  await c.aws.s3.send(new PutObjectCommand({ Bucket: bucket, Key: `inputs/${A}/${INPUT_AT_CAP}`, Body: inputAtCap() }));
+  await c.aws.s3.send(new PutObjectCommand({ Bucket: bucket, Key: `inputs/${A}/${INPUT_OVER_CAP}`, Body: Buffer.alloc(MAX_INPUT_BYTES_CAP + 1) }));
+  c.rec.note('invoices of tenants A and B, the inputs at and over the input cap, and mint tokens on both instances');
 }
 
 export async function parse(c: Ctx, u: Unit): Promise<void> {
@@ -179,6 +182,13 @@ export async function deadHandle(c: Ctx, u: Unit): Promise<void> {
   if (backend !== 'agentcore') {
     // A task takes 45 to 78 s to stop (spec §5.3).
     c.rec.check('the stopped sandbox reports ended within 4 minutes', await waitEnded(c, backend, handle, 240_000));
+    if (backend === 'microvm') {
+      // The tool counts a MicroVM as dead only when terminatedAt is more than 2 s before its request left; a call
+      // inside that window is no_answer, and the tool stops the sandbox and returns timedOut (ADR-0044). Wait until
+      // 4 s past terminatedAt on this clock, which leaves 2 s for a driver clock ahead of the platform's.
+      const endedAt = await microvmTerminatedAt(c, handle);
+      await sleep(Math.max(0, (endedAt ?? Date.now()) + 4000 - Date.now()));
+    }
   } else {
     await sleep(5000);
   }

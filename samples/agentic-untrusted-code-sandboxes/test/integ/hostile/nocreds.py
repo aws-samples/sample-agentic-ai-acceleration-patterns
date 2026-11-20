@@ -52,8 +52,10 @@ def load():
 
 
 early = [probe("imds_role_path", role_path), probe("ecs_credentials_path", ecs_path), probe("imds_credentials_loaded", load)]
-for t in early:
-    t.join(8)
+# The metadata calls go to address literals (no lookup) and normally end in under 2 s; they get until 9 s. The
+# reads of B's data below get what is left of the shared deadline; one that does not finish leaves its key out
+# of R, and the check fails.
+join_all(early, until=START + 9)
 R["credentials_loaded"] = creds[0] is not None
 
 
@@ -73,6 +75,5 @@ def get_row_b():
 
 
 late = [probe("get_object_b", get_b), probe("get_row_b", get_row_b)]
-for t in late:
-    t.join(6)
+join_all(late)
 done()

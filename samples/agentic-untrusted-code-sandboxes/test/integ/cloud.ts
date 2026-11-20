@@ -74,6 +74,16 @@ export async function sandboxState(c: Ctx, backend: Backend, handle: string): Pr
 
 export const ENDED = new Set(['STOPPED', 'TERMINATED', 'gone']);
 
+/** When the platform says a MicroVM ended, in ms; undefined when it does not say or the MicroVM is gone. */
+export async function microvmTerminatedAt(c: Ctx, handle: string): Promise<number | undefined> {
+  try {
+    const t = (await c.aws.microvms.send(new GetMicrovmCommand({ microvmIdentifier: handle }))).terminatedAt;
+    return t === undefined ? undefined : new Date(t).getTime();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Waits until a sandbox reports an ended state; false when the deadline passes first. */
 export async function waitEnded(c: Ctx, backend: 'microvm' | 'nitro', handle: string, deadlineMs: number): Promise<boolean> {
   const v = await until(async () => (ENDED.has(await sandboxState(c, backend, handle)) ? true : undefined), deadlineMs, 5000);

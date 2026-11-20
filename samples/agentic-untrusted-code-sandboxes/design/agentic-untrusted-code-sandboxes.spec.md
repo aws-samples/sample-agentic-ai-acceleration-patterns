@@ -1435,7 +1435,9 @@ runs once through the producer's sample agent with its deterministic
 `tool <target>/<tool> {json}` probe, so the grant and the 120 s ingress
 path are exercised as a consumer would. It deploys one integration stack with two
 construct instances, each with its own VPC: `run-code` with all three
-backends, `sandboxIdle` = 2 min, `dnsFirewall` on, `standalone` on, and a
+backends, `sandboxIdle` = 2 min, `dnsFirewall` on, `standalone` on,
+`maxInputBytes` and `maxOutputBytes` at their caps (6 MiB and 4 MiB, so
+`limits` sends both through every platform), and a
 `RunCodeToolTarget` named `run-code`; and `run-code-files` with
 `agentcore` only, `sessionFiles` on, `dnsFirewall` off, and a
 `RunCodeToolTarget` named `run-code-files`. Every step runs through the
@@ -1444,18 +1446,18 @@ touched.
 
 | Step | Checks |
 |---|---|
-| seed | tenants `A` and `B`, each with `inputs/<t>/invoice.csv` (synthetic) and grants for the `run-code` and `run-code-files` tools |
+| seed | tenants `A` and `B`, each with `inputs/<t>/invoice.csv` (synthetic) and grants for the `run-code` and `run-code-files` tools; on `run-code` an input for A of exactly `maxInputBytes` and one a byte over |
 | parse | A runs a script that parses its invoice; output matches; `sandbox` = `started` (or `sandbox_starting`, then retried) |
 | reuse | A writes `/work/marker`; A's next call reads it; `sandbox` = `reused` |
 | apart | B's call on the same backend cannot see A's marker; B's `sandbox` = `started` |
 | race | two concurrent first calls for a new tenant `C` start one sandbox |
 | prefix | the tool refuses `input` = `../B/invoice.csv` and any name outside A's prefix |
 | iam-wall | `iam:SimulatePrincipalPolicy` on the tool tenant role with `aws:PrincipalTag/TenantId` = `A` denies `inputs/B/*`, the `TENANT#B` row, and `StopTask` on B's task |
-| limits | a 6 MiB input returns `input_too_large`; a 1 MiB print returns `truncated` = true; `multiprocessing.Lock()` raises `PermissionError` on `microvm` and works on `nitro` and `agentcore`, where a file the job leaves in `/dev/shm` is gone at its next call; on `microvm` `os.memfd_create`, `semget`, `setsockopt(SO_SNDBUF)`, `socket(AF_UNIX)` and `listen(128)` raise `PermissionError`, `socketpair` and `listen(5)` work, and the job's `/proc/self/status` shows `Seccomp: 2`; on `nitro` `semget` raises `PermissionError` |
-| no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no answer within the script's own 3 s timeout), and the `GetObject` fails. `agentcore`: credentials load, and every call outside C-2 is denied |
-| no-egress | A's script tries HTTPS to `example.com`, a TCP connect to a public IP address on port 443 with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy. Every request fails within 5 s, and for the IP-literal probe the TCP connect itself must not complete (a TLS error after a completed connect is a failure of the step) |
+| limits | an input one byte over `maxInputBytes` returns `input_too_large`; an input of exactly `maxInputBytes` is read back whole (size and SHA-256 match); a print of `maxOutputBytes` `0x01` bytes (six bytes each in JSON) returns `truncated` = true with a result under the 6 MB Lambda response limit; `multiprocessing.Lock()` raises `PermissionError` on `microvm` and works on `nitro` and `agentcore`, where a file the job leaves in `/dev/shm` is gone at its next call; on `microvm` `os.memfd_create`, `semget`, `setsockopt(SO_SNDBUF)`, `socket(AF_UNIX)` and `listen(128)` raise `PermissionError`, `socketpair` and `listen(5)` work, and the job's `/proc/self/status` shows `Seccomp: 2`; on `nitro` `semget` raises `PermissionError` |
+| no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no TCP connection within the script's own 2 s), and the `GetObject` makes no connection. `agentcore`: credentials load, and every call outside C-2 is denied; the `GetObject` on B's invoice reaches S3 and is refused with 403. The `GetItem` on B's row makes no connection on any backend |
+| no-egress | A's script first sends a positive control with the same request code and deadline to the sandbox's own allowed address (the metadata service on `microvm` and `agentcore`, the ECS credentials path on `nitro`), which must answer with a status; it proves the request code and its deadline, not a name lookup or a route. It then tries HTTPS to `example.com`, a TCP connect to a public IP address on port 443 with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy. Every request fails before its TCP connect completes (a name that does not exist, or a connect that fails or takes over 2 s on each of up to four addresses of the name, IPv4 first; the driver checks 14 s, a 5 s lookup included), except the presigned PUT on `agentcore`, which reaches the S3 gateway endpoint and must be refused with 403. A request whose connect completes counts as open, however slow or broken its answer, and so does a lookup with no answer in 5 s or a resolver failure, so a slow but open path cannot pass. For the IP-literal probe the TCP connect itself must not complete |
 | runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and the job plus N − 1 children that each allocate up to their `RLIMIT_AS` (on `nitro` and `agentcore` a total far above the sandbox memory), whose N-th fork fails with `EAGAIN`: each returns `timedOut`, `memoryExceeded` (the memory fill on `nitro` and `agentcore`) or a non-zero exit (on `microvm` with `MemoryError` in `stderr`); one process filled past its own `RLIMIT_AS` returns `memoryExceeded` false and `MemoryError` in `stderr` on every backend; on `nitro` a job that writes 900 MiB of files to `/work` is not killed; on `microvm` a job of four threads that each allocate 32 MiB completes; on `nitro` and `agentcore` a `memfd` fill aimed at 1.5 × L (100 MiB per `memfd`; about 1.2 GiB on `nitro`, 11 GiB on `agentcore`) returns `memoryExceeded` true with the same `bootId`, and the next call works; on `agentcore` a SysV semaphore array a job creates is gone at the next call; after a job that forked N − 1 children was killed, the next job can fork N − 1 children again (no zombies left); the runner is still the one that answers (same `bootId`), nothing of the job survives into A's next call, and A's next call works |
-| dead-handle | stop A's sandbox out of band; A's next call returns `sandbox` = `started` |
+| dead-handle | stop A's sandbox out of band (on `microvm` wait until 4 s past the MicroVM's `terminatedAt`, beyond the 2 s clock margin of ADR-0044); A's next call returns `sandbox` = `started` |
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
 | idle | after `sandboxIdle` (2 min) idle the driver invokes the reaper; A's `nitro` task is stopped, and the stop line carries `sandboxSeconds` |
 | cold-from-zero | `nitro`: with no instance running, a new tenant `D`'s first call returns `sandbox_starting`; retries reuse the same task until it is `READY`, and no second task starts |
@@ -1477,9 +1479,10 @@ Preconditions, checked by the driver before it deploys: the account's
 "maximum allocated ARM_64 MicroVM memory" quota (Service Quotas, looked up
 by quota code, not by name) is at least
 5 × `microvm.memoryMiB` (tenants A, B, C and E, plus a restart), and the
-account has a free CloudWatch Logs resource policy slot (10 per Region,
-not adjustable) for the `dnsFirewall` instance; the driver fails early
-naming the quota if not. Every behaviour step runs
+account has three free CloudWatch Logs resource policy slots (10 per
+Region, not adjustable): one for the `dnsFirewall` instance and one for the
+usage log of each `agentcore` backend, a number the driver computes from
+the app; the driver fails early naming the cause if not. Every behaviour step runs
 once per backend unless it names one. `cold-from-zero` records the
 `nitro` start time and fails if it comes within half of the start cap. The run
 records cold and warm latency per backend and the deploy and destroy time.
