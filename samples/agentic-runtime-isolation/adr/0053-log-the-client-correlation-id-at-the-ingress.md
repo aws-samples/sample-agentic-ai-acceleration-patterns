@@ -14,10 +14,11 @@ hop and attributes every refusal to a tenant per request. It needs one id
 that the load driver chose, on the driver's record and on each hop's log
 line. The ingress lines (`request authorised`, `request served`,
 `request admitted`, `request refused`, `token refused`) carry the verified
-`tenantId`, `backend` and `txn`, but nothing the client chose, so a driver
-record joins them only by tenant and time; the stress slice matches
-refusals by count for want of it (ADR-0052). A refusal at the authoriser has
-no `txn` at all.
+`tenantId`, `backend` and `txn` where they have them, but nothing the
+client chose, so a driver record joins them only by tenant and time; the
+stress slice matches refusals by count for want of it (ADR-0052). A refusal
+at the authoriser has no `txn`, and a `token refused` line no `tenantId`
+either.
 
 ## Options considered
 ### Option 1: Log a client `x-correlation-id` header, shape-checked, as a field
@@ -53,7 +54,7 @@ dimension, not forwarded to the Runtime, and not part of the session id. A
 request without the header logs no field.
 
 ## Consequences
-Easier: a client, the stress driver or a support desk, joins its own
+Easier: a client (the stress driver, a support desk) joins its own
 record to the ingress lines on one field, for refusals and served requests
 alike. Harder: the ingress logs hold one client-chosen value; its alphabet
 and length bound what it can carry (threat model T-109, M-87). A request
