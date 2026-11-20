@@ -60,7 +60,15 @@ and is stopped again while the platform lists its sandbox.
 A takeover that replaces a sandbox writes the replaced handle on the new row
 (`replaces`) and keeps it there, so the old sandbox, which a `nitro` stop keeps
 listed for a minute, is neither an orphan nor lined twice; the reaper and the
-drain stop it again if it is still listed. A list that failed says nothing about
+drain stop it again if it is still listed. The call that took the row over stops
+the old sandbox, writes its line, and then sets `replacesLined` on the row. A row
+that is older than `startWait` plus the tool timeout with `replacesLined` still
+false means the call died first: the reaper or the drain claims the line with a
+conditional write of `replacesLined`, stops the sandbox, and writes the line
+(`reason` = `replaced`), once. A `replaces` equal to the row's own handle, or
+listed for another tenant, is ignored. `offboardTenant` stops it too. A stop that
+fails for the whole life of the next sandbox, and a second takeover in that time,
+can give the old handle a second line; that case is accepted. A list that failed says nothing about
 a sandbox, so a row is not treated as gone because it was not listed.
 The shield uses the platform's `startedAt` against the row's `createdAt`
 (with 5 s of clock slack), so a real orphan is not shielded for as long as
@@ -95,8 +103,12 @@ stopped. The window is one start, and the integration test's teardown has
 no calls in flight. A drain that fails leaves the sandboxes it could not end for the
 operator to remove, and its error names how many.
 
+A `STOPPING` row whose sandbox has left the list is deleted by the reaper, with no
+line; a `FAILED` row stays for its backoff. That is how a row an offboard kept for
+a task that was still stopping goes away.
+
 What a backend owes this logic: `stop` does not throw for a sandbox that is
-already gone; a stopped sandbox leaves the `live` set of `list()` before the next
-five-minute pass (a `nitro` task in its stopping states counts as live, spec
-§5.3); and `ready` answers within the budget of a probe, because a dead handle
+already gone; a `nitro` task in its stopping states counts as live in `list()`
+(spec §5.3), and the sample keeps a row for it so it is not taken for an orphan;
+and `ready` answers within the budget of a probe, because a dead handle
 that takes long to detect leaves the tool call too little time for a new start.

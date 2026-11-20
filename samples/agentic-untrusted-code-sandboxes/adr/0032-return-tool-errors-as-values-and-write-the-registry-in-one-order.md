@@ -88,7 +88,9 @@ Registry writes, in the spec's order:
   line, `sandbox_failed`. A dead handle is never kept for lack of time.
 - A takeover records the handle it replaces on the new row (`replaces`), so no
   sweep takes the old sandbox, which may take a minute to stop, for an orphan
-  (ADR-0034).
+  (ADR-0034). After the old sandbox is stopped and lined, the call sets
+  `replacesLined` on the row; a row older than the start window without it means
+  the call died, and the reaper or the drain writes the line.
 - The run line names the sandbox (`handle`) on a reused call too, because
   `agentcore` cost is joined through it (spec §3.8).
 - Credentials are one `AssumeRole` with the `TenantId` session tag, cached per

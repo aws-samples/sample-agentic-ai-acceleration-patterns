@@ -40,6 +40,12 @@ only if `isAlive`, and the row is deleted. A row with no handle is deleted.
 It never touches another tenant's key, which `TENANT#<id>` makes exact, so
 `tenant-a` does not reach `tenant-a2`.
 
+A sandbox that is still listed after a successful stop (a `nitro` task stays listed
+while it stops) keeps its `STOPPING` row, so the reaper does not take it for an
+orphan and line it again; the reaper deletes the row once the sandbox has left
+the list. The call still returns it in `stopped`. A sandbox a takeover replaced
+and that is still named on the row is stopped too, with no line of its own.
+
 A stop that fails keeps the row, finishes the other backends, and throws, so
 the control plane's tenant delete script stops. A second call repeats the
 stop. Each stopped handle is listed once. A tenant id that breaks the §5.1 rule throws before any client is

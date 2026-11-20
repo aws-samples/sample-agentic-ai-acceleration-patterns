@@ -282,18 +282,26 @@ async function startNew(call: Call, prev: RegistryRow | undefined, why: string):
   }, prev);
   if (row === undefined) return { kind: 'reread' };
   call.sandbox = 'started';
-  if (prev?.handle !== undefined) await retire(call, { ...prev, handle: prev.handle }, why);
+  let held: RegistryRow = row;
+  if (prev?.handle !== undefined) {
+    await retire(call, { ...prev, handle: prev.handle }, why);
+    // The replaced sandbox now has its line. Until this write a reaper or drain pass that finds the row old and unmarked
+    // writes the line itself, because the call may have died before it did (ADR-0034).
+    const marked = await call.registry.update(row, { replacesLined: true });
+    if (marked === undefined) return { kind: 'reread' };
+    held = { ...row, version: marked };
+  }
   let started;
   try {
     started = await call.backend.start(call.tenantId, nonce, call.creds);
   } catch (error) {
     // Nothing is recorded to stop. A sandbox the failed call launched anyway is an orphan the reaper's sweep stops.
     call.stoppedReason = errorName(error);
-    await call.registry.update(row, { state: 'FAILED', retryAt: deps.now() + FAIL_BACKOFF_MS });
+    await call.registry.update(held, { state: 'FAILED', retryAt: deps.now() + FAIL_BACKOFF_MS });
     return { kind: 'error', error: fail('sandbox_failed', FAIL_BACKOFF_MS / 1000) };
   }
   call.handle = started.handle;
-  const version = await call.registry.update(row, { handle: started.handle, address: started.address });
+  const version = await call.registry.update(held, { handle: started.handle, address: started.address });
   if (version === undefined) {
     // The row moved while the sandbox started (an offboard, or the reaper): nothing names it any more.
     await stopQuietly(call.backend, started, deps.log, call.creds);
@@ -309,7 +317,7 @@ async function startNew(call: Call, prev: RegistryRow | undefined, why: string):
     });
     return { kind: 'error', error: fail('sandbox_starting', 1) };
   }
-  return probe(call, { ...row, handle: started.handle, address: started.address, version });
+  return probe(call, { ...held, handle: started.handle, address: started.address, version });
 }
 
 /** Stops the handle a takeover replaced. The takeover moved the row out of READY or STARTING only then does this call owe the line. */

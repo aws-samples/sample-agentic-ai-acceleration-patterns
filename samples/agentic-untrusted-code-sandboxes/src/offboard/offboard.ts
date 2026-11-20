@@ -59,6 +59,10 @@ export async function offboardTenant(tenantId: unknown, deps: OffboardDeps): Pro
         break;
       }
       let held: RowKey = row;
+      // A sandbox a takeover replaced and whose stop failed is still named on the row: stop it too, with no new line.
+      if (row.replaces !== undefined && row.replaces !== '' && row.replaces !== row.handle) {
+        await stopQuietly(backend, { backend: name, tenantId, handle: row.replaces, nonce: '' }, log);
+      }
       if (row.handle !== undefined) {
         const handle = { ...row, handle: row.handle };
         if (row.state === 'READY' || row.state === 'STARTING') {
@@ -76,6 +80,12 @@ export async function offboardTenant(tenantId: unknown, deps: OffboardDeps): Pro
             break;
           }
           stopped.set(`${name}|${row.handle}`, { backend: name, handle: row.handle });
+          // A task that is still stopping stays listed for a while: keep the row STOPPING so the reaper does not take
+          // the sandbox for an orphan and line it a second time; the reaper deletes the row once it has left the list.
+          if (await backend.isAlive(handleOf(handle))) {
+            settled = true;
+            break;
+          }
         } else if (await backend.isAlive(handleOf(handle))) {
           // STOPPING or FAILED: its line is written. A sandbox still alive is stopped again.
           if (!await stopQuietly(backend, handleOf(handle), log)) {
@@ -84,6 +94,10 @@ export async function offboardTenant(tenantId: unknown, deps: OffboardDeps): Pro
             break;
           }
           stopped.set(`${name}|${row.handle}`, { backend: name, handle: row.handle });
+          if (await backend.isAlive(handleOf(handle))) {
+            settled = true;
+            break;
+          }
         }
       }
       settled = await registry.delete(held);

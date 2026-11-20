@@ -81,7 +81,9 @@ describe('two callers on one tenant', () => {
     const h = harness();
     await runCode(req(), h.deps);
     let lost = 0;
+    let marks = 0;
     h.db.hook = (op, input) => {
+      if (op === 'update' && String(input.UpdateExpression).startsWith('SET #last = :t')) marks += 1;
       if (op === 'update' && String(input.UpdateExpression).startsWith('SET #last = :t') && lost < 3) {
         lost += 1;
         const item = h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!;
@@ -91,7 +93,22 @@ describe('two callers on one tenant', () => {
     h.clock.t += 1000;
     const out = ok(await runCode(req(), h.deps));
     expect(lost).toBe(3);
+    // three marks lost, then the row is read again and this call's own mark lands: the job never runs unmarked
+    expect(marks).toBe(4);
     expect(out.sandbox).toBe('reused');
+    expect((await rowA(h))?.lastUsedAt).toBeGreaterThanOrEqual(h.clock.t);
+  });
+
+  test('a boot id from ready that does not look like one is ignored; the runner\'s own is recorded', async () => {
+    const h = harness();
+    const b = h.backends.get('microvm')!;
+    const real = b.ready.bind(b);
+    jest.spyOn(b, 'ready').mockImplementation(async (handle, r) => {
+      const out = await real(handle, r);
+      return out.state === 'ready' ? { ...out, patch: { ...out.patch, bootId: 'not a boot id!' } } : out;
+    });
+    ok(await runCode(req(), h.deps));
+    expect((await rowA(h))?.bootId).not.toBe('not a boot id!');
   });
 
   test('a row with a state but no version (a partial write) does not wedge the tenant', async () => {

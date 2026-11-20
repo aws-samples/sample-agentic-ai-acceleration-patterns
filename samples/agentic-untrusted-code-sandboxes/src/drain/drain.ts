@@ -15,7 +15,7 @@ import type { BackendName, RegistryRow, SandboxBackend, SandboxSummary } from '.
 import type { ToolConfig } from '../tool/config';
 import type { Logger } from '../tool/log';
 import type { Registry } from '../tool/registry';
-import { handleOf, orphanHandle, stopQuietly, writeStopLine } from '../tool/sandbox';
+import { handleOf, orphanHandle, settleReplaced, stopQuietly, writeStopLine } from '../tool/sandbox';
 
 /** How long the drain waits for sandboxes to end, and how long a backend's cleanup may take (spec §5.3). */
 export const DRAIN_BOUND_MS = 600_000;
@@ -62,13 +62,14 @@ export async function drain(deps: DrainDeps, limitMs: number = Number.POSITIVE_I
 
   // 1. Every handle the registry names. Moving READY or STARTING to STOPPING earns this writer the sandbox's one stop line.
   try {
-    for await (const row of registry.scan()) {
+    for await (const scanned of registry.scan()) {
+      let row = scanned;
       const backend = deps.backends.get(row.backend);
       if (backend !== undefined && row.replaces !== undefined) {
-        // The sandbox a takeover replaced has its line from that takeover; the drain only makes sure it is stopped.
+        // The sandbox a takeover replaced has its line from that takeover (or from the drain, when the call died); the drain stops it.
         lined.add(key(row.backend, row.replaces));
-        await stopQuietly(backend, { backend: row.backend, tenantId: row.tenantId, handle: row.replaces, nonce: '' }, log);
-        stoppedAt.set(key(row.backend, row.replaces), deps.now());
+        const claimed = await settleReplaced({ row, stopAlways: true, backend, registry, log, config, now: deps.now(), by: 'drain' });
+        if (claimed !== undefined) row = { ...row, version: claimed, replacesLined: true };
       }
       if (backend === undefined || row.handle === undefined) continue;
       const handle = { ...row, handle: row.handle };

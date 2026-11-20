@@ -20,7 +20,14 @@ const R = REGISTRY;
 export const REPLACES = 'replaces';
 
 /** A row as stored: the spec's attributes, and the handle the takeover that wrote it is replacing, if any. */
-export type StoredRow = RegistryRow & { readonly replaces?: string };
+export type StoredRow = RegistryRow & {
+  readonly replaces?: string;
+  /** True once the call that took the row over has stopped the replaced sandbox and written its stop line. */
+  readonly replacesLined?: boolean;
+};
+
+/** Attribute of {@link StoredRow.replacesLined}. */
+export const REPLACES_LINED = 'replacesLined';
 
 /** Fields a writer sets on a `STARTING` row it takes over (spec §4.1 step 2). */
 export interface NewRow {
@@ -41,6 +48,7 @@ export interface RowPatch {
   readonly address?: string;
   readonly bootId?: string;
   readonly retryAt?: number;
+  readonly replacesLined?: boolean;
 }
 
 /**
@@ -92,6 +100,7 @@ export function rowFromItem(item: Record<string, unknown> | undefined): StoredRo
     ttlAt: num(R.TTL_AT) ?? Math.floor((expiresAt + 3_600_000) / 1000),
     version,
     replaces: str(REPLACES),
+    replacesLined: typeof item[REPLACES_LINED] === 'boolean' ? (item[REPLACES_LINED] as boolean) : undefined,
   };
 }
 
@@ -140,7 +149,7 @@ export class Registry {
       [R.EXPIRES_AT]: expiresAt,
       [R.TTL_AT]: Math.floor((expiresAt + 3_600_000) / 1000),
       [R.VERSION]: version,
-      ...(next.replaces === undefined ? {} : { [REPLACES]: next.replaces }),
+      ...(next.replaces === undefined ? {} : { [REPLACES]: next.replaces, [REPLACES_LINED]: false }),
     };
     try {
       await this.client.send(new PutCommand({
@@ -179,12 +188,13 @@ export class Registry {
    */
   public async update(row: RowKey, patch: RowPatch): Promise<number | undefined> {
     const { tenantId, backend, version } = row;
-    const attrs: Record<string, string | number> = {};
+    const attrs: Record<string, string | number | boolean> = {};
     if (patch.state !== undefined) attrs[R.STATE] = patch.state;
     if (patch.handle !== undefined) attrs[R.HANDLE] = patch.handle;
     if (patch.address !== undefined) attrs[R.ADDRESS] = patch.address;
     if (patch.bootId !== undefined) attrs[R.BOOT_ID] = patch.bootId;
     if (patch.retryAt !== undefined) attrs[R.RETRY_AT] = patch.retryAt;
+    if (patch.replacesLined !== undefined) attrs[REPLACES_LINED] = patch.replacesLined;
     attrs[R.VERSION] = version + 1;
     const names: Record<string, string> = { '#cv': R.VERSION, '#cn': R.NONCE };
     const values: Record<string, unknown> = { ':v': version, ':n': row.nonce };

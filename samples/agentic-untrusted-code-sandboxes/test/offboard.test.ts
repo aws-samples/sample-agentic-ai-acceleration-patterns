@@ -4,6 +4,7 @@
 import { harness, maintenanceDeps, rowItem, seedSandbox } from './harness';
 import { offboardTenant } from '../src/offboard/offboard';
 import { handler } from '../src/offboard/offboard.function';
+import { reapOnce } from '../src/reaper/reaper';
 import { runCode } from '../src/tool/run-code';
 
 const A = 'tenant-a';
@@ -151,10 +152,28 @@ describe('offboardTenant', () => {
     expect(h.events('sandbox_stopped')).toHaveLength(1);
   });
 
-  test('a sandbox that lingers after its stop is stopped again on the repeat read, but listed once', async () => {
+  test('a sandbox that is still listed after its stop keeps its STOPPING row, so the reaper does not line it again as an orphan', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    const handle = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'nitro');
+    const b = h.backends.get('nitro')!;
+    const realStop = b.stop.bind(b);
+    jest.spyOn(b, 'stop').mockImplementation(async () => { /* the task takes a minute to stop: it stays listed */ });
+    const out = await offboardTenant(A, maintenanceDeps(h));
+    expect(out.stopped).toEqual([{ backend: 'nitro', handle: handle.handle }]);
+    expect(await h.registry.get(A, 'nitro')).toMatchObject({ state: 'STOPPING' });
+    const first = await reapOnce(maintenanceDeps(h));
+    expect(first.orphans).toBe(0);
+    expect(await h.registry.get(A, 'nitro')).toMatchObject({ state: 'STOPPING' });
+    await realStop(handle);
+    h.clock.t += 60_000;
+    await reapOnce(maintenanceDeps(h));
+    expect(await h.registry.get(A, 'nitro')).toBeUndefined();
+    expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ by: 'offboard' })]);
+  });
+
+  test('a delete that loses a race re-reads the row and lists the handle once', async () => {
     const h = harness();
     await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
-    jest.spyOn(h.backends.get('microvm')!, 'isAlive').mockResolvedValue(true);
     let raced = false;
     h.db.hook = (op) => {
       if (op === 'delete' && !raced) {
@@ -164,8 +183,18 @@ describe('offboardTenant', () => {
       }
     };
     const out = await offboardTenant(A, maintenanceDeps(h));
+    expect(raced).toBe(true);
     expect(out.stopped).toEqual([{ backend: 'microvm', handle: 'fake-1' }]);
-    expect(h.backends.get('microvm')!.stops).toHaveLength(2);
+    expect(h.db.items.size).toBe(0);
+  });
+
+  test('a sandbox a takeover replaced, still named on the row, is stopped too, without a new line', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', 'tenant-z');
+    await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'microvm', A);
+    h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replaces = old.handle;
+    await offboardTenant(A, maintenanceDeps(h));
+    expect(h.backends.get('microvm')!.sandboxes.get(old.handle)!.live).toBe(false);
     expect(h.events('sandbox_stopped')).toHaveLength(1);
   });
 

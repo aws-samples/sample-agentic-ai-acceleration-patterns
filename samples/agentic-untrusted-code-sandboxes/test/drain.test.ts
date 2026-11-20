@@ -199,6 +199,40 @@ describe('the drain', () => {
     expect(h.events('sandbox_stopped')).toEqual([]);
   });
 
+  test('a sandbox a takeover replaced is stopped by the drain, and the drain writes its line when the call died before it did', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY');
+    const prev = (await h.registry.get(A, 'microvm'))!;
+    await h.registry.takeOver({
+      tenantId: A, backend: 'microvm', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 3_600_000, replaces: old.handle,
+    }, prev);
+    h.clock.t += 120_000;
+    await drain(deps(h));
+    expect(h.backends.get('microvm')!.sandboxes.get(old.handle)!.live).toBe(false);
+    expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: old.handle, by: 'drain', reason: 'replaced' })]);
+  });
+
+  test('a replaced sandbox of a call still in flight is stopped with no line from the drain', async () => {
+    const h = harness();
+    const old = await seedSandbox(h, 'READY');
+    const prev = (await h.registry.get(A, 'microvm'))!;
+    await h.registry.takeOver({
+      tenantId: A, backend: 'microvm', nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 3_600_000, replaces: old.handle,
+    }, prev);
+    await drain(deps(h));
+    expect(h.backends.get('microvm')!.sandboxes.get(old.handle)!.live).toBe(false);
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
+  test('cleanup gets a deadline no later than the Lambda\'s limit', async () => {
+    const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+    const cleanup = jest.fn();
+    h.backends.get('nitro')!.cleanup = cleanup;
+    const began = h.clock.t;
+    await drain(deps(h), began + 100_000);
+    expect(cleanup).toHaveBeenCalledWith(began + 100_000);
+  });
+
   test('a row that keeps changing still gets its one line, from the drain, once the sandbox is stopped', async () => {
     const h = harness();
     await seedSandbox(h, 'READY');

@@ -3,6 +3,7 @@
 
 import { harness, maintenanceDeps, rowItem, seedSandbox, type Harness } from './harness';
 import { reapOnce } from '../src/reaper/reaper';
+import { handleLessStaleMs } from '../src/tool/config';
 import { runCode } from '../src/tool/run-code';
 
 const A = 'tenant-a';
@@ -364,6 +365,84 @@ describe('a pass', () => {
     expect(h.events('sandbox_stopped').filter((l) => l.handle === 'fake-1')).toEqual([]);
   });
 
+  describe('a call that died between its takeover and its stop of the replaced sandbox', () => {
+    async function died(h: Harness, backend: 'microvm' | 'nitro' = 'microvm') {
+      const old = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, backend);
+      const prev = (await h.registry.get(A, backend))!;
+      await h.registry.takeOver({
+        tenantId: A, backend, nonce: 'B'.repeat(43), now: h.clock.t, startCapMs: 20_000, sandboxMaxLifeMs: 8 * HOUR, replaces: old.handle,
+      }, prev);
+      return old;
+    }
+
+    test('while the row is young the reaper only stops the replaced sandbox: the call may still write its line', async () => {
+      const h = harness();
+      const old = await died(h);
+      h.clock.t += 1000;
+      const summary = await reapOnce(maintenanceDeps(h));
+      expect(summary.orphans).toBe(0);
+      expect(stops(h)).toEqual([old.handle]);
+      expect(h.events('sandbox_stopped')).toEqual([]);
+    });
+
+    test('once the row is old and unmarked the reaper writes the one missing line, and a second pass writes none', async () => {
+      const h = harness();
+      const old = await died(h);
+      h.clock.t += handleLessStaleMs(h.deps.config) + 1;
+      await reapOnce(maintenanceDeps(h));
+      expect(h.events('sandbox_stopped')).toEqual([expect.objectContaining({ handle: old.handle, by: 'reaper', reason: 'replaced', tenantId: A })]);
+      expect(h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')?.replacesLined).toBe(true);
+      await reapOnce(maintenanceDeps(h));
+      expect(h.events('sandbox_stopped')).toHaveLength(1);
+    });
+
+    test('a call that wrote the line marks the row, so the reaper writes none', async () => {
+      const h = harness();
+      await runCode({ tenantId: A, code: 'x' }, h.deps);
+      h.backends.get('microvm')!.script.nextRun = { kind: 'refused', refusal: { v: 1, error: 'dirty' } };
+      await runCode({ tenantId: A, code: 'x' }, h.deps);
+      expect(h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')).toMatchObject({ replaces: 'fake-1', replacesLined: true });
+      h.clock.t += handleLessStaleMs(h.deps.config) + 1;
+      await reapOnce(maintenanceDeps(h));
+      expect(h.events('sandbox_stopped')).toHaveLength(1);
+    });
+
+    test('a replaces that is the row\'s own handle is left alone', async () => {
+      const h = harness();
+      const own = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t });
+      h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replaces = own.handle;
+      h.db.row('TENANT#tenant-a', 'SANDBOX#microvm')!.replacesLined = false;
+      h.clock.t += handleLessStaleMs(h.deps.config) + 1;
+      await reapOnce(maintenanceDeps(h));
+      expect(stops(h)).toEqual([]);
+      expect(h.events('sandbox_stopped')).toEqual([]);
+    });
+
+    test('a replaces that the platform says belongs to another tenant is left alone', async () => {
+      const h = harness({ backends: ['nitro'], defaultBackend: 'nitro' });
+      await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'nitro', A);
+      const other = await seedSandbox(h, 'READY', { lastUsedAt: h.clock.t }, 'nitro', B);
+      h.db.row('TENANT#tenant-a', 'SANDBOX#nitro')!.replaces = other.handle;
+      h.db.row('TENANT#tenant-a', 'SANDBOX#nitro')!.replacesLined = false;
+      h.clock.t += handleLessStaleMs(h.deps.config) - 1000;
+      await reapOnce(maintenanceDeps(h));
+      expect(stops(h, 'nitro')).toEqual([]);
+      expect(h.events('sandbox_stopped')).toEqual([]);
+    });
+  });
+
+  test('a STOPPING row whose sandbox has left the list is deleted without a line, a FAILED row is kept', async () => {
+    const h = harness();
+    const stopping = await seedSandbox(h, 'STOPPING', {}, 'microvm', A);
+    const failed = await seedSandbox(h, 'FAILED', { retryAt: h.clock.t + 20_000 }, 'microvm', B);
+    h.backends.get('microvm')!.kill(stopping.handle);
+    h.backends.get('microvm')!.kill(failed.handle);
+    await reapOnce(maintenanceDeps(h));
+    expect(await row(h, A)).toBeUndefined();
+    expect(await row(h, B)).toMatchObject({ state: 'FAILED' });
+    expect(h.events('sandbox_stopped')).toEqual([]);
+  });
+
   test('one pass logs its totals', async () => {
     const h = harness();
     await reapOnce(maintenanceDeps(h));
@@ -395,8 +474,9 @@ describe('a pass', () => {
       }
       return realStop(handle, creds);
     });
-    await reapOnce(maintenanceDeps(h));
+    const summary = await reapOnce(maintenanceDeps(h));
     expect(h.events('stop_failed')).toHaveLength(1);
     expect(h.events('sandbox_stopped')).toHaveLength(2);
+    expect(summary.stopped).toBe(1);
   });
 });

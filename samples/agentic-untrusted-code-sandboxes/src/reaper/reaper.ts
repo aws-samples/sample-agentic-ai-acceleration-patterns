@@ -16,7 +16,7 @@ import type { BackendName, RegistryRow, SandboxBackend, SandboxSummary } from '.
 import { handleLessStaleMs, type ToolConfig } from '../tool/config';
 import { errorName, type Logger } from '../tool/log';
 import type { Registry, RowKey } from '../tool/registry';
-import { handleOf, orphanHandle, readStopFacts, stopQuietly, writeStopLine } from '../tool/sandbox';
+import { handleOf, orphanHandle, readStopFacts, settleReplaced, stopQuietly, writeStopLine } from '../tool/sandbox';
 
 /** A failed start backs off this long, as in the tool (spec §4.1). */
 const FAIL_BACKOFF_MS = 30_000;
@@ -92,19 +92,21 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
     return { key: { ...row, version }, stopped: await stopRow(backend, row, reason) };
   };
 
-  for await (const row of registry.scan()) {
+  for await (const scanned of registry.scan()) {
+    let row = scanned;
     stats.rows += 1;
     if (row.handle !== undefined) known.add(key(row.backend, row.handle));
     // A takeover names the handle it is replacing until that sandbox is stopped: it is not an orphan, and a stop that failed is retried.
-    if (row.replaces !== undefined) {
-      known.add(key(row.backend, row.replaces));
-      const old = live.get(row.backend)?.get(row.replaces);
-      const oldBackend = deps.backends.get(row.backend);
-      if (old !== undefined && oldBackend !== undefined) await stopQuietly(oldBackend, orphanHandle(old), log);
-    }
+    if (row.replaces !== undefined) known.add(key(row.backend, row.replaces));
     const backend = deps.backends.get(row.backend);
     if (backend === undefined) continue;
     try {
+      if (row.replaces !== undefined) {
+        const claimed = await settleReplaced({
+          row, listed: live.get(row.backend)?.get(row.replaces), backend, registry, log, config, now: deps.now(), by: 'reaper',
+        });
+        if (claimed !== undefined) row = { ...row, version: claimed, replacesLined: true };
+      }
       const now = deps.now();
       const summary = row.handle === undefined ? undefined : live.get(row.backend)?.get(row.handle);
       const expired = now >= row.expiresAt || (summary?.startedAt !== undefined && summary.startedAt + config.sandboxMaxLifeMs <= now);
@@ -115,8 +117,9 @@ export async function reapOnce(deps: ReaperDeps): Promise<ReaperSummary> {
         // Not listed means gone only when the list worked: a failed list says nothing about the sandbox.
         const notListed = listed.has(row.backend) && summary === undefined;
         const gone = notListed || handled === undefined || await stopQuietly(backend, handleOf(handled), log);
-        // The row stays while a stop is failing: it is what makes the next pass stop the sandbox again.
-        if (expired && gone && await registry.delete(row)) stats.deletedRows += 1;
+        // The row stays while a stop is failing: it is what makes the next pass stop the sandbox again. A STOPPING row
+        // whose sandbox has left the list has done its work (an offboard keeps it for a task that is still stopping).
+        if ((expired || (row.state === 'STOPPING' && notListed)) && gone && await registry.delete(row)) stats.deletedRows += 1;
         continue;
       }
 
