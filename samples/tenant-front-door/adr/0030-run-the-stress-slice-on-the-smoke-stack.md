@@ -61,5 +61,11 @@ which is not a budgeted quota.
   §6.4).
 - The smoke app gains two optional contexts, and its defaults keep the
   smoke test's names.
-- Revisit when the platform run composes the real control plane, or when
-  CloudFront Functions compute gets a Service Quotas code.
+- The slice's `collect` writes beyond the contract's late fields: it adds
+  the `edge` hop to `latency` and the router's compute reading to
+  `quotas.platform` in the records `run` wrote, and writes neither
+  `refusals` nor `cost`. That relies on the runner hashing the slice's own
+  records after `collect`.
+- Revisit when the platform run composes the real control plane, when
+  CloudFront Functions compute gets a Service Quotas code, or when the
+  contract names the `edge` hop and the compute reading.

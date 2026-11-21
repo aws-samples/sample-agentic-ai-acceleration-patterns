@@ -15,13 +15,14 @@
 #   slice.sh teardown [--fixtures]  the run's tenants, then the stacks (teardown.sh)
 #
 # Slice mode only: the front door runs on the smoke stack (a stand-in control
-# plane, one demo cell). The platform run, which composes the real control
-# plane and its global hooks, is a later work item: every verb but `budget`
-# refuses that mode.
+# plane, one demo cell; ADR-0030). Platform mode, with the real control plane
+# and its global hooks, is not part of this slice: every verb but `budget`
+# refuses it.
 #
 # Needs AWS_REGION and credentials for the account (every verb but budget),
-# STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME (deploy), bash, aws, jq, node and
-# the sample's npm install (run once when missing). Prints ids, counts and
+# STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME (deploy), bash, aws, jq, node, the
+# `smithy` CLI (deploy, on a fresh checkout) and npm (an `npm ci` of the
+# sample, run once when a package is missing). Prints ids, counts and
 # seconds only, never a token, a password or a key, and never runs `set -x`
 # (scripts/CONVENTIONS.md): the runner writes this output to run.log.
 

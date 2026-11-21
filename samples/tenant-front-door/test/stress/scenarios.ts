@@ -14,7 +14,8 @@ import type { Env, Manifest, Outputs, RequestLine, TenantEntry } from './state';
  * The four scenarios of the front-door slice (docs/stress-test.spec.md §5.2,
  * §5.1 PS-7). Each returns its result record and the request lines the join
  * with the edge log reads; none sends a token, a password or a key anywhere
- * but to the edge or the platform API it belongs to.
+ * but to the edge, the platform API it belongs to, or (PS-7's direct-origin
+ * probe) the cell origin the probe is for.
  */
 
 export const SCENARIOS = ['PS-7', 'route-write', 'router-load', 'edge-refusals'] as const;
@@ -263,7 +264,8 @@ export async function routeWrite(ctx: Ctx): Promise<Outcome> {
       // Wait before the next attempt, not after the last one: a given-up write must not add its wait to the burst's time.
       if (attempt < 4) await sleep(5000 * (0.5 + Math.random()));
     }
-    // A 503 after the driver's five attempts is counted, by cause, and does not fail the run: the hook retries it and the spec sets no limit before it is measured.
+    // A write not written: a 503 after the driver's five attempts (counted by cause, and not a failure: the hook retries it and the spec sets
+    // no limit on it) or a refusal, which is already a violation.
     failedWrites += 1;
   };
 
@@ -290,7 +292,7 @@ export async function routeWrite(ctx: Ctx): Promise<Outcome> {
     lines: sink.lines,
     failures: rec.failures,
     notes: [
-      `writes: burst ${burst.length} at once, then ${sustained.length} at ${plan.sustainedWritesPerSecond}/s; ${attempts} registrar calls, ${failedWrites} writes failed after five attempts`,
+      `writes: burst ${burst.length} at once, then ${sustained.length} at ${plan.sustainedWritesPerSecond}/s; ${attempts} registrar calls, ${failedWrites} writes not written (503 after five attempts, or refused)`,
       `the burst's ${burst.length} writes were all written (or given up) ${Math.round((burstDone - rec.started.getTime()) / 1000)} s after it started, the driver's own waits before a retry included`,
       `a route served once and refused again before it settled (edge locations learn a write at different times): ${flapping.length} of ${watches.length} routes, ${flapping.reduce((a, w) => a + w.flaps, 0)} requests`,
       `registrar 503 by cause: ${refused503.length === 0 ? 'none' : refused503.join(' ')}`,

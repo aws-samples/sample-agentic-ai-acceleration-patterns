@@ -27,7 +27,8 @@ export async function pool<T>(items: readonly T[], limit: number, fn: (item: T, 
  * Open-loop pacing: starts `fn(i)` at `rps` per second for `seconds`, whether
  * or not the earlier calls have returned (a slow edge must not slow the
  * load). At most `maxInflight` calls run at once; past that the pacer waits
- * for one to finish, and counts the call as `late`. Resolves when every call
+ * for one to finish. A call that starts more than a second after its slot
+ * counts as `late`, whichever held it back. Resolves when every call
  * has settled; rejects then with the first error a call threw, so a failed
  * call is never an unhandled rejection while the rest still run.
  */
@@ -45,8 +46,9 @@ export async function paced(
   for (let i = 0; i < total; i += 1) {
     const wait = start + (i * 1000) / rps - Date.now();
     if (wait > 0) await sleep(wait);
-    else if (wait < -1000) late += 1;
     if (inflight.size >= maxInflight) await Promise.race(inflight);
+    // Late: the call starts more than a second after its slot, whether the pacer or the in-flight cap held it back.
+    if (Date.now() - (start + (i * 1000) / rps) > 1000) late += 1;
     const p: Promise<void> = Promise.resolve()
       .then(() => fn(i))
       .catch((e: unknown) => {

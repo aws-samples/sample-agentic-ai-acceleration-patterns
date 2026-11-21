@@ -334,6 +334,12 @@ describe('load helpers', () => {
     expect(seen).toContain(1);
   });
 
+  it('counts a call the in-flight cap held back for more than a second as late', async () => {
+    const r = await paced(1000, 0.004, () => new Promise<void>((resolve) => setTimeout(resolve, 600)), 1);
+    expect(r.started).toBe(4);
+    expect(r.late).toBeGreaterThanOrEqual(1);
+  }, 20_000);
+
   it('rejects with the first error of a paced call after the others settled', async () => {
     const done: number[] = [];
     await expect(

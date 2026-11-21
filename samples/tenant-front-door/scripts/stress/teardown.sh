@@ -46,15 +46,9 @@ status=0
 TEARDOWN_START_MS="$(( $(date +%s) * 1000 ))"
 account="$(aws sts get-caller-identity --query Account --output text)"
 echo "teardown: account ${account}, ${AWS_REGION}, prefix ${PREFIX}"
-# The host's record of the prefix names the account it was made in. Another account's stacks of the same names are not this run's.
-for record in "$CONTEXT" "$OUTPUTS"; do
-  if [[ -s "$record" ]]; then
-    recorded="$(jq -r '.accountId // empty' "$record")"
-    if [[ "$recorded" != "$account" ]]; then
-      fail "${record} names account ${recorded:-none}, not ${account}: nothing was destroyed; use the credentials of that account, or another STRESS_HOME"
-    fi
-  fi
-done
+# The host's record of the prefix names the account and Region it was made in. Another account's or Region's stacks of the same names are not this run's.
+check_record "$CONTEXT" "$account"
+check_record "$OUTPUTS" "$account"
 
 driver() { (cd "$SAMPLE_DIR" && node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/driver.ts "$@"); }
 

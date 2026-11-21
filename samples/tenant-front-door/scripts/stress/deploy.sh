@@ -17,7 +17,8 @@
 # runtime-isolation integration test; two worked).
 #
 # Needs the tenant-identity shared-pool deployment's published parameters in
-# this Region, or in STRESS_FD_IDENTITY_REGION when it is another one. Prints one `stack=<name> deploy_seconds=<n>` line per stack.
+# this Region, or in STRESS_FD_IDENTITY_REGION when it is another one. Prints
+# one `stack=<name> deploy_seconds=<n>` line per stack.
 
 set -euo pipefail
 
@@ -42,13 +43,11 @@ ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 echo "deploy: account ${ACCOUNT}, ${AWS_REGION} (edge in ${EDGE_REGION}, identity in ${IDENTITY_REGION}), prefix ${PREFIX}, application domain ${APP_DOMAIN}"
 
 # A prefix whose stacks exist while this host has no deploy for it names stacks the run did not make, and teardown
-# would destroy them. A rerun after a failed deploy has its context file, which names the account it was made in.
-if [[ -s "$CONTEXT" ]]; then
-  RECORDED_ACCOUNT="$(jq -r '.accountId // empty' "$CONTEXT")"
-  if [[ "$RECORDED_ACCOUNT" != "$ACCOUNT" ]]; then
-    fail "the record of prefix ${PREFIX} on this host (${CONTEXT}) names account ${RECORDED_ACCOUNT:-none}, not ${ACCOUNT}: use another STRESS_PREFIX or STRESS_HOME, or remove the record after checking that no stack of the prefix is left in ${RECORDED_ACCOUNT:-that account}"
-  fi
-else
+# would destroy them. A rerun after a failed deploy has its context file. The context file and the outputs of an earlier deploy
+# name the account and Region they were made in.
+check_record "$CONTEXT" "$ACCOUNT"
+check_record "$OUTPUTS" "$ACCOUNT"
+if [[ ! -s "$CONTEXT" ]]; then
   for s in "$STACK_SUPPORT" "$STACK_CP" "$STACK_EDGE" "$STACK_MAIN" "$STACK_LOGGING" "$STACK_CELL"; do
     if stack_exists "$s"; then
       fail "stack ${s} exists and this host has no state for the prefix ${PREFIX}: pick another STRESS_PREFIX, or remove the stack"
@@ -90,8 +89,8 @@ total_start=$SECONDS
 # A rerun keeps what the earlier deploy recorded: teardown needs it to find the cell stack when this run stops early.
 OLD_CONTEXT='{}'
 [[ ! -s "$CONTEXT" ]] || OLD_CONTEXT="$(cat "$CONTEXT")"
-jq -n --arg p "$PREFIX" --arg f "$FLEET" --arg acct "$ACCOUNT" --argjson old "$OLD_CONTEXT" \
-  '($old | {distributionArn, cellIssuer, cellClientId} | with_entries(select(.value != null))) + {stackNamePrefix: $p, fleet: $f, accountId: $acct}' >"${CONTEXT}.new"
+jq -n --arg p "$PREFIX" --arg f "$FLEET" --arg acct "$ACCOUNT" --arg region "$AWS_REGION" --argjson old "$OLD_CONTEXT" \
+  '($old | {distributionArn, cellIssuer, cellClientId} | with_entries(select(.value != null))) + {stackNamePrefix: $p, fleet: $f, accountId: $acct, region: $region}' >"${CONTEXT}.new"
 mv "${CONTEXT}.new" "$CONTEXT"
 chmod 600 "$CONTEXT"
 deploy_stack "$STACK_SUPPORT" smoke
@@ -108,11 +107,11 @@ FIXTURE_TABLE="$(stack_output "$STACK_CP" FixtureTable)"
 
 # 2. The front door: edge (certificate, web ACL), main (distribution, router, route table, registrar), edge logging.
 jq -n --arg d "$APP_DOMAIN" --arg zi "$STRESS_FD_ZONE_ID" --arg zn "$STRESS_FD_ZONE_NAME" --arg app "$APPLICATION_ID" --arg f "$FLEET" --arg p "$PREFIX" \
-  --arg op "$OPERATOR_ROLE" --arg ac "$APP_CLIENT_ID" --argjson cp "$CONTROL_PLANE" --arg ci "$ISSUER" --arg ca "$APP_CLIENT_ID" \
+  --arg op "$OPERATOR_ROLE" --arg cid "$APP_CLIENT_ID" --argjson cp "$CONTROL_PLANE" --arg ci "$ISSUER" \
   '{appDomain: $d, hostedZone: {zoneId: $zi, zoneName: $zn}, applicationId: $app, controlPlane: $cp, dedicatedDomains: "false", fleet: $f,
-    edgeOperatorRoleArn: $op, issuer: {clientId: $ac, scopes: "openid", authorizeEndpoint: "https://issuer.example.com/oauth2/authorize",
+    edgeOperatorRoleArn: $op, issuer: {clientId: $cid, scopes: "openid", authorizeEndpoint: "https://issuer.example.com/oauth2/authorize",
     tokenEndpoint: "https://issuer.example.com/oauth2/token", logoutEndpoint: "https://issuer.example.com/logout"}, stackNamePrefix: $p,
-    cellIssuer: $ci, cellClientId: $ca}' | jq --arg acct "$ACCOUNT" --argjson old "$OLD_CONTEXT" '. + {accountId: $acct} + ($old | {distributionArn} | with_entries(select(.value != null)))' >"${CONTEXT}.new"
+    cellIssuer: $ci, cellClientId: $cid}' | jq --arg acct "$ACCOUNT" --arg region "$AWS_REGION" --argjson old "$OLD_CONTEXT" '. + {accountId: $acct, region: $region} + ($old | {distributionArn} | with_entries(select(.value != null)))' >"${CONTEXT}.new"
 mv "${CONTEXT}.new" "$CONTEXT"
 chmod 600 "$CONTEXT"
 deploy_stack "$STACK_EDGE" fd

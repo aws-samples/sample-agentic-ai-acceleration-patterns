@@ -56,6 +56,18 @@ SMOKE_APP="npx ts-node -P test/tsconfig.json --prefer-ts-exts test/smoke/smoke.a
 
 fail() { echo "slice: $*" >&2; exit 1; }
 
+# check_record FILE ACCOUNT: fails when the host's record of the prefix was made in another account or Region than the credentials and
+# AWS_REGION name. The prefix's stacks of another account or Region are not this run's, and the edge stacks in us-east-1 would be shared.
+check_record() {
+  local file="$1" account="$2" recorded_account recorded_region
+  [[ -s "$file" ]] || return 0
+  recorded_account="$(jq -r '.accountId // empty' "$file")"
+  recorded_region="$(jq -r '.region // empty' "$file")"
+  if [[ "$recorded_account" != "$account" || "$recorded_region" != "$AWS_REGION" ]]; then
+    fail "${file} names account ${recorded_account:-none} in ${recorded_region:-no Region}, not ${account} in ${AWS_REGION}: nothing was changed; use the credentials and Region it names, or another STRESS_PREFIX or STRESS_HOME"
+  fi
+}
+
 # Region of each stack: the edge stacks are in us-east-1 (ADR-0010), the rest in AWS_REGION.
 stack_region() {
   case "$1" in

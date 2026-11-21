@@ -45,8 +45,8 @@ cd stress
 
 The runner calls `slice.sh` with each verb (`budget`, `deploy`, `seed`,
 `run <scenario>`, `collect`, `teardown`), writes `results.md` and the records
-under `$STRESS_HOME/$STRESS_PREFIX/<run id>/`, and tears down when anything
-fails. `STRESS_HOME` defaults to `~/.aaa-stress`. The tier is `small`; the
+under `$STRESS_HOME/$STRESS_PREFIX/<run id>/`, and tears down at the end,
+also when anything fails. `STRESS_HOME` defaults to `~/.aaa-stress`. The tier is `small`; the
 slice reads `STRESS_TIER_JSON` and seeds `min(tenantsActive, 100)` active
 tenants, a write pool of `min(100, tenantsSeeded)` plus the sustained writes
 (30 at `small`, up to 60), and one spare: 71 tenants at `small`, up to 261 at
@@ -56,7 +56,7 @@ distribution, is most of it) and a destroy of the stacks about 9, with about
 
 | Input | Meaning |
 |---|---|
-| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it (the host's record of the prefix names the account it was made in, `deploy` and `teardown` refuse the credentials of another account, and a clean `teardown` clears the record) |
+| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it (the host's record of the prefix, `context.json` and `outputs.json`, names the account and Region it was made in, `deploy` and `teardown` refuse the credentials or the Region of another, and a clean `teardown` clears `context.json`) |
 | `STRESS_FD_ZONE_ID`, `STRESS_FD_ZONE_NAME` | the test subdomain's hosted zone; the front door's `appDomain` is `<prefix in lower case>.<zone name>`: one name per run prefix, so two runs never share a host |
 | `STRESS_FD_IDENTITY_REGION` | the Region of the `tenant-identity` shared pool when it is not `AWS_REGION` |
 
@@ -84,10 +84,9 @@ application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 | `router-load` | 10 requests a second for 40 s, then 40 a second for 20 s, over the active tenants; one in five carries a token padded to about 8,000 bytes that the cell refuses | no mismatch; every refusal is the cell's `403` for the padded token or its rate limit |
 | `edge-refusals` | 60 each of: no token, an undecodable token, a tenant with no route, a suspended tenant, a cross-site call, an Authorization over 8,192 bytes, `/agents`; first it routes the spare tenant, suspends it and reports the time from the suspend call to five 503s in a row | every request is refused with its reason; the cell's log has no line for the window |
 
-All four run against the smoke stack (ADR-0030), which has one cell. `PS-7` here is the
-stress spec's cross-cell probe set (§5.1) as far as one cell allows: the probes
-at the router, with no probe at a second cell. Platform mode is not part of this
-slice.
+All four run against the smoke stack (ADR-0030), which has one cell. `PS-7`
+here is the stress spec's cross-cell probe set (§5.1) as far as one cell
+allows: the probes at the router, with no probe at a second cell.
 
 Every answer is classified (`test/stress/classify.ts`) as served, or refused
 with a reason that names the hop (`edge-no-route`, `cell-forbidden`,
@@ -227,7 +226,8 @@ What the numbers say:
   again for every tenant of the manifest.
 - The driver runs on the host that runs the slice, not the stress driver host,
   so client latencies include that host's path to CloudFront.
-- A failed first write is retried four more times, 5 s apart; the real hook
+- A write answered 503 is retried four more times, about 5 s apart (2.5 to
+  7.5 s); the real hook
   retries five times over about two minutes.
 - CloudFront's own metrics have one point a minute; short scenarios share
   minutes.

@@ -5,10 +5,10 @@ import { ConflictException } from '@aws-sdk/client-cloudfront-keyvaluestore';
 
 /**
  * Whether a KeyValueStore write failed because its `IfMatch` ETag is stale (spec §3.4 step 5, M-15).
- * The store refuses the stale ETag with a conflict (409; 412 is read the same way). The data plane
- * answers a stale ETag as a `ValidationException` (400) whose message says the pre-condition failed:
- * seen live against a real KeyValueStore, so it is a conflict too, not a bad request. The registrar
- * and the route table's custom resource write the same store and use this one test.
+ * The API documents a `ConflictException` (409; 412 is read the same way) for a stale ETag. A real
+ * KeyValueStore answers a stale `IfMatch` with a `ValidationException` (400) whose message says the
+ * pre-condition failed, so that is a conflict too, not a bad request. The registrar and the route
+ * table's custom resource write the same store and use this one test.
  */
 export function isEtagConflict(error: unknown): boolean {
   if (error instanceof ConflictException) return true;
