@@ -387,7 +387,7 @@ describe('signedPut', () => {
 
 describe('liveEdge credentials', () => {
   const inputs = { edgeUrl: 'https://stress.example.com', registrarUrl: 'https://abc123.execute-api.us-east-1.amazonaws.com/prod', agentBackend: 'default' };
-  const creds = { accessKeyId: 'AKIATESTKEY0000', secretAccessKey: 'secret-test-value' };
+  const creds = { accessKeyId: 'AKIATESTKEY0000', secretAccessKey: 'secret-test-value' }; // pragma: allowlist secret (test fixture)
 
   function setup() {
     const clock = { t: 0 };
