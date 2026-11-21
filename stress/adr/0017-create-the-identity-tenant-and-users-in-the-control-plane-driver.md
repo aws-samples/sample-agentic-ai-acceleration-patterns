@@ -118,8 +118,9 @@ second global hook widens the set a platform deploy registers and tears down
 ## Decision
 Option 1. The driver of the `control-plane` slice, right after each
 tenant's deployment is `ACTIVE`, calls tenant-identity `CreateTenant` with
-the control-plane tenant id, `scopes` `["app/use"]` (the scope floor the
-ingress requires on every token) and an admin e-mail address, then
+the control-plane tenant id, `scopes` `["app/use"]` (the vendor scope the
+slice-mode tenants carry, which the driver first puts in the identity's
+scope catalogue with `PutScope`) and an admin e-mail address, then
 `CreateUser` for each further user the tier lists (spec §4.1 counts the
 admin among the users), through the IAM-signed platform API at the `apiUrl`
 of `identity.json`. It does this for each tenant PS-1 onboards, for the
@@ -160,8 +161,11 @@ limit first: at 8 `CreateTenant` calls a second the driver makes 16
 500 on most calls (tenant-identity ADR-0037). So the driver paces
 `CreateTenant` and `CreateUser` at about four calls a second, as the
 `tenant-identity` seed does (tenant-identity ADR-0042). A throttle that
-remains shows in PS-1's time, which is a result, not an error. Spec §4.4
-lists the draw in the `control-plane` column.
+remains shows in PS-1's time, which is a result, not an error. In a
+platform run the `tenant-identity` slice already books the groups of the
+control plane's tenants (tenant-identity ADR-0042, spec §4.4). The
+user-write categories have no id in the quota catalogue, so no slice books
+them.
 
 A throttled `CreateTenant` answers 503, and it may have created the tenant
 without its admin (tenant-identity ADR-0037). A blind repeat then answers
@@ -180,23 +184,23 @@ joint control-plane mount test covers it (tenant-identity
 The `control-plane` slice needs `identity.json`, a manifest of the
 `tenant-identity` slice, and its driver holds two credentials: the
 operator token for the control plane and the AWS session for the platform
-API. The
-runtime-isolation slice reads `identity[]` of `control-plane.json` (spec
-§4.2). Until the driver writes it, the runtime-isolation slice refuses every
-control-plane tenant and a platform run fails with the list.
+API. The runtime-isolation slice reads `identity[]` of `control-plane.json`
+(spec §4.2). Until the driver writes it, the runtime-isolation slice
+refuses every control-plane tenant and a platform run fails with the list.
 
 W-9 implements: the driver's identity calls after each tenant's deployment
-is `ACTIVE`, with the scope and e-mail address above; `identity[]` in
-`control-plane.json`, read by the runtime-isolation slice for control-plane
-tenants; `execute-api:Invoke` on the platform API for the driver's session;
-pacing at about four calls a second, retry with backoff, and the rule above
-for a half-created tenant; the Cognito draw in the slice's `budget`; the
-comment in `stress/application/scripts/tenant/create.sh`, which says the
-identity tenant joins that script when the slices compose; and the
-cleanup, in the `control-plane` `teardown`, of the identity tenants of every
-deployment of the run that has one: the seeded tenants of `small` and
-`medium` and, at `large`, the churn tenants PS-1 is timed on, which PS-5
-deleted. The `large` fleet's identity tenants stay with the fixture. The
+is `ACTIVE`, with the scope and e-mail address above and the `PutScope`
+before the first `CreateTenant`; `identity[]` in `control-plane.json`,
+and the runtime-isolation slice's read of it for control-plane tenants in
+place of `tenant-identity.json`; `execute-api:Invoke` on the platform API
+for the driver's session; pacing at about four calls a second, retry with
+backoff, and the rule above for a half-created tenant; the comment in
+`stress/application/scripts/tenant/create.sh`, which says the identity
+tenant joins that script when the slices compose; and the cleanup, in the
+`control-plane` `teardown`, of the identity tenants of every deployment of
+the run that has one: the seeded tenants of `small` and `medium` and, at
+`large`, the churn tenants that PS-1 onboards and removes. The `large`
+fleet's identity tenants stay with the fixture. The
 cleanup is needed because the control plane's `DeleteDeployment` does not
 remove them and the `tenant-identity` `teardown` knows only the tenants it
 seeded. Revisit if the tenant-identity sample gains a control-plane hook, or

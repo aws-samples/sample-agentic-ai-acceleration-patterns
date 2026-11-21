@@ -207,24 +207,27 @@ and the records in
    writes the tenant route once the deployment's event has run
    (front-door ADR-0017, front-door spec §3.2).
 4. When the deployment is `ACTIVE`, the driver of the `control-plane`
-   slice creates the tenant's identity with the IAM-signed admin API of the
-   stress identity (stress ADR-0017): tenant-identity `CreateTenant` with
-   the control-plane tenant id, `scopes` `["app/use"]` (the scope floor the
-   ingress requires on every token) and an admin e-mail address, which
-   creates the first admin, then `CreateUser` for each further user the tier
-   lists (§4.1; users per active tenant count the admin, so only active
-   tenants get further users). It does this for each tenant PS-1 onboards,
-   for the warm-up tenant (after front-door phase two, §3.5) and for the
-   `large` fleet's seed; a churn create (PS-5) gets identity calls only
-   where PS-1 is timed on it (`large`), because PS-5's own probes need no
-   token (§5.1). The driver then polls through the edge until the first
-   `report` is served. It then makes one `GET /api/whoami` call through the
-   edge to the cell API, whose answer carries the route hint (§5.3). The
-   identity calls and the polling are part of PS-1's time to the first
-   served request (§5.1). The run's first tenant is the warm-up tenant of
-   §3.5: its deployment builds the cell, and `/agents/*` is refused at the
-   edge (404, or CloudFront's own 403 for a `POST`) until front-door phase
-   two, so it is not timed in PS-1.
+   slice creates the tenant's identity with the IAM-signed admin API of
+   the stress identity (stress ADR-0017): tenant-identity `CreateTenant`
+   with the control-plane tenant id, `scopes` `["app/use"]` (the vendor
+   scope the slice-mode tenants carry; the driver puts it in the
+   identity's scope catalogue with `PutScope` first, as the
+   runtime-isolation `deploy` does in slice mode) and an admin e-mail
+   address, which creates the first admin, then `CreateUser` for each
+   further user the tier lists (§4.1; users per active tenant count the
+   admin, so only active tenants get further users). It does this for
+   each tenant PS-1 onboards, for the warm-up tenant (after front-door
+   phase two, §3.5) and for the `large` fleet's seed. At `large`, the
+   churn tenants that PS-1 onboards get identity calls too; the tenants
+   that PS-5 creates get none, because PS-5's own probes need no token
+   (§5.1). The driver then polls through the edge until the first
+   `report` is served. It then makes one `GET /api/whoami` call through
+   the edge to the cell API, whose answer carries the route hint (§5.3).
+   The identity calls and the polling are part of PS-1's time to the
+   first served request (§5.1). The run's first tenant is the warm-up
+   tenant of §3.5: its deployment builds the cell, and `/agents/*` is
+   refused at the edge (404, or CloudFront's own 403 for a `POST`) until
+   front-door phase two, so it is not timed in PS-1.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -287,8 +290,9 @@ built, so a slice-mode run leaves it out and refuses one named in
 The runner orders slices by their needs, and each slice runs its `deploy`
 and then its `seed` before the next slice starts, so a slice's `deploy`
 can read what an earlier slice seeded. `teardown` runs in the reverse
-order. The platform run's set-up interleaves the control-plane and
-front-door verbs (§3.5). The needs the three existing slices declare,
+order. The platform run's set-up needs the verbs of the control plane
+and the front door interleaved (§3.5), which the first platform run
+(W-9) adds to the runner. The needs the three existing slices declare,
 and the ones the front-door slice will declare (W-7), are:
 
 | Slice | Needs | `platformOnly` scenarios |
@@ -351,15 +355,16 @@ Teardown has one ordering rule that the reverse order alone does not
 give. In the reverse order the front door goes before the control plane,
 and the control plane's cell delete runs the front door's `PRE` hook
 (`CELL_DELETE`, `DEPLOYMENT_DELETE`) against the route registrar. The
-`tenant-front-door` `teardown` therefore unregisters its two global hooks
-from the control plane (`register-hooks.sh --delete`, front-door spec §5.2)
-before it removes the registrar, so the control plane deletes deployments
-and cells with no call to a registrar that is gone. The control plane is
-still deployed at that point. Front-door spec §6.2 removes the routes
-through the hooks first and unregisters the hooks last; here the registrar
-and the route table are destroyed in the same teardown, so no route needs
-removing. The rest of front-door spec §6.2's order follows: the policy out
-of `globalHookManagedPolicyArns` with a control-plane update, then
+`tenant-front-door` `teardown` therefore unregisters its two global
+hooks from the control plane (`register-hooks.sh --delete`, front-door
+spec §5.2) before it removes the registrar, so the control plane deletes
+deployments and cells with no call to a registrar that is gone. The
+control plane is still deployed at that point. Front-door spec §6.2
+removes the routes through the hooks first (step 1) and then unregisters
+the hooks (step 2); here the registrar and the route table are destroyed
+in the same teardown, so no route needs removing. The rest of front-door
+spec §6.2's order follows: the policy out of
+`globalHookManagedPolicyArns` with a control-plane update, then
 `RouteHookAccess` and its parameter, then the stacks; the slice's
 `teardown` verifies that none is left (§3.4).
 
@@ -541,24 +546,25 @@ A platform run uses four manifests:
 | `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` (W-7) | `agentic-runtime-isolation`; `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
 
 `agentic-runtime-isolation` also writes `manifest.json` (the tenants it
-drove) and `platform-tenants.json` (tenants it refused or ignored, by id and
-reason: `no-identity-tenant`, `no-user`, `not-in-control-plane`) in its own
-folder. It drives, in platform mode, every tenant in `control-plane.json`
-`seeded` that has an admin user in the `identity[]` of the same file, and
-builds that set when each scenario starts, because the control plane
-onboards its tenants in PS-1, after every `seed`. It stops when fewer than
-two tenants are usable. The identity tenants the control-plane driver
-creates (§3.3 step 4) are not in `tenant-identity.json`, which only that
-slice's `seed` writes; the driver records them in `identity[]` (stress
-ADR-0017, W-9), and a control-plane tenant with no entry is refused
-(`no-identity-tenant`). The `control-plane` `teardown` deletes the identity
-tenants of every deployment of the run that has one: the seeded tenants of
-`small` and `medium` and, at `large`, the churn tenants PS-1 is timed on,
-which PS-5 deleted; it removes their `identity[]` entries, because the
-control plane's `DeleteDeployment` does not and the `tenant-identity`
-`teardown` removes only the tenants it seeded; the reverse order of §3.4
-runs it before `tenant-identity`'s. The `large` fleet is a fixture (P-5):
-its identity tenants stay with it, and `--fixtures` removes them.
+drove) and `platform-tenants.json` (tenants it refused or ignored, by id
+and reason: `no-identity-tenant`, `no-user`, `not-in-control-plane`) in
+its own folder. It drives, in platform mode, every tenant in
+`control-plane.json` `seeded` that has an admin user in the `identity[]`
+of the same file, and builds that set when each scenario starts, because
+the control plane onboards its tenants in PS-1, after every `seed`. It
+stops when fewer than two tenants are usable. The identity tenants the
+control-plane driver creates (§3.3 step 4) are not in
+`tenant-identity.json`, which only that slice's `seed` writes; the
+driver records them in `identity[]` (stress ADR-0017, W-9), and a
+control-plane tenant with no entry is refused (`no-identity-tenant`).
+The `control-plane` `teardown` deletes the identity tenants of every
+deployment of the run that has one: the seeded tenants of `small` and
+`medium` and, at `large`, the churn tenants that PS-1 onboards and
+removes; it removes their `identity[]` entries, because the control
+plane's `DeleteDeployment` does not and the `tenant-identity` `teardown`
+removes only the tenants it seeded; the reverse order of §3.4 runs it
+before `tenant-identity`'s. The `large` fleet is a fixture (P-5): its
+identity tenants stay with it, and `--fixtures` removes them.
 `DeleteTenant` scans the whole pool in `shared-pool` (tenant-identity
 README), so that teardown's time at `large` is a result.
 
@@ -593,7 +599,7 @@ Each slice's `budget` fills its column; the runner sums per account.
 | KMS `Sign` | - | - | - | mint, tool contexts |
 | API Gateway control plane | deploy | deploy | deploy | deploy, tenant keys |
 | AgentCore Runtime sessions and TPS | - | - | - | agents |
-| Cognito (stress pool) | groups (2 per tenant) and users of the identity tenants it creates (§3.3 step 4, W-9) | groups (2 per tenant, 10,000 cap), auth | - | - |
+| Cognito (stress pool) | - | groups (2 per tenant, 10,000 cap), including those of the control plane's tenants in `platform` mode (§3.3 step 4), auth | - | - |
 | CloudFront Functions compute, KVS size | - | - | router, route table | - |
 
 ## 5. Scenarios
@@ -609,7 +615,7 @@ ADR-0016). Scenarios above `small` wait for Q-7.
 
 | Id | Shape | What it stresses | Watch |
 |---|---|---|---|
-| PS-1 onboarding | the tier's onboarding at `buildLimit`; at `large`, where the fleet is a fixture, PS-1 is timed on PS-5's creates | control plane, CodeBuild, tenant scripts, tenant-identity platform throttle, registrar | deployments per minute; time from `CreateDeployment` to the first served request, which includes the route hook build and the tenant's identity calls (§3.3 step 4), for every tenant but the warm-up tenant, which builds the cell before front-door phase two (§3.5); build failures by cause |
+| PS-1 onboarding | the tier's onboarding at `buildLimit`; at `large`, where the fleet is a fixture, PS-1 is timed on the churn tenants it onboards and removes | control plane, CodeBuild, tenant scripts, tenant-identity platform throttle, registrar | deployments per minute; time from `CreateDeployment` to the first served request, which includes the route hook build and the tenant's identity calls (§3.3 step 4), for every tenant but the warm-up tenant, which builds the cell before front-door phase two (§3.5); build failures by cause |
 | PS-2 steady through the edge | runtime-isolation S1 shape through CloudFront to the cell's ingress | every hop of the agent path (§3.3) | latency per hop; edge overhead; router compute utilisation |
 | PS-3 herd through the edge | S2 shape: ingress instances in the cell, 0 to the peak rate in 5 s. In platform mode the slice has no write access to the cell accounts and cannot retire the instances, so it waits 60 s idle and starts the herd there: the cold-start share is what the instances' age allows | cold starts behind the edge, per-account quotas | refusals by tenant; STS and Lambda throttles by account |
 | PS-4 noisy neighbour | S3 shape: one tenant at 10x its limit | the per-tenant limit behind the edge: the ingress's own for agent calls | that tenant refused; every other tenant on its cell served |
@@ -764,7 +770,7 @@ Q-5.
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | done in `samples/tenant-identity/scripts/stress/` |
 | W-7 front-door slice | the front door merged (done); its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | yes; phase two after W-11's ingress reader role |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part done; front-door part yes, now |
-| W-9 first platform run at `small`: also the control-plane driver's identity calls (§3.3 step 4) and the record of them that the runtime-isolation slice reads (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | no |
+| W-9 first platform run at `small`: also the control-plane driver's identity calls with the `PutScope` before the first (§3.3 step 4), the record of them and the runtime-isolation slice's read of that record in place of `tenant-identity.json` for control-plane tenants (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | no |
 
 ## 10. Open questions
 
