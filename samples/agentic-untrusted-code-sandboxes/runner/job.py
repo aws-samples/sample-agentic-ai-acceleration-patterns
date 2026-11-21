@@ -32,8 +32,9 @@ SWEEP_DEADLINE_S = 5.0
 # One budget for everything after a job ends: the kill, the sweep and the thread joins (M-2).
 # The tool waits timeoutMs + 5 s, so the answer comes with 2 s to spare.
 POST_JOB_DEADLINE_S = 3.0
-# Of that budget, how long the agentcore job group may take to show the memory the sweep freed (spec 3.5 step 3).
-DIRTY_POLL_S = 1.0
+# Of that budget, how long the agentcore job group may take to show the memory the sweep freed (spec 3.5 step 3):
+# all that is left of it. A memfd fill near L took more than 1 s to drain in the integration test.
+DIRTY_POLL_S = POST_JOB_DEADLINE_S
 READ_CHUNK = 65536
 CPU_LIMIT_SLACK_MS = 100
 PR_SET_NO_NEW_PRIVS = 38
@@ -516,8 +517,8 @@ class Executor:
         """dirty(), read again while the group drains.
 
         Memory the sweep freed takes a moment to leave the group's counters, so a read right after the
-        sweep can say dirty for a sandbox that is clean. Polls for at most DIRTY_POLL_S and never past
-        the post-job deadline; a read that fails counts as dirty.
+        sweep can say dirty for a sandbox that is clean. Polls until the post-job deadline (DIRTY_POLL_S
+        is the whole budget); a read that fails counts as dirty.
         """
         limit = min(deadline, time.monotonic() + DIRTY_POLL_S)
         while True:
