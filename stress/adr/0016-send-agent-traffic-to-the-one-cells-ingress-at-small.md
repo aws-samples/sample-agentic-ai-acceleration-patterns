@@ -83,8 +83,7 @@ Deploy: one front-door main-stack update per front-door release, an
 update of the existing distribution, unmeasured (the front door's spikes
 created a distribution stack in 221 s, S-5, to 506 s, S-3, which also
 deployed a cell in a second account, front-door `design/spikes.md`);
-none per run, since each cell's agent origin is a
-route-table write.
+none per run, since each cell's agent origin is a route-table write.
 
 ### Option 3: `small` only, with `agentIngress` set to the one cell's ingress
 At `small` the one cell's ingress is the only agent origin, so the
@@ -153,13 +152,13 @@ API (`samples/tenant-front-door/src/demo-cell/`), with `CellRouteAccess`,
 which takes the distribution ARN from a cell parameter, and writes that
 output (spec §3.3 step 2, §3.5). The cell source zip of ADR-0014 also
 carries `samples/tenant-front-door/src/demo-cell/` and `src/shared/` for
-it; this record amends ADR-0014 on that point. The demo cell API checks that its cell
-hosts the tenant under `/application-plane/tenants/<tenant id>/<app id>`,
-so the tenant script records the deployment in the parameter
-`.../<app id>/deployment` and does not write a route; this record amends
-ADR-0012 on those points. A tenant is
-routed on `/agents/*` only once its cell's API origin exists and its
-cell route is registered.
+it; this record amends ADR-0014 on that point. The demo cell API checks
+that its cell hosts the tenant under
+`/application-plane/tenants/<tenant id>/<app id>`, so the tenant script
+records the deployment in the parameter `.../<app id>/deployment` and
+does not write a route; this record amends ADR-0012 on those points. A
+tenant is routed on `/agents/*` only once its cell's API origin exists
+and its cell route is registered.
 
 Phase two reads the ingress's `baseUrl` from its published parameter in
 the cell account, `StressCell-<cellId>/ingress` under
