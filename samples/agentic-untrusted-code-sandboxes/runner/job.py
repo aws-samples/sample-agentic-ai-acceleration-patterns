@@ -538,6 +538,7 @@ class Executor:
         while True:
             try:
                 if not self.dirty():
+                    self._log_if_clean_by_reclaimable_slab()
                     return False
             except (OSError, ValueError) as e:
                 log("dirty_check_failed", error=type(e).__name__)
@@ -549,6 +550,19 @@ class Executor:
                     log("dirty_group_unreadable", error=type(e).__name__)
                 return True
             time.sleep(min(0.05, max(0.0, limit - time.monotonic())))
+
+    def _log_if_clean_by_reclaimable_slab(self) -> None:
+        """Logs the split (`clean_by_reclaimable_slab`) when only leaving out reclaimable slab made the group clean, so a
+        passing run still shows how the leftover split. Never changes the verdict."""
+        if self.backend != "agentcore" or not self.job_group:
+            return
+        try:
+            g = self.job_group
+            if sz.counted(read_text(os.path.join(g, "memory.current")),
+                          read_text(os.path.join(g, "memory.stat"))) >= sz.AGENTCORE_DIRTY:
+                log("clean_by_reclaimable_slab", **self.group_memory())
+        except (OSError, ValueError):
+            pass
 
     def kill_all(self) -> None:
         """On SIGTERM: end any job. No reap here: a job thread may still be in Popen.wait()."""

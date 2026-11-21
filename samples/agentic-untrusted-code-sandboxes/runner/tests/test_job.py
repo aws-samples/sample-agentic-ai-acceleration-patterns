@@ -210,6 +210,20 @@ class SettledDirtyTest(unittest.TestCase):
                 write(os.path.join(self.dir.name, "memory.stat"), stat)
                 self.assertTrue(self.ex.dirty())
 
+    def test_a_group_clean_only_by_reclaimable_slab_logs_its_split(self):
+        self.set_memory(215 * MIB)
+        write(os.path.join(self.dir.name, "memory.stat"), "anon 0\nfile 0\nshmem 0\nslab %d\nslab_reclaimable %d\nslab_unreclaimable 0\n" % (215 * MIB, 215 * MIB))
+        with mock.patch.object(jb, "log") as log:
+            self.assertFalse(self.ex.settled_dirty(time.monotonic() + 3))
+        log.assert_any_call("clean_by_reclaimable_slab", current_mib=215, counted_mib=0, anon_mib=0, file_mib=0, shmem_mib=0,
+                            slab_mib=215, slab_reclaimable_mib=215, slab_unreclaimable_mib=0)
+
+    def test_a_plainly_clean_group_logs_nothing(self):
+        self.set_memory(MIB)
+        with mock.patch.object(jb, "log") as log:
+            self.assertFalse(self.ex.settled_dirty(time.monotonic() + 3))
+        log.assert_not_called()
+
     def test_just_under_32_mib_after_reclaimable_slab_is_clean(self):
         self.set_memory(246 * MIB)
         write(os.path.join(self.dir.name, "memory.stat"), "anon 0\nfile 0\nshmem 0\nslab %d\nslab_reclaimable %d\nslab_unreclaimable %d\n" % (246 * MIB, 215 * MIB, 31 * MIB))
