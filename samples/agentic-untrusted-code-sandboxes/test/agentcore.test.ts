@@ -5,6 +5,7 @@ import {
   BedrockAgentCoreClient,
   InvokeAgentRuntimeCommand,
   ResourceNotFoundException,
+  RetryableConflictException,
   RuntimeClientError,
   StopRuntimeSessionCommand,
   ThrottlingException,
@@ -267,6 +268,12 @@ describe('run', () => {
     const { backend, handle } = await started();
     mock.on(InvokeAgentRuntimeCommand).rejects(new RuntimeClientError({ message: 'container', $metadata: {} }));
     expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'runtime_client_error' });
+  });
+
+  test('a conflict on the session (a concurrent first call) is a busy refusal', async () => {
+    const { backend, handle } = await started();
+    mock.on(InvokeAgentRuntimeCommand).rejects(new RetryableConflictException({ message: 'busy', $metadata: {} }));
+    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'refused', refusal: { v: 1, error: 'busy' } });
   });
 
   test('a throttle or any other error reaches the caller', async () => {

@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { conversationIdFor, ensureScope } from './agent-path';
+import { agentRequestBody, ensureScope } from './agent-path';
 import { EVIDENCE_LINE_CHARS, EVIDENCE_LINES, evidenceLines } from './cloud';
 import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix } from './common';
 import { Ctx, TOKEN_REUSE_MS } from './ctx';
@@ -189,8 +189,8 @@ describe('the consumer path and the evidence', () => {
     // never a delete: the shared pool keeps the scope
     expect(calls.some((x) => x.startsWith('DELETE'))).toBe(false);
   });
-  test('the conversation id fits the ingress schema for a short run id', () => {
-    for (const id of ['mwpsjpw7', 'a', 'x'.repeat(80), 'ab-cd_9']) expect(conversationIdFor(id)).toMatch(/^[A-Za-z0-9]{16,64}$/);
+  test('the agent call sends only the prompt (the ingress model has additionalProperties false and no session scope)', () => {
+    expect(JSON.parse(agentRequestBody('tool x/y {}'))).toEqual({ prompt: 'tool x/y {}' });
   });
   test('evidence keeps the last lines, each cut to size, on one line', () => {
     const lines = evidenceLines(Array.from({ length: EVIDENCE_LINES + 5 }, (_, i) => `line ${i}\n${'y'.repeat(EVIDENCE_LINE_CHARS)}`));

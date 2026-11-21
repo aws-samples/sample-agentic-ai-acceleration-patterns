@@ -61,6 +61,7 @@ and returns `no_answer`. It returns:
 | a result with another `runId` or a proof that does not match | `dead`, `identity_check_failed` |
 | anything else a body can be: not JSON, not an object, a field of the wrong type, an unknown refusal code, a status other than 200 | `dead`, with a reason |
 | `ResourceNotFoundException`, `RuntimeClientError` | `dead`, `not_found` or `runtime_client_error` |
+| `RetryableConflictException` (the session is busy with another call, for example two first calls of one tenant at once; the platform refuses before the runner sees the job) | `refused`, `busy` |
 | any other error (throttle, access denied, network) | thrown to the caller |
 
 A dead handle makes the tool stop the session and start a new one under the
