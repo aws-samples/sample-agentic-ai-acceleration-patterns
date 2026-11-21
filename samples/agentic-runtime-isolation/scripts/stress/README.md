@@ -169,5 +169,12 @@ Estimates from the plan; the scripts print the measured figures.
 - `large` reserves 800 + 1,000 Lambda concurrency (ADR-0049): the account's
   Lambda concurrency quota must be at least 1,900 before `deploy` at that
   scale, or CloudFormation refuses the reserve.
-- In the platform run (`STRESS_MODE=platform`) every verb but `budget` refuses
-  until the control plane deploys this sample as a cell (W-5).
+- In the platform run (`STRESS_MODE=platform`) the slice deploys no cell: the cells
+  are the control plane's. `deploy` and `seed` check the manifests the other
+  slices write, `run` sends the S1, S2, S3, S5 and S6 shapes to the edge as
+  `PS-2`, `PS-3`, `PS-4`, `PS-6` and `PS-8`, `collect` takes each refusal's
+  tenant and reason from k6's own lines (`collect-platform.sh`), and `teardown`
+  removes only the files `run` wrote and a k6 host its own `deploy` made.
+  `S1` to `S7` refuse the platform mode and `PS-n` refuses the slice mode. The
+  manifests and what each field is for are in
+  [`stress/README.md`](../../../../stress/README.md#platform-mode-manifests).

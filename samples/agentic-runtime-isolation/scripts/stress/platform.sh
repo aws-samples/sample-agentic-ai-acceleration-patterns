@@ -1,0 +1,89 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# What slice.sh needs in platform mode (STRESS_MODE=platform; docs/stress-test.spec.md §3.3,
+# §3.4, §4.2; stress/README.md, "Platform mode: manifests"). Sourced, not run.
+#
+# In platform mode the slice deploys no cell and seeds nothing. The control plane builds the
+# cells, tenant-identity holds the users, and the front door is the edge, so the slice reads
+# the manifests those slices wrote to $STRESS_HOME/$STRESS_PREFIX and drives the edge. Needs
+# jq, STRESS_HOME, STRESS_PREFIX, STRESS_TIER and STRESS_STATE_DIR (slice.sh sets the last).
+
+# The manifests, the slice that writes each one, and what the slice reads from it.
+PLATFORM_MANIFEST_DIR="${STRESS_HOME:-}/${STRESS_PREFIX:-}"
+PLATFORM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+platform_producer() {
+  case "$1" in
+    tenant-front-door.json) echo tenant-front-door ;;
+    identity.json | tenant-identity.json) echo tenant-identity ;;
+    control-plane.json) echo control-plane ;;
+  esac
+}
+
+# need_platform_inputs VERB -> exits 1 naming every manifest that is missing or unusable.
+# Sets EDGE_URL (an https origin, no path), IDENTITY_API (with a trailing slash), IDENTITY_CLIENT,
+# IDENTITY_REGION and IDENTITY_ISSUER (the stress identity's token issuer).
+need_platform_inputs() {
+  local verb="$1" f bad=0 d="$PLATFORM_MANIFEST_DIR"
+  for f in tenant-front-door.json identity.json control-plane.json tenant-identity.json; do
+    if [[ ! -s "${d}/${f}" ]]; then
+      echo "slice.sh ${verb}: platform mode reads ${d}/${f}, which the $(platform_producer "$f") slice writes; it is missing" >&2
+      bad=1
+    elif ! jq -e 'type == "object"' "${d}/${f}" >/dev/null 2>&1; then
+      echo "slice.sh ${verb}: ${d}/${f} (written by the $(platform_producer "$f") slice) is not a JSON object" >&2
+      bad=1
+    fi
+  done
+  (( bad == 0 )) || exit 1
+
+  EDGE_URL="$(jq -r '.edgeUrl // empty' "${d}/tenant-front-door.json")"
+  EDGE_URL="${EDGE_URL%/}"
+  [[ "$EDGE_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] \
+    || { echo "slice.sh ${verb}: tenant-front-door.json (written by the tenant-front-door slice): edgeUrl must be an https origin with no path (got '${EDGE_URL:-nothing}')" >&2; exit 1; }
+
+  EDGE_BACKEND="$(jq -r '.agentBackend // "default"' "${d}/tenant-front-door.json")"
+  [[ "$EDGE_BACKEND" =~ ^[a-z0-9-]{1,32}$ ]] \
+    || { echo "slice.sh ${verb}: tenant-front-door.json (written by the tenant-front-door slice): agentBackend must match [a-z0-9-]{1,32}" >&2; exit 1; }
+
+  IDENTITY_API="$(jq -r '.apiUrl // empty' "${d}/identity.json")"
+  IDENTITY_CLIENT="$(jq -r '.appClientId // empty' "${d}/identity.json")"
+  IDENTITY_REGION="$(jq -r '.region // empty' "${d}/identity.json")"
+  local pool
+  pool="$(jq -r '.userPoolId // empty' "${d}/identity.json")"
+  [[ "$IDENTITY_API" =~ ^https://[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com(/[A-Za-z0-9_./-]*)?$ ]] \
+    || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): apiUrl must be an execute-api URL (got '${IDENTITY_API:-nothing}')" >&2; exit 1; }
+  [[ "$IDENTITY_API" == */ ]] || IDENTITY_API="${IDENTITY_API}/"
+  [[ "$IDENTITY_CLIENT" =~ ^[A-Za-z0-9]{1,128}$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): appClientId is missing or malformed" >&2; exit 1; }
+  [[ "$IDENTITY_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): region is missing or malformed" >&2; exit 1; }
+  [[ "$pool" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]_[A-Za-z0-9]+$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): userPoolId is missing or malformed" >&2; exit 1; }
+  IDENTITY_ISSUER="https://cognito-idp.${IDENTITY_REGION}.amazonaws.com/${pool}"
+
+  for f in control-plane.json tenant-identity.json; do
+    jq -e '.seeded | type == "array"' "${d}/${f}" >/dev/null 2>&1 \
+      || { echo "slice.sh ${verb}: ${d}/${f} (written by the $(platform_producer "$f") slice): \"seeded\" must be an array" >&2; exit 1; }
+  done
+}
+
+# build_platform_manifest TIER_JSON FILE -> writes the manifest of the tenants this run drives
+# to FILE (the shape k6's loadManifest reads) and the refusals to
+# $STRESS_STATE_DIR/platform-tenants.json, prints each refusal by tenant and reason, and exits
+# 1 when fewer than two tenants are usable (the read-other probe needs two).
+build_platform_manifest() {
+  local tier="$1" out="$2" active built usable total d="$PLATFORM_MANIFEST_DIR"
+  active="$(jq -er .tenantsActive <<<"$tier")" || { echo "slice.sh run: the tier has no tenantsActive" >&2; exit 1; }
+  built="$(jq -n --slurpfile cp "${d}/control-plane.json" --slurpfile ti "${d}/tenant-identity.json" \
+    --argjson active "$active" --arg scale "${STRESS_TIER:-}" -f "${PLATFORM_DIR}/platform-tenants.jq")" \
+    || { echo "slice.sh run: could not read ${d}/control-plane.json and ${d}/tenant-identity.json" >&2; exit 1; }
+  mkdir -p -m 700 "$STRESS_STATE_DIR"
+  ( umask 077; jq .manifest <<<"$built" >"$out" )
+  ( umask 077; jq '{refused, ignored}' <<<"$built" >"${STRESS_STATE_DIR}/platform-tenants.json" )
+  usable="$(jq '.manifest.tenants | length' <<<"$built")"
+  total="$(jq '(.manifest.tenants | length) + (.refused | length)' <<<"$built")"
+  echo "platform tenants: ${usable} of ${total} steady tenants usable, $(jq '.ignored | length' <<<"$built") identity tenants outside the control plane ignored"
+  jq -r '.refused[] | "  refused \(.tenantId): \(.reason)"' <<<"$built"
+  if (( usable < 2 )); then
+    echo "slice.sh run: platform mode needs at least two usable tenants, ${usable} found: onboard the control plane's tenants (PS-1) and give them users in tenant-identity.json first" >&2
+    exit 1
+  fi
+}
