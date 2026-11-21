@@ -42,8 +42,13 @@ ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 echo "deploy: account ${ACCOUNT}, ${AWS_REGION} (edge in ${EDGE_REGION}, identity in ${IDENTITY_REGION}), prefix ${PREFIX}, application domain ${APP_DOMAIN}"
 
 # A prefix whose stacks exist while this host has no deploy for it names stacks the run did not make, and teardown
-# would destroy them. A rerun after a failed deploy has its context file.
-if [[ ! -s "$CONTEXT" ]]; then
+# would destroy them. A rerun after a failed deploy has its context file, which names the account it was made in.
+if [[ -s "$CONTEXT" ]]; then
+  RECORDED_ACCOUNT="$(jq -r '.accountId // empty' "$CONTEXT")"
+  if [[ "$RECORDED_ACCOUNT" != "$ACCOUNT" ]]; then
+    fail "the record of prefix ${PREFIX} on this host (${CONTEXT}) names account ${RECORDED_ACCOUNT:-none}, not ${ACCOUNT}: use another STRESS_PREFIX or STRESS_HOME, or remove the record after checking that no stack of the prefix is left in ${RECORDED_ACCOUNT:-that account}"
+  fi
+else
   for s in "$STACK_SUPPORT" "$STACK_CP" "$STACK_EDGE" "$STACK_MAIN" "$STACK_LOGGING" "$STACK_CELL"; do
     if stack_exists "$s"; then
       fail "stack ${s} exists and this host has no state for the prefix ${PREFIX}: pick another STRESS_PREFIX, or remove the stack"
@@ -85,8 +90,8 @@ total_start=$SECONDS
 # A rerun keeps what the earlier deploy recorded: teardown needs it to find the cell stack when this run stops early.
 OLD_CONTEXT='{}'
 [[ ! -s "$CONTEXT" ]] || OLD_CONTEXT="$(cat "$CONTEXT")"
-jq -n --arg p "$PREFIX" --arg f "$FLEET" --argjson old "$OLD_CONTEXT" \
-  '($old | {distributionArn, cellIssuer, cellClientId} | with_entries(select(.value != null))) + {stackNamePrefix: $p, fleet: $f}' >"${CONTEXT}.new"
+jq -n --arg p "$PREFIX" --arg f "$FLEET" --arg acct "$ACCOUNT" --argjson old "$OLD_CONTEXT" \
+  '($old | {distributionArn, cellIssuer, cellClientId} | with_entries(select(.value != null))) + {stackNamePrefix: $p, fleet: $f, accountId: $acct}' >"${CONTEXT}.new"
 mv "${CONTEXT}.new" "$CONTEXT"
 chmod 600 "$CONTEXT"
 deploy_stack "$STACK_SUPPORT" smoke
@@ -107,7 +112,7 @@ jq -n --arg d "$APP_DOMAIN" --arg zi "$STRESS_FD_ZONE_ID" --arg zn "$STRESS_FD_Z
   '{appDomain: $d, hostedZone: {zoneId: $zi, zoneName: $zn}, applicationId: $app, controlPlane: $cp, dedicatedDomains: "false", fleet: $f,
     edgeOperatorRoleArn: $op, issuer: {clientId: $ac, scopes: "openid", authorizeEndpoint: "https://issuer.example.com/oauth2/authorize",
     tokenEndpoint: "https://issuer.example.com/oauth2/token", logoutEndpoint: "https://issuer.example.com/logout"}, stackNamePrefix: $p,
-    cellIssuer: $ci, cellClientId: $ca}' | jq --argjson old "$OLD_CONTEXT" '. + ($old | {distributionArn} | with_entries(select(.value != null)))' >"${CONTEXT}.new"
+    cellIssuer: $ci, cellClientId: $ca}' | jq --arg acct "$ACCOUNT" --argjson old "$OLD_CONTEXT" '. + {accountId: $acct} + ($old | {distributionArn} | with_entries(select(.value != null)))' >"${CONTEXT}.new"
 mv "${CONTEXT}.new" "$CONTEXT"
 chmod 600 "$CONTEXT"
 deploy_stack "$STACK_EDGE" fd

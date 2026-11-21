@@ -1057,19 +1057,20 @@ given below):
    write at most five times, with a jittered backoff of 50 to 500 ms
    between attempts, and then answers 503, which the route hook
    retries (route hook step 4: five attempts over about two
-   minutes). These bounds are chosen. The rates that follow are
-   measured by the stress slice (`scripts/stress/README.md`, small tier,
-   a burst of 20 writes at once, then one write a second for 30 s): a
-   write takes 0.50 s at the median, 7.2 to 7.8 s at the 95th
-   percentile and 8.2 to 8.6 s at the 99th, because every writer waits
-   on the store's one ETag. The 20 writes of the burst are all written
-   within 16 s, which includes the measuring client's own wait of about
-   5 s before it tries a 503 again, so the store takes no longer than
-   that.
-   About one registrar call in twelve of such a run ends in 503 after
-   five attempts, which the route hook retries. The load assumed is
-   about one write a second; nothing throttles the registrar to it, and
-   at that load the store has room for the retries. A burst of 20
+   minutes). These bounds are chosen, and so is the stage throttle,
+   10 calls a second with a burst of 100. The rates that follow are
+   measured by the stress slice (`scripts/stress/README.md`, small
+   tier). A run starts with a burst of 20 writes at once, then writes
+   one a second for 30 s. In such a run a write takes 0.50 s at the
+   median, 7.2 to 7.8 s at the 95th percentile and 8.2 to 8.6 s at the
+   99th, because every writer waits on the store's one ETag. The 20
+   writes of the burst are all written within 16 s, which includes the
+   measuring client's own wait of about 5 s before it tries a 503
+   again, so the store takes no longer than that. About one registrar
+   call in twelve of such a run answers 503 after the registrar's five
+   attempts, and the route hook retries it. The load assumed is about
+   one write a second; nothing throttles the registrar to it, and at
+   that load the store has room for the retries. A burst of 20
    creates at once is the largest one characterised, and the capacity
    above it is not. A burst the store cannot clear within the hook's
    retries leaves creates in `CREATE_FAILED`, which the operator
@@ -2395,6 +2396,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0026](../adr/0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to each cell account as a plain string | a JSON document; a plain string |
 | [ADR-0027](../adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Proposed. Write the front door hook parameter, one JSON document, from a `registrarUrl` input once the main stack is deployed | an input read after the main stack's deploy; the hook reads the edge parameter across accounts; a fixed registrar domain; a separate app |
 | [ADR-0029](../adr/0029-join-stress-requests-on-the-cloudfront-request-id.md) | Join the stress slice's requests to the edge log on the CloudFront request id, with no correlation header; the origin is joined by counts | the stress ADR-0005 correlation header; the CloudFront request id; X-Ray trace ids |
+| [ADR-0030](../adr/0030-run-the-stress-slice-on-the-smoke-stack.md) | Run the stress slice on the smoke stack, its stacks, hook role and construct id named by a run prefix; budget Lambda concurrency only | the smoke stack named by a prefix; a stack of its own in the front door app; wait for platform mode |
 
 ## 9. Spikes
 

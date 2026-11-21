@@ -56,7 +56,7 @@ distribution, is most of it) and a destroy of the stacks about 9, with about
 
 | Input | Meaning |
 |---|---|
-| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it (a clean `teardown` clears the host's record of the prefix) |
+| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it (the host's record of the prefix names the account it was made in, `deploy` and `teardown` refuse the credentials of another account, and a clean `teardown` clears the record) |
 | `STRESS_FD_ZONE_ID`, `STRESS_FD_ZONE_NAME` | the test subdomain's hosted zone; the front door's `appDomain` is `<prefix in lower case>.<zone name>`: one name per run prefix, so two runs never share a host |
 | `STRESS_FD_IDENTITY_REGION` | the Region of the `tenant-identity` shared pool when it is not `AWS_REGION` |
 
@@ -73,7 +73,7 @@ application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 | `seed` | tenants in `tenant-identity`, each tenant's namespace parameter in the cell's Region and its records in the stand-in control plane, the cell route and the active tenants' routes written through the registrar as the global hook role, and a wait until every active route answers five times in a row. It registers the vendor scope `app/use` on the shared pool when the catalogue lacks it, and leaves it there, as a later run reuses it |
 | `run <scenario>` | one scenario, one result record, one request log (below) |
 | `collect` | reads the edge and cell logs and the router's metrics for each scenario's window and checks them against the driver's counts; writes the `edge` hop and the router's compute utilization into the records |
-| `teardown` | the run's tenants, routes and parameters (the vendor scope `app/use` stays); then the stacks, last deployed first; then a check that nothing is left. Prints `stack=<name> destroy_seconds=<n>` for each |
+| `teardown` | the run's tenants (at `large`, only with `--fixtures`), routes and parameters (the vendor scope `app/use` stays); then the stacks, last deployed first; then a check that nothing is left. Prints `stack=<name> destroy_seconds=<n>` for each |
 
 ## Scenarios
 
@@ -84,7 +84,7 @@ application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 | `router-load` | 10 requests a second for 40 s, then 40 a second for 20 s, over the active tenants; one in five carries a token padded to about 8,000 bytes that the cell refuses | no mismatch; every refusal is the cell's `403` for the padded token or its rate limit |
 | `edge-refusals` | 60 each of: no token, an undecodable token, a tenant with no route, a suspended tenant, a cross-site call, an Authorization over 8,192 bytes, `/agents`; first it routes the spare tenant, suspends it and reports the time from the suspend call to five 503s in a row | every request is refused with its reason; the cell's log has no line for the window |
 
-All four run against the smoke stack, which has one cell. `PS-7` here is the
+All four run against the smoke stack (ADR-0030), which has one cell. `PS-7` here is the
 stress spec's cross-cell probe set (§5.1) as far as one cell allows: the probes
 at the router, with no probe at a second cell. Platform mode is not part of this
 slice.
@@ -171,8 +171,9 @@ teardown that sweeps 71 tenants adds about 6.5 minutes before the stacks go:
 What the numbers say:
 
 - A write takes half a second when alone and up to about 9 s when 20 contend
-  for the store's one ETag; about one call in twelve ends in 503 after five
-  attempts. The route hook retries those. The 15 to 16 s the burst took
+  for the store's one ETag; about one call in twelve is answered 503 after the
+  registrar's five store attempts. The route hook retries those, as the driver
+  does. The 15 to 16 s the burst took
   includes the driver's own wait (about 5 s) before it retries a 503, so it is
   an upper bound on the store's time, not its throughput.
 - A route is not seen everywhere at once. Edge locations learn a write at
@@ -245,4 +246,4 @@ What the numbers say:
 |---|---|
 | `slice.sh`, `slice.json` | the verbs and the declaration the runner reads |
 | `deploy.sh`, `teardown.sh`, `lib.sh` | stacks and what they leave behind |
-| `../../test/stress/` | the driver: `driver.ts` (verbs), `scenarios.ts`, `classify.ts`, `sink.ts`, `recorder.ts`, `collect.ts`, `join.ts`, `clients.ts`, `sigv4.ts`, `plan.ts`, `http.ts`, `load.ts`, `state.ts`; unit tests in `stress.test.ts` |
+| `../../test/stress/` | the driver: `driver.ts` (verbs), `scenarios.ts`, `classify.ts`, `sink.ts`, `recorder.ts`, `collect.ts`, `join.ts`, `clients.ts`, `sigv4.ts`, `plan.ts`, `http.ts`, `load.ts`, `state.ts`; unit tests in `stress.test.ts` and, for the guards of `slice.sh`, `slice-guards.test.ts` |

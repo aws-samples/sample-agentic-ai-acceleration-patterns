@@ -36,7 +36,7 @@ sampling drops requests under load.
 Option 2. The slice joins each request to its edge log line on
 `x-amz-cf-id` and `x-edge-request-id`, and compares the cell's log with
 the driver's count of requests that reached the cell, by status. The
-router, the cell and the front door's threat model stay as they are,
+router and the cell stay as they are, and the join adds no threat,
 because no client header is logged or forwarded.
 
 ## Consequences
