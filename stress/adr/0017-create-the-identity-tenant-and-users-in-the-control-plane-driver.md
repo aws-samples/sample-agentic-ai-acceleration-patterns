@@ -118,24 +118,28 @@ caller; a second global hook widens the set a platform deploy registers
 and tears down (spec §3.5).
 
 ## Decision
-Option 1. In a platform run, the driver of the `control-plane` slice,
-right after each tenant's deployment is `ACTIVE`, calls tenant-identity
-`CreateTenant` with the control-plane tenant id, `scopes` `["app/use"]`
-(the vendor scope the slice-mode tenants carry, which the driver first
-puts in the identity's scope catalogue with `PutScope`) and an admin
-e-mail address, then `CreateUser` for each further user the tier lists
-(spec §4.1 counts the admin among the users), through the IAM-signed
-platform API at the `apiUrl` of `identity.json`. It does this for each
-tenant PS-1 onboards, for the warm-up tenant (after front-door phase
-two) and for the `large` fleet's seed, as spec §3.3 step 4 says. The
-tenant script keeps only the entitlement call. The calls are part of
-PS-1's time to the first served request. The driver never writes a
-temporary password or a token to disk (spec §4.2).
-
-The driver records the admin and users it creates in `identity[]` of
-`control-plane.json`. The runtime-isolation slice reads that list for
-control-plane tenants, in place of the lookup in `tenant-identity.json`
-that only the `tenant-identity` `seed` writes (spec §4.2).
+Option 1, for these reasons: the platform API admits the run's own AWS
+session and not a cell account's tenant role, so the tenant role stays
+an entitlement-only role; the driver already knows each tenant's id, the
+tier's user count and when the deployment is `ACTIVE`; the calls fall
+inside PS-1's timing; and no other sample changes. In a platform run,
+the driver of the `control-plane` slice, right after each tenant's
+deployment is `ACTIVE`, calls tenant-identity `CreateTenant` with the
+control-plane tenant id, `scopes` `["app/use"]` (the vendor scope the
+slice-mode tenants carry, which the driver first puts in the identity's
+scope catalogue with `PutScope`) and an admin e-mail address, then
+`CreateUser` for each further user the tier lists (spec §4.1 counts the
+admin among the users), through the IAM-signed platform API at the
+`apiUrl` of `identity.json`. It does this for each tenant PS-1 onboards,
+for the warm-up tenant (after front-door phase two) and for the `large`
+fleet's seed, as spec §3.3 step 4 says. The tenant script keeps only the
+entitlement call. The calls are part of PS-1's time to the first served
+request. The driver never writes a temporary password or a token to disk
+(spec §4.2). The driver records the admin and users it creates in
+`identity[]` of `control-plane.json`. The runtime-isolation slice reads
+that list for control-plane tenants, in place of the lookup in
+`tenant-identity.json` that only the `tenant-identity` `seed` writes
+(spec §4.2).
 
 ## Consequences
 Easier: the tenant role stays an entitlement-only role, and the identity
