@@ -145,7 +145,7 @@ export interface RunOptions {
   readonly repoRoot: string;
   readonly tier: string;
   readonly slices: readonly string[];
-  /** Scenario ids to run; default per mode (see `scenarioOrder`): the `PS-*` scenarios in a platform run, the slice's own in a slice run. */
+  /** Scenario ids to run; default per mode (see `scenarioOrder`): the `PS-<n>` scenarios in a platform run, every scenario but the `platformOnly` ones in a slice run. */
   readonly scenarios?: readonly string[];
   /** Folder for manifests, the lock and results, outside the repository (spec §4.2). */
   readonly home: string;
@@ -265,7 +265,11 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
   if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
   if (scenarios.length === 0 && mode === 'platform') {
-    throw new Error('no slice in the run declares a PS-<n> scenario, so a platform run has nothing to run: name --scenarios or add the slices that own them');
+    throw new Error(
+      opts.scenarios === undefined
+        ? 'no slice in the run declares a PS-<n> scenario, so a platform run has nothing to run: name --scenarios or add the slices that own them'
+        : '--scenarios names no scenario, so the run has nothing to run',
+    );
   }
   // A scenario that needs the other slices' interfaces has nothing to run against alone.
   const alone = scenarios.filter((sc) => mode === 'slice' && slices.some((s) => s.platformOnly.includes(sc)));

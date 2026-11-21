@@ -13,7 +13,10 @@
  * answers from its route table before any origin sees the request: 403 for a tenant with no
  * route entry, 503 for a suspended one, and anything else once the request goes on to the
  * origin (the ingress refuses the unsigned token with 401, so no model call, no cost). The
- * token this file builds is unsigned and names a tenant id; no verifier accepts it (P-1).
+ * token this file builds carries no signature and names a tenant id; no verifier accepts it
+ * (P-1). The probe reads a front door in `single` addressing mode, where the bearer token alone
+ * names the tenant: in `host` mode the router looks the host up first and the probe would read
+ * 404 or 403 whatever the tenant's state.
  */
 
 import { execFile } from 'node:child_process';
@@ -62,7 +65,7 @@ export function parseEdgeInputs(text: string | undefined, file: string): EdgeInp
   return { edgeUrl: edge, registrarUrl: registrar, agentBackend: backend };
 }
 
-/** Reads the front-door manifest of this run's prefix, or undefined when it is not there. */
+/** Reads the front-door manifest of this run's prefix; throws, naming the file and its writer, when it is missing or malformed. */
 export function readEdgeInputs(home: string, prefix: string): EdgeInputs {
   const file = path.join(home, prefix, FRONT_DOOR_FILE);
   return parseEdgeInputs(fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined, file);
@@ -75,6 +78,10 @@ export type EdgeState = 'unrouted' | 'suspended' | 'routed' | 'error';
  * 403: no route entry (never created, or removed). 503: suspended. 0 (no answer) and 404
  * (the router's answer for `/agents` when no agent ingress is configured) tell nothing about the
  * tenant: `error`. Any other status means the request left the router for an origin.
+ *
+ * shortcut: a 503 also comes from CloudFront when the router function fails, so a router that
+ * hits its compute limit under load reads as a suspended tenant. The router's suspended answer
+ * carries `retry-after: 300`; read that header here when a run shows 503 without a suspension.
  */
 export function edgeStateOf(status: number): EdgeState {
   if (status === 403) return 'unrouted';
@@ -83,10 +90,14 @@ export function edgeStateOf(status: number): EdgeState {
   return 'routed';
 }
 
-/** An unsigned bearer token whose payload names `tenantId`. Never sent anywhere but the edge. */
+/**
+ * A bearer token whose payload names `tenantId` and whose signature is not one. The router
+ * refuses a token with an empty third segment (401 at step 5, before it looks the tenant up),
+ * so the segment holds a fixed word; no verifier accepts it. Never sent anywhere but the edge.
+ */
 export function probeToken(tenantId: string): string {
   const part = (o: object): string => Buffer.from(JSON.stringify(o)).toString('base64url');
-  return `${part({ alg: 'none', typ: 'JWT' })}.${part({ tenant_id: tenantId })}.`;
+  return `${part({ alg: 'none', typ: 'JWT' })}.${part({ tenant_id: tenantId })}.${Buffer.from('unsigned').toString('base64url')}`;
 }
 
 /** The edge as PS-5 uses it; the unit tests give it a fake. */

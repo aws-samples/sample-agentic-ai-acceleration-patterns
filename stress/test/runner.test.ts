@@ -141,6 +141,13 @@ describe('runner (spec §3.5)', () => {
     expect(calls).toEqual([]);
   });
 
+  it('refuses an empty --scenarios list in a platform run with its own message', async () => {
+    const { root, home } = fixture(slices);
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, scenarios: [], exec })).rejects.toThrow(/--scenarios names no scenario/);
+    expect(calls).toEqual([]);
+  });
+
   it('refuses a scenario no slice in the run declares', async () => {
     const { root, home } = fixture(slices);
     const { calls, exec } = stub();

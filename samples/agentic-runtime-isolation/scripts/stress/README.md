@@ -175,6 +175,6 @@ Estimates from the plan; the scripts print the measured figures.
   `PS-2`, `PS-3`, `PS-4`, `PS-6` and `PS-8`, `collect` takes each refusal's
   tenant and reason from k6's own lines (`collect-platform.sh`), and `teardown`
   removes only the files `run` wrote and a k6 host its own `deploy` made.
-  `S1` to `S7` refuse the platform mode and `PS-n` refuses the slice mode. The
+  `S1` to `S7` are refused in platform mode and the `PS-n` scenarios in slice mode. The
   manifests and what each field is for are in
   [`stress/README.md`](../../../../stress/README.md#platform-mode-manifests).

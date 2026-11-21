@@ -130,7 +130,8 @@ case "$verb" in
     driver publish
     # The published identity (ids only, no secret) as a manifest, for the slices that read it
     # in platform mode: stress/README.md, "Platform mode: manifests".
-    (umask 077 && aws ssm get-parameter --name "/${STRESS_PREFIX}/identity" --query Parameter.Value --output text >"${RUN_HOME}/identity.json")
+    # Written to a temporary file and moved into place, so a failed read leaves no empty manifest.
+    (umask 077 && aws ssm get-parameter --name "/${STRESS_PREFIX}/identity" --query Parameter.Value --output text >"${RUN_HOME}/identity.json.tmp" && mv "${RUN_HOME}/identity.json.tmp" "${RUN_HOME}/identity.json")
     ;;
 
   seed)
@@ -194,7 +195,7 @@ case "$verb" in
         status=1
       else
         if driver unpublish; then
-          rm -f "${RUN_HOME}/tenant-identity.json" "${RUN_HOME}/identity.json"
+          rm -f "${RUN_HOME}/tenant-identity.json" "${RUN_HOME}/identity.json" "${RUN_HOME}/identity.json.tmp"
         else
           status=1
         fi

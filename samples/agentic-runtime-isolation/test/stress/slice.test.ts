@@ -365,7 +365,7 @@ describe('slice.sh', () => {
         });
       });
 
-      it('runs S1 as before in slice mode: its own ingress and the shared identity, no platform record id', () => {
+      it('runs S1 in slice mode against its own ingress and the shared identity, with no platform record id', () => {
         withHome(ALL, (h) => {
           fs.mkdirSync(path.join(h, 'results'));
           fs.mkdirSync(stateOf(h), { recursive: true });

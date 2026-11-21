@@ -412,11 +412,17 @@ describe('what the edge says about a tenant', () => {
     expect([403, 503, 0, 404, 401, 200, 502].map(edgeStateOf)).toEqual(['unrouted', 'suspended', 'error', 'error', 'routed', 'routed', 'routed']);
   });
 
-  it('builds an unsigned token whose payload names the tenant', () => {
+  it('builds a token whose payload names the tenant and whose signature is no signature', () => {
     const [header, payload, signature] = probeToken('01HZX0000000000000000000A1').split('.');
     expect(JSON.parse(Buffer.from(header, 'base64url').toString())).toEqual({ alg: 'none', typ: 'JWT' });
     expect(JSON.parse(Buffer.from(payload, 'base64url').toString())).toEqual({ tenant_id: '01HZX0000000000000000000A1' });
-    expect(signature).toBe('');
+    expect(Buffer.from(signature, 'base64url').toString()).toBe('unsigned');
+  });
+
+  it('builds a token the front-door router decodes (its step 5 pattern needs three non-empty segments)', () => {
+    // The pattern of `decodeClaim` in samples/tenant-front-door/src/router/router.js.
+    const router = /^Bearer ([^.\s]+\.([^.\s]+)\.[^.\s]+)$/i;
+    expect(router.test(`Bearer ${probeToken('01HZX0000000000000000000A1')}`)).toBe(true);
   });
 });
 

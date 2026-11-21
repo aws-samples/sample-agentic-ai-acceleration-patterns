@@ -64,7 +64,7 @@ run. The runner times `deploy` and `teardown` itself and writes one
 `lifecycle` record per slice with the deploy and destroy seconds.
 
 Slices run in the order of their `needs`, and each one deploys and then seeds before the next
-starts, so a slice's `deploy` can read what an earlier slice seeded (the front door's needs
+starts, so a slice's `deploy` can read what an earlier slice seeded (the front door needs
 the control plane's application). `teardown` runs in reverse order. Without `--scenarios`, a
 slice-mode run runs the slice's scenarios except its `platformOnly` ones, and a platform run
 (several slices) runs only the `PS-<n>` scenarios, platform scenarios first by number, then
@@ -101,10 +101,10 @@ Who owns which platform scenario (spec §5.1):
 
 | Scenario | Slice | What runs in platform mode |
 |---|---|---|
-| PS-1 | `tenant-identity`, `control-plane` | the onboarding each slice already runs in slice mode |
+| PS-1 | `tenant-identity`, `control-plane` | the onboarding each slice runs in slice mode |
 | PS-2, PS-3, PS-4, PS-6, PS-8 | `agentic-runtime-isolation` | its S1, S2, S3, S5 and S6 load shapes sent to `<edgeUrl>/agents/<agent>/invocations`; the record carries the `PS-n` id |
-| PS-5 | `control-plane` | the tier's churn count of tenants created, suspended, resumed and deleted, each change timed from its call to the first edge answer that shows it |
-| PS-7 | `tenant-front-door` | not in this folder's slices yet |
+| PS-5 | `control-plane` | the tier's churn count of seeded tenants: each one's deployment created, its route suspended and resumed, and the deployment deleted, each change timed from its call to the first edge answer that shows it |
+| PS-7 | `tenant-front-door` | no slice declares it |
 
 The manifests a platform run reads and writes:
 
@@ -115,9 +115,11 @@ The manifests a platform run reads and writes:
 | `control-plane.json` | `control-plane` `seed` | `agentic-runtime-isolation` | `seeded[]`, `churn[]`, `extra[]`: tenant ids. `seeded` is the platform's steady set; `churn` and `extra` belong to the control-plane scenarios |
 | `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` | `agentic-runtime-isolation`, `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
 
-Not written by this change: `tenant-front-door.json` is the front-door slice's to write, and
-the fields above are the contract it must meet. The edge serves agents at
-`/agents/<backend>/invocations` and reads the tenant from the token (front-door spec §3.3).
+The front-door slice writes `tenant-front-door.json`, and the fields above are the contract it
+meets. The edge serves agents at `/agents/<backend>/invocations` and reads the tenant from the
+token (front-door spec §3.3). `edgeUrl` is an edge in the front door's `single` addressing
+mode, where the token alone names the tenant; in `host` mode the router looks the host up first
+and answers 404 or 403 whatever the tenant's state.
 
 What a slice does in platform mode:
 
@@ -136,8 +138,8 @@ tenant id in the scenario's output and in `platform-tenants.json` in the slice's
 `$STRESS_HOME`, together with the identity tenants outside the control plane (`not-in-control-plane`,
 ignored). The scenario stops when fewer than two tenants are usable (the read-other probe needs
 two). Nothing in a platform run creates the identity tenant and the users of a tenant the
-control plane onboarded yet (spec §3.3, steps 3 and 4), so until something does, this slice
-refuses every control-plane tenant and the run fails with the list.
+control plane onboarded (spec §3.3, steps 3 and 4), so this slice refuses every control-plane
+tenant and the run fails with the list, until something does.
 
 Every request through the edge that is refused (4xx, 5xx) or whose body shows a refusal gets a
 tenant and a reason in the record's `refusals.byTenantReason`: the tenant is the driver's, the
@@ -230,11 +232,23 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   there, so its cold-start share is whatever the instances' age allows.
 - PS-2 to PS-8 in platform mode attribute refusals from the driver's own lines. The edge's and
   the cells' logs are not joined, so the records hold the client's latency hops only and no
-  quota peaks or cost.
-- PS-5 reads the edge with an unsigned token that names the tenant, which the router accepts
-  without checking the signature (front-door spec §3.3, step 5), so a probe reaches the ingress
-  at most and is refused there with 401. It shows what the router does for the tenant, not
-  what a signed request would get.
+  quota peaks or cost. A virtual user flushes its per-minute refusal counts on a change of
+  minute and once the scenario is 99 % done; a refusal in the last minute of a user that ends
+  earlier stays unattributed, and the run fails on it.
+- `agentic-runtime-isolation` needs `tenant-front-door`, and no slice of that name exists, so
+  the runner refuses every platform run that names `agentic-runtime-isolation` with
+  `agentic-runtime-isolation needs tenant-front-door, which is not a slice`. PS-2, PS-3, PS-4,
+  PS-6 and PS-8 are tested against stubs only until the front door declares its slice.
+- A platform run of `tenant-identity` and `control-plane` runs `PS-1` and `PS-5` by default.
+  PS-5 reads `tenant-front-door.json`, which nothing writes without the front-door slice, and
+  stops with a message that names the file. Name `--scenarios PS-1` for such a run.
+- PS-5 reads the edge with a token that names the tenant and carries no signature the router
+  could check: the router does not verify it (front-door spec §3.3, step 5), so a probe reaches
+  the ingress at most and is refused there with 401. It shows what the router does for the
+  tenant, not what a signed request would get.
+- PS-5 reads 503 as a suspended tenant. CloudFront also answers 503 when the router function
+  fails, so a router that goes over its compute limit under load reads as a suspension. The
+  router's suspended answer carries `retry-after: 300`, which the probe does not read.
 - PS-5 suspends and resumes tenants through the front door's route registrar with a SigV4
   call that `curl` (7.75 or later) signs with the driver session's own credentials. The
   registrar allows only its edge operator role for `UpdateTenantRouteStatus`, so the session

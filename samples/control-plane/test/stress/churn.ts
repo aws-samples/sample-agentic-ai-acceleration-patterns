@@ -3,9 +3,11 @@
 
 /**
  * PS-5, churn under load (platform stress test, docs/stress-test.spec.md §5.1, §7): the tier's
- * churn count of tenants are created, suspended, resumed and deleted, and each change is timed
- * from the call to the first edge response that shows it. Creates and deletes go to the control
- * plane; suspend and resume go to the front door's route registrar (`UpdateTenantRouteStatus`).
+ * churn count of tenants have a deployment created, their route suspended and resumed, and the
+ * deployment deleted, and each change is timed from the call to the first edge response that
+ * shows it. The tenant records are the ones `seed` made, and they stay. Deployment creates and
+ * deletes go to the control plane; suspend and resume go to the front door's route registrar
+ * (`UpdateTenantRouteStatus`).
  * The edge read is one request with an unsigned token naming the tenant (`edge.ts`).
  *
  * Hops in the record: `routable` (CreateDeployment to the first answer that left the router),
@@ -33,8 +35,9 @@ export interface Timing {
 }
 
 /**
- * Front-door spikes measured a route change reaching the edge in a median of 28 s and up to
- * about 65 s; the spec waits 90 s before it asserts every request sees one (plan review, 9).
+ * Front-door spikes saw a route change first served 16 to 37 s after the write and the last
+ * miss up to 65 s after it (`samples/tenant-front-door/design/spikes.md`, "Propagation"); the
+ * front-door spec waits 90 s where every request must see a change (§4.2).
  */
 export const REAL_TIMING: Timing = { now: Date.now, sleep, pollMs: 2000, settleSeconds: 90, confirmations: 3 };
 
@@ -45,8 +48,12 @@ const STATUS_TIMEOUT_SECONDS = 300;
 /** A tenant delete build, the route hook, then the edge. */
 const REMOVED_TIMEOUT_SECONDS = 900;
 
-/** An answer that is no refusal: 503 is the suspended tenant's, and a reply from an origin is whatever it is. */
-const expectedAtEdge = (status: number): boolean => status === 503 || (status >= 200 && status < 500 && status !== 404);
+/**
+ * An answer PS-5 asks for: every state a tenant passes through in a cycle is wanted (403 before
+ * the route and after its removal, 503 while suspended, an origin's answer while routed), so
+ * only no answer, a 404 or a 5xx other than the suspended tenant's 503 is an unexpected one.
+ */
+const expectedAtEdge = (status: number): boolean => edgeStateOf(status) !== 'error' && (status < 500 || status === 503);
 
 class EdgeMisconfigured extends Error {}
 

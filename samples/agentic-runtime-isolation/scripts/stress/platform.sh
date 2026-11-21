@@ -9,7 +9,7 @@
 # the manifests those slices wrote to $STRESS_HOME/$STRESS_PREFIX and drives the edge. Needs
 # jq, STRESS_HOME, STRESS_PREFIX, STRESS_TIER and STRESS_STATE_DIR (slice.sh sets the last).
 
-# The manifests, the slice that writes each one, and what the slice reads from it.
+# The slice that writes each manifest.
 PLATFORM_MANIFEST_DIR="${STRESS_HOME:-}/${STRESS_PREFIX:-}"
 PLATFORM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
