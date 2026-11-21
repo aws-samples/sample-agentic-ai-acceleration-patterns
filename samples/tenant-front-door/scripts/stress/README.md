@@ -38,7 +38,6 @@ export STRESS_FD_IDENTITY_REGION=<region of tenant-identity; default AWS_REGION>
 export STRESS_FD_ZONE_ID=<hosted zone id of the test subdomain>
 export STRESS_FD_ZONE_NAME=<its name>
 export STRESS_PREFIX=<1 to 28 letters and digits, starting with a letter>
-export INTEG_DEPLOY_CONCURRENCY=2
 cd stress
 ./run.sh run --tier small --slices tenant-front-door
 ```

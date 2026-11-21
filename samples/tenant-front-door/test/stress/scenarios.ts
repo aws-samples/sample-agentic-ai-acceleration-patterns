@@ -64,16 +64,18 @@ async function tokensFor(ctx: Ctx, tenants: readonly TenantEntry[]): Promise<Map
   });
   await issue();
   const first = tokens.values().next().value;
+  let lifetime = 0;
   if (first !== undefined) {
     const p = payloadOf(first);
-    console.log(`tokens: ${tokens.size} issued, lifetime ${Number(p.exp) - Number(p.iat)} s, refreshed every ${TOKEN_REFRESH_MS / 1000} s`);
+    lifetime = Number(p.exp) - Number(p.iat);
+    console.log(`tokens: ${tokens.size} issued, lifetime ${lifetime} s, refreshed every ${TOKEN_REFRESH_MS / 1000} s`);
   }
-  // A refresh that fails is tried again after 20 s, well before the tokens it replaces (five minutes) run out.
+  // A refresh that fails is tried again after 20 s, well before the tokens it replaces (their lifetime, five minutes) run out.
   const refresh = (): void => {
     issue().then(
       () => { setTimeout(refresh, TOKEN_REFRESH_MS).unref(); },
       (e: unknown) => {
-        console.error(`tokens: refresh failed (${e instanceof Error ? e.message : String(e)}); trying again in 20 s, the tokens in hand had about ${300 - TOKEN_REFRESH_MS / 1000} s left when the first try began`);
+        console.error(`tokens: refresh failed (${e instanceof Error ? e.message : String(e)}); trying again in 20 s, the tokens in hand had about ${lifetime - TOKEN_REFRESH_MS / 1000} s left when the first try began`);
         setTimeout(refresh, 20_000).unref();
       },
     );

@@ -426,7 +426,7 @@ invocations, and its highest minute is 94 % under ordinary load. The
 two figures measure different things, one decode against the worst
 invocation of a minute. What raises the worst invocation to 94 % is
 not established, and the router's margin to the function's limit at
-that reading is a risk the slice leaves open. The router checks no
+that reading is open (§11, Q-1). The router checks no
 token signatures and writes nothing to the store; its only output
 besides the request or the answer is the tenant id it passes to
 `cf.logCustomData` (§3.1). In `single` mode it holds no secrets. In
@@ -1061,10 +1061,10 @@ given below):
    10 calls a second with a burst of 100. The rates that follow are
    measured by the stress slice (`scripts/stress/README.md`, small
    tier). A run starts with a burst of 20 writes at once, then writes
-   one a second for 30 s. In such a run a write takes 0.50 s at the
-   median, 7.2 to 7.8 s at the 95th percentile and 8.2 to 8.6 s at the
-   99th, because every writer waits on the store's one ETag. The 20
-   writes of the burst are all written within 16 s, which includes the
+   one a second for 30 s. In such a run a write takes 0.50 to 0.51 s
+   at the median, 7.2 to 7.8 s at the 95th percentile and 8.2 to 8.6 s
+   at the 99th, because every writer waits on the store's one ETag.
+   The 20 writes of the burst are all written within 16 s, which includes the
    measuring client's own wait of about 5 s before it tries a 503
    again, so the store takes no longer than that. About one registrar
    call in twelve of such a run answers 503 after the registrar's five
@@ -2910,4 +2910,9 @@ commands.
 
 ## 11. Open questions
 
-None is open.
+- Q-1: What raises the router's compute utilization to 94 % in the worst
+  minute under ordinary load, and what margin is left to the function's
+  limit (§3.3)? The stress slice reads the metric once a minute, as the
+  maximum over that minute's invocations, and does not isolate the
+  invocation that costs it. A run that sends one request in a minute, or
+  reads the function's own log of compute time, settles it.

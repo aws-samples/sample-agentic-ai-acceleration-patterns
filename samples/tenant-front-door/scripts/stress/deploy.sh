@@ -11,10 +11,7 @@
 # and STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME: a public hosted zone in this
 # account, the test subdomain the front door's `appDomain` goes under. The
 # application domain is `<prefix in lower case>.<zone name>`, one per run
-# prefix. INTEG_DEPLOY_CONCURRENCY (default 2) bounds the CDK's parallel
-# stack deploys: API Gateway's control plane answers a deploy that runs
-# more of them with 429 (six REST APIs at concurrency 6 failed in the
-# runtime-isolation integration test; two worked).
+# prefix. The stacks deploy one at a time, each named with `--exclusively`.
 #
 # Needs the tenant-identity shared-pool deployment's published parameters in
 # this Region, or in STRESS_FD_IDENTITY_REGION when it is another one. Prints
@@ -33,8 +30,6 @@ done
 
 APP_DOMAIN="${PREFIX_LOWER}.${STRESS_FD_ZONE_NAME}"
 mkdir -p -m 700 "$STATE_DIR"
-# A new deploy starts the list of what teardown must check afresh.
-rm -f "$RESOURCES"
 cd "$SAMPLE_DIR"
 LOGS="$(mktemp -d)"
 trap 'rm -rf "$LOGS"' EXIT
@@ -72,17 +67,19 @@ deploy_stack() {
   if [[ "$kind" == smoke ]]; then
     smoke_context_args
     npx cdk deploy "$stack" --exclusively --app "$SMOKE_APP" --output "${STATE_DIR}/cdk.out.smoke" "${SMOKE_CONTEXT[@]}" \
-      --require-approval never --concurrency "$CONCURRENCY" >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
+      --require-approval never >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
   else
     fd_context_args
     npx cdk deploy "$(fd_selector "$stack")" --exclusively --output "${STATE_DIR}/cdk.out.fd" "${FD_CONTEXT[@]}" \
-      --require-approval never --concurrency "$CONCURRENCY" >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
+      --require-approval never >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
   fi
   secs=$((SECONDS - start))
   echo "stack=${stack} deploy_seconds=${secs}"
   echo "$(date -u +%F) stack=${stack} deploy_seconds=${secs}" >>"$TIMINGS"
 }
 
+# A deploy that no check refused starts the list of what teardown must check afresh.
+rm -f "$RESOURCES"
 total_start=$SECONDS
 
 # 1. The two callers of the registrar and the stand-in control plane.

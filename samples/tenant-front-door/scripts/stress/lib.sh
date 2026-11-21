@@ -33,7 +33,6 @@ OUTPUTS="${STATE_DIR}/outputs.json"
 CONTEXT="${STATE_DIR}/context.json"
 RESOURCES="${STATE_DIR}/resources.json"
 TIMINGS="${STATE_DIR}/timings.txt"
-CONCURRENCY="${INTEG_DEPLOY_CONCURRENCY:-2}"
 
 STACK_SUPPORT="${PREFIX}-support"
 STACK_CP="${PREFIX}-control-plane"
@@ -108,6 +107,8 @@ param() { # NAME [REGION]
   present "parameter $1" "$v"
 }
 
+# shortcut: takes the first resource of the type; the stacks it is asked about hold one log group and one function each, so a second one
+# in a stack would need this to select by logical id.
 resource() { # STACK TYPE -> physical id of the first resource of that type
   local v
   v="$(aws cloudformation describe-stack-resources --region "$(stack_region "$1")" --stack-name "$1" \

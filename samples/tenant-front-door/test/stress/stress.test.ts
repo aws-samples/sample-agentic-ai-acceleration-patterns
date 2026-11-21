@@ -202,6 +202,24 @@ describe('signing Region', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
+  it('signs the query string it sends', async () => {
+    const sent = jest.spyOn(http, 'request').mockResolvedValue({ status: 200, headers: {}, body: '', ttfb: 0, total: 0 });
+    const caller = signedCaller('eu-west-2', async () => ({ accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'example-secret' }));
+    const base = 'https://abcde12345.execute-api.eu-central-1.amazonaws.com/prod/tenants';
+    // Only the clock is fixed, so the two signatures differ by the query alone.
+    jest.useFakeTimers({
+      now: new Date('2026-11-21T10:00:00Z'),
+      doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'hrtime'],
+    });
+    try {
+      await caller.call('GET', `${base}?a=1`);
+      await caller.call('GET', `${base}?a=2`);
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(sent.mock.calls[0][0].headers?.authorization).not.toBe(sent.mock.calls[1][0].headers?.authorization);
+  });
+
   it('signs a call for execute-api in the Region of the host with the credentials it is given', async () => {
     const sent = jest.spyOn(http, 'request').mockResolvedValue({ status: 200, headers: {}, body: '', ttfb: 0, total: 0 });
     const caller = signedCaller('eu-west-2', async () => ({ accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'example-secret', sessionToken: 'example-session' }));

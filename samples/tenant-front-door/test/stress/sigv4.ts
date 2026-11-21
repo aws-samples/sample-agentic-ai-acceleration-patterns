@@ -73,7 +73,7 @@ export function signedCaller(region: string, credentials: AwsCredentialIdentityP
         protocol: 'https:',
         hostname: u.hostname,
         path: u.pathname,
-        query: {},
+        query: Object.fromEntries(u.searchParams),
         headers,
         body: text,
       });

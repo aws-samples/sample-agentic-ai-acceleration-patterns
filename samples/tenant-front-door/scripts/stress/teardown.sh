@@ -125,10 +125,14 @@ if held="$(aws ssm get-parameter --name "$PARAM_EDGE" --query Parameter.Value --
   # The name is fixed per account and Region: a front door another person deployed since holds it under its own distribution.
   mine="$(jq -r '.distributionArn // empty' "$CONTEXT" 2>/dev/null || true)"
   theirs="$(jq -r '.distributionArn // empty' <<<"$held" 2>/dev/null || true)"
-  if [[ -n "$mine" && -n "$theirs" && "$mine" != "$theirs" ]]; then
-    echo "teardown: ${PARAM_EDGE} is held by another front door (${theirs##*/}), not by this run's; it is left as it is"
-  else
+  if [[ -n "$mine" && "$mine" == "$theirs" ]]; then
     echo "teardown: ${PARAM_EDGE} is still there; remove it with: aws ssm delete-parameter --name ${PARAM_EDGE} --region ${AWS_REGION}" >&2
+    status=1
+  elif [[ -n "$theirs" ]]; then
+    # The main stack owns the parameter and its destroy removes it, so a parameter of another distribution (or one this run never recorded) is not this run's.
+    echo "teardown: ${PARAM_EDGE} is held by a front door this run did not deploy (${theirs##*/}); it is left as it is"
+  else
+    echo "teardown: could not tell whose ${PARAM_EDGE} is" >&2
     status=1
   fi
 elif ! grep -q 'ParameterNotFound' "${LOGS}/edge-parameter.err"; then
