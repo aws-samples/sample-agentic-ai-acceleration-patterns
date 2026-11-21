@@ -5,9 +5,9 @@ import { KvsRouteStore, MAX_ATTEMPTS } from '../../src/registrar/route-store';
 
 /**
  * The data plane of a real KeyValueStore answers a stale `IfMatch` with a
- * `ValidationException` whose message says the pre-condition failed (stress
- * slice live run, HTTP 400), not with a `ConflictException`. The store must
- * read that as an ETag conflict and try again.
+ * `ValidationException` whose message says the pre-condition failed (HTTP
+ * 400), not with a `ConflictException`. The store must read that as an ETag
+ * conflict and try again.
  */
 describe('KvsRouteStore on a stale ETag', () => {
   const stale = (): Error => Object.assign(new Error('Pre-Condition failed during update of Key-Value-Store'), { name: 'ValidationException', $metadata: { httpStatusCode: 400 } });

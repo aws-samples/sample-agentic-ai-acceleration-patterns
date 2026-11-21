@@ -91,7 +91,7 @@ Every answer is classified (`test/stress/classify.ts`) as served, or refused
 with a reason that names the hop (`edge-no-route`, `cell-forbidden`,
 `origin-iam-denied`, ...). A refusal is attributed to the tenant the request
 named, or `-` when it named none, which is also what the edge log shows
-(spec P-7). An answer no hop owns is an unattributed refusal and fails the
+(stress spec P-7). An answer no hop owns is an unattributed refusal and fails the
 run; so does a driver-side timeout or network error (status 0), which no hop
 answered. A 503 from the registrar is counted by cause: `route-table-busy`
 (five ETag conflicts), `control-plane-unreadable`, or `other`.

@@ -221,6 +221,10 @@ async function main(): Promise<number> {
       return r.failures.length === 0 ? 0 : 1;
     }
     case 'sweep':
+      if (arg !== undefined && arg !== '--no-routes') {
+        console.error(`driver: sweep takes no argument or --no-routes, not ${arg}`);
+        return 2;
+      }
       return sweep(readEnv(), arg !== '--no-routes');
     default:
       console.error('usage: driver.ts budget | seed | run <scenario> | collect | sweep');

@@ -87,7 +87,7 @@ total_start=$SECONDS
 OLD_CONTEXT='{}'
 [[ ! -s "$CONTEXT" ]] || OLD_CONTEXT="$(cat "$CONTEXT")"
 jq -n --arg p "$PREFIX" --arg f "$FLEET" --arg acct "$ACCOUNT" --arg region "$AWS_REGION" --argjson old "$OLD_CONTEXT" \
-  '($old | {distributionArn, cellIssuer, cellClientId} | with_entries(select(.value != null))) + {stackNamePrefix: $p, fleet: $f, accountId: $acct, region: $region}' >"${CONTEXT}.new"
+  '$old + {stackNamePrefix: $p, fleet: $f, accountId: $acct, region: $region}' >"${CONTEXT}.new"
 mv "${CONTEXT}.new" "$CONTEXT"
 chmod 600 "$CONTEXT"
 deploy_stack "$STACK_SUPPORT" smoke

@@ -202,7 +202,7 @@ unchecked=0
 unowned=0
 left=0
 unsure=0
-while IFS= read -r line; do
+while IFS= read -r line <&3; do
   type="$(jq -r .type <<<"$line")"; id="$(jq -r .id <<<"$line")"; region="$(jq -r .region <<<"$line")"
   rc=0
   exists "$type" "$id" "$region" || rc=$?
@@ -239,7 +239,7 @@ while IFS= read -r line; do
       unsure=$((unsure + 1))
     fi
   fi
-done <"$RESOURCES"
+done 3<"$RESOURCES"
 if (( left > 0 || unsure > 0 )); then status=1; fi
 if (( status == 0 )); then
   kept=""

@@ -61,6 +61,11 @@ which is not a budgeted quota.
   §6.4).
 - The smoke app gains two optional contexts, and its defaults keep the
   smoke test's names.
+- The stand-in control plane's API no longer creates the account's API
+  Gateway CloudWatch Logs role, which CDK would retain after the stack is
+  deleted. The registrar's stage needs that role for its access logs, so
+  the account must hold it before the smoke test or the slice deploys the
+  main stack (`aws apigateway update-account`).
 - The slice's `collect` writes beyond the contract's late fields: it adds
   the `edge` hop to `latency` and the router's compute reading to
   `quotas.platform` in the records `run` wrote, and writes neither
