@@ -2586,8 +2586,9 @@ around the suspended-tenant check, and a streamed call of a few seconds.
 The control plane the test deploys has its own deploy and destroy time,
 which the test reports with the rest. A `host` run, which skips steps
 5 to 10, 12 to 14, 16 and 19 to 22, was measured at 64 minutes in all:
-about 21 minutes of deploys and about 11 minutes of teardown
-(integration-test.md, "Runtime and cost"). A `single` run is an
+stack deploy times of about 21 minutes in all and stack destroys of about
+11 minutes (stacks of one phase overlap; integration-test.md, "Runtime and
+cost"). A `single` run is an
 estimate, not a measurement: about four and a half hours, of which
 about three hours are steps (each control-plane operation runs its
 scripts and hook builds one at a time, and steps 14 and 22 take about

@@ -87,7 +87,7 @@ SPDX-License-Identifier: MIT-0
         <mxCell id="c77" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;strokeColor=#545B64;strokeWidth=1.5;endArrow=block;endFill=1;exitX=0.75;exitY=0;exitDx=0;exitDy=0;entryX=0.75;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="c36" target="c8"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
         <mxCell id="c78" value="Dedicated domains" style="text;html=0;align=left;verticalAlign=top;fontSize=11;fontStyle=0;fontColor=#232F3E;spacing=0;spacingTop=0;" vertex="1" parent="1"><mxGeometry x="608" y="252" width="108.72" height="16" as="geometry"/></mxCell>
         <mxCell id="c79" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;strokeColor=#545B64;strokeWidth=1.5;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.4;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="c40" target="c8"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1310" y="650"/><mxPoint x="20" y="650"/><mxPoint x="20" y="225"/><mxPoint x="530" y="225"/></Array></mxGeometry></mxCell>
-        <mxCell id="c80" value="Removes tenants" style="text;html=0;align=center;verticalAlign=top;fontSize=11;fontStyle=0;fontColor=#232F3E;spacing=0;spacingTop=0;" vertex="1" parent="1"><mxGeometry x="1071.8" y="630" width="96.4" height="16" as="geometry"/></mxCell>
+        <mxCell id="c80" value="Removes domains" style="text;html=0;align=center;verticalAlign=top;fontSize=11;fontStyle=0;fontColor=#232F3E;spacing=0;spacingTop=0;" vertex="1" parent="1"><mxGeometry x="1071.8" y="630" width="96.4" height="16" as="geometry"/></mxCell>
       </root>
     </mxGraphModel>
   </diagram>

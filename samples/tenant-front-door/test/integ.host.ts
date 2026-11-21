@@ -3,7 +3,7 @@
 
 /**
  * The integration test's CDK app in `host` mode (spec §10). Run it through
- * `scripts/integ.sh host` (`npx projen integ`), which passes the `integ`
+ * `scripts/integ.sh host` (`npx projen integ:host`), which passes the `integ`
  * context phase by phase; see test/integ/stacks.ts and integration-test.md.
  */
 
