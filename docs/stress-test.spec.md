@@ -176,9 +176,9 @@ and the records in
    commit, W-5), with its `CellRouteAccess`, which takes the
    distribution ARN from a cell parameter (§3.5). The origin verifies
    the token, refuses a hint that is not the token's tenant and a
-   tenant its cell does not host with 403, and answers with the tenant
-   and the hint it received on `GET /api/whoami` (front-door spec §3.5,
-   §10 step 4). The script writes the cell API's `frontDoorApiDomain`
+   tenant its cell's account does not host with 403, and answers with
+   the tenant, its cell id and the hint it received on
+   `GET /api/whoami` (front-door spec §3.5, §10 step 4). The script writes the cell API's `frontDoorApiDomain`
    to its outputs, which the front door's global post hook reads to
    register the cell route (`PutCellRoute`) with the route registrar
    (front-door spec §3.2, front-door ADR-0017). The cell API origin,
@@ -420,8 +420,8 @@ account base by its tag together with no service role and a stack ARN
 on the list the account owner gives the check (W-11; an ARN pins the
 Region and the stack id, so the same name in another Region or a
 recreated stack does not pass), cells by their service role, the cell
-bootstrap's execution role), a stack whose service role is set and is not the cell execution role, a
-`cdk-hnb659fds-*` role, a role pair on `/cell/` or under either cell
+bootstrap's execution role), a stack whose service role is set and is
+not the cell execution role, a `cdk-hnb659fds-*` role, a role pair on `/cell/` or under either cell
 boundary, a role pair half holding a policy its stack did not give it (a
 managed policy other than its owner policy, `cell-build-policy` or
 `cell-tenant-build-policy` with the owner's suffix, or an inline policy
@@ -542,7 +542,7 @@ Every request through the edge checks the layers its path crosses (P-1):
 | Layer | Path | Check | Failure means |
 |---|---|---|---|
 | Edge | `/api/*` | the response's route hint names the token's tenant | the router routed on something other than the token |
-| Cell | `/api/*` | the cell lists the tenant | a tenant reached a cell that does not host it |
+| Cell | `/api/*` | the cell account lists the tenant, and the answer's cell id is the tenant's placed cell | a tenant reached a cell that does not host it |
 | Ingress and agent | `/agents/*` | `tokenTenant` and the unit prefix are the tenant's | the wrong grant or unit reached the Runtime |
 | Credential | `/agents/*` | `read <A>` succeeds, `read <B>` is `AccessDeniedException` | the vended credential is not scoped |
 

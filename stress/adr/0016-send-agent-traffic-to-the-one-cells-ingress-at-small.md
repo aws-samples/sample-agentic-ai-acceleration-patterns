@@ -154,7 +154,7 @@ which takes the distribution ARN from a cell parameter, and writes that
 output (spec §3.3 step 2, §3.5). The cell source zip of ADR-0014 also
 carries `samples/tenant-front-door/src/demo-cell/` and `src/shared/` for
 it; this record amends ADR-0014 on that point. The demo cell API checks
-that its cell hosts the tenant under
+that its cell's account hosts the tenant under
 `/application-plane/tenants/<tenant id>/<app id>`, so the tenant script
 records the deployment in the parameter `.../<app id>/deployment` and
 does not write a route; this record amends ADR-0012 on those points. A
