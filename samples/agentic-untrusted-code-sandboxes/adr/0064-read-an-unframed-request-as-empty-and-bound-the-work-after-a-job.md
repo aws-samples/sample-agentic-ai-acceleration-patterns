@@ -57,4 +57,4 @@ budget needs the tool's 5 s margin raised with it.
 
 Note 2026-11-20: on `agentcore` the runner reads the job group's memory again, for up to 1 s of the 3 s budget, before it calls the group not drained, because memory the sweep freed takes a moment to show.
 
-Note 2026-11-21: the read is repeated for the rest of the 3 s budget, not 1 s: in the integration test the runner called the group not drained exactly 1 s after the sweep that followed a `memfd` fill near L, and restarted the session.
+Note 2026-11-21: the read is repeated for the rest of the 3 s budget, not 1 s. The integration test's `runaway` step on `agentcore` saw the runner call the group not drained after a disk fill (first read as a slow `memfd` drain); the longer poll did not change that, and the runner now logs the group's memory split with `dirty` so the cause can be read.
