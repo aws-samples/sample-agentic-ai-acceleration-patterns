@@ -19,7 +19,7 @@ import { matrix, SPEC_TABLE_ORDER, STEPS, unitKey, validateSteps, type StepSpec 
 import { collectHandles, sameKeys } from './steps/basic';
 import { neededQuotaGb, slotsFree } from './steps/build';
 import { DRIVER_STEPS, IMPLS } from './steps/index';
-import { CONNECTED, LAMBDA_RESPONSE_BYTES, LOOKUP_SLOW, PROBE_BOUND_MS, controlAnswered, controlOutputOk, denied, egressFailed, noConnection, unexpectedBlocked } from './steps/probes';
+import { CONNECTED, LAMBDA_RESPONSE_BYTES, LOOKUP_SLOW, PROBE_BOUND_MS, controlAnswered, controlOutputOk, denied, egressFailed, noConnection, reverseName, unexpectedBlocked } from './steps/probes';
 import { lastJsonLine, parseFunctionResponse, parseGatewayResponse } from './tool-result';
 
 describe('step order and matrix', () => {
@@ -358,6 +358,21 @@ describe('the dns-platform check (spec 3.9)', () => {
     expect(unexpectedBlocked([{ query_name: '187.13.0.10.in-addr.arpa.', query_type: 'A', srcaddr: '10.0.13.187' }], none)).toEqual(['187.13.0.10.in-addr.arpa']);
     expect(unexpectedBlocked([{ query_name: 'evil.example.net.', query_type: 'PTR', srcaddr: '10.0.13.187' }], none)).toEqual(['evil.example.net']);
     expect(unexpectedBlocked([{ query_name: '187.13.0.10.in-addr.arpa.', query_type: 'PTR' }], none)).toEqual(['187.13.0.10.in-addr.arpa']);
+  });
+  test('a malformed address, a suffixed or mixed-case name and a lowercase type are handled', () => {
+    expect(reverseName('10.0.13.999')).toBeUndefined();
+    expect(reverseName('10.0.013.1')).toBeUndefined();
+    expect(reverseName('::1')).toBeUndefined();
+    expect(reverseName('')).toBeUndefined();
+    expect(reverseName('10.0.13.187')).toBe('187.13.0.10.in-addr.arpa');
+    expect(unexpectedBlocked([{ query_name: '999.13.0.10.in-addr.arpa.', query_type: 'PTR', srcaddr: '10.0.13.999' }], none)).toEqual(['999.13.0.10.in-addr.arpa']);
+    expect(unexpectedBlocked([{ query_name: 'x.187.13.0.10.in-addr.arpa.', query_type: 'PTR', srcaddr: '10.0.13.187' }], none)).toEqual(['x.187.13.0.10.in-addr.arpa']);
+    expect(unexpectedBlocked([{ query_name: '187.13.0.10.in-addr.arpa.', query_type: 'ptr', srcaddr: '10.0.13.187' }], none)).toEqual(['187.13.0.10.in-addr.arpa']);
+    expect(unexpectedBlocked([{ query_name: '187.13.0.10.IN-ADDR.ARPA', query_type: 'PTR', srcaddr: '10.0.13.187' }], none)).toEqual([]);
+  });
+  test('a name from several addresses is listed once', () => {
+    const rows = [1, 2].map((i) => ({ query_name: 'evil.example.net.', query_type: 'A', srcaddr: `10.0.1.${i}` }));
+    expect(unexpectedBlocked(rows, none)).toEqual(['evil.example.net']);
   });
   test('a looked-up name and the NTP zone stay ignored', () => {
     expect(unexpectedBlocked([{ query_name: 'a.example.com.', query_type: 'A', srcaddr: '10.0.1.1' }, { query_name: '0.amazon.pool.ntp.org.', query_type: 'A', srcaddr: '10.0.1.1' }], new Set(['a.example.com']))).toEqual([]);

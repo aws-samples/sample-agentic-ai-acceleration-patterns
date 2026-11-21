@@ -814,10 +814,12 @@ Every allowed zone is answered by AWS. `*.amazon.pool.ntp.org`, which
 the MicroVM and AgentCore platforms look up, is a third-party zone and is
 left blocked: its servers would see every label. S-13 saw no failure with
 it blocked over 15 minutes; clock behaviour over hours is unverified.
-Each sandbox also makes one PTR lookup of its own address (for example
-`187.13.0.10.in-addr.arpa`) at start-up, which is left blocked and gets
-NXDOMAIN; the integration step `dns-platform` ignores a PTR for the
-querying sandbox's own address and nothing else.
+Each sandbox address also looked up its own reverse name (a PTR query, for
+example `187.13.0.10.in-addr.arpa`) in the first integration run, on every
+backend: the platforms make it, the firewall leaves it blocked and it gets
+NXDOMAIN. On `agentcore` the address is the shared runtime address. The
+integration step `dns-platform` ignores a PTR for the querying address's own
+reverse name, as it ignores the NTP zone, and fails on any other PTR.
 Names a vendor adds in `allowDomains` are the vendor's own exception to
 C-3.
 

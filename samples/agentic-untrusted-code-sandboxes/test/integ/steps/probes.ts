@@ -360,26 +360,29 @@ export async function dns(c: Ctx, u: Unit): Promise<void> {
 /** Query-log names that are the platform's own and stay blocked on purpose (spec §3.9). */
 const NTP_ZONE = /\.amazon\.pool\.ntp\.org\.?$/;
 
-/** The reverse name of an IPv4 address (`10.0.1.2` is `2.1.0.10.in-addr.arpa`), or undefined for anything else. */
-function reverseName(address: string | undefined): string | undefined {
+/** The reverse name of a dotted IPv4 address (`10.0.1.2` is `2.1.0.10.in-addr.arpa`), or undefined for anything else (an octet is 0 to 255, no leading zero). */
+export function reverseName(address: string | undefined): string | undefined {
   const parts = (address ?? '').split('.');
-  return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p)) ? `${parts.reverse().join('.')}.in-addr.arpa` : undefined;
+  const octet = (p: string): boolean => /^(0|[1-9]\d{0,2})$/.test(p) && Number(p) <= 255;
+  return parts.length === 4 && parts.every(octet) ? `${parts.reverse().join('.')}.in-addr.arpa` : undefined;
 }
 
 /**
  * The blocked names of a query log that no test script looked up and that the platform has no standing to look up (spec §3.9):
- * the NTP zone stays blocked on purpose, and so does a PTR query by a sandbox for the reverse name of its OWN address, which
- * the platforms make once at start-up. A PTR for any other address, any other query type and any other name still counts.
- * The firewall is unchanged; only this check ignores those two. Pure.
+ * the NTP zone stays blocked on purpose, and so does a PTR query for the reverse name of the querying address itself (the
+ * sandbox's own address; on agentcore, the shared runtime address). A PTR for any other address, any other query type and any
+ * other name still counts. The firewall is unchanged; only this check ignores those. Each name is listed once. Pure.
  */
 export function unexpectedBlocked(
   rows: ReadonlyArray<{ query_name: string; query_type?: string; srcaddr?: string }>,
   lookedUp: ReadonlySet<string>,
 ): string[] {
-  return rows
-    .filter((r) => !(r.query_type === 'PTR' && reverseName(r.srcaddr) === r.query_name.replace(/\.$/, '').toLowerCase()))
-    .map((r) => r.query_name.replace(/\.$/, '').toLowerCase())
+  const named = (r: { query_name: string }): string => r.query_name.replace(/\.$/, '').toLowerCase();
+  const unexpected = rows
+    .filter((r) => !(r.query_type === 'PTR' && reverseName(r.srcaddr) === named(r)))
+    .map(named)
     .filter((n) => !lookedUp.has(n) && !NTP_ZONE.test(n));
+  return [...new Set(unexpected)];
 }
 
 export async function dnsPlatform(c: Ctx): Promise<void> {

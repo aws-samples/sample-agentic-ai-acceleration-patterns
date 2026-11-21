@@ -60,7 +60,7 @@ delivery policy; a change delivery makes there is a stated leftover.
 
 C-3 reads per setting. The integration test runs `run-code` with the
 firewall on and `run-code-files` with it off, checks both outcomes, and
-fails if any platform name other than the NTP pool was blocked. Running
+fails if any platform name other than the NTP pool, or a sandbox's PTR for its own address, was blocked. Running
 an `agentcore` runtime in each instance also gives the with-and-without
 control for the ready-time question. Names under the allowed AWS zones
 still resolve; a narrower list of exact names is a later option. The
