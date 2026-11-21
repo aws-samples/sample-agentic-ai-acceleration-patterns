@@ -291,6 +291,9 @@ function startReadiness(s: ScenarioEnv, p: PlatformEnv, tenants: readonly string
         try {
           // A tenant placed in an earlier run is timed apart: its clock starts at the old CreateDeployment.
           await becomeReady(s, p, t, Date.parse(d.createdAt), placedNow.has(t) ? 'ready' : 'rerun-ready');
+        } catch (e) {
+          // An unhandled rejection would end the driver before it writes the PS-1 record.
+          s.rec.finding(`tenant ${t}: readiness failed (${e instanceof Error ? e.message : 'error'})`);
         } finally {
           release();
         }
@@ -332,7 +335,8 @@ async function ps1Platform(s: ScenarioEnv, p: PlatformEnv): Promise<void> {
   const others = s.manifest.seeded.filter((t) => t !== warm.tenantId);
   // A tenant that is ACTIVE already (a rerun) is not placed again but still gets its identity and its first served call.
   const tenants = others.filter((t) => existing.get(t)?.status !== 'ACTIVE');
-  const watcher = startReadiness(s, p, others, new Set(tenants));
+  // Placed in this run: no deployment before it. One left CREATING by an aborted run keeps its old clock.
+  const watcher = startReadiness(s, p, others, new Set(tenants.filter((t) => existing.get(t) === undefined)));
   let r: Onboarded;
   try {
     r = await onboard(s, tenants, 'onboard');

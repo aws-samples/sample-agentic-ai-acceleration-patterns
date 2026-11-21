@@ -50,6 +50,23 @@ export const emailOf = (tenantId: string, n: number): string => `success+${tenan
 
 const jitter = (ms: number): number => Math.min(8000, ms) * (0.5 + Math.random());
 
+/**
+ * The identity tenants a sweep deletes (stress ADR-0017): in a platform run, one for every control-plane
+ * tenant just deleted (`gone`, with or without an entry: an identity made part way may have none), and one
+ * for every entry whose control-plane tenant is in none of `live` (an earlier sweep could not delete it and
+ * the tenant is no longer in the manifest to wait for). Slice mode has none.
+ */
+export function identityTenantsToDelete(
+  platform: boolean,
+  gone: readonly string[],
+  entries: readonly IdentityEntry[],
+  live: readonly string[],
+): string[] {
+  if (!platform) return [];
+  const orphans = entries.map((e) => e.tenantId).filter((id) => !live.includes(id));
+  return [...new Set([...gone, ...orphans])];
+}
+
 export class IdentityApi {
   private readonly base: string;
   private scope?: Promise<boolean>;

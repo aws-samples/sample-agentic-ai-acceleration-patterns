@@ -30,7 +30,7 @@ import { ControlPlaneApi, operatorToken } from './api';
 import { aws, AwsError, sleep } from './aws';
 import { type Edge, liveEdge, readEdgeInputs } from './edge';
 import { cellsOf, deploymentsOf, type FleetEnv, removeAll } from './fleet';
-import { IdentityApi, curlSend } from './identity';
+import { IdentityApi, curlSend, identityTenantsToDelete } from './identity';
 import { allTenants, emptyManifest, type IdentityEntry, type Manifest, manifestPath, readManifest, writeManifest } from './manifest';
 import {
   APPLICATION_ID,
@@ -46,7 +46,7 @@ import {
   tenantSetsOf,
   type TierSizes,
 } from './plan';
-import { hookCommitOf, readFrontDoor, registerHooks, setHookPolicy, warmUp } from './platform-steps';
+import { hookCommitOf, hookPolicyFile, readFrontDoor, registerHooks, setHookPolicy, warmUp } from './platform-steps';
 import { type Identity, Recorder, type ResultRecordJson } from './recorder';
 import { type PlatformEnv, SCENARIOS, type ScenarioEnv } from './scenarios';
 import { awaitTenantsActive, deleteTenants, existingTenants, pollRecord } from './seed';
@@ -346,10 +346,16 @@ async function unhookStep(): Promise<number> {
     log(`unhook: register-hooks.sh --delete exited ${code}; the hook policy stays on ${n.fleet}-global-hook`);
     return 1;
   }
-  if (fs.existsSync(path.join(home, prefix, 'hook-policy-arns'))) {
+  const policyFile = hookPolicyFile(home, prefix);
+  if (fs.existsSync(policyFile)) {
+    const arn = fs.readFileSync(policyFile, 'utf8').trim();
     setHookPolicy(home, prefix, undefined);
     log('unhook: redeploying the control plane without the hook policy');
-    if ((await sliceCommand(['set-hook-policy'])) !== 0) return 1;
+    if ((await sliceCommand(['set-hook-policy'])) !== 0) {
+      // The policy is still on the role: keep the file, so a rerun redeploys instead of reporting success.
+      setHookPolicy(home, prefix, arn);
+      return 1;
+    }
   }
   return 0;
 }
@@ -627,7 +633,7 @@ async function sweep(seeded: boolean): Promise<number> {
     // A platform run asks for every deleted tenant, with or without an entry: an
     // identity made part way has none yet, and DeleteTenant answers 404 for a tenant that has no identity.
     let identities = m.identity ?? [];
-    const doomed = parseMode(process.env.STRESS_MODE) === 'platform' ? gone : [];
+    const doomed = identityTenantsToDelete(parseMode(process.env.STRESS_MODE) === 'platform', gone, identities, allTenants(m));
     if (doomed.length > 0) {
       try {
         const api = identityApiOf(() => undefined);

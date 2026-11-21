@@ -251,15 +251,15 @@ export async function collectFiveXx(
 ): Promise<Collected> {
   const windows = windowsOf(docs);
   const { reached, seen5xx } = driverCounts(docs);
-  const seed5xx = windows.reduce((a, w) => a + seed5xxIn(seedPerMinute, w.start, w.end), 0);
+  const seed5xx = windows.reduce((a, w) => a + seed5xxIn(seedPerMinute, w.start, new Date(w.end.getTime() + MINUTE)), 0);
   // shortcut: the driver's clock can run up to a minute behind CloudWatch's (W-9 saw calls land in the
-  // minute after the record's window), so `Count`, which only checks that the metrics caught up, is read
-  // one minute past each window. `5XXError` stays on the exact windows, so another slice's 5XX in the
-  // gap are not charged here. Upgrade by sampling the clock skew against AWS at the start of the run.
+  // minute after the record's window), so both metrics, and seed's 5xx, are read one minute past each
+  // window. Another slice's 5XX in that extra minute (platform mode) is charged here: a false alarm,
+  // never a missed one (P-7). Upgrade by sampling the clock skew against AWS at the start of the run.
   const sum = async (metric: 'Count' | '5XXError'): Promise<number> => {
     let total = 0;
     for (const w of windows) {
-      total += await ops.apiSum(metric, w.start, metric === 'Count' ? new Date(w.end.getTime() + MINUTE) : w.end);
+      total += await ops.apiSum(metric, w.start, new Date(w.end.getTime() + MINUTE));
     }
     return total;
   };

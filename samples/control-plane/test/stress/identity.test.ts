@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { IdentityApi, Pacer, emailOf, type Send } from './identity';
+import { IdentityApi, Pacer, emailOf, identityTenantsToDelete, type Send } from './identity';
 import { Recorder } from './recorder';
 
 const T = '01KAF5M0000000000000000T01';
@@ -42,6 +42,16 @@ describe('the identity calls of the platform run (stress ADR-0017)', () => {
     const entry = await f.api.createIdentity(T, 'st-name', 2, (e) => saved.push(e.users.length));
     expect(entry).toBeUndefined();
     expect(saved).toEqual([0, 1]);
+  });
+
+  it('deletes the identity of every deleted tenant, and of an orphaned entry, in a platform run only', () => {
+    const entry = (tenantId: string) => ({ tenantId, admin: { username: 'a', email: 'a@x' }, users: [] });
+    const A = '01KAF5M0000000000000000A01';
+    const B = '01KAF5M0000000000000000B01';
+    const C = '01KAF5M0000000000000000C01';
+    // A was deleted (no entry: made part way), B is an orphan entry left by an earlier sweep, C is still live.
+    expect(identityTenantsToDelete(true, [A], [entry(B), entry(C)], [A, C]).sort()).toEqual([A, B]);
+    expect(identityTenantsToDelete(false, [A], [entry(B)], [])).toEqual([]);
   });
 
   it('registers the scope first when the catalogue lacks it', async () => {
