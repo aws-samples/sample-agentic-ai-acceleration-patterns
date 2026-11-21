@@ -512,19 +512,20 @@ class Executor:
         current_text = read_text(os.path.join(g, "memory.current"))
         stat_text = read_text(os.path.join(g, "memory.stat"))
         stat = sz.flat_keyed(stat_text)
-        out = {"current_mib": int(current_text.strip()) // sz.MIB, "counted_mib": sz.counted(current_text, stat_text) // sz.MIB}
-        for key in ("anon", "file", "shmem", "kernel", "slab", "sock", "file_dirty", "file_writeback"):
+        out = {"current_mib": int(current_text.strip()) // sz.MIB, "counted_mib": sz.dirty_counted(current_text, stat_text) // sz.MIB}
+        for key in ("anon", "file", "shmem", "kernel", "slab", "slab_reclaimable", "slab_unreclaimable", "sock",
+                    "file_dirty", "file_writeback"):
             if key in stat:
                 out[key + "_mib"] = stat[key] // sz.MIB
         return out
 
     def dirty(self) -> bool:
-        """agentcore: the job group still holds 32 MiB or more after the sweep (spec §3.5 step 3)."""
+        """agentcore: the job group still holds 32 MiB or more after the sweep, reclaimable slab aside (spec §3.5 step 3)."""
         if self.backend != "agentcore" or not self.job_group:
             return False
         g = self.job_group
-        return sz.counted(read_text(os.path.join(g, "memory.current")),
-                          read_text(os.path.join(g, "memory.stat"))) >= sz.AGENTCORE_DIRTY
+        return sz.dirty_counted(read_text(os.path.join(g, "memory.current")),
+                                read_text(os.path.join(g, "memory.stat"))) >= sz.AGENTCORE_DIRTY
 
     def settled_dirty(self, deadline: float) -> bool:
         """dirty(), read again while the group drains.

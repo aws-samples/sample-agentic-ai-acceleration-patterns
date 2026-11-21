@@ -58,3 +58,5 @@ budget needs the tool's 5 s margin raised with it.
 Note 2026-11-20: on `agentcore` the runner reads the job group's memory again, for up to 1 s of the 3 s budget, before it calls the group not drained, because memory the sweep freed takes a moment to show.
 
 Note 2026-11-21: the read is repeated for the rest of the 3 s budget, not 1 s. The integration test's `runaway` step on `agentcore` saw the runner call the group not drained after a disk fill (first read as a slow `memfd` drain); the longer poll did not change that, and the runner now logs the group's memory split with `dirty` so the cause can be read.
+
+Note 2026-11-21 (later): the logged split after a disk fill showed the 215 MiB left over was kernel slab (anon 0, shmem 0, file already left out). The dirty read now also leaves out `slab_reclaimable` (dentries and inodes the kernel frees under pressure) and keeps unreclaimable slab, where SysV semaphores and message queues are charged (S-18). The 32 MiB limit is unchanged. The split of the 215 MiB between the two is logged (`slab_reclaimable_mib`, `slab_unreclaimable_mib`) and is proven by the next integration run.

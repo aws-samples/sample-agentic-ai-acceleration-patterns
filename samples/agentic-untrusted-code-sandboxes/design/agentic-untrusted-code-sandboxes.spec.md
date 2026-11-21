@@ -482,7 +482,11 @@ with `busy`. The runner:
    first `fork` failed with `EAGAIN` on `microvm` and `agentcore`
    (S-18). On `agentcore` the runner then reads the job group's
    `memory.current` less `file` plus `shmem` (as the `nitro` watchdog
-   does, so the page cache of files in `/work` does not count). The read is
+   does, so the page cache of files in `/work` does not count), less
+   `slab_reclaimable`: a disk fill leaves about 215 MiB of slab charged to
+   the group (the integration test's `dirty_group` line), and the
+   reclaimable part (dentries and inodes) the kernel frees under pressure. Unreclaimable slab stays counted, because SysV
+   semaphores and message queues are charged as kernel memory (S-18). The read is
    repeated for the rest of the 3 s the runner allows after a job, because
    the memory the sweep freed takes a moment to leave the group's counters
    (ADR-0064).
