@@ -8,7 +8,7 @@ import { ConflictException } from '@aws-sdk/client-cloudfront-keyvaluestore';
  * The API documents a `ConflictException` (409; 412 is read the same way) for a stale ETag. A real
  * KeyValueStore answers a stale `IfMatch` with a `ValidationException` (400) whose message says the
  * pre-condition failed, so that is a conflict too, not a bad request. The registrar and the route
- * table's custom resource write the same store and use this one test.
+ * table's custom resource write the same store and use this one test (ADR-0031).
  */
 export function isEtagConflict(error: unknown): boolean {
   if (error instanceof ConflictException) return true;

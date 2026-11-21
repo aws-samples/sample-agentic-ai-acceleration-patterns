@@ -150,7 +150,7 @@ log_group_created() {
 # exists TYPE ID REGION: 0 when the resource is still there, 1 when it is gone, 2 when the type is one this
 # script does not read, 3 when AWS did not say (a throttle, a denial): the check cannot tell.
 exists() {
-  local type="$1" id="$2" region="$3" err created
+  local type="$1" id="$2" region="$3" err created found
   case "$type" in
     AWS::Lambda::Function)
       err="$(aws lambda get-function --region "$region" --function-name "$id" 2>&1 >/dev/null)" && return 0
@@ -181,8 +181,12 @@ exists() {
       err="$(aws cloudfront describe-function --name "${id##*/}" 2>&1 >/dev/null)" && return 0
       grep -q 'NoSuchFunctionExists' <<<"$err" && return 1 ;;
     AWS::CloudFront::KeyValueStore)
-      err="$(aws cloudfront describe-key-value-store --name "$id" 2>&1 >/dev/null)" && return 0
-      grep -q 'EntityNotFound\|NoSuchResource' <<<"$err" && return 1 ;;
+      err="$(aws cloudfront describe-key-value-store --name "${id##*/}" 2>&1 >/dev/null)" && return 0
+      if grep -q 'EntityNotFound\|NoSuchResource' <<<"$err"; then
+        # CloudFormation's physical id may be the store's Id or ARN, not its name: look for the store in the list before it counts as gone.
+        found="$(aws cloudfront list-key-value-stores --query "KeyValueStoreList.Items[?Id=='${id##*/}' || ARN=='${id}'].Name" --output text 2>/dev/null)" || return 3
+        [[ -z "$found" || "$found" == None ]] && return 1 || return 0
+      fi ;;
     AWS::SSM::Parameter)
       err="$(aws ssm get-parameter --region "$region" --name "$id" 2>&1 >/dev/null)" && return 0
       grep -q 'ParameterNotFound' <<<"$err" && return 1 ;;

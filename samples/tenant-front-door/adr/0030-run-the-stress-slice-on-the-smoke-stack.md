@@ -40,7 +40,7 @@ reach an origin all concern the front door alone, so the slice can measure
 them now.
 
 ## Decision
-Option 1. A prefix of 1 to 28 letters and digits starting with a letter
+Option 1. A prefix of 1 to 28 lower-case letters and digits starting with a letter
 names the stacks, the stand-in hook role and the application domain label.
 `teardown` destroys every stack of the prefix, so `slice.sh` refuses the
 prefixes of the front door's own stacks (`TenantFrontDoor`) and of the
@@ -61,6 +61,10 @@ which is not a budgeted quota.
   §6.4).
 - The smoke app gains two optional contexts, and its defaults keep the
   smoke test's names.
+- The stand-in hook and operator roles trust the account's root principal,
+  so any principal in the account that may call `sts:AssumeRole` can write
+  routes to this run's registrar. Run the slice in a non-production
+  account whose principals are the tester's own.
 - The stand-in control plane's API no longer creates the account's API
   Gateway CloudWatch Logs role, which CDK would retain after the stack is
   deleted. The registrar's stage needs that role for its access logs, so

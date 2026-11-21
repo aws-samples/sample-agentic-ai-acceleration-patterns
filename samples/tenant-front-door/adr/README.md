@@ -41,3 +41,4 @@ are in [spikes](../design/spikes.md).
 | [0027](./0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Write the hook parameter from a registrar URL input | Proposed | 2026-11-20 |
 | [0029](./0029-join-stress-requests-on-the-cloudfront-request-id.md) | Join stress requests on the CloudFront request id | Accepted | 2026-11-21 |
 | [0030](./0030-run-the-stress-slice-on-the-smoke-stack.md) | Run the stress slice on the smoke stack | Accepted | 2026-11-21 |
+| [0031](./0031-read-a-pre-condition-validation-error-as-an-etag-conflict.md) | Read a pre-condition validation error as an ETag conflict | Accepted | 2026-11-21 |

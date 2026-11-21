@@ -38,10 +38,10 @@ describe('slice.sh guards', () => {
     expect(r.stderr).toContain('is the name of the front door');
   });
 
-  it.each(['1abc', 'a-b', 'a_b', 'a'.repeat(29), ''])('refuses the prefix "%s"', (prefix) => {
+  it.each(['1abc', 'a-b', 'a_b', 'Abc', 'a'.repeat(29), ''])('refuses the prefix "%s"', (prefix) => {
     const r = slice(prefix, 'slice', 'teardown');
     expect(r.status).toBe(2);
-    expect(r.stderr).toMatch(/STRESS_PREFIX (must be 1 to 28 letters|is not set)/);
+    expect(r.stderr).toMatch(/STRESS_PREFIX (must be 1 to 28 lower-case letters|is not set)/);
   });
 
   (hasJq ? it : it.skip)('lets a good prefix through to the platform-mode refusal, which touches nothing', () => {

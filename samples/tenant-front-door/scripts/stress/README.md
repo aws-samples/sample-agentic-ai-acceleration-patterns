@@ -37,7 +37,7 @@ export AWS_REGION=<region for the front door>
 export STRESS_FD_IDENTITY_REGION=<region of tenant-identity; default AWS_REGION>
 export STRESS_FD_ZONE_ID=<hosted zone id of the test subdomain>
 export STRESS_FD_ZONE_NAME=<its name>
-export STRESS_PREFIX=<1 to 28 letters and digits, starting with a letter>
+export STRESS_PREFIX=<1 to 28 lower-case letters and digits, starting with a letter>
 cd stress
 ./run.sh run --tier small --slices tenant-front-door
 ```
@@ -55,8 +55,8 @@ distribution, is most of it) and a destroy of the stacks about 9, with about
 
 | Input | Meaning |
 |---|---|
-| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it (the host's record of the prefix, `context.json` and `outputs.json`, names the account and Region it was made in, `deploy` and `teardown` refuse the credentials or the Region of another, and a clean `teardown` clears `context.json`) |
-| `STRESS_FD_ZONE_ID`, `STRESS_FD_ZONE_NAME` | the test subdomain's hosted zone; the front door's `appDomain` is `<prefix in lower case>.<zone name>`: one name per run prefix, so two runs never share a host |
+| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it (the host's record of the prefix, `context.json` and `outputs.json`, names the account and Region it was made in, `deploy` and `teardown` refuse the credentials or the Region of another, and a clean `teardown` clears `context.json`) |
+| `STRESS_FD_ZONE_ID`, `STRESS_FD_ZONE_NAME` | the test subdomain's hosted zone; the front door's `appDomain` is `<prefix>.<zone name>`: one name per run prefix, so two runs never share a host |
 | `STRESS_FD_IDENTITY_REGION` | the Region of the `tenant-identity` shared pool when it is not `AWS_REGION` |
 
 The stress front door uses a test subdomain zone that you supply: one
@@ -145,7 +145,7 @@ does not.
 | Registrar 503 (`route-table-busy`) | 4 or 5 of 54 or 55 calls |
 | Time to routable p50 / p95 / p99 | 23 to 40 s / 37 to 49 s / 38 to 58 s |
 | Time to last miss p50 / p95 / p99 | 34 to 41 s / 52 to 57 s / 54 to 60 s |
-| Routes served once and then refused again | 29 or 30 of 50 routes |
+| Routes served once and then answered otherwise (any non-200, a cell rate limit included) | 29 or 30 of 50 routes |
 | Suspend call to five 503s in a row | 30 to 60 s |
 | Client latency, served `whoami`, p50 / p99 | 0.05 s / 0.11 to 0.12 s |
 | Edge refusal latency, p50 / p99 | 3 to 4 ms / 7 to 9 ms |

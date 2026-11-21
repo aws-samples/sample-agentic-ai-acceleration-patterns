@@ -1687,9 +1687,14 @@ about 30 s at one location (spike S-2: median 28.4 s, p99 29.4 s, max
 29.5 s). It does not reach every server of that location at once: from
 one client the first routed request came 16 to 37 s after the write, and
 requests still missed the change up to about 63 s after it (design/spikes.md,
-Smoke run). A check that needs every request to see a change therefore
-waits 90 s. The route hook bounds its wait at 45 s after the registrar
-returns, so the operation does not end before its route is live. For
+Smoke run). The stress slice (`scripts/stress/README.md`) measured the first
+routed request 23 to 40 s after the registrar's answer at the median and up
+to 58 s at the 99th percentile, the last miss up to 60 s after it, and a
+suspension taking 30 to 60 s to answer five 503s in a row. A check that needs
+every request to see a change therefore waits 90 s. The route hook bounds its
+wait at 45 s after the registrar returns. That is a bound, not a guarantee:
+the times above can exceed it, and then an operation ends before every
+request sees its route. For
 cell routes and every call in `single` mode it waits the full 45 s, a
 bound and not a check: in `single` mode a route cannot be observed
 without a tenant token, and a `cell#` route cannot be observed from
@@ -2400,6 +2405,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0027](../adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Proposed. Write the front door hook parameter, one JSON document, from a `registrarUrl` input once the main stack is deployed | an input read after the main stack's deploy; the hook reads the edge parameter across accounts; a fixed registrar domain; a separate app |
 | [ADR-0029](../adr/0029-join-stress-requests-on-the-cloudfront-request-id.md) | Join the stress slice's requests to the edge log on the CloudFront request id, with no correlation header; the origin is joined by counts | the stress ADR-0005 correlation header; the CloudFront request id; X-Ray trace ids |
 | [ADR-0030](../adr/0030-run-the-stress-slice-on-the-smoke-stack.md) | Run the stress slice on the smoke stack, its stacks, hook role and construct id named by a run prefix; budget Lambda concurrency only | the smoke stack named by a prefix; a stack of its own in the front door app; wait for platform mode |
+| [ADR-0031](../adr/0031-read-a-pre-condition-validation-error-as-an-etag-conflict.md) | Read a stale `IfMatch` as an ETag conflict whether the store answers `ConflictException` or a 400 `ValidationException` that says the pre-condition failed | `ConflictException` only; both answers; re-read the ETag after any failure |
 
 ## 9. Spikes
 

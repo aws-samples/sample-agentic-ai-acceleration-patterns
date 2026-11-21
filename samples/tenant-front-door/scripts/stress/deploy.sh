@@ -10,7 +10,7 @@
 # Inputs (environment): AWS_REGION, STRESS_PREFIX, STRESS_HOME from the runner,
 # and STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME: a public hosted zone in this
 # account, the test subdomain the front door's `appDomain` goes under. The
-# application domain is `<prefix in lower case>.<zone name>`, one per run
+# application domain is `<prefix>.<zone name>`, one per run
 # prefix. The stacks deploy one at a time, each named with `--exclusively`.
 #
 # Needs the tenant-identity shared-pool deployment's published parameters in
