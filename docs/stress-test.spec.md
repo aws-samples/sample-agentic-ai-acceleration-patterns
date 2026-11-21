@@ -63,6 +63,9 @@ runtime-isolation deployment for up to `maxTenants` tenants.
   (Q-7, stress ADR-0016). At `small` the edge check on agent calls reads
   no route hint (§5.3).
 - Several Regions.
+- Churn and cross-cell probes under load. The runner runs scenarios one
+  after another, so PS-5 and PS-7 run without PS-2's load beside them
+  (§5.1, [stress ADR-0018](../stress/adr/0018-run-churn-and-cross-cell-probes-after-the-load-scenarios.md)).
 - Soak runs over days. One platform run is a working day at most.
 
 ### 1.3 What the test is NOT
@@ -208,7 +211,7 @@ and the records in
    (front-door ADR-0017, front-door spec §3.2).
 4. In a platform run, when the deployment is `ACTIVE`, the driver of the
    `control-plane` slice creates the tenant's identity with the
-   IAM-signed admin API of the stress identity (stress ADR-0017). It
+   IAM-signed platform API of the stress identity (stress ADR-0017). It
    calls tenant-identity `CreateTenant` with the control-plane tenant
    id, `scopes` `["app/use"]` and an admin e-mail address, which creates
    the first admin. The scope is the vendor scope the slice-mode tenants
@@ -354,27 +357,6 @@ is stopped when it exits.
 With one slice named, the runner is that sample's stress test. With all of
 them, it is the platform run.
 
-Teardown has one ordering rule that the reverse order alone does not
-give. In the reverse order the front door goes before the control plane,
-and the control plane's cell and deployment deletes run the front door's
-`PRE` hook (`CELL_DELETE`, `DEPLOYMENT_DELETE`) against the route
-registrar. When the run removes the fleet (`small`, `medium`, and
-`large` with `--fixtures`), the `tenant-front-door` `teardown` therefore
-unregisters its two global hooks from the control plane
-(`register-hooks.sh --delete`, front-door spec §5.2) before it removes
-the registrar, so the control plane deletes deployments and cells with
-no call to a registrar that is gone. The control plane is still deployed
-at that point. Front-door spec §6.2 removes the routes through the hooks
-first (step 1) and then unregisters the hooks (step 2); here the
-registrar and the route table are destroyed in the same teardown, so no
-route needs removing. The rest of front-door spec §6.2's order follows:
-the policy out of `globalHookManagedPolicyArns` with a control-plane
-update, then `RouteHookAccess` and its parameter, then the stacks; the
-slice's `teardown` verifies that none is left (§3.4). At `large` without
-`--fixtures` the fleet stays with its routes (P-5), so the registrar,
-the route table and the hooks stay with it, and the `tenant-front-door`
-`teardown` removes none of them.
-
 In the platform run the front door deploys in two phases, because its
 `agentIngress` input is the first cell's ingress, which exists only
 after the control plane builds that cell (stress ADR-0016). Phase one
@@ -423,6 +405,27 @@ account base (§3.7, W-11), with the platform account credentials it
 deploys with. Phase two is a CloudFront distribution change in the main
 stack, on every run at `small`. Its time is part of the front-door slice's
 `deploySeconds` (P-6), and the slice logs it on a line of its own.
+
+Teardown has one ordering rule that the reverse order alone does not
+give. In the reverse order the front door goes before the control plane,
+and the control plane's cell and deployment deletes run the front door's
+`PRE` hook (`CELL_DELETE`, `DEPLOYMENT_DELETE`) against the route
+registrar. When the run removes the fleet (`small`, `medium`, and
+`large` with `--fixtures`), the `tenant-front-door` `teardown` therefore
+unregisters its two global hooks from the control plane
+(`register-hooks.sh --delete`, front-door spec §5.2) before it removes
+the registrar, so the control plane deletes deployments and cells with
+no call to a registrar that is gone. The control plane is still deployed
+at that point. Front-door spec §6.2 removes the routes through the hooks
+first (step 1) and then unregisters the hooks (step 2); here the
+registrar and the route table are destroyed in the same teardown, so no
+route needs removing. The rest of front-door spec §6.2's order follows:
+the policy out of `globalHookManagedPolicyArns` with a control-plane
+update, then `RouteHookAccess` and its parameter, then the stacks; the
+slice's `teardown` verifies that none is left (§3.4). At `large` without
+`--fixtures` the fleet stays with its routes (P-5), so the registrar,
+the route table and the hooks stay with it, and the `tenant-front-door`
+`teardown` removes none of them.
 
 The lock is per prefix on the runner's host. A second run from another host
 against the same accounts is not detected; one run per set of accounts at a
@@ -521,11 +524,12 @@ Each cell's `maxTenants` is its seeded share plus its share of the churn
 count, so a churn create (PS-5) lands in a free slot of an existing cell and
 times a tenant build, not a cell build.
 
-In a platform run, users per active tenant counts the admin that
-`CreateTenant` creates, so a tenant has the admin and the tier's count
-minus one further users (tenant-identity ADR-0042). In slice mode the
-runtime-isolation slice's own `seed` creates that many users beyond its
-admin.
+Users per active tenant counts the admin that `CreateTenant` creates,
+when the control-plane driver (§3.3 step 4) or the `tenant-identity`
+`seed` creates the users: a tenant has the admin and the tier's count
+minus one further users (tenant-identity ADR-0042). The
+runtime-isolation slice's own `seed`, in slice mode, creates the tier's
+count of users beyond its admin.
 
 The `large` row splits the runtime-isolation `large` tier over four cells:
 100 agents in total, the same as the runtime-isolation `large` tier, so
@@ -729,7 +733,7 @@ correlation id.
 | 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair and a scoped cell bootstrap | the cell build would otherwise act as an account administrator; see below | stress ADR-0006, stress ADR-0011, stress ADR-0012, stress ADR-0014, stress ADR-0016, control-plane ADR-0047 |
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios | stress ADR-0007 |
 | 9 | At `small`, the front door's one `agentIngress` is the one cell's ingress; per-cell agent routing for `medium` and `large` is Q-7 | the front door routes only `/api/*` per cell, so agent calls cannot reach a per-cell ingress through the router | stress ADR-0016 |
-| 10 | The driver of the `control-plane` slice creates each onboarded tenant's identity tenant and users, through the IAM-signed admin API of the stress identity; the tenant script keeps only the entitlement call | three components could do it, and the choice sets what PS-1 times and which role may call the identity admin API | stress ADR-0017 |
+| 10 | The driver of the `control-plane` slice creates each onboarded tenant's identity tenant and users, through the IAM-signed platform API of the stress identity; the tenant script keeps only the entitlement call | three components could do it, and the choice sets what PS-1 times and which role may call the identity's platform API | stress ADR-0017 |
 
 Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
 the account's CDK bootstrap roles. Each cell account carries one bootstrap,

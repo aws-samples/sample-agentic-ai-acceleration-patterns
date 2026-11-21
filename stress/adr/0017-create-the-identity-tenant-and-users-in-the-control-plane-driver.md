@@ -142,8 +142,8 @@ that list for control-plane tenants, in place of the lookup in
 (spec §4.2).
 
 ## Consequences
-Easier: the tenant role stays an entitlement-only role, and the identity
-admin API is called from one place, the session of the run. PS-1 shows
+Easier: the tenant role stays an entitlement-only role, and the identity's
+platform API is called from one place, the session of the run. PS-1 shows
 the cost of a ready tenant including its identity, which a vendor's own
 onboarding would also pay.
 
