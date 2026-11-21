@@ -184,6 +184,8 @@ export class FakeControlPlane {
   readonly tenants = new Map<string, { name: string }>();
   /** When set, every control-plane GET answers this status. */
   failWith?: number;
+  /** The next this many control-plane GETs answer 503, then the fake answers as usual. */
+  failFirst = 0;
   /** When set, the token endpoint answers this status. */
   tokenStatus = 200;
   tokenExpiresIn = 3600;
@@ -201,6 +203,10 @@ export class FakeControlPlane {
     const path = u.replace('https://cp.example.com/prod', '');
     this.reads.push(path);
     if ((init?.headers as Record<string, string>).authorization !== `Bearer ${this.token}`) return new Response('{}', { status: 401 });
+    if (this.failFirst > 0) {
+      this.failFirst--;
+      return new Response('{}', { status: 503 });
+    }
     if (this.failWith !== undefined) return new Response('{}', { status: this.failWith });
     let m = /^\/cells\/([0-9A-Z]{26})$/.exec(path);
     if (m) {
@@ -278,6 +284,7 @@ export function harness(config: RegistrarConfig = testConfig(), domains?: Dedica
       secretArn: config.vendorIdpSecretArn,
       secrets: new SecretsManagerClient({}),
       fetch: cp.fetch as unknown as typeof fetch,
+      sleep: async () => undefined,
     }),
     store: new KvsRouteStore({
       client: new CloudFrontKeyValueStoreClient({ region: 'us-east-1' }),
