@@ -51,10 +51,12 @@ the platform it measures, and Option 3 does not measure the edge.
   body as well as the status. An answer counts as the origin's, and the tenant
   as routed, only when API Gateway's request id (`x-amzn-requestid`) is on it.
   `x-cache` cannot tell the two apart, because CloudFront sets
-  `Error from cloudfront` on an origin's 4xx too. No answer, a 404, and an
-  answer with neither the router's body nor the request id (CloudFront's own: a
-  geographic restriction, a function failure) tell nothing about the tenant and
-  are read again.
+  `Error from cloudfront` on an origin's 4xx too. No answer, and an answer with
+  neither the router's body nor the request id (CloudFront's own: a geographic
+  restriction, a function failure), tell nothing about the tenant and are read
+  again. A 404 (no agent ingress, a wrong backend or host) or a router 401
+  (another tenant claim) stops the scenario with that cause: one read of a
+  tenant that has no deployment settles it before any build starts.
 - **Registrar.** `setStatus` signs the call with the caller's own credentials
   through `curl --aws-sigv4`, passing the key pair on stdin and never in the
   arguments. The session that runs PS-5 holds the edge operator role. The

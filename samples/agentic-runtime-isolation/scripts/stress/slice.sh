@@ -270,7 +270,7 @@ case "$verb" in
         S5) k6_file=s5-streams.js ;;
         S6) k6_file=s6-peak.js ;;
         S7) k6_file=s7-eviction.js ;;
-        PS-*) echo "slice.sh run: ${scenario} runs in platform mode only: it needs the edge, so run it with every slice it needs" >&2; exit 2 ;;
+        PS-2 | PS-3 | PS-4 | PS-6 | PS-8) echo "slice.sh run: ${scenario} runs in platform mode only: it needs the edge, so run it with every slice it needs" >&2; exit 2 ;;
         *) echo "slice.sh run: unknown scenario ${scenario} (S1 to S7)" >&2; exit 2 ;;
       esac
     fi

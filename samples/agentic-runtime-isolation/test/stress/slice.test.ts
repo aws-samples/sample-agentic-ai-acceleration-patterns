@@ -177,6 +177,9 @@ describe('slice.sh', () => {
         const odd = run(SLICE_SH, platformEnv(h), 'run', 'PS-7');
         expect(odd.status).toBe(2);
         expect(odd.stderr).toContain('unknown scenario PS-7');
+        const foreign = run(SLICE_SH, sliceEnv('small', { AWS_REGION: 'eu-central-1', STRESS_RESULTS: h, STRESS_COMMIT: 'abc1234' }), 'run', 'PS-5');
+        expect(foreign.status).toBe(2);
+        expect(foreign.stderr).toContain('unknown scenario PS-5');
         const mode = run(SLICE_SH, sliceEnv('small', { STRESS_MODE: 'both' }), 'budget');
         expect(mode.status).toBe(2);
         expect(mode.stderr).toContain('STRESS_MODE must be slice or platform');
@@ -555,7 +558,7 @@ describe('slice.sh', () => {
     describe('the edge-refusal lines (k6/edge-refusals.js)', () => {
       // The file has no k6 import, so it runs here as it is, with its `export` keyword dropped.
       type Tracker = { track: (tenant: string, status: number) => void };
-      type Loaded = { createEdgeRefusals: (now: () => number, progress: () => number, log: (l: string) => void) => Tracker };
+      type Loaded = { createEdgeRefusals: (now: () => number, log: (l: string) => void) => Tracker };
       const load = (): Loaded => {
         const ctx: Record<string, unknown> = {};
         vm.runInNewContext(`${fs.readFileSync(path.join(STRESS_DIR, 'k6', 'edge-refusals.js'), 'utf8').replace(/^export /gm, '')}\nthis.createEdgeRefusals = createEdgeRefusals;`, ctx);
@@ -563,42 +566,24 @@ describe('slice.sh', () => {
       };
       const MINUTE = 60_000;
 
-      it('writes a minute\'s refusals when the next minute\'s first response arrives, even a success', () => {
+      it('writes each refusal at once, with its minute, so the last one of a VU is never lost', () => {
         const lines: string[] = [];
         let now = 10 * MINUTE;
-        const { track } = load().createEdgeRefusals(() => now, () => 0.2, (l) => lines.push(l));
+        const { track } = load().createEdgeRefusals(() => now, (l) => lines.push(l));
         track('A', 503);
-        track('A', 503);
-        track('B', 403);
-        track('A', 200);
-        expect(lines).toEqual([]);
-        now += MINUTE;
-        track('A', 200);
-        expect(lines.map((l) => JSON.parse(l))).toEqual([
-          { kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 503, count: 2 },
-          { kind: 'edge_refusal', epochMinute: 10, tenantId: 'B', status: 403, count: 1 },
+        expect(lines.map((l) => JSON.parse(l))).toEqual([{ kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 503, count: 1 }]);
+        now += MINUTE + 5_000;
+        track('B', 429);
+        track('B', 429);
+        expect(lines.map((l) => JSON.parse(l)).slice(1)).toEqual([
+          { kind: 'edge_refusal', epochMinute: 11, tenantId: 'B', status: 429, count: 1 },
+          { kind: 'edge_refusal', epochMinute: 11, tenantId: 'B', status: 429, count: 1 },
         ]);
-        now += MINUTE;
-        track('A', 200);
-        expect(lines).toHaveLength(2);
-      });
-
-      it('writes after every response in the last 1 % of the scenario, a success included', () => {
-        const lines: string[] = [];
-        let progress = 0.5;
-        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, () => progress, (l) => lines.push(l));
-        track('A', 429);
-        expect(lines).toEqual([]);
-        progress = 0.995;
-        track('A', 200);
-        expect(lines.map((l) => JSON.parse(l))).toEqual([{ kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 429, count: 1 }]);
-        track('A', 200);
-        expect(lines).toHaveLength(1);
       });
 
       it('counts nothing for a success', () => {
         const lines: string[] = [];
-        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, () => 1, (l) => lines.push(l));
+        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, (l) => lines.push(l));
         track('A', 200);
         expect(lines).toEqual([]);
       });

@@ -12,7 +12,8 @@
 #   slice.sh seed                   the tier's tenants and users, from the manifest when it exists
 #   slice.sh run <scenario>         PS-1, token-rate or create-tenant-burst
 #   slice.sh collect                late fields of this run's records, from API Gateway metrics
-#   slice.sh teardown [--fixtures]  delete the run's tenants; with --fixtures also the stack
+#   slice.sh teardown [--fixtures]  delete the run's tenants; with --fixtures also the stack and
+#                                   both manifests
 #
 # The stack is `${STRESS_PREFIX}-identity`, a `shared-pool` deployment with its
 # own user pool that publishes none of the fixed-name shared parameters

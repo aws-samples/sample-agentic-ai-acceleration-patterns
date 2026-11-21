@@ -147,7 +147,7 @@ interface Credentials {
 async function loadCredentials(): Promise<{ creds: Credentials; expiresAt: number } | undefined> {
   try {
     const out = await aws(['configure', 'export-credentials', '--format', 'process']);
-    if (typeof out.AccessKeyId !== 'string' || typeof out.SecretAccessKey !== 'string') return undefined;
+    if (typeof out.AccessKeyId !== 'string' || typeof out.SecretAccessKey !== 'string') return undefined; // pragma: allowlist secret (a type check)
     const expires = typeof out.Expiration === 'string' ? Date.parse(out.Expiration) : Number.NaN;
     return {
       creds: { accessKeyId: out.AccessKeyId, secretAccessKey: out.SecretAccessKey, sessionToken: typeof out.SessionToken === 'string' ? out.SessionToken : undefined },

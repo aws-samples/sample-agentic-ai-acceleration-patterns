@@ -121,11 +121,10 @@ export function summarize(data, scenario) {
 
 // -- refusals through the edge (platform mode) ----------------------------------
 
-// A 4xx or 5xx through the edge is one `edge_refusal` line per VU, tenant, status and minute
-// (edge-refusals.js); collect-platform.sh gives each its tenant and reason (P-7). It runs on every
-// response, so the last minute's counts are written too.
+// A 4xx or 5xx through the edge is one `edge_refusal` line, written at once (edge-refusals.js);
+// collect-platform.sh gives each its tenant and reason (P-7).
 const PLATFORM = env('STRESS_MODE', 'slice') === 'platform';
-const edgeRefusals = createEdgeRefusals(Date.now, () => exec.scenario.progress, (line) => console.log(line));
+const edgeRefusals = createEdgeRefusals(Date.now, (line) => console.log(line));
 
 // -- tokens and conversations --------------------------------------------------
 

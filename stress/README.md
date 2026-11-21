@@ -142,9 +142,10 @@ the reason `no-identity-tenant`, one with no admin user name with `no-user`; bot
 tenant id in the scenario's output and in `platform-tenants.json` in the slice's folder of
 `$STRESS_HOME`, together with the identity tenants outside the control plane
 (`not-in-control-plane`, ignored). The scenario stops when fewer than two tenants are
-usable (the read-other probe needs two). Nothing in a platform run creates the identity tenant and the users of a tenant the
-control plane onboarded (spec §3.3, steps 3 and 4), so this slice refuses every control-plane
-tenant and the run fails with the list, until something does.
+usable (the read-other probe needs two). Nothing in a platform run creates the identity
+tenant and the users of a tenant the control plane onboarded (spec §3.3, steps 3 and 4), so
+this slice refuses every control-plane tenant and the run fails with the list, until
+something does.
 
 Every request through the edge that is refused (4xx, 5xx) or whose body shows a refusal gets a
 tenant and a reason in the record's `refusals.byTenantReason`: the tenant is the driver's, the
@@ -240,9 +241,9 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   slice-mode figure, all on `cell-account-1`, so it overstates what one cell account draws.
 - PS-2, PS-3, PS-4, PS-6 and PS-8 in platform mode attribute refusals from the driver's own
   lines. The edge's and the cells' logs are not joined, so the records hold the client's
-  latency hops only and no quota peaks or cost. A virtual user flushes its per-minute
-  refusal counts on a change of minute and once the scenario is 99 % done; a refusal in the
-  last minute of a user that ends earlier stays unattributed, and the run fails on it.
+  latency hops only and no quota peaks or cost. The driver prints one line for each refused
+  request, so a scenario that refuses most of its requests (PS-4's noisy tenant) prints as
+  many lines as refusals.
 - `agentic-runtime-isolation` needs `tenant-front-door`, and no slice of that name exists, so
   the runner refuses every platform run that names `agentic-runtime-isolation` with
   `agentic-runtime-isolation needs tenant-front-door, which is not a slice`. PS-2, PS-3, PS-4,

@@ -344,7 +344,7 @@ describe('the front door\'s manifest (stress/README.md, "Platform mode: manifest
 });
 
 describe('signedPut', () => {
-  const creds = { accessKeyId: 'AKIATESTKEY0000', secretAccessKey: 'secret-test-value', sessionToken: 'session-test-value' };
+  const creds = { accessKeyId: 'AKIATESTKEY0000', secretAccessKey: 'secret-test-value', sessionToken: 'session-test-value' }; // pragma: allowlist secret (test fixture)
   const fake = (script: string): { dir: string; curl: string } => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fakecurl-'));
     const curl = path.join(dir, 'curl');
@@ -444,6 +444,23 @@ describe('what the edge says about a tenant', () => {
     w.script = () => ({ status: 401, router: true, origin: false });
     await ps5(w.env({ manifest: ONE_TENANT }), w.timing);
     expect(w.recorder.findings.join('\n')).toMatch(/the router answered 401 for the probe token: the front door reads the tenant from a claim other than tenant_id/);
+  });
+
+  it('builds no deployment for any churn tenant when the edge is wrong, and says so once', async () => {
+    const w = new World(1);
+    w.script = () => ({ status: 404, router: true, origin: false });
+    await ps5(w.env({ buildLimit: 3 }), w.timing);
+    expect(w.created.size).toBe(0);
+    expect(w.recorder.findings).toHaveLength(1);
+    expect(w.recorder.findings[0]).toMatch(/the edge answered 404/);
+  });
+
+  it('stops before any build when a tenant with no deployment already has a live route', async () => {
+    const w = new World(1);
+    w.script = () => INGRESS_DENY;
+    await ps5(w.env(), w.timing);
+    expect(w.created.size).toBe(0);
+    expect(w.recorder.findings).toEqual([`tenant ${TENANTS[0]}: the edge answers as routed for a tenant with no deployment: PS-5 times a create from nothing`]);
   });
 
   it('never reads a CloudFront-generated 403 as a route, in either direction', async () => {

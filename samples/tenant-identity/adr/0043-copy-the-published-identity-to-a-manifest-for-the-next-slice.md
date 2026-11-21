@@ -7,8 +7,8 @@
 
 ## Context
 ADR-0042 has the stress slice publish one JSON parameter, `/<prefix>/identity`
-(API URL, API id, pool id, app client id, Region; ids only), for the next
-slice. In a platform run the next slice is `agentic-runtime-isolation`, which
+(stack name, API URL, API id, pool id, app client id, Region; ids and names
+only), for the next slice. In a platform run the next slice is `agentic-runtime-isolation`, which
 runs its load from the k6 driver host and reads every input from manifest
 files in `$STRESS_HOME/$STRESS_PREFIX/` (`stress/README.md`, "Platform mode:
 manifests"): ids and names only, a file per producer, each checked before use

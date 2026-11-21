@@ -224,7 +224,7 @@ scripts/stress/
   collect-platform.sh  platform mode: `collect` from the driver's own refusal lines (the edge's and the cells' logs are not joined)
   k6/
     probe.js         the ingress call, the probes and their isolation assertions, warm-up and step (token refresh, pacing and counters are in stress/k6/lib.js)
-    edge-refusals.js platform mode: counts each refused request by tenant, status and minute and prints one `edge_refusal` line for each
+    edge-refusals.js platform mode: prints one `edge_refusal` line, with its tenant, status and minute, for each refused request
     noisy-pace.js    S3's pacing arithmetic, no k6 import (test/stress/slice.test.ts checks it)
     s1-steady.js ... s7-eviction.js
   collect.sh         Section 7 for each record's window; fills the record's late fields; prints the pass table

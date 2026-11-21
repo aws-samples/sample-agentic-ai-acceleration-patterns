@@ -76,6 +76,10 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
   });
   // Credentials load before the first timed call, so no `suspended` or `resumed` hop includes them.
   await edge.prepare?.();
+  // One read of a tenant that has no deployment, before any build starts: the edge is wrong (a
+  // 404, a router 401) or the tenant has a route it should not have, and every churn tenant
+  // would otherwise create a deployment and fail at its first poll.
+  if (tenants.length > 0 && !(await preflight(s, edge, tenants[0]))) return;
   const queue = [...tenants];
   // Cycles in flight: the most builds that can run at once, an upper bound on the draw on the
   // platform account's concurrent builds (a cycle also waits on the edge, with no build running).
@@ -90,6 +94,8 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
       } catch (e) {
         const cause = e instanceof EdgeMisconfigured ? e.message : `the churn cycle stopped (${e instanceof Error ? `${e.name}: ${e.message}` : 'unknown error'})`;
         s.rec.finding(`tenant ${tenant}: ${cause}`);
+        // A wrong edge is wrong for every tenant: start no more cycles.
+        if (e instanceof EdgeMisconfigured) queue.length = 0;
       } finally {
         active -= 1;
       }
@@ -99,6 +105,22 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
   // workers never run more cycles at once than it allows.
   await Promise.all(Array.from({ length: Math.min(s.buildLimit, tenants.length) }, worker));
   s.log(`PS-5: ${completed} of ${tenants.length} churn tenants completed a deployment cycle`);
+}
+
+/** True when the edge answers for a tenant with no deployment as it should (no route, or no answer that says otherwise). */
+async function preflight(s: ScenarioEnv, edge: Edge, tenant: string): Promise<boolean> {
+  try {
+    const state = await read(s, edge, tenant);
+    if (state === 'routed' || state === 'suspended') {
+      s.rec.finding(`tenant ${tenant}: the edge answers as ${state} for a tenant with no deployment: PS-5 times a create from nothing`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    if (!(e instanceof EdgeMisconfigured)) throw e;
+    s.rec.finding(`tenant ${tenant}: ${e.message}`);
+    return false;
+  }
 }
 
 /** One edge read, recorded as a call of its own so a surprising answer is attributed to the tenant. */
