@@ -292,8 +292,17 @@ not pass), cells by their service role, the
 cell bootstrap's execution role), a
 stack whose service role is set and is not the cell execution role, a
 `cdk-hnb659fds-*` role, a role pair on `/cell/` or under either cell
-boundary, or a `/cell/` role trusted from outside (above). The stack list
-and `iam:GetRole` give all of it.
+boundary, a role pair half holding a policy its stack did not give it (a
+managed policy other than its owner policy, `cell-build-policy` or
+`cell-tenant-build-policy` with the owner's suffix, or an inline policy
+other than the stack's default one with the control plane's SSM namespace
+actions on `/application-plane/`), a role pair half whose trust is not the
+stack's (one statement allowing `sts:AssumeRole` to the platform account,
+conditioned on `aws:PrincipalArn` being the fleet's build role for that
+half or its API role, and nothing else), or a `/cell/` role trusted from
+outside (above). The stack list, `iam:ListRoles`, and for the role pair
+`iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and
+`iam:GetRolePolicy` give all of it.
 
 ## 4. Data model
 
@@ -443,7 +452,7 @@ correlation id.
 | 4 | Cells split agents (four cells of 25 at `large`) | keeps the Runtime count flat while testing routing across cells | stress ADR-0003 |
 | 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds | stress ADR-0004 |
 | 6 | A correlation header, logged at every hop | the runtime-isolation ingress and the front door each log it; a change to both samples | stress ADR-0005 |
-| 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair and a scoped cell bootstrap | the cell build would otherwise act as an account administrator; see below | stress ADR-0006, stress ADR-0011, control-plane ADR-0047 |
+| 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair and a scoped cell bootstrap | the cell build would otherwise act as an account administrator; see below | stress ADR-0006, stress ADR-0011, stress ADR-0012, stress ADR-0014, control-plane ADR-0047 |
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios | stress ADR-0007 |
 
 Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
@@ -490,9 +499,9 @@ Q-5.
 | W-2 driver and k6 library moved to `stress/` | W-1 schema | yes, once W-1's schema is fixed |
 | W-3 runtime-isolation slice on the contract | W-1, W-2 | yes, after W-1 and W-2 |
 | W-4 control-plane build-limit prop | decision 2 | yes, now |
-| W-5 control-plane slice and the stress application | W-1, W-4, W-10; W-11 for Q-1 and the account check | after W-1, W-4 and W-10; Q-1 after W-11 |
+| W-5 control-plane slice and the stress application | W-1, W-4, W-10; W-11 for Q-1 and the account check | done: the slice in `samples/control-plane/scripts/stress/`, the stress application and the role pair in `stress/application/` (stress ADR-0012 to ADR-0015); Q-1 answered |
 | W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, workload boundary, `/cell/` path aspect and the cell bootstrap, in `stress/application/` | decision 7; the deny probes ran in the path spike (`stress/spikes/cell-path/`); the second boundary is ADR-0011 | done: the prop in control-plane ADR-0047, the rest in `stress/application/` |
-| W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair | §3.7; W-10's policies and prop for the bootstrap and the role pair | accounts and the cell bootstrap yes, now (`stress/application/`); the role pair with W-5 |
+| W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair | §3.7; W-10's policies and prop for the bootstrap and the role pair | done in both cell accounts: the owner stacks, `CDKToolkit-cell` and the role pair (`stress/application/deploy-role-pair.sh`, W-5); the account check passes on both |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
 | W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1 | no: blocked on the front door |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part yes; front-door part after its merge |
@@ -502,9 +511,9 @@ Q-5.
 
 | # | Question | Needed by |
 |---|---|---|
-| Q-1 | How long does one cell take to deploy from a CodeBuild cell script (expected about 8 minutes on Runtime V2), and does `BUILD_GENERAL1_SMALL` (3 GB) hold the synth? | W-5 |
+| Q-1 | How long does one cell take to deploy from a CodeBuild cell script (expected about 8 minutes on Runtime V2), and does `BUILD_GENERAL1_SMALL` (3 GB) hold the synth? | Answered: a cell takes 486 s from `CreateDeployment` to the cell `ACTIVE`; inside the cell build the install takes 20 s, the synth 10 s and the deploy 421 s. `BUILD_GENERAL1_SMALL` holds the synth: the container has 3,831 MiB and 2 vCPUs and peaks at 1,977 MiB (`stress/application/README.md`, Results, run `20261120T142632Z`) |
 | Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? The platform run assumes it can | W-7 |
 | Q-3 | Does the platform run keep the `large` fleet in every account between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
 | Q-5 | Does the request path work in a standalone cell account with every role on `/cell/` (authoriser, TVM `sts:AssumeRole` of a `/cell/` tenant role, the model call, tools)? Proven by the first platform run at `small` | W-9 |
-| Q-6 | Does runtime-isolation's package entry export what the stress cell app needs (`RuntimeIsolationDemoStack`, `parseDemoContext`, `bundleAgent`)? The path spike imports them from `src/` by path | W-5 |
+| Q-6 | Does runtime-isolation's package entry export what the stress cell app needs (`RuntimeIsolationDemoStack`, `parseDemoContext`, `bundleAgent`)? The path spike imports them from `src/` by path | W-5 kept the path imports: `stress/application/cell-app.ts` loads them from the sample's `src/` with the sample's own CDK; an export is not needed for the stress test |

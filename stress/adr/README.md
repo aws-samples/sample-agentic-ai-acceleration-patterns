@@ -21,6 +21,10 @@ that change a sample are recorded in that sample's `adr/`.
 | [0009](./0009-deploy-the-driver-as-its-own-cdk-app-in-stress.md) | Deploy the driver as its own CDK app in `stress/` | Accepted | 2026-11-19 |
 | [0010](./0010-count-an-isolation-assertion-per-answered-request.md) | Count an isolation assertion per answered request, and every refusal under `refusals` | Accepted | 2026-11-19 |
 | [0011](./0011-give-the-roles-a-cell-creates-a-workload-boundary-without-iam.md) | Give the roles a cell creates a workload boundary without IAM | Proposed | 2026-11-20 |
+| [0012](./0012-onboard-a-tenant-on-its-cell-through-the-role-pair-tenant-role.md) | Onboard a tenant on its cell through the role pair's tenant role | Proposed | 2026-11-20 |
+| [0013](./0013-pace-waves-at-the-build-limit-and-retry-conflicts.md) | Pace waves at the build limit and retry conflicts | Proposed | 2026-11-20 |
+| [0014](./0014-ship-the-cell-source-as-a-zip-of-the-pinned-commit.md) | Ship the cell source as a zip of the pinned commit | Proposed | 2026-11-20 |
+| [0015](./0015-check-the-cell-accounts-with-the-owners-read-access.md) | Check the cell accounts with the owner's read access | Proposed | 2026-11-20 |
 
 In `samples/control-plane/adr/`:
 
