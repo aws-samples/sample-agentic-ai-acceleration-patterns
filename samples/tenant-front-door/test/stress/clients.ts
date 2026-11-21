@@ -13,7 +13,7 @@ import type { Outputs } from './state';
  * control plane's fixture table, and the route registrar.
  */
 
-const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // pragma: allowlist secret
 
 /** A control-plane style id: 26 characters of Crockford base32, a millisecond timestamp then random. */
 export function newUlid(now: number = Date.now()): string {

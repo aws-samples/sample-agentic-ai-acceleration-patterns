@@ -219,7 +219,7 @@ describe('signing Region', () => {
 describe('assumed role credentials', () => {
   const sts = mockClient(STSClient);
   const answer = (expiresInMs: number) => ({
-    Credentials: { AccessKeyId: 'AKID', SecretAccessKey: 'secret', SessionToken: 'session', Expiration: new Date(Date.now() + expiresInMs) },
+    Credentials: { AccessKeyId: 'AKID', SecretAccessKey: 'secret', SessionToken: 'session', Expiration: new Date(Date.now() + expiresInMs) }, // pragma: allowlist secret
   });
 
   beforeEach(() => sts.reset());
