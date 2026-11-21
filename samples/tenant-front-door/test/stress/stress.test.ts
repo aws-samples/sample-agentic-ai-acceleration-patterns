@@ -16,7 +16,7 @@ import { compareCell, expectedAtCell, joinEdge, type EdgeRow } from './join';
 import { paced, pool, Rate } from './load';
 import { drawsOf, parseTier, planOf, tenantsToSeed } from './plan';
 import { percentiles, Recorder } from './recorder';
-import { type Watch, watchRoute, writeAnswer } from './scenarios';
+import { edgeRefusals, type Ctx, type Watch, watchRoute, writeAnswer } from './scenarios';
 import { assumedCredentials, regionOf, signedCaller } from './sigv4';
 import { Sink, answerOf } from './sink';
 import { recordMismatch, type Env, type Outputs, type RequestLine } from './state';
@@ -459,6 +459,64 @@ describe('watching a written route', () => {
     expect(w.lastMiss).toBeDefined();
     expect(w.flaps).toBe(1);
     expect(w.finalMisses).toBe(0);
+  });
+});
+
+describe('edge-refusals', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('starts its record window after the suspension wait, and resumes the spare tenant', async () => {
+    let now = Date.parse('2026-11-21T10:00:00Z');
+    jest.useFakeTimers({
+      now,
+      doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'hrtime'],
+    });
+    try {
+      const b64 = (o: unknown): string => Buffer.from(JSON.stringify(o)).toString('base64url');
+      const jwt = `${b64({ alg: 'RS256' })}.${b64({ tenant_id: 'T', iat: 1, exp: 301 })}.sig`;
+      let suspended = false;
+      let lastWaitPoll = 0;
+      let afterSuspend = 0;
+      let status = '';
+      jest.spyOn(http, 'sleep').mockResolvedValue(undefined);
+      jest.spyOn(http, 'request').mockImplementation(async () => {
+        now += 1000;
+        jest.setSystemTime(now);
+        // The wait polls until five answers in a row are 503: the fifth request after the suspension ends it.
+        if (suspended) {
+          afterSuspend += 1;
+          if (afterSuspend === 5) lastWaitPoll = now;
+        }
+        return { status: suspended ? 503 : 200, headers: {}, body: '{}', ttfb: 0, total: 0.01 };
+      });
+      const reply = { status: 200, headers: {}, body: '', ttfb: 0, total: 0 };
+      const ctx = {
+        env: { tier: parseTier(SMALL), runId: 'r', mode: 'slice', commit: '' },
+        out: { appDomain: 'app.example.com', cellFunctionUrl: 'https://cell.example.com/' },
+        manifest: {
+          version: 1,
+          tenants: [
+            { tenantId: 'A', username: 'a', kind: 'active' },
+            { tenantId: 'S', username: 's', kind: 'write' },
+          ],
+        },
+        identity: { issueToken: async () => jwt },
+        registrar: {
+          putTenant: async () => reply,
+          setStatus: async (_id: string, to: string) => {
+            suspended = to === 'suspended';
+            status = to;
+            return reply;
+          },
+        },
+      } as unknown as Ctx;
+      const outcome = await edgeRefusals(ctx);
+      // The polls that wait for the suspension are over before the window opens: the cell logs them, and no request log holds them.
+      expect(Date.parse(outcome.record.window.start)).toBeGreaterThanOrEqual(lastWaitPoll);
+      expect(status).toBe('active');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

@@ -49,7 +49,12 @@ also when anything fails. `STRESS_HOME` defaults to `~/.aaa-stress`. The tier is
 slice reads `STRESS_TIER_JSON` and seeds `min(tenantsActive, 100)` active
 tenants, a write pool of `min(100, tenantsSeeded)` plus the sustained writes
 (30 at `small`, up to 60), and one spare: 71 tenants at `small`, up to 261 at
-`large`. A deploy takes about 11 minutes (the main stack, with the
+`medium` and `large`. The slice keeps its state in
+`$STRESS_HOME/$STRESS_PREFIX/tenant-front-door/`: `manifest.json` (the
+tenants), `outputs.json` (the stacks' outputs), `context.json` (the record of
+the prefix), `resources.json` (what teardown checks), `timings.txt`,
+`requests.<scenario>.jsonl` (one request log per scenario) and the CDK output
+folders. A deploy takes about 11 minutes (the main stack, with the
 distribution, is most of it) and a destroy of the stacks about 9, with about
 6.5 more when `teardown` removes 71 tenants (see Measured).
 
@@ -90,8 +95,9 @@ allows: the probes at the router, with no probe at a second cell.
 Every answer is classified (`test/stress/classify.ts`) as served, or refused
 with a reason that names the hop (`edge-no-route`, `cell-forbidden`,
 `origin-iam-denied`, ...). A refusal is attributed to the tenant the request
-named, or `-` when it named none, which is also what the edge log shows
-(stress spec P-7). An answer no hop owns is an unattributed refusal and fails the
+named, or `-` when it named none (stress spec P-7). The edge log's tenant is
+compared for the requests whose probe sets one; the `cross-site` probe sets
+none, because the router refuses before it reads the token. An answer no hop owns is an unattributed refusal and fails the
 run; so does a driver-side timeout or network error (status 0), which no hop
 answered. A registrar answer that is not a write is counted by cause: for a
 503, `route-table-busy` (five ETag conflicts), `control-plane-unreadable` or

@@ -8,7 +8,7 @@ import { CloudWatchLogsClient, GetQueryResultsCommand, StartQueryCommand } from 
 import { sleep } from './http';
 import { compareCell, expectedAtCell, joinEdge, type EdgeRow } from './join';
 import { percentiles, type ResultRecordJson } from './recorder';
-import { readRequestLog, type Env, type Outputs, type RequestLine } from './state';
+import { readRequestLog, requestLogPath, type Env, type Outputs, type RequestLine } from './state';
 
 /**
  * `collect`: reads the hops' logs for each scenario's window and checks
@@ -132,6 +132,10 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
   const records = recordsOf(env);
   if (records.length === 0) failures.push(`no tenant-front-door.<scenario>.json record in ${env.results}: run a scenario first, there is nothing to check`);
   for (const { scenario, file, record } of records) {
+    if (!fs.existsSync(requestLogPath(env, scenario))) {
+      failures.push(`${scenario}: no request log ${requestLogPath(env, scenario)}: there is nothing to join with the edge log`);
+      continue;
+    }
     const lines = readRequestLog(env, scenario);
     const fromMs = Date.parse(record.window.start);
     const toMs = Date.parse(record.window.end);

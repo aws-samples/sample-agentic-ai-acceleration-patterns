@@ -692,8 +692,7 @@ ASH scanned the stress driver (`test/stress/`), its scripts
 0 high, 0 medium and 0 low. The secret scanner raised three critical
 findings, all false positives. Two, a base32 alphabet and a mock credential
 in a test, carry an allowlist comment in the code. The third is a placeholder
-`clientSecretArn` in the usage comment of `src/main.ts`. ProtoShield was not
-run again on these changes.
+`clientSecretArn` in the usage comment of `src/main.ts`.
 
 ## Links
 

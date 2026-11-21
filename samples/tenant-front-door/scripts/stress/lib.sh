@@ -138,3 +138,9 @@ smoke_context_args() {
     )
   fi
 }
+
+# The same prefix guard as slice.sh, for deploy.sh and teardown.sh run by hand: `teardown` destroys every stack of the prefix.
+case "$PREFIX_LOWER" in
+  tenantfrontdoor | tfdsmoke) fail "STRESS_PREFIX ${PREFIX} is the name of the front door's own stacks (or the smoke test's); pick another" ;;
+esac
+[[ "$PREFIX" =~ ^[a-z][a-z0-9]{0,27}$ ]] || fail "STRESS_PREFIX must be 1 to 28 lower-case letters and digits, starting with a letter"

@@ -60,14 +60,18 @@ which is not a budgeted quota.
 - Two front doors in one account need different `stackNamePrefix` values
   and different Regions, because the edge parameter's name is fixed (spec
   §6.4).
-- The smoke app gains two optional contexts, and its defaults keep the
+- The smoke app takes two optional contexts, and its defaults keep the
   smoke test's names.
+- The slice keeps its state in a folder of its own,
+  `$STRESS_HOME/$STRESS_PREFIX/tenant-front-door/` (mode 0700, files 0600),
+  because it holds a manifest, the deploy outputs, the record of the prefix,
+  the leftover list and one request log per scenario.
 - The stand-in hook and operator roles trust the account's root principal,
   so any principal in the account that may call `sts:AssumeRole` can write
   routes to this run's registrar. Run the slice in a non-production
   account whose principals are the tester's own.
-- The stand-in control plane's API no longer creates the account's API
-  Gateway CloudWatch Logs role, which CDK would retain after the stack is
+- The stand-in control plane's API creates no account-wide API Gateway
+  CloudWatch Logs role, which CDK would retain after the stack is
   deleted. The registrar's stage needs that role for its access logs, so
   the account must hold it before the smoke test or the slice deploys the
   main stack (`aws apigateway update-account`).

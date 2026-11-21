@@ -397,14 +397,16 @@ export async function edgeRefusals(ctx: Ctx): Promise<Outcome> {
   const s0 = Date.now();
   const suspend = await retrying(() => ctx.registrar.setStatus(spare.tenantId, 'suspended'), busy);
   if (suspend.status !== 200) throw new Error(`UpdateTenantRouteStatus: HTTP ${suspend.status}`);
-  const rec = new Recorder();
-  const sink = new Sink(rec);
-  const kinds: (() => Promise<void>)[] = [];
   // From the suspend call on, the spare is resumed whatever happens: a spare left suspended would fail the next run's wait for its route.
-  try {
+  const resumed: { problem?: string } = {};
+  const measured = await (async () => {
     const toSuspended = await waitFor(ctx, token(tokens, spare.tenantId), 503, 150);
     notes.push(`time from the suspend call to five 503s in a row: ${Math.round((Date.now() - s0) / 100) / 10} s (the first of them ${Math.round(toSuspended * 10) / 10} s into the wait)`);
 
+    // The record's window starts here, after the wait: the polls above reach the cell while the suspension propagates, and no request log holds them.
+    const rec = new Recorder();
+    const sink = new Sink(rec);
+    const kinds: (() => Promise<void>)[] = [];
     const n = plan.refusalsPerKind;
     for (let i = 0; i < n; i += 1) {
       kinds.push(
@@ -423,10 +425,13 @@ export async function edgeRefusals(ctx: Ctx): Promise<Outcome> {
     const order = shuffled(kinds);
     await paced(ctx.env.tier.steadyRps, order.length / ctx.env.tier.steadyRps, async (i) => order[i]());
     sink.flush();
-  } finally {
+    return { rec, sink, kinds };
+  })().finally(async () => {
     const resume = await retrying(() => ctx.registrar.setStatus(spare.tenantId, 'active'), busy);
-    if (resume.status !== 200) rec.problem(`the spare tenant could not be resumed: HTTP ${resume.status}`);
-  }
+    if (resume.status !== 200) resumed.problem = `the spare tenant could not be resumed: HTTP ${resume.status}`;
+  });
+  const { rec, sink, kinds } = measured;
+  if (resumed.problem !== undefined) rec.problem(resumed.problem);
   await sleep(QUIET_MS);
   return { record: rec.build(identityOf(ctx), 'edge-refusals'), lines: sink.lines, failures: rec.failures, notes: [...notes, `${kinds.length} requests of ${new Set(sink.lines.map((l) => l.kind)).size} kinds`] };
 }
