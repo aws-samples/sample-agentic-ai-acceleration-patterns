@@ -11,3 +11,4 @@
 | [0005](0005-keep-billing-events-off-the-telemetry-path.md) | Keep billing events off the telemetry path | Accepted | 2026-11-18 |
 | [0006](0006-publish-a-subscriber-construct-with-a-dead-letter-queue.md) | Publish a subscriber construct that always has a dead-letter queue | Accepted | 2026-11-18 |
 | [0007](0007-sign-http-sink-deliveries-with-the-dispatcher-role.md) | Offer SigV4 with the dispatcher's role as an HTTP sink auth mode | Accepted | 2026-11-19 |
+| [0008](0008-key-registrations-by-emitter-not-cell.md) | Key registrations by emitter, not by cell | Accepted | 2026-11-20 |

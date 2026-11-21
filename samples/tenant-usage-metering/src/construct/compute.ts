@@ -165,7 +165,7 @@ export function createCompute(scope: Construct, props: ComputeProps): Compute {
   );
 
   const blocked = [
-    ...(config.testOnlyAllowCellsInMeteringAccount ? [] : [stack.account]),
+    ...(config.testOnlyAllowEmittersInMeteringAccount ? [] : [stack.account]),
     ...config.rawSubscriberAccountIds,
     ...config.usageSubscriberAccountIds,
   ];

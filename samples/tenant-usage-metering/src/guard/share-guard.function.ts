@@ -4,7 +4,7 @@
 /**
  * Lambda entry of the bus share guard, the `onEvent` handler of a
  * custom-resource provider (ADR-0006). Create and Update read the registry
- * and throw when an account in `AccountIds` holds a registered cell, which
+ * and throw when an account in `AccountIds` holds a registered emitter, which
  * fails the deploy before the AWS RAM shares change. Delete does nothing.
  */
 

@@ -14,7 +14,7 @@ const ev = (overrides: Partial<EnrichedUsageEvent> = {}): EnrichedUsageEvent => 
   value: '10',
   time: '2026-11-18T12:05:00Z',
   applicationId: 'app-1',
-  cellId: '01JD0000000000000000000000',
+  emitterId: '01JD0000000000000000000000',
   emitterAccountId: '111122223333',
   emitterRole: 'demo-ue-01JD0000000000000000000000',
   receivedAt: '2026-11-18T12:05:01Z',

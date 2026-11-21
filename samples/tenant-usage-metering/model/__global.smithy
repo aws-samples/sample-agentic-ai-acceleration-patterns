@@ -54,9 +54,10 @@ string TenantId
 @length(min: 1, max: 32)
 string ApplicationId
 
-/// A cell id: a ULID (control-plane §4.2).
+/// An emitter id: a ULID the registrar picks (with the control plane, the
+/// cell id, control-plane §4.2).
 @pattern("^[0-9A-HJKMNP-TV-Z]{26}$")
-string CellId
+string EmitterId
 
 /// A 12-digit AWS account id.
 @pattern("^[0-9]{12}$")
@@ -183,7 +184,7 @@ enum EventResult {
 /// The refusals that could still count, which `StartReadmission` may
 /// select (spec P-8).
 enum ReadmittableReason {
-    TENANT_NOT_IN_CELL
+    TENANT_NOT_BOUND
     REGISTRATION_CLOSED
     UNKNOWN_METER
     METER_NOT_ALLOWED
@@ -191,14 +192,15 @@ enum ReadmittableReason {
 
 /// Why a 409 was returned. Only `CONCURRENT_WRITE` is worth retrying.
 enum ConflictReason {
-    /// `PutCellEmitter` in a subscriber account or the metering account.
+    /// `PutEmitter` in a subscriber account or the metering account.
     ACCOUNT_NOT_ALLOWED
 
     /// `CreateMeter` or `CreateSink` on an existing id.
     ALREADY_EXISTS
 
-    /// A known cell with another account or application, or a binding for
-    /// a cell with no emitter or of another application (spec §4.2, §4.3).
+    /// A known emitter with another account or application, or a binding
+    /// to an emitter that is not registered, not `ACTIVE`, or of another
+    /// application (spec §4.2, §4.3).
     PLACEMENT_MISMATCH
 
     /// `StartRecount` whose whole range is closed or within 60 minutes of
@@ -211,7 +213,7 @@ enum ConflictReason {
 
 /// Why an event was refused (spec §5). The first four can be re-admitted.
 enum RefusalReason {
-    TENANT_NOT_IN_CELL
+    TENANT_NOT_BOUND
     REGISTRATION_CLOSED
     UNKNOWN_METER
     METER_NOT_ALLOWED
