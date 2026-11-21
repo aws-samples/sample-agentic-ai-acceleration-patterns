@@ -458,7 +458,7 @@ step_15() {
   check "b is counted" yes "$(yes_no jq -e --arg t "${TENANT_B,,}" '.[$t] > 0' <<<"$counts")"
   if [[ "$MODE" == host ]]; then
     check "x-host-header agrees with the field on a's host" 0 "$(jq --arg h "$(host_of "$TENANT_A")" --arg t "${TENANT_A,,}" \
-      '[.[] | fromjson? | select(.["x-host-header"] == $h) | select((.["viewer-request-log-data"] // "" | ascii_downcase) != $t)] | length' <<<"$events")"
+      '[.[] | fromjson? | select(.["x-host-header"] == $h) | select((.["viewer-request-log-data"] // "-" | ascii_downcase) as $f | $f != "-" and $f != $t)] | length' <<<"$events")"
     check "an /assets/* load on a's host names a" yes "$(yes_no jq -e --arg h "$(host_of "$TENANT_A")" --arg t "${TENANT_A,,}" \
       'any(.[] | fromjson? ; .["x-host-header"] == $h and (.["cs-uri-stem"] | startswith("/assets/")) and ((.["viewer-request-log-data"] // "") | ascii_downcase) == $t)' <<<"$events")"
     check "login.<appDomain> leaves the field empty" 0 "$(jq --arg h "login.${APP_DOMAIN}" \
@@ -548,7 +548,7 @@ step_18() {
   st="$(edge GET "$ha" "/signin-state?nonce=integnonce000000000000" '' -H 'Sec-Fetch-Site: cross-site')"; check "cross-site 403" 403 "$st"
   st="$(edge GET "$ha" "/signin-state?nonce=bad" '' -H 'Sec-Fetch-Site: same-origin')"; check "malformed nonce 400" 400 "$st"
   st="$(edge GET "$login" "/callback?code=integcode&state=${state}")"; loc="$(header location)"
-  check "the sign-in host sends the code to a's /callback" "302:yes" "${st}:$(yes_no grep -q "^https://${ha}/callback?code=integcode" <<<"$loc")"
+  check "the sign-in host sends the code to a's /callback" "302:yes" "${st}:$(yes_no grep -qE "^https://${ha}/callback\?state=[^&]+&code=integcode$" <<<"$loc")"
   skip "a real sign-in through the issuer and the SPA's exchange: needs a browser and the issuer's callback URLs (spec §10, run by hand)"
   st="$(edge GET "$login" "/callback?code=integcode")"; check "no state 400" 400 "$st"
   st="$(edge GET "$login" "/callback?code=integcode&state=${state}x")"; check "changed state 400" 400 "$st"
@@ -572,7 +572,7 @@ step_18() {
     "$(jq -rn --arg u "https://${login}/callback" '$u|@uri')")"
   check "/logout Clear-Site-Data" '"storage", "cache"' "$(header clear-site-data)"
   logout_state="$(sed -n 's/.*[?&]state=\([^&]*\).*/\1/p' <<<"$loc")"
-  st="$(edge GET "$login" "/callback?state=${logout_state}")"
+  st="$(edge GET "$login" "/callback?code=integcode&state=${logout_state}")"
   check "after the issuer's sign-out, the sign-in host sends a's / with no code or state" "302:https://${ha}/" "${st}:$(header location)"
   st="$(edge GET "$login" /logout)"; check "login.<appDomain>/logout: the signed-out page" 200 "$st"
 }
