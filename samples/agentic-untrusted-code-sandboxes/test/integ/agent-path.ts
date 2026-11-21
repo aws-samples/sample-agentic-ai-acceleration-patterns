@@ -66,9 +66,9 @@ export async function ensureScope(send: Send, api: string, runId: string): Promi
   return { registered: put.status === 200, status: put.status };
 }
 
-/** The agent's conversation id for a run: letters and digits, 16 to 64 of them (the ingress's request schema refuses others). */
-export function conversationIdFor(runId: string): string {
-  return `rcintegconversation${runId.replace(/[^A-Za-z0-9]/g, '')}`.slice(0, 64);
+/** The body of one call to the sample agent: the ingress's request model without a session scope takes `prompt` and nothing else. */
+export function agentRequestBody(prompt: string): string {
+  return JSON.stringify({ prompt });
 }
 
 /** One call through the sample agent as a real user of a throwaway tenant; records its checks on `c.rec`. */
@@ -105,7 +105,8 @@ export async function agentPath(c: Ctx): Promise<void> {
     const res = await fetch(`${endpoint.replace(/\/$/, '')}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'Authorization': `Bearer ${bearer}` },
-      body: JSON.stringify({ conversationId: conversationIdFor(c.runId), prompt }),
+      // The integration ingress has no session scope, so its request model allows `prompt` only (no `conversationId`).
+      body: agentRequestBody(prompt),
       signal: AbortSignal.timeout(150_000),
     });
     const text = await res.text();

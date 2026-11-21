@@ -28,6 +28,7 @@ import {
   BedrockAgentCoreClient,
   InvokeAgentRuntimeCommand,
   ResourceNotFoundException,
+  RetryableConflictException,
   RuntimeClientError,
   StopRuntimeSessionCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
@@ -201,6 +202,9 @@ export class AgentcoreBackend implements SandboxBackend {
       text = out.response ? await out.response.transformToString('utf-8') : '';
     } catch (e) {
       if (e instanceof ResourceNotFoundException) return dead('not_found');
+      // A retryable client fault: the session is busy with another call. Seen when two first calls of one tenant reach
+      // the session at once, before the runner sees the job; it is a `busy` refusal the caller retries (ADR-0052).
+      if (e instanceof RetryableConflictException) return { kind: 'refused', refusal: { v: 1, error: 'busy' } };
       // The container answered with an error or the session cannot be reached: a dead handle (spec §4.1 step 3).
       if (e instanceof RuntimeClientError) return dead('runtime_client_error');
       throw e;

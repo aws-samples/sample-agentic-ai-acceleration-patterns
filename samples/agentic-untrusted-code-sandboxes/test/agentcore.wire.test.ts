@@ -119,6 +119,16 @@ test('a throttle is not retried either', async () => {
   expect(seen).toHaveLength(1);
 });
 
+test('a session conflict from the real client is a busy refusal, sent once', async () => {
+  const { backend, handle, job } = await started();
+  answer = (_req, res) => {
+    res.writeHead(409, { 'content-type': 'application/json', 'x-amzn-errortype': 'RetryableConflictException' });
+    res.end(JSON.stringify({ message: 'conflict' }));
+  };
+  expect(await backend.run(handle, job)).toEqual({ kind: 'refused', refusal: { v: 1, error: 'busy' } });
+  expect(seen).toHaveLength(1);
+});
+
 test('stopping the session is one call that names the runtime and the tenant\'s session id', async () => {
   const { backend, handle } = await started();
   answer = (_req, res) => json(res, 200, { runtimeSessionId: handle.handle, statusCode: 200 });
