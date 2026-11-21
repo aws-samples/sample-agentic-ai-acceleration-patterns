@@ -18,7 +18,7 @@ import { readRequestLog, type Env, type Outputs, type RequestLine } from './stat
  * status equals the number of requests the driver saw reach it, so a
  * refusal at the edge that also reached the origin shows. Router: the
  * function's compute utilization and its error metrics for the window.
- * Writes the edge hop into the scenario's record (late field) and
+ * Writes the edge hop and the router's compute reading into the scenario's record and
  * returns the failures; the run fails when there are any.
  */
 

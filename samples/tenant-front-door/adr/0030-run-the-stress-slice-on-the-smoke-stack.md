@@ -45,7 +45,8 @@ names the stacks, the stand-in hook role and the application domain label.
 `teardown` destroys every stack of the prefix, so `slice.sh` refuses the
 prefixes of the front door's own stacks (`TenantFrontDoor`) and of the
 smoke test (`TfdSmoke`), and `deploy.sh` refuses a prefix whose stacks exist
-while the host holds no record of a deploy for it in the same account. The
+while the host holds no record of a deploy for it in the same account
+and Region. The
 slice declares only Lambda concurrency in its budget, because CloudFront
 Functions compute and the API Gateway control plane have no Service Quotas
 code. The router's compute utilization goes into the result record under a

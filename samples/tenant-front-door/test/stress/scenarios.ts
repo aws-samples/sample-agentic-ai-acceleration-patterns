@@ -223,8 +223,8 @@ export async function watchRoute(ctx: Ctx, sink: Sink, w: Watch, tokenOf: () => 
  * `sustainedWriteSeconds`, each a hook-role `PutTenantRoute` against the
  * registrar, which reads the stand-in control plane and writes the route
  * table with the store's ETag. Each written tenant is then watched for the
- * route (p50 and p99 of the write cycle and of the time to routable; no pass
- * limit until measured). A 503 is counted by cause; a failed write is tried
+ * route (p50 and p99 of the write cycle and of the time to routable, with no
+ * pass limit on either). A 503 is counted by cause; a failed write is tried
  * again as the hook does, four more times.
  */
 export async function routeWrite(ctx: Ctx): Promise<Outcome> {

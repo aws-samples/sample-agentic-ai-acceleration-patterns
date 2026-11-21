@@ -132,7 +132,7 @@ spec §11 question).
 | T-7 | B1 | D | Floods of unknown hosts or tenants, and hostile input to the router (a very large token, long paths) | Open for the router's compute margin in the worst minute under ordinary load (spec §11, Q-1); mitigated for the rest: refused at the edge, no origin reached, and an `Authorization` header over 8,192 bytes gets 401 before the decode. The cost of refused traffic is accepted (AR-9) | M-1, M-27, M-47 |
 | T-8 | B1 | T, E | A page on another site, or another tenant's host in `host` mode, makes a request to `/api/*`, `/agents/*` or `/signin-state` from the user's browser | Mitigated; residual AR-13 | M-29, M-32 |
 | T-9 | B1 | I | A response made for one tenant is cached and served to another, most likely in `single` mode where every tenant shares one host | Mitigated | M-33 |
-| T-10 | B1 | E | A suspension or a route delete takes about 30 s to reach an edge location and, measured from one client, 30 to 60 s until every request sees it. Until then the tenant is still routed | Accepted (AR-7) | M-2, M-13 |
+| T-10 | B1 | E | A suspension or a route delete takes about 30 s to reach an edge location. Measured from one client, a suspension took 30 to 60 s to show for every request. Until then the tenant is still routed | Accepted (AR-7) | M-2, M-13 |
 | T-11 | B2 | E | A caller reaches a cell's function URL without the edge, skipping the suspension check, the rate rule and the header baseline. Or `CellRouteAccess` is set loosely so another distribution passes | Mitigated | M-5 |
 | T-12 | B2 | I | A valid token reaches a cell that does not host its tenant: a wrong or stale `cell#` route, an operator backfill error, a wrong placement (T-28). If the account belongs to someone else, that party sees a live bearer token | Mitigated for the refusal. The cell still receives the token (AR-4) | M-2, M-8, M-4 |
 | T-13 | B2 | E | A cell API does not verify the token, ignores the hint or skips the hosts check, so a forged token or a token for another tenant is served | Contract only; the front door cannot enforce it (AR-26) | M-2 |
@@ -682,6 +682,12 @@ checkov, gitleaks, CVE, IAM least privilege, licence headers): 0 critical,
 
 cdk-nag (47) and checkov (35) suppressions were all reviewed as info; each
 cites its reason in the code.
+
+ASH scanned the stress driver (`test/stress/`), its scripts
+(`scripts/stress/`, `scripts/smoke.sh`) and the shared ETag test on
+2026-11-21 (semgrep, bandit, cdk-nag, checkov, detect-secrets, npm-audit):
+0 critical and 0 high. Two secret-scanner false positives, a base32 alphabet
+and a mock credential in a test, carry an allowlist comment in the code.
 
 ## Links
 

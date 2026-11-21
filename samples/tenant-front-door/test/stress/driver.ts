@@ -8,7 +8,7 @@
  *   driver.ts budget            the slice's draws on account-wide quotas (no credentials)
  *   driver.ts seed              tenants in tenant-identity, their cell namespace and control-plane records, the routes
  *   driver.ts run <scenario>    one scenario: its result record and request log
- *   driver.ts collect           the hops' logs against the driver's counts; the late fields
+ *   driver.ts collect           the hops' logs against the driver's counts; the edge hop and the router's compute reading
  *   driver.ts sweep             the run's routes and tenants
  *
  * It prints ids, counts and timings, never a token, a password or a key.
