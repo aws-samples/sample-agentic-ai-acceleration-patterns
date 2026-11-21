@@ -373,9 +373,10 @@ describe('slice.sh', () => {
           expect(r.stderr).toBe('');
           expect(r.status).toBe(0);
           expect(r.stdout).toMatch(/waiting \d+s for a fresh minute past the last scenario's metric window/);
-          // The record ends now, so the wait is at least a minute and 3 s; with no record at all it
-          // would be at most 59 s (window.sh). That is what shows the PS records are read.
-          expect(Number(fs.readFileSync(path.join(fake, 'sleeps.txt'), 'utf8').trim())).toBeGreaterThanOrEqual(63);
+          // The record ends now, so the wait is about a minute and a few seconds more (a stalled
+          // host takes a little off); with no record at all it is at most 59 s (window.sh). That
+          // is what shows the PS records are read.
+          expect(Number(fs.readFileSync(path.join(fake, 'sleeps.txt'), 'utf8').trim())).toBeGreaterThanOrEqual(60);
         });
       });
 

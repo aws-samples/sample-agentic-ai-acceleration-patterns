@@ -35,6 +35,8 @@ class World {
   readonly deleted = new Map<string, number>();
   readonly route = new Map<string, { at: number; status: 'active' | 'suspended' }[]>();
   registrarStatus = 200;
+  /** A deleted deployment stays listed as `DELETE_FAILED`. */
+  deleteFails = false;
   probes = 0;
   script?: (tenant: string, state: string, probes: number) => EdgeAnswer | undefined;
 
@@ -101,7 +103,9 @@ class World {
       },
       listAll: async () => ({
         status: 200,
-        items: [...this.created.keys()].filter((t) => !this.deleted.has(t)).map((t) => ({ tenantId: t, status: 'ACTIVE' })),
+        items: [...this.created.keys()]
+          .filter((t) => this.deleteFails || !this.deleted.has(t))
+          .map((t) => ({ tenantId: t, status: this.deleteFails && this.deleted.has(t) ? 'DELETE_FAILED' : 'ACTIVE', statusReason: this.deleteFails && this.deleted.has(t) ? 'cell stack failed' : undefined })),
       }),
     } as unknown as ControlPlaneApi;
   }
@@ -453,6 +457,15 @@ describe('what the edge says about a tenant', () => {
     expect(w.created.size).toBe(0);
     expect(w.recorder.findings).toHaveLength(1);
     expect(w.recorder.findings[0]).toMatch(/the edge answered 404/);
+  });
+
+  it('reports a deployment that ends DELETE_FAILED, and counts no completed cycle', async () => {
+    const w = new World(1);
+    w.deleteFails = true;
+    const logs: string[] = [];
+    await ps5(w.env({ manifest: ONE_TENANT, log: (l: string) => logs.push(l) }), w.timing);
+    expect(w.recorder.findings).toEqual([`tenant ${TENANTS[0]}: deployment DELETE_FAILED after DeleteDeployment (cell stack failed)`]);
+    expect(logs.at(-1)).toBe('PS-5: 0 of 1 churn tenants completed a deployment cycle');
   });
 
   it('starts no further cycle when the edge turns wrong after the preflight', async () => {

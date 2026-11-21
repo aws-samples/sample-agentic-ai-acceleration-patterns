@@ -237,6 +237,11 @@ async function cycle(s: ScenarioEnv, edge: Edge, tenant: string, timing: Timing)
   await hold(s, edge, tenant, 'unrouted', timing);
   // The delete build ends after the route is gone: wait for it, so a successful cycle leaves the
   // fleet as the scenario found it. A cycle that stops early leaves its deployment for the sweep.
-  await waitDeployments(s, [tenant], { gone: true, timeoutSeconds: REMOVED_TIMEOUT_SECONDS });
+  const left = (await waitDeployments(s, [tenant], { gone: true, timeoutSeconds: REMOVED_TIMEOUT_SECONDS })).get(tenant);
+  if (left !== undefined) {
+    // A `*_FAILED` delete counts as settled for the wait, but the deployment is still there.
+    s.rec.finding(`tenant ${tenant}: deployment ${left.status} after DeleteDeployment${left.statusReason === undefined ? '' : ` (${left.statusReason})`}`);
+    return false;
+  }
   return true;
 }
