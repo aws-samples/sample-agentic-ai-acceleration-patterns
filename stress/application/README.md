@@ -478,9 +478,10 @@ publishes and reads assets, and it holds only cell assets.
 - A cell is stamped with its source when it is created: a fixed cell or
   tenant script reaches an existing cell only after it is deleted and created
   again (ADR-0014).
-- The request path under the workload boundary (authoriser, TVM, model
-  call, tools) has not run in a cell account; the first platform run at
-  `small` is the check (spec Q-5).
+- The request path under the workload boundary (authoriser, TVM, streamed
+  answers) was served in a cell account by the first platform run at `small`
+  (spec Q-5, `stress/results/2026-11-21-small.md`). Tool calls and model
+  usage events are not counted apart in the record.
 - The policies allow the cell's services on `*`. That is safe only in a
   standalone cell account that holds nothing but cells, the cell bootstrap,
   the role pair and these stacks (spec §3.7, ADR-0006); never deploy them in
