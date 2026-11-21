@@ -7,9 +7,11 @@ SPDX-License-Identifier: MIT-0
 The code every sample's stress slice plugs into, so the samples can be
 stress-tested alone or together as one agent platform. The design is
 [`docs/stress-test.spec.md`](../docs/stress-test.spec.md); the decisions are
-in [`adr/`](./adr/README.md). It is a test asset that deploys two things:
-the driver host, for the length of a run, and the account owner's stacks in
-`application/`, which stay in each standalone cell account.
+in [`adr/`](./adr/README.md). It is a test asset that deploys the driver
+host, for the length of a run, and the stacks in `application/` that stay in
+each standalone cell account: the account owner's stacks and the
+control-plane role pair. `application/` also holds the stress application,
+whose cell and tenant scripts the control-plane slice runs.
 
 | Part | File | What it holds |
 |---|---|---|
@@ -20,7 +22,7 @@ the driver host, for the length of a run, and the account owner's stacks in
 | Runner | [`src/runner.ts`](./src/runner.ts), [`run.sh`](./run.sh) | budget, then `deploy`, `seed`, `run`, `collect` in dependency order, `teardown` in reverse (spec §3.5) |
 | Driver host | [`driver/`](./driver/stress-driver.cdk.ts) | the k6 host every slice runs its load from: one EC2 instance, no inbound rule, no public IP, SSM Session Manager (ADR-0007, ADR-0009) |
 | k6 library | [`k6/`](./k6/README.md) | tokens, pacing, the correlation header and the result record every slice's scenarios share (ADR-0008) |
-| Cell account owner's stacks | [`application/`](./application/README.md) | the cell policies, the account base, the `/cell/` path aspect, the cell bootstrap and its probes (spec §3.7, §8 decision 7; ADR-0006, ADR-0011) |
+| Cell account owner's stacks and the stress application | [`application/`](./application/README.md) | the cell policies, the account base, the `/cell/` path aspect, the cell bootstrap and its probes, the control-plane role pair, and the stress application's cell app and cell and tenant scripts (spec §3.1, §3.7, §8 decision 7; ADR-0006, ADR-0011, ADR-0012, ADR-0014) |
 
 ## A slice
 

@@ -5,8 +5,9 @@
  * The account owner's stacks of a standalone cell account (spec §3.7; stress ADR-0006):
  *
  * - `CellPoliciesStack`: the cell execution policy, the cell permissions boundary, the
- *   cell workload boundary (ADR-0011) and the cell build policy (control-plane ADR-0047).
- *   It deploys before the cell bootstrap, which names the first two.
+ *   cell workload boundary (ADR-0011), the cell build policy (control-plane ADR-0047) and
+ *   the cell tenant build policy (stress ADR-0012). It deploys before the cell bootstrap,
+ *   which names the first two.
  * - `CellAccountBaseStack`: the API Gateway account's CloudWatch Logs role and setting,
  *   and the identity parameters a cell reads (`/application-plane/shared/identity/*`).
  *
@@ -17,7 +18,7 @@
  * cell boundary.
  */
 
-import { LegacyStackSynthesizer, Stack, type StackProps } from 'aws-cdk-lib';
+import { LegacyStackSynthesizer, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -26,6 +27,7 @@ import {
   cellBuildPolicyDocument,
   cellExecutionPolicyDocument,
   cellPermissionsBoundaryDocument,
+  cellTenantBuildPolicyDocument,
   cellWorkloadBoundaryDocument,
   type CellPolicyNames,
 } from './cell-policies';
@@ -52,12 +54,13 @@ export interface CellPoliciesStackProps extends OwnerStackProps {
   readonly names: CellPolicyNames;
 }
 
-/** The four cell policies, as customer managed policies with fixed names. */
+/** The five cell policies, as customer managed policies with fixed names. */
 export class CellPoliciesStack extends Stack {
   readonly executionPolicy: iam.ManagedPolicy;
   readonly permissionsBoundary: iam.ManagedPolicy;
   readonly workloadBoundary: iam.ManagedPolicy;
   readonly buildPolicy: iam.ManagedPolicy;
+  readonly tenantBuildPolicy: iam.ManagedPolicy;
 
   constructor(scope: Construct, id: string, props: CellPoliciesStackProps) {
     super(scope, id, ownerProps(props));
@@ -83,12 +86,22 @@ export class CellPoliciesStack extends Stack {
       description: 'For the role pair cell role (cellBuildManagedPolicyArns): assume the cell bootstrap deploy and publishing roles only',
       document: cellBuildPolicyDocument(),
     });
+    this.tenantBuildPolicy = new iam.ManagedPolicy(this, 'CellTenantBuildPolicy', {
+      managedPolicyName: names.tenantBuild,
+      description: 'For the role pair tenant role (tenantBuildManagedPolicyArns): invoke the tenant subscription methods of the cell Entitlements APIs only',
+      document: cellTenantBuildPolicyDocument(),
+    });
+    // An explicit DeletionPolicy (the same Delete CloudFormation applies anyway) lets an owner
+    // bring the policy back under the stack with `cdk import` when a deploy without it left
+    // the policy behind, attached to the role pair (README, "Bring back a tenant build
+    // policy left behind").
+    this.tenantBuildPolicy.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
     const reason =
       'Cell policies for a standalone cell account that holds only cells, the cell bootstrap and the owner stacks (spec §3.7, ADR-0006): ' +
       'IAM is scoped to role/cell/* and the explicit denies keep cell principals off every other role, policy, owner parameter and the API Gateway account setting; ' +
       'the service grants are bounded by the account itself.';
-    for (const policy of [this.permissionsBoundary, this.workloadBoundary, this.executionPolicy, this.buildPolicy]) {
+    for (const policy of [this.permissionsBoundary, this.workloadBoundary, this.executionPolicy, this.buildPolicy, this.tenantBuildPolicy]) {
       acknowledgeWildcards(policy, reason);
     }
   }
