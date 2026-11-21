@@ -258,10 +258,10 @@ spec §3.5).
 `agentIngress`. Per-cell agent routing for those tiers is Q-7; no run
 above `small` starts until it is decided.
 
-**Churn** (after PS-4, §5.1): `CreateDeployment`, `UpdateTenantRouteStatus` to
-suspended and back, and `DeleteDeployment`, each on a tenant the steady
-set does not use, each timed from the call to the first edge response
-that shows it.
+**Churn** (after PS-4, §5.1): `CreateDeployment`,
+`UpdateTenantRouteStatus` to suspended and back, and `DeleteDeployment`,
+each on a tenant the steady set does not use, each timed from the call
+to the first edge response that shows it.
 
 ### 3.4 Slice contract
 
@@ -288,8 +288,8 @@ The runner orders slices by their needs, and each slice runs its `deploy`
 and then its `seed` before the next slice starts, so a slice's `deploy`
 can read what an earlier slice seeded. `teardown` runs in the reverse
 order. The platform run's set-up interleaves the control-plane and
-front-door verbs (§3.5). The needs the three existing slices declare, and the ones the
-front-door slice will declare (W-7), are:
+front-door verbs (§3.5). The needs the three existing slices declare,
+and the ones the front-door slice will declare (W-7), are:
 
 | Slice | Needs | `platformOnly` scenarios |
 |---|---|---|
@@ -509,10 +509,11 @@ Each cell's `maxTenants` is its seeded share plus its share of the churn
 count, so a churn create (PS-5) lands in a free slot of an existing cell and
 times a tenant build, not a cell build.
 
-Users per active tenant counts the admin that `CreateTenant` creates
-(tenant-identity ADR-0042). In slice mode the runtime-isolation slice's own
-`seed` adds that many users beyond its admin; the platform run follows this
-count.
+In a platform run, users per active tenant counts the admin that
+`CreateTenant` creates, so a tenant has the admin and the tier's count
+minus one further users (tenant-identity ADR-0042). In slice mode the
+runtime-isolation slice's own `seed` creates that many users beyond its
+admin.
 
 The `large` row splits the runtime-isolation `large` tier over four cells:
 100 agents in total, the same as the runtime-isolation `large` tier, so
@@ -612,7 +613,7 @@ ADR-0016). Scenarios above `small` wait for Q-7.
 | PS-2 steady through the edge | runtime-isolation S1 shape through CloudFront to the cell's ingress | every hop of the agent path (§3.3) | latency per hop; edge overhead; router compute utilisation |
 | PS-3 herd through the edge | S2 shape: ingress instances in the cell, 0 to the peak rate in 5 s. In platform mode the slice has no write access to the cell accounts and cannot retire the instances, so it waits 60 s idle and starts the herd there: the cold-start share is what the instances' age allows | cold starts behind the edge, per-account quotas | refusals by tenant; STS and Lambda throttles by account |
 | PS-4 noisy neighbour | S3 shape: one tenant at 10x its limit | the per-tenant limit behind the edge: the ingress's own for agent calls | that tenant refused; every other tenant on its cell served |
-| PS-5 churn | after PS-4: create, suspend, resume and delete the churn count of tenants, each timed from its call to the first edge answer that shows it. The edge is read with an unsigned token that names the tenant, which the router accepts without checking the signature (front-door spec §3.3 step 5): 403 means no route, 503 means suspended, 404 or no answer tells nothing, and any other status means the router passed the request on to an origin, which refuses the token. Suspend and resume are `UpdateTenantRouteStatus` calls to the route registrar, signed with the session's credentials, so the session holds the registrar's edge operator role | control-plane writes reaching the edge and the cells | time to routable; time to suspended (503 at the edge); time to removed (403 at the edge); no request for a removed tenant at an origin, which needs the edge's and the cells' logs joined |
+| PS-5 churn | after PS-4: create, suspend, resume and delete the churn count of tenants, each timed from its call to the first edge answer that shows it. The edge is read with an unsigned token that names the tenant, which the router accepts without checking the signature (front-door spec §3.3 step 5): the router's own answer, the body `{"status":403}`, means no route and `{"status":503}` means suspended. An answer that carries API Gateway's request id, the ingress's own 403 for this token included, means the router passed the request on to an origin. Any other answer tells nothing: CloudFront's own 403 or 503, a 404, or no answer. Suspend and resume are `UpdateTenantRouteStatus` calls to the route registrar, signed with the session's credentials, so the session holds the registrar's edge operator role | control-plane writes reaching the edge and the cells | time to routable; time to suspended (503 at the edge); time to removed (403 at the edge); no request for a removed tenant at an origin, which needs the edge's and the cells' logs joined |
 | PS-6 long streams | S5 shape through CloudFront to the ingress, with nothing between the edge and the ingress | streaming through the edge | first byte at the client against first byte at the ingress; broken streams |
 | PS-7 cross-cell probes | after PS-6: a token whose payload names another tenant (in another cell when the tier has more than one), a client route header, a direct `/api/*` call to a cell origin, a direct call to the ingress with a token whose payload names another tenant, and a direct call to the ingress with the tenant's own token | the router, the route hint check, origin access control, the ingress's own token check | every probe but the last refused at the edge, the cell, the origin or the ingress, never served; the last is served, because the ingress is public by design (front-door spec §1.2) |
 | PS-8 peak | S6 shape at the tier's peak for 60 s | the shared quotas at their limit | the first quota that gives out, per account; every refusal attributed |

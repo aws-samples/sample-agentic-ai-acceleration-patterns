@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Proposed
 - Date: 2026-11-20
+- Amends: ADR-0012
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -74,10 +75,10 @@ the calls fall inside PS-1's timing without a new component; the
 another sample.
 
 Cons: the driver does the work of a tenant script, and the stress test does
-not exercise the sample's own mount; the `control-plane` slice now reads
+not exercise the sample's own mount; the `control-plane` slice reads
 `identity.json`; the driver must record what it created for the
 runtime-isolation slice and delete it at teardown, because the control
-plane's `DeleteDeployment` no longer reaches the identity.
+plane's `DeleteDeployment` does not reach the identity.
 
 ### Option 2: The tenant script, through the tenant-identity mount
 The tenant script runs the sample's own `create.sh` (or calls `CreateTenant`
@@ -153,13 +154,14 @@ The first platform run at `small` onboards 20 tenants, and builds that start
 together finish close together, so the driver can have up to 20
 `CreateTenant` calls (40 `CreateGroup` calls) to make within seconds.
 Against 15 requests a second that can throttle. The platform API has a
-10 requests a second stage throttle, but Cognito's group quota gives out
-first: a seed at 8 requests a second answered 500 on most calls
-(tenant-identity ADR-0037). So the driver paces `CreateTenant` and
-`CreateUser` at about four calls a second, as the `tenant-identity` seed
-does (tenant-identity ADR-0042). A throttle that remains shows in PS-1's
-time, which is a result, not an error. Spec §4.4 lists the draw in the
-`control-plane` column.
+10 requests a second stage throttle, but the group quota is the likely
+limit first: at 8 `CreateTenant` calls a second the driver makes 16
+`CreateGroup` calls a second, and a seed at 8 requests a second answered
+500 on most calls (tenant-identity ADR-0037). So the driver paces
+`CreateTenant` and `CreateUser` at about four calls a second, as the
+`tenant-identity` seed does (tenant-identity ADR-0042). A throttle that
+remains shows in PS-1's time, which is a result, not an error. Spec §4.4
+lists the draw in the `control-plane` column.
 
 A throttled `CreateTenant` answers 503, and it may have created the tenant
 without its admin (tenant-identity ADR-0037). A blind repeat then answers
@@ -170,14 +172,15 @@ and a 404 means the tenant was removed by `CreateTenant`'s own compensation,
 so the driver repeats `CreateTenant`. It repeats the other calls with
 backoff.
 
-The stress test no longer exercises the sample's own mount, so a defect in
+The stress test does not exercise the sample's own mount, so a defect in
 `create.sh` or in `PlatformInvokePolicy` is not found by it. The sample's
 joint control-plane mount test covers it (tenant-identity
 `integration-test.md`).
 
-The `control-plane` slice now needs `identity.json`, and so reads a manifest
-that it did not before, and its driver holds two credentials: the operator
-token for the control plane and the AWS session for the platform API. The
+The `control-plane` slice needs `identity.json`, a manifest of the
+`tenant-identity` slice, and its driver holds two credentials: the
+operator token for the control plane and the AWS session for the platform
+API. The
 runtime-isolation slice reads `identity[]` of `control-plane.json` (spec
 §4.2). Until the driver writes it, the runtime-isolation slice refuses every
 control-plane tenant and a platform run fails with the list.
@@ -187,12 +190,14 @@ is `ACTIVE`, with the scope and e-mail address above; `identity[]` in
 `control-plane.json`, read by the runtime-isolation slice for control-plane
 tenants; `execute-api:Invoke` on the platform API for the driver's session;
 pacing at about four calls a second, retry with backoff, and the rule above
-for a half-created tenant; the Cognito draw in the slice's `budget`; and the
+for a half-created tenant; the Cognito draw in the slice's `budget`; the
+comment in `stress/application/scripts/tenant/create.sh`, which says the
+identity tenant joins that script when the slices compose; and the
 cleanup, in the `control-plane` `teardown`, of the identity tenants of every
 deployment of the run that has one: the seeded tenants of `small` and
 `medium` and, at `large`, the churn tenants PS-1 is timed on, which PS-5
 deleted. The `large` fleet's identity tenants stay with the fixture. The
-cleanup is needed because the control plane's `DeleteDeployment` no longer
-removes them and the `tenant-identity` `teardown` knows only the tenants it
+cleanup is needed because the control plane's `DeleteDeployment` does not
+remove them and the `tenant-identity` `teardown` knows only the tenants it
 seeded. Revisit if the tenant-identity sample gains a control-plane hook, or
 if the platform API admits cell-account roles.
