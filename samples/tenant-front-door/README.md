@@ -496,7 +496,8 @@ from the checkout that ran the test, with credentials of the same role: it
 reads the run's ids from `.integ/<run id>/`. The teardown needs the same
 inputs as the test.
 
-The demo takes about three minutes (137 to 199 s in three runs), uses only
+The demo takes about three minutes (137 to 199 s in three runs on
+2026-11-21 against a kept `host` mode deployment), uses only
 the run's synthetic tenants and prints no token. The test ends with `b`
 suspended (step 18), so the demo first sets both tenants active, and it
 suspends `b` once more for step 5. It undoes that suspension when the script exits, also after a
@@ -614,7 +615,9 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
 [threat model](./threat-model.md).
 
 - **The integration test ran live in `host` mode only.** `single` mode
-  (steps 5 to 10, 12 to 14, 16 and 19 to 22) has no live run. The status
+  (steps 5 to 10, 12 to 14, 16 and 19 to 22, and the `single`-mode parts of
+  steps 3, 15 and 23, including the streamed call to the stand-in) has no
+  live run. The status
   block of [`architecture.md`](./architecture.md) holds the date, Region and
   coverage of the last green run.
 - **The demo needs the integration test's deployment.** `scripts/demo.sh`

@@ -59,7 +59,7 @@ export const CELL_API_PARAMETER = (applicationId: string) => `/application-plane
 
 /** The vendor IdP's resource server and scope for the registrar's reader token (spec §6.1, control-plane R-38). */
 export const VENDOR_READ_SCOPE = 'control-plane/read';
-/** The `role` values the vendor IdP's trigger mints (control-plane ADR-018, ADR-042). */
+/** The `role` values the vendor IdP's trigger mints (control-plane ADR-0018, ADR-0042). */
 export const OPERATOR_ROLE = 'operator';
 export const READER_ROLE = 'control-plane:reader';
 /** The vendor IdP user the driver signs in as the operator. */

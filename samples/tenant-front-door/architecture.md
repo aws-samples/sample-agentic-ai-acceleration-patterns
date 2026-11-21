@@ -11,8 +11,8 @@
 > | Last green integration run | 2026-11-21, `host` mode, two accounts (103 checks passed, 0 failed, 3 skipped; 64 minutes with the teardown; leftover check 0 found) |
 > | Region | `eu-west-1` for the control plane and the cells, `us-east-1` for the edge stacks, `eu-central-1` for the `tenant-identity` shared pool |
 > | Mode and steps passed | `host`: steps 1, 2, 3, 4, 11, 15, 17, 18, 23 and 24 |
-> | Not exercised live | `single` mode and its steps (5 to 10, 12 to 14, 16, 19 to 22); in `host` mode, the inline callback script order (SPA build tests cover it), the CSP check of the callback in a browser, and a real sign-in through the issuer (run by hand) |
-> | Unit tests | 39 suites, 1,239 tests passed |
+> | Not exercised live | `single` mode and its steps (5 to 10, 12 to 14, 16, 19 to 22), and the `single`-mode parts of steps 3, 15 and 23 (including the streamed call to the stand-in); in `host` mode, the inline callback script order (SPA build tests cover it), the CSP check of the callback in a browser, and a real sign-in through the issuer (run by hand) |
+> | Unit tests | 39 suites, 1,240 tests passed (`npx projen build`, 2026-11-21) |
 
 This document describes what is built. The design is in
 [`design/tenant-front-door.spec.md`](design/tenant-front-door.spec.md), the

@@ -20,9 +20,9 @@ The teardown of §6.2 is ordered, and three of its parts are API calls
 outside CloudFormation.
 
 The control-plane sample's own test uses `@aws-cdk/integ-runner` with
-integ-tests-alpha assertions. Its assertion stack already holds 168 of
-CloudFormation's 200 outputs and an 824 KB template of the 1 MB limit
-for 18 steps in one account.
+integ-tests-alpha assertions. Its assertion stack for 18 steps in one
+account is already close to CloudFormation's limit of 200 outputs and its
+1 MB template limit.
 
 The sample standard (§5.2) allows either driver and asks for an ADR when
 the test uses the CDK CLI from `scripts/integ.sh`.

@@ -2584,13 +2584,15 @@ minutes for the sweeper to delete the certificate. Step 23 adds the
 stand-in's deploy and destroy (67 s and 33 s in S-5), two 90 s waits
 around the suspended-tenant check, and a streamed call of a few seconds.
 The control plane the test deploys has its own deploy and destroy time,
-which the test reports with the rest. In all, an estimate: about 30
-minutes of deploys, about three hours of steps in `single` mode (each
-control-plane operation runs its scripts and hook builds one at a time,
-and steps 14 and 22 take about 40 minutes each) and about 50 minutes of
-teardown, so about four and a half hours; a `host` run, which skips
-steps 5 to 10, 12 to 14, 16 and 19 to 22, about two and a half. The
-credentials the driver starts with must last the whole run.
+which the test reports with the rest. A `host` run, which skips steps
+5 to 10, 12 to 14, 16 and 19 to 22, was measured at 64 minutes in all:
+about 21 minutes of deploys and about 11 minutes of teardown
+(integration-test.md, "Runtime and cost"). A `single` run is an
+estimate, not a measurement: about four and a half hours, of which
+about three hours are steps (each control-plane operation runs its
+scripts and hook builds one at a time, and steps 14 and 22 take about
+40 minutes each). The credentials the driver starts with must last the
+whole run.
 
 1. Deploy the control plane in the control plane's account, which
    installs that account's role pair, and deploy the account role pair in

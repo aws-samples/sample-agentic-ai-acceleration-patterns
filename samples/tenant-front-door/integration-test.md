@@ -80,7 +80,7 @@ them first on `PATH`.
 | `AWS_REGION` | none (required) | The control plane's Region; the edge stacks go to `us-east-1` |
 | `TFD_INTEG_ACCOUNT_B` | none (required) | The control plane's account |
 | `TFD_APP_DOMAIN`, `TFD_HOSTED_ZONE_ID`, `TFD_DEDICATED_DOMAIN` | none (required) | The test domain, its zone in the edge account, and step 14's domain |
-| `TFD_INTEG_RUN_ID` | new per run | `[a-z0-9]{1,10}`; names every stack, role, policy and application of the run |
+| `TFD_INTEG_RUN_ID` | new per run | `[a-z0-9]{1,10}`, and not containing `aws`, `amazon` or `cognito`; names every stack, role, policy and application of the run |
 | `TFD_IDENTITY_REGION` | `AWS_REGION` | The Region of the `tenant-identity` deployments |
 | `TFD_ISSUER_DOMAIN` | reserved example endpoints | A Cognito domain for the front door's `issuer` input |
 | `TFD_INTEG_KEEP` | unset | `1` skips the teardown; run `scripts/integ.sh teardown <run id> <mode>` after. `scripts/demo.sh <run id>` walks the tenants of a kept `host` run: the run ends with tenant `b` suspended (step 18), and the demo sets it active first |
