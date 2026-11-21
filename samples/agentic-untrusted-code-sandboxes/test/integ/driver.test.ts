@@ -8,6 +8,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix } from './common';
 import { Ctx, TOKEN_REUSE_MS } from './ctx';
+import { imageNameOf } from './deploy';
 import { HOSTILE_DIR, MAX_CODE_BYTES, PROBES, probeCode } from './hostile';
 import { checkLeftovers, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes } from './leftovers';
 import { claimsFor, mint, signJws } from './mint.function';
@@ -331,6 +332,10 @@ describe('the leftover comparison', () => {
   test('the stack\'s own policy is a plain leftover, and no ARN means nothing to compare', () => {
     expect(policyFindings({}, [{ name: 'mine', document: arn }], cdkArn, new Set(['mine']))[0].known).toBeUndefined();
     expect(policyFindings({}, [{ name: 'mine', document: arn }], undefined)).toEqual([]);
+  });
+  test('the image name is the last part of the image ARN, and a bare name is kept', () => {
+    expect(imageNameOf('arn:aws:lambda:eu-west-1:ACCOUNT:microvm-image:some-image')).toBe('some-image');
+    expect(imageNameOf('some-image')).toBe('some-image');
   });
   test('a blank runtime or image name gives no log group prefix, so nothing outside the run is listed', () => {
     expect(serviceLogPrefixes({ runtimeNames: ['rt', ''], imageNames: [' ', 'img'] })).toEqual([

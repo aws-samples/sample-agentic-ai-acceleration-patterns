@@ -82,6 +82,11 @@ export async function snapshotResources(aws: Aws, stackName: string): Promise<Ow
   return out;
 }
 
+/** The image name in a MicroVM image's physical id, which is its ARN (`arn:...:microvm-image:<name>`): a log group prefix takes the name, not the ARN. */
+export function imageNameOf(physicalId: string): string {
+  return physicalId.split(/[/:]/).pop() ?? physicalId;
+}
+
 /** Runtime names and image names, which prefix the log groups AgentCore and Lambda create after the deploy. */
 export async function serviceNames(aws: Aws, resources: readonly OwnedResource[]): Promise<{ runtimeNames: string[]; imageNames: string[] }> {
   const runtimeNames: string[] = [];
@@ -89,7 +94,7 @@ export async function serviceNames(aws: Aws, resources: readonly OwnedResource[]
     const g = await aws.agentcoreControl.send(new GetAgentRuntimeCommand({ agentRuntimeId: r.physicalId.split('/').pop() ?? r.physicalId })).catch(() => undefined);
     if (g?.agentRuntimeName) runtimeNames.push(g.agentRuntimeName);
   }
-  const imageNames = resources.filter((x) => x.type === 'AWS::Lambda::MicrovmImage').map((x) => x.physicalId.split('/').pop() ?? x.physicalId);
+  const imageNames = resources.filter((x) => x.type === 'AWS::Lambda::MicrovmImage').map((x) => imageNameOf(x.physicalId));
   return { runtimeNames, imageNames };
 }
 
