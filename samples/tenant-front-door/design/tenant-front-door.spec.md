@@ -2434,9 +2434,11 @@ criteria and measurements are in [spikes.md](./spikes.md).
 
 `scripts/integ.sh` drives the test (ADR-0028). It deploys the stacks of
 two CDK apps, `test/integ.single.ts` for the default mode and
-`test/integ.host.ts`, which runs steps 1 to 4, 11, 15, 17, 18, 23 and 24 with
-`addressing: 'host'` (steps 17 and 18, marked (host), run only there), one stack per CDK call so each stack's deploy and
-destroy time is reported. It runs the steps below, and runs step 24's
+`test/integ.host.ts`, which deploys with `addressing: 'host'`, one stack per
+CDK call so each stack's deploy and destroy time is reported. In the default
+mode it runs the steps below; in `host` mode it runs steps 1 to 4, 11, 15,
+17, 18, 23 and 24 (steps 17 and 18, marked (host), run only there). It runs
+step 24's
 ordered teardown from an `EXIT` trap, so a run that fails or stops still
 removes what it made. `npx projen integ` and `npx projen integ:host`
 start it.
@@ -2484,7 +2486,8 @@ that zone only, for TXT records at `_tfd-challenge.<dd>` only, to write
 step 14's records, and `route53:GetChange` to wait for each change.
 
 Every name the run creates carries its run id (`TFD_INTEG_RUN_ID`,
-`[a-z0-9]{1,10}` and none of `aws`, `amazon` or `cognito`, a new one per
+`[a-z0-9]{1,10}` and none of `aws`, `amazon` or `cognito`, words that a
+Cognito domain prefix and some other resource names refuse; a new one per
 run by default): its stacks are
 `TfdInteg-<run id>-*`, its fleet is `tfdi-<run id>` and its applications
 are `tfd-<run id>` and `plain-<run id>`, so a run never meets another run
@@ -2568,8 +2571,8 @@ The test's other shortcuts, none of them taken by the sample's own code:
 Expected time, from S-1: deploying the edge stacks and the distribution
 takes about 481 s and destroying them about 312 s, before the control
 plane and the cells the test also deploys, and each cell or deployment
-event runs one route hook build. The route changes of steps 2, 13, 16
-and 20 to 22, and the deletes of step 24, go through the route hook,
+event runs one route hook build. The route changes of steps 2, 11 to 13,
+16 and 20 to 22, and the deletes of step 24, go through the route hook,
 which waits its 45 s bound (§4.2) before the operation ends. Step 20
 adds one probe build per event, and step 22 waits through two skipped
 delete hooks, each three builds of at least one 60 s poll with 60 s and
@@ -2843,7 +2846,9 @@ whole run.
     "cache"`. The issuer then shows the sign-in form, so the session
     ended. After a fresh sign-in the sign-in host's `Location` is
     `https://a.<appDomain>/` with no `code` and no `state`.
-    `login.<appDomain>/logout` returns the static signed-out page.
+    `login.<appDomain>/logout` returns the static signed-out page. For the
+    suspended-host check, the edge operator role suspends `b` and the test
+    waits 90 s (§4.2); it leaves `b` suspended.
 19. An application without a front door. Register `plain-<run id>`, which
     has no `RouteHookAccess` stack and whose scripts write no outputs,
     and create a deployment of `a` in it: its cell and its deployment

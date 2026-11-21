@@ -664,17 +664,16 @@ None. Spec §11 has no open question.
 
 ## Security review
 
-ProtoShield scanned the sample on 2026-11-21 at the head of the pull request
-that added the integration test, which includes the demo script and the
-registrar read retry (semgrep, cdk-nag on the synthesized templates, checkov,
-gitleaks, CVE, IAM least privilege, licence headers; bandit and cfn-nag had no
-Python or `.template` file to run on). The scan found 0 critical, 4 high, 6 medium and
-2 low. Two scans on 2026-11-20 came before the demo script and the retry.
-The IAM least privilege check is model-based and groups and grades the same
-statements differently from one run to the next, so the table also holds the
-findings of those earlier scans. The count in brackets is the number of
-findings of the 2026-11-21 scan the row covers; a row marked "earlier scan
-only" was not reported by it. The counts of the other rows sum to 4 high, 6
+ProtoShield scanned the sample on 2026-11-21, with the integration test, the
+demo script and the registrar read retry in the tree (semgrep, cdk-nag on the
+synthesized templates, checkov, gitleaks, CVE, IAM least privilege, licence
+headers; bandit and cfn-nag had no Python or `.template` file to run on). The
+scan found 0 critical, 4 high, 6 medium and 2 low. The IAM least privilege
+check is model-based and groups and grades the same statements differently
+from one run to the next, so the table also holds findings of earlier scans of
+the same code. The count in brackets is the number of findings of the
+2026-11-21 scan the row covers; a row marked "earlier scan only" was not
+reported by it. The counts of the other rows sum to 4 high, 6
 medium and 2 low. Each finding:
 
 | Finding | Severity | Outcome |

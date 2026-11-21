@@ -28,7 +28,7 @@ export interface TestRoleInputs {
 }
 
 export interface IntegInputs {
-  /** `[a-z0-9]{1,10}`, without `aws`, `amazon` or `cognito`: it names every stack, role and user pool domain of the run. */
+  /** `[a-z0-9]{1,10}`, without `aws`, `amazon` or `cognito` (a Cognito domain prefix refuses them): it names every stack and role of the run. */
   readonly runId: string;
   /** The account the driver's credentials point at: the edge account, which holds the hosted zone (spec §10). */
   readonly edgeAccount: string;

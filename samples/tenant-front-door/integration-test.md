@@ -144,7 +144,8 @@ add up to about 21 minutes and the stack destroys to about 11 minutes
 including the control plane's script and hook builds, which run one at a time.
 The driver prints each stack's deploy and destroy time at the end
 (`.integ/<run id>/times.tsv`). The cost is a few dollars: CloudFront, a
-few dozen short CodeBuild builds, one ACM certificate request, Lambda,
+few dozen short CodeBuild builds, one ACM certificate for `<dd>` and one or
+two probe certificates for `probe.<dd>`, Lambda,
 DynamoDB and API Gateway requests, all removed at the end.
 
 Last green run: 2026-11-21, `host` mode, control plane in `eu-west-1`

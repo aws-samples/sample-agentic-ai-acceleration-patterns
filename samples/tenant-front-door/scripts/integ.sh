@@ -192,6 +192,9 @@ preflight() {
       identity: {userPoolId: $pool, appClientId: $client, region: $ir}}
       + (if $issuer == "" then {} else {issuerDomain: $issuer} end)
       + (if $mode == "host" then {tenantRequestsPer5Min: $tr, ipRequestsPer5Min: $ir2} else {} end)' >"$RUN_DIR/context.json"
+  # A reused run id keeps the earlier state beside the new one: a teardown that ended with a part failed (and no stack left)
+  # still has its ids there for a manual clean-up.
+  [[ ! -s "$RUN_DIR/state.env" ]] || mv "$RUN_DIR/state.env" "$RUN_DIR/state.env.$(date +%s).old"
   : >"$RUN_DIR/state.env"
   printf 'kind\tname\tseconds\tresult\n' >"$RUN_DIR/times.tsv"
 }

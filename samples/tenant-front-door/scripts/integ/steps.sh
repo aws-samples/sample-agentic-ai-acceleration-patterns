@@ -750,6 +750,6 @@ step_23() {
   check "the stand-in logged neither" 0 "$(log_count "$INGRESS_LOG" "$REGION" '"agent-ingress-request"' "$t0")"
 }
 
-# The steps each mode runs (spec §10: integ.host.ts repeats the steps marked host).
+# The steps each mode runs (spec §10 intro).
 STEPS_SINGLE=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 19 20 21 22 23)
 STEPS_HOST=(01 02 03 04 11 15 17 18 23)
