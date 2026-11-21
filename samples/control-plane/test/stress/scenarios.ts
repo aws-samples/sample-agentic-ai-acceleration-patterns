@@ -58,6 +58,8 @@ export interface PlatformEnv {
   readonly existing: (tenantId: string) => IdentityEntry | undefined;
   /** Records a created identity tenant in the manifest, at once, so teardown finds it after any failure. */
   readonly save: (entry: IdentityEntry) => void;
+  /** Writes the tenant's row in the cell's demo table, which the agent's `read <tenant>` probe reads (spec §5.3, credential check). */
+  readonly seedData?: (tenantId: string) => Promise<void>;
 }
 
 /** A cell build plus its first tenant build: Q-1 expects about eight minutes; one hour is the build budget. */
@@ -220,6 +222,14 @@ async function becomeReady(s: ScenarioEnv, p: PlatformEnv, tenant: string, creat
       return;
     }
     p.save(entry);
+  }
+  // The demo row the agent's credential check reads: made with the identity, before the first served call.
+  if (p.seedData !== undefined) {
+    try {
+      await p.seedData(tenant);
+    } catch (e) {
+      s.rec.finding(`tenant ${tenant}: its demo data could not be written (${e instanceof Error ? e.name : 'error'})`);
+    }
   }
   s.rec.sample('identity', (Date.now() - identityStarted) / 1000);
   if (p.edgeUrl === undefined) return;

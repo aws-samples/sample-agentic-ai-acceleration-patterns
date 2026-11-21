@@ -384,6 +384,24 @@ function platformEnvOf(rec: Recorder): PlatformEnv | undefined {
   if (parseMode(process.env.STRESS_MODE) !== 'platform') return undefined;
   const file = manifestFile();
   const fd = readFrontDoor(need('STRESS_HOME'), need('STRESS_PREFIX'));
+  // shortcut: the demo row goes into the warm-up cell's table with the cell account owner's profile, because the tenant
+  // role holds entitlement methods only (stress ADR-0012); with one cell, which is `small`, that is every tenant's cell.
+  // Upgrade to the deployment's own cell when a tier has several.
+  let table: Promise<{ profile: string; name: string }> | undefined;
+  const demoTable = (): Promise<{ profile: string; name: string }> => {
+    table ??= (async () => {
+      const warm = readManifest(file)?.warmUp;
+      if (warm === undefined) throw new Error('no warm-up record');
+      const platform = await platformAccount();
+      const account = cellAccounts(tier(), platform).find((a) => a.accountId === warm.accountId);
+      if (account === undefined) throw new Error('the warm-up cell is in an account the run does not list');
+      const out = await aws(['cloudformation', 'describe-stack-resources', '--stack-name', `StressCell-${warm.cellId}`], { profile: account.profile, region: region() });
+      const demo = ((out.StackResources ?? []) as any[]).find((r) => r.ResourceType === 'AWS::DynamoDB::GlobalTable' && String(r.LogicalResourceId).startsWith('DemoTable'));
+      if (demo === undefined) throw new Error('the cell has no demo table');
+      return { profile: account.profile, name: String(demo.PhysicalResourceId) };
+    })();
+    return table;
+  };
   return {
     identity: identityApiOf(rec.observe.bind(rec)),
     users: tier().usersPerActiveTenant,
@@ -393,6 +411,13 @@ function platformEnvOf(rec: Recorder): PlatformEnv | undefined {
       const m = readManifest(file);
       if (m === undefined) throw new Error('no manifest: run seed first');
       writeManifest(file, { ...m, identity: [...(m.identity ?? []).filter((e) => e.tenantId !== entry.tenantId), entry] });
+    },
+    seedData: async (tenantId) => {
+      const t = await demoTable();
+      await aws(
+        ['dynamodb', 'put-item', '--table-name', t.name, '--item', JSON.stringify({ PK: { S: `TENANT#${tenantId}` }, label: { S: `st-${tenantId.slice(-12).toLowerCase()}` } })],
+        { profile: t.profile, region: region() },
+      );
     },
   };
 }
