@@ -6,6 +6,8 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { conversationIdFor, ensureScope } from './agent-path';
+import { EVIDENCE_LINE_CHARS, EVIDENCE_LINES, evidenceLines } from './cloud';
 import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix } from './common';
 import { Ctx, TOKEN_REUSE_MS } from './ctx';
 import { imageNameOf } from './deploy';
@@ -168,6 +170,42 @@ describe('the context', () => {
     const found = await checkLeftovers(aws as never, 'P', state);
     expect(found).toEqual([{ kind: 'check-failed', id: 'image', detail: expect.stringMatching(/empty service name/) }]);
     expect(prefixes).toEqual(['/aws/lambda-microvms/img']);
+  });
+});
+
+describe('the consumer path and the evidence', () => {
+  const api = 'https://id.example.com/prod/';
+  test('the app/use scope is registered when tenant-identity answers 404, and left alone when it exists', async () => {
+    const calls: string[] = [];
+    const send = (status: Record<string, number>) => async (method: string, url: string) => {
+      calls.push(`${method} ${url}`);
+      return { status: status[method] };
+    };
+    expect(await ensureScope(send({ GET: 404, PUT: 200 }), api, 'r1')).toEqual({ registered: true, status: 200 });
+    expect(calls).toEqual([`GET ${api}platform/scopes/app%2Fuse`, `PUT ${api}platform/scopes/app%2Fuse`]);
+    calls.length = 0;
+    expect(await ensureScope(send({ GET: 200 }), api, 'r1')).toEqual({ status: 200 });
+    expect(calls).toEqual([`GET ${api}platform/scopes/app%2Fuse`]);
+    expect(await ensureScope(send({ GET: 404, PUT: 500 }), api, 'r1')).toEqual({ registered: false, status: 500 });
+    // never a delete: the shared pool keeps the scope
+    expect(calls.some((x) => x.startsWith('DELETE'))).toBe(false);
+  });
+  test('the conversation id fits the ingress schema for a short run id', () => {
+    for (const id of ['mwpsjpw7', 'a', 'x'.repeat(80), 'ab-cd_9']) expect(conversationIdFor(id)).toMatch(/^[A-Za-z0-9]{16,64}$/);
+  });
+  test('evidence keeps the last lines, each cut to size, on one line', () => {
+    const lines = evidenceLines(Array.from({ length: EVIDENCE_LINES + 5 }, (_, i) => `line ${i}\n${'y'.repeat(EVIDENCE_LINE_CHARS)}`));
+    expect(lines).toHaveLength(EVIDENCE_LINES);
+    expect(lines[0].startsWith('line 5 ')).toBe(true);
+    expect(lines.every((l) => l.length <= EVIDENCE_LINE_CHARS && !l.includes('\n'))).toBe(true);
+  });
+  test('a failed unit keeps its notes in the record', () => {
+    const rec = new Recorder('r', () => 0, () => undefined);
+    rec.begin('race:run-code:agentcore');
+    rec.note('runner lines: x');
+    rec.check('both calls served', false);
+    rec.end();
+    expect(rec.toJSON('t').steps[0].evidence).toBe('both calls served; runner lines: x');
   });
 });
 
@@ -454,6 +492,8 @@ describe('the hostile probes', () => {
   test('the checks count a completed connect or a slow lookup as open, and only a failed connect (or a 403 where S3 is reachable) as denied', () => {
     expect(noConnection({ error: CONNECTED })).toBe(false);
     expect(noConnection({ error: LOOKUP_SLOW })).toBe(false);
+    // a probe thread that could not start tried nothing, so it is never a block
+    expect(noConnection({ error: 'RuntimeError' })).toBe(false);
     expect(noConnection({ error: 'ConnectionRefusedError' })).toBe(true);
     expect(noConnection({ status: 404 })).toBe(false);
     for (const b of ['microvm', 'nitro', 'agentcore'] as const) {

@@ -51,6 +51,26 @@ async function signed(c: Ctx, method: string, url: string, body?: unknown): Prom
   return { status: res.status, json };
 }
 
+type Send = (method: string, url: string, body?: unknown) => Promise<{ status: number }>;
+
+/**
+ * The scope the throwaway tenant gets must be in tenant-identity's catalogue; a fresh pool has none. Adds it when
+ * the GET answers 404 and leaves it: the pool is a shared fixture, and another run (agentic-runtime-isolation's) may
+ * use the same scope at the same time. `registered` is undefined when the scope was already there.
+ */
+export async function ensureScope(send: Send, api: string, runId: string): Promise<{ registered?: boolean; status: number }> {
+  const url = `${api}platform/scopes/${encodeURIComponent(VENDOR_SCOPE)}`;
+  const got = await send('GET', url);
+  if (got.status !== 404) return { status: got.status };
+  const put = await send('PUT', url, { description: `run_code integ ${runId}` });
+  return { registered: put.status === 200, status: put.status };
+}
+
+/** The agent's conversation id for a run: letters and digits, 16 to 64 of them (the ingress's request schema refuses others). */
+export function conversationIdFor(runId: string): string {
+  return `rcintegconversation${runId.replace(/[^A-Za-z0-9]/g, '')}`.slice(0, 64);
+}
+
 /** One call through the sample agent as a real user of a throwaway tenant; records its checks on `c.rec`. */
 export async function agentPath(c: Ctx): Promise<void> {
   const endpoint = c.out.EndpointUrl;
@@ -63,13 +83,8 @@ export async function agentPath(c: Ctx): Promise<void> {
   if (!api.endsWith('/')) api += '/';
   const name = `rcinteg${c.runId}`.slice(0, 40);
   let tenantId: string | undefined;
-  // The scope the throwaway tenant gets must be in tenant-identity's catalogue; a fresh pool has none. The run adds it when missing and leaves it:
-  // the pool is a shared fixture, and another run (agentic-runtime-isolation's) may use the same scope at the same time.
-  const scopeUrl = `${api}platform/scopes/${encodeURIComponent(VENDOR_SCOPE)}`;
-  if ((await signed(c, 'GET', scopeUrl)).status === 404) {
-    const put = await signed(c, 'PUT', scopeUrl, { description: `run_code integ ${c.runId}` });
-    c.rec.check(`the vendor scope ${VENDOR_SCOPE} is registered in tenant-identity (HTTP ${put.status})`, put.status === 200);
-  }
+  const scope = await ensureScope((method, url, body) => signed(c, method, url, body), api, c.runId);
+  if (scope.registered !== undefined) c.rec.check(`the vendor scope ${VENDOR_SCOPE} is registered in tenant-identity (HTTP ${scope.status})`, scope.registered);
   try {
     const t = await signed(c, 'POST', `${api}platform/tenants`, { name, adminEmail: `success+${name}@simulator.amazonses.com`, scopes: [VENDOR_SCOPE] });
     tenantId = (t.json.tenant as { tenantId?: string } | undefined)?.tenantId;
@@ -90,12 +105,12 @@ export async function agentPath(c: Ctx): Promise<void> {
     const res = await fetch(`${endpoint.replace(/\/$/, '')}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'Authorization': `Bearer ${bearer}` },
-      body: JSON.stringify({ conversationId: `rcinteg${c.runId}`, prompt }),
+      body: JSON.stringify({ conversationId: conversationIdFor(c.runId), prompt }),
       signal: AbortSignal.timeout(150_000),
     });
     const text = await res.text();
     const events = text.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6));
-    c.rec.check(`the agent answers (HTTP ${res.status})`, res.status === 200 && events.length > 0);
+    c.rec.check(`the agent answers (HTTP ${res.status}${res.status === 200 ? '' : `: ${text.replace(/\s+/g, ' ').slice(0, 200)}`})`, res.status === 200 && events.length > 0);
     let toolText: string | undefined;
     for (const e of events) {
       try {

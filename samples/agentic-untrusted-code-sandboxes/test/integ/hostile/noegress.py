@@ -8,20 +8,43 @@
 # probe must make no TCP connection (a failed lookup or connect, or ProbeDeadline
 # after 2 s), except the presigned PUT on agentcore, which reaches S3 and must get
 # 403. A positive control to an allowed address must get a status in the same time.
+import resource
 import threading
 
 
 def probe(name, fn):
-    def go():
-        t0 = time.time()
-        try:
-            R[name] = {"outcome": fn()}
-        except BaseException as e:  # noqa: BLE001
-            R[name] = {"error": type(e).__name__, "errno": getattr(e, "errno", None)}
-        R[name]["ms"] = int((time.time() - t0) * 1000)
-    t = threading.Thread(target=go)
-    t.start()
-    return t
+    t0 = time.time()
+    try:
+        R[name] = {"outcome": fn()}
+    except BaseException as e:  # noqa: BLE001
+        R[name] = {"error": type(e).__name__, "errno": getattr(e, "errno", None)}
+    R[name]["ms"] = int((time.time() - t0) * 1000)
+
+
+def workers():
+    # Each probe runs in a worker and starts at most one helper thread at a time (_bounded in _lib.py). RLIMIT_NPROC
+    # counts every thread of the job (9 on microvm at the default size, 64 elsewhere), so the pool keeps the main
+    # thread, the workers and their helpers under it, with one slot spare for a helper still ending.
+    soft = resource.getrlimit(resource.RLIMIT_NPROC)[0]
+    return len(PROBES) if soft == resource.RLIM_INFINITY else max(1, min(len(PROBES), (soft - 2) // 2))
+
+
+def run_all():
+    todo = list(PROBES)
+    lock = threading.Lock()
+
+    def work():
+        while True:
+            with lock:
+                if not todo:
+                    return
+                name, fn = todo.pop(0)
+            probe(name, fn)
+
+    ts = [threading.Thread(target=work, daemon=True) for _ in range(workers())]
+    for t in ts:
+        t.start()
+    return ts
 
 
 def https_name():
@@ -52,11 +75,13 @@ def control():
     return http("GET", "http://" + llink() + "/latest/meta-data/")[0]
 
 
-ts = [probe("control", control), probe("https_name", https_name), probe("tcp_public_ip", tcp_public), probe("put_presigned", put_presigned)]
-if CONFIG.get("peer_ip"):
-    ts.append(probe("tcp_peer", tcp_peer))
+# The slow probes first (a name that resolves, then up to four connects), so a small pool still ends in time.
+PROBES = [("control", control), ("https_name", https_name), ("put_presigned", put_presigned)]
 if CONFIG.get("peer_url"):
-    ts.append(probe("https_peer", https_peer))
-# A lookup may take LOOKUP_TIMEOUT before the connects and the request; the threads run side by side on one deadline.
-join_all(ts)
+    PROBES.append(("https_peer", https_peer))
+PROBES.append(("tcp_public_ip", tcp_public))
+if CONFIG.get("peer_ip"):
+    PROBES.append(("tcp_peer", tcp_peer))
+# A lookup may take LOOKUP_TIMEOUT before the connects and the request; the workers run side by side on one deadline.
+join_all(run_all())
 done()

@@ -92,7 +92,8 @@ export class Recorder {
     this.steps.push({
       key: c.key,
       result: failed ? 'FAIL' : 'PASS',
-      evidence: failed ? c.failures.join('; ') : c.notes.join('; '),
+      // A failed unit keeps its notes too: they carry the logs and stderr read for the failure.
+      evidence: (failed ? [...c.failures, ...c.notes] : c.notes).join('; '),
       seconds,
     });
   }

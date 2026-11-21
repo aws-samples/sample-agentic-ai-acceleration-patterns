@@ -9,7 +9,8 @@
  */
 
 import { StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
-import { GetQueryResultsCommand, StartQueryCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { GetAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore-control';
+import { DescribeLogGroupsCommand, GetQueryResultsCommand, StartQueryCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { DescribeTasksCommand, ListContainerInstancesCommand, ListTasksCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { GetFunctionConfigurationCommand } from '@aws-sdk/client-lambda';
 import { GetMicrovmCommand, ListMicrovmsCommand, TerminateMicrovmCommand } from '@aws-sdk/client-lambda-microvms';
@@ -131,5 +132,43 @@ export async function insights(
     }
     if (rows.length >= want || Date.now() + 15_000 > end) return rows;
     await sleep(15_000);
+  }
+}
+
+/** How many log lines a failed check keeps as evidence, and how long each line may be. */
+export const EVIDENCE_LINES = 20;
+export const EVIDENCE_LINE_CHARS = 300;
+
+/** Log lines cut to a size a run record can hold: the last `EVIDENCE_LINES`, each at most `EVIDENCE_LINE_CHARS`. Pure. */
+export function evidenceLines(messages: readonly string[]): string[] {
+  return messages.slice(-EVIDENCE_LINES).map((m) => m.replace(/\s+/g, ' ').trim().slice(0, EVIDENCE_LINE_CHARS));
+}
+
+/**
+ * The log groups of the runner on a backend, for evidence: on `agentcore` the runtime's own groups
+ * (`/aws/bedrock-agentcore/runtimes/<runtimeName>-*`). Other backends give none: their runner lines are in
+ * groups the driver does not name.
+ */
+export async function runnerGroups(c: Ctx, instance: Instance, backend: Backend): Promise<string[]> {
+  if (backend !== 'agentcore') return [];
+  const arn = runtimeArn(c, instance);
+  const rt = await c.aws.agentcoreControl.send(new GetAgentRuntimeCommand({ agentRuntimeId: arn.split('/').pop() ?? arn }));
+  if (!rt.agentRuntimeName) return [];
+  const r = await c.aws.logs.send(new DescribeLogGroupsCommand({ logGroupNamePrefix: `/aws/bedrock-agentcore/runtimes/${rt.agentRuntimeName}-` }));
+  return (r.logGroups ?? []).map((g) => g.logGroupName).filter((n): n is string => !!n);
+}
+
+/**
+ * Log lines from the groups since `sinceMs`, for a failed check's evidence. Read while the stack (and so the
+ * groups) still exists, because the teardown deletes them. A read that fails gives the error instead.
+ */
+export async function logEvidence(c: Ctx, groups: readonly string[], sinceMs: number, filter = ''): Promise<string[]> {
+  if (groups.length === 0) return [];
+  try {
+    const q = `fields @timestamp, @message${filter ? ` | filter ${filter}` : ''} | sort @timestamp asc | limit 1000`;
+    const rows = await insights(c, [...groups], q, sinceMs, 1, 60_000);
+    return evidenceLines(rows.map((r) => `${r['@timestamp'] ?? ''} ${r['@message'] ?? ''}`));
+  } catch (e) {
+    return [`log read failed: ${(e as Error).name}`];
   }
 }
