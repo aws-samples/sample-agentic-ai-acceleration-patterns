@@ -17,6 +17,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DeleteParametersCommand, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { Fixtures, IdentityClient, newUlid, Registrar, retrying } from './clients';
 import { collect } from './collect';
 import { request, sleep } from './http';
@@ -24,7 +25,7 @@ import { pool, Rate } from './load';
 import { drawsOf, parseTier, planOf, tenantsToSeed } from './plan';
 import { runScenario, SCENARIOS, type Ctx, type ScenarioId } from './scenarios';
 import { assumedCredentials, ownCredentials, signedCaller } from './sigv4';
-import { readEnv, readManifest, readOutputs, writeManifest, writeRequestLog, type Env, type Manifest, type Outputs, type TenantEntry } from './state';
+import { readEnv, readManifest, readOutputs, recordMismatch, writeManifest, writeRequestLog, type Env, type Manifest, type Outputs, type TenantEntry } from './state';
 
 const SEED_CONCURRENCY = 2;
 /** PutParameter and DeleteParameter share a 3 per second account limit (SSM). */
@@ -199,6 +200,14 @@ async function run(env: Env, scenario: string): Promise<number> {
   return outcome.failures.length === 0 && record.isolation.mismatches === 0 && record.refusals.unattributed === 0 ? 0 : 1;
 }
 
+/** Refuses a verb that runs with other credentials or in another Region than the deploy recorded in `outputs.json`, before it changes anything. */
+async function checkRecord(env: Env): Promise<void> {
+  if (!fs.existsSync(path.join(env.stateDir, 'outputs.json'))) return;
+  const id = await new STSClient({ region: env.region }).send(new GetCallerIdentityCommand({}));
+  const why = recordMismatch(readOutputs(env), id.Account, env.region);
+  if (why !== undefined) throw new Error(`${why}; nothing was changed`);
+}
+
 async function main(): Promise<number> {
   const [verb, arg] = process.argv.slice(2);
   switch (verb) {
@@ -207,14 +216,18 @@ async function main(): Promise<number> {
       return 0;
     case 'seed': {
       const env = readEnv();
+      await checkRecord(env);
       await seed(env, readOutputs(env));
       return 0;
     }
     case 'run': {
-      return run(readEnv(), arg ?? '');
+      const env = readEnv();
+      await checkRecord(env);
+      return run(env, arg ?? '');
     }
     case 'collect': {
       const env = readEnv();
+      await checkRecord(env);
       const r = await collect(env, readOutputs(env));
       for (const n of r.notes) console.log(`collect: ${n}`);
       for (const f of r.failures) console.error(`collect: FAIL ${f}`);
@@ -225,7 +238,11 @@ async function main(): Promise<number> {
         console.error(`driver: sweep takes no argument or --no-routes, not ${arg}`);
         return 2;
       }
-      return sweep(readEnv(), arg !== '--no-routes');
+      {
+        const env = readEnv();
+        await checkRecord(env);
+        return sweep(env, arg !== '--no-routes');
+      }
     default:
       console.error('usage: driver.ts budget | seed | run <scenario> | collect | sweep');
       return 2;

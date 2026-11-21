@@ -41,4 +41,5 @@ before.
   what a conflict is.
 - A change of the store's message wording fails writes loudly. The tests pin
   the message the store gives today.
-- Revisit if the store answers a stale `IfMatch` with `ConflictException`.
+- Revisit if the store changes the wording of that message, or the SDK
+  gains a typed error for a stale `IfMatch`.

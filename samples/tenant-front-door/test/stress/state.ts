@@ -77,6 +77,13 @@ export function readOutputs(env: Env): Outputs {
   return o as unknown as Outputs;
 }
 
+/** Why the credentials or Region a verb runs with are not the ones `deploy` recorded; undefined when they match. */
+export function recordMismatch(out: Outputs, account: string | undefined, region: string): string | undefined {
+  if (account !== out.accountId) return `the deploy outputs name account ${out.accountId}, the credentials are account ${account ?? 'unknown'}`;
+  if (region !== out.region) return `the deploy outputs name Region ${out.region}, AWS_REGION is ${region}`;
+  return undefined;
+}
+
 export type TenantKind = 'active' | 'write';
 
 export interface TenantEntry {

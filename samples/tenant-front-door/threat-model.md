@@ -213,7 +213,7 @@ hardening checklist (standard §7).
 | M-12 | The route hook handles input as untrusted. Ids come from `CELL_ID` and `TENANT_ID`, never from `SCRIPT_OUTPUTS`, and must be control-plane ids. It refuses outputs that are not a JSON object of strings, finds a repeated key with a streaming parse, rejects a missing `frontDoorApiDomain`, reads the value exactly (a trailing newline included) and checks the origin form before sending (the registrar checks it again), builds bodies with `jq --arg`, and never `eval`s. Credentials come from `aws configure export-credentials`, are checked against their character sets so they cannot break the config line, reach `curl --aws-sigv4` through a mode-600 `-K` file and never a command line, and are never printed. The registrar's error body is printed, which holds no token | Spec §3.4 (route hook steps 1 to 3), §5.2; ADR-0017; control-plane R-43 | T-29, T-30 |
 | M-13 | Hook failure semantics keep the table honest. A failing `POST` hook fails the create or update, so `ACTIVE` means routed. The delete hook runs `PRE`, before the delete script, so the route goes while the record still exists. A delete hook that fails three times is skipped and counted by the control plane. The hook waits 45 s for propagation after a write, a bound the measured times can exceed (spec §4.2) | Spec §3.4 (route hook step 4 and the paragraphs after it), §4.2; ADR-0017, ADR-0003; control-plane R-45, R-46. Planned check: steps 16, 21, 22 | T-10, T-31, T-65 |
 | M-14 | The registrar reads the control plane with a reader token only: its own app client, whose `role` is a namespaced entry of the control plane's `readerRoles`, the client id in `vendorIdp.clientIds`, and `requiredScope` set when the client can call another API. The secret lives in Secrets Manager in the edge account. The token is cached until it expires. A failed read refuses the write | Spec §3.6, §6.1, §3.4 step 2; ADR-0015; spike S-9; control-plane R-36, R-38. Deployer action: rotate the secret | T-27, T-31 |
-| M-15 | Store writes are optimistic. Every write uses the store's ETag (`IfMatch`). A stale ETag is a conflict, whether the store answers `ConflictException` (409 or 412) or, as a real store does, a 400 `ValidationException` whose message says the pre-condition failed. On a conflict the registrar re-reads the keys, repeats the checks of steps 3 and 4 and the size check, and retries. A write that rests on a DNS answer is retried only if the entry still holds the same `d` and `dk`. The `signin` custom resource does the same | Spec §3.4 step 5 (end), §3.5; ADR-0003 | T-24, T-43, T-64 |
+| M-15 | Store writes are optimistic. Every write uses the store's ETag (`IfMatch`). A stale ETag is a conflict, whether the store answers `ConflictException` (409 or 412) or, as a real store does, a 400 `ValidationException` whose message says the pre-condition failed. On a conflict the registrar re-reads the keys, repeats the checks of steps 3 and 4 and the size check, and retries. A write that rests on a DNS answer is retried only if the entry still holds the same `d` and `dk`. The `signin` custom resource does the same | Spec §3.4 step 5 (end), §3.5; ADR-0003, ADR-0031 | T-24, T-43, T-64 |
 | M-16 | Roles are split and narrow. The registrar never deletes a distribution tenant or certificate, and holds no ACM or CloudFront domain action while `dedicatedDomains` is off. The sweeper cannot write routes: it holds read actions on the store, not `PutKey`. Only the sweeper role holds the sweeper table, and its ACM delete is conditioned on the registrar's distribution tag. The registrar's creates carry that tag with this distribution's id and no tag keys but its own three; its tag grants (`cloudfront:TagResource`, `acm:AddTagsToCertificate`) apply only where the resource's distribution tag is already this distribution's id, which a create's own tags satisfy, so it cannot put the distribution tag on a resource it did not create (it can rewrite the tenant tags on its own, residual AR-33). Each front door creates its pooled distribution tenant with the distribution tag set to `pooled/<distribution id>`: the value is no distribution's id, so IAM refuses every front door's registrar the tag grants on it and refuses the `UpdateDistributionTenant` and `DeleteDistributionTenant` of every front door's registrar, sweeper and teardown on it (residual AR-33). The sweeper and the teardown also skip it by its id before any read, a second guard. No code reads the tag's value. Where IAM cannot narrow an action, the code checks the tenant's distribution and tags first (409) | Spec §3.4 (IAM paragraphs), §3.1; ADR-0018, ADR-0020, ADR-0022 | T-25, T-55 |
 | M-17 | The edge operator role is the vendor's own and the stack does not create it. It sits behind the vendor's sign-in and multi-factor rule, and no role a cell account, a tenant or the hook role can assume reaches it. The registrar's own checks apply to it too: form of the origin, the `GetCell` read, the domain rules and the challenge | Spec §3.4 (operator role paragraph), §3.6; ADR-0017. Deployer action: MFA, short sessions, review of who can assume it | T-21, T-23 |
 | M-18 | Audit: the registrar logs the caller role, key and outcome, never the body (step 6). The API access log names the calling account, the edge account or the control plane's, on the refused calls. CloudTrail records each operator call under the role's name. The hook role's calls say "some global hook" (AR-1) | Spec §3.4 step 6, §10 step 15; ADR-0017 | T-23, T-26 |
@@ -406,11 +406,11 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
    28.4 s, p99 29.4 s, max 29.5 s, one location). The hook waits 45 s.
    From one client the stress slice saw a suspension take 30 to 60 s to
    show, and a new route missed by some request up to 60 s after its write:
-   both longer than the hook's wait. Until then the tenant is still routed, and the cell's hosts
-   check is the only refusal. *Why:* the store is eventually consistent; no
-   alternative reads at the edge without a network call (ADR-0003). *Bounded
-   by:* the window is about a minute from the one client and location
-   measured; other locations were not measured.
+   both can exceed the hook's wait. Until then the tenant is still routed,
+   and the cell's hosts check is the only refusal. *Why:* the store is
+   eventually consistent; no alternative reads at the edge without a network
+   call (ADR-0003). *Bounded by:* the window is about a minute from the one
+   client and location measured; other locations were not measured.
 - **AR-8: `single` mode has no edge rate rule, and forged claims reach an
    origin (T-1, T-5).** WAF cannot read the token's tenant. A request with
    a forged claim naming a live tenant costs one invocation of that cell
@@ -684,10 +684,16 @@ cdk-nag (47) and checkov (35) suppressions were all reviewed as info; each
 cites its reason in the code.
 
 ASH scanned the stress driver (`test/stress/`), its scripts
-(`scripts/stress/`, `scripts/smoke.sh`) and the shared ETag test on
+(`scripts/stress/`, `scripts/smoke.sh`), the shared ETag test
+(`src/shared/etag-conflict.ts`, `src/registrar/route-store.ts`,
+`src/custom-resources/route-table-keys.function.ts` and their tests),
+`src/main.ts`, `src/edge/main.cdk.ts` and `test/smoke/smoke.app.ts` on
 2026-11-21 (semgrep, bandit, cdk-nag, checkov, detect-secrets, npm-audit):
-0 critical and 0 high. Two secret-scanner false positives, a base32 alphabet
-and a mock credential in a test, carry an allowlist comment in the code.
+0 high, 0 medium and 0 low. The secret scanner raised three critical
+findings, all false positives. Two, a base32 alphabet and a mock credential
+in a test, carry an allowlist comment in the code. The third is a placeholder
+`clientSecretArn` in the usage comment of `src/main.ts`. ProtoShield was not
+run again on these changes.
 
 ## Links
 

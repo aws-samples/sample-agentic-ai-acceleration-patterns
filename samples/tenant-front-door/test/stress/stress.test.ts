@@ -19,7 +19,7 @@ import { percentiles, Recorder } from './recorder';
 import { type Watch, watchRoute, writeAnswer } from './scenarios';
 import { assumedCredentials, regionOf, signedCaller } from './sigv4';
 import { Sink, answerOf } from './sink';
-import type { Env, RequestLine } from './state';
+import { recordMismatch, type Env, type Outputs, type RequestLine } from './state';
 import { parseDraws } from '../../../../stress/src/budget';
 import { recordProblems } from '../../../../stress/src/result';
 
@@ -191,6 +191,17 @@ describe('tokens and ids', () => {
   it('builds a token no one signed whose payload names the tenant', () => {
     expect(payloadOf(unsignedToken('GHOST'))).toEqual({ tenant_id: 'GHOST' });
     expect(unsignedToken('GHOST').split('.')).toHaveLength(3);
+  });
+});
+
+describe('the deploy record', () => {
+  const out = { accountId: '111122223333', region: 'eu-west-2' } as Outputs;
+
+  it('matches the account and Region it was made in, and says what differs otherwise', () => {
+    expect(recordMismatch(out, '111122223333', 'eu-west-2')).toBeUndefined();
+    expect(recordMismatch(out, '999988887777', 'eu-west-2')).toContain('credentials are account 999988887777');
+    expect(recordMismatch(out, undefined, 'eu-west-2')).toContain('unknown');
+    expect(recordMismatch(out, '111122223333', 'eu-central-1')).toContain('AWS_REGION is eu-central-1');
   });
 });
 
