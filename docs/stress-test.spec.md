@@ -330,7 +330,15 @@ is refused, so `small` keeps one cell and one `agentIngress`. Steps 2
 to 6 alternate between two slices' verbs, which the runner's
 `deploy`-then-`seed` order (item 3 of the list in this section) does
 not express; the first platform run (W-9) adds the order to the runner
-and the slices' `needs`. Phase two takes the origin's domain and its
+and the slices' `needs`. Teardown interleaves the same verbs in the
+front door's order (front-door spec §6.2), not the runner's reverse
+order: the `control-plane` slice deletes the deployments and cells while
+the registrar and the hooks are still in place; then
+`register-hooks.sh --delete`; then the `RouteHookAccess` policy leaves
+`globalHookManagedPolicyArns` and the control plane is updated; then
+`RouteHookAccess` is destroyed and its retained parameter deleted; then
+the front door, the control plane and the stress identity are destroyed
+in that order. W-9 adds this order to the runner too. Phase two takes the origin's domain and its
 path, the ingress stage, from the ingress's published parameter,
 `/application-plane/shared/agent-runtime/StressCell-<cellId>/ingress`
 (`baseUrl`, front-door spec §6.3), where `<cellId>` is the warm-up
@@ -483,7 +491,7 @@ Each slice's `budget` fills its column; the runner sums per account.
 
 | Quota (per account) | `control-plane` | `tenant-identity` | `tenant-front-door` | `agentic-runtime-isolation` (per cell) |
 |---|---|---|---|---|
-| Lambda concurrency | API and workflow | platform and token functions | registrar | ingress, authoriser, tools, cell API origin |
+| Lambda concurrency | API and workflow, and in `platform` mode each cell's cell API origin | platform and token functions | registrar | ingress, authoriser, tools |
 | CodeBuild concurrent builds | `buildLimit` x the projects the run builds in (cell and tenant, plus the global hook project in `platform` mode); the control plane creates four, §3.6 | - | - | - |
 | STS `AssumeRole` | role pair per build | - | - | TVM |
 | KMS `Sign` | - | - | - | mint, tool contexts |
