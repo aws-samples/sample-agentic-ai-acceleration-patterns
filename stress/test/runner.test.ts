@@ -83,7 +83,7 @@ describe('runner (spec §3.5)', () => {
   it('orders platform scenarios by number, then the slices own scenarios', () => {
     const { root } = fixture(slices);
     const loaded = ['tenant-identity', 'control-plane'].map((n) => loadSlice(root, n));
-    expect(scenarioOrder(loaded)).toEqual(['PS-1', 'PS-5', 'placement-race']);
+    expect(scenarioOrder(loaded, 'slice')).toEqual(['PS-1', 'PS-5', 'placement-race']);
   });
 
   it('runs only the PS scenarios in a platform run and leaves the platform-only ones out of a slice run', () => {
@@ -94,7 +94,6 @@ describe('runner (spec §3.5)', () => {
     const pair = ['tenant-identity', 'control-plane'].map((n) => loadSlice(root, n));
     expect(scenarioOrder(pair, 'platform')).toEqual(['PS-1', 'PS-5']);
     expect(scenarioOrder(pair, 'slice')).toEqual(['PS-1', 'token-rate', 'placement-race']);
-    expect(scenarioOrder(pair)).toEqual(['PS-1', 'PS-5', 'token-rate', 'placement-race']);
   });
 
   it('refuses a need that is no slice, and a need left out of --slices', () => {

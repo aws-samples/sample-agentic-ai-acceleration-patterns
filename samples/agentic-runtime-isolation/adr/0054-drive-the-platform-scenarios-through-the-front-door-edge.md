@@ -79,10 +79,15 @@ the front door routes to.
 
 Harder: a platform record has the client's latency hops only, with no ingress
 latency, quota peaks or cost. PS-3 starts its herd after 60 s idle, so its
-cold-start share is whatever the instances' age allows. Until something
-creates the identity tenant and users for the tenants the control plane
-onboards (spec §3.3, steps 3 and 4), the slice refuses every control-plane
-tenant and the run fails with the list.
+cold-start share is whatever the instances' age allows. `collect-platform.sh`
+does not evaluate the rows of S3's noisy-tenant check or its delivery check, so
+PS-4 passes with another tenant's 429 recorded as an attributed refusal, and
+only the k6 delivery threshold holds. The slice's `budget` is the slice-mode
+figure, all on `cell-account-1`: an upper bound that overstates what a platform
+run draws on one cell account, where the load spreads over the cells. Until
+something creates the identity tenant and users for the tenants the control
+plane onboards (spec §3.3, steps 3 and 4), the slice refuses every
+control-plane tenant and the run fails with the list.
 
 Revisit when: the edge's and the cells' logs can be joined to the driver's
 counts without write access to the cell accounts, or the platform run creates

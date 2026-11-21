@@ -143,9 +143,11 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
     // A suspended and a removed tenant are each read again after the edge has settled: P-1 holds.
     expect(r.isolation).toEqual({ assertions: TENANTS.length * 2 * 3, mismatches: 0 });
     // The router's 403 before a route, the ingress's 403 once routed, the router's 503 while suspended: all expected, none a refusal.
-    const seen = (status: number): number => Object.entries(r.requests).filter(([k]) => k.startsWith(`${status}:`) && k.endsWith(':expected')).reduce((n, [, v]) => n + v, 0);
+    const seen = (status: number): number => Object.entries(r.requests).filter(([k]) => k.startsWith(`edge:${status}:`) && k.endsWith(':expected')).reduce((n, [, v]) => n + v, 0);
     expect(seen(403)).toBeGreaterThan(0);
     expect(seen(503)).toBeGreaterThan(0);
+    // The edge's 503s are counted under the edge, so `collect` weighs only the control plane's own 5xx against its access log.
+    expect(Object.keys(r.requests).filter((k) => /^5/.test(k))).toEqual([]);
     expect(r.refusals).toEqual({ byTenantReason: [], unattributed: 0 });
     expect(w.created.size).toBe(TENANTS.length);
     expect(w.deleted.size).toBe(TENANTS.length);
@@ -505,6 +507,12 @@ describe('what the edge says about a tenant', () => {
     const router = new RegExp((literal as string).slice(1, -2), 'i');
     expect(router.test(`Bearer ${probeToken('01HZX0000000000000000000A1')}`)).toBe(true);
     expect(router.test('Bearer a.b.')).toBe(false);
+  });
+
+  it('reads the refusal body the router writes (its `fail` builds {"status":<code>})', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../../../tenant-front-door/src/router/router.js'), 'utf8');
+    expect(source).toContain('const fail = (code, extra) => answer(code, extra, \'{"status":\' + code + \'}\');');
+    expect(isRouterBody('{"status":403}', 403)).toBe(true);
   });
 });
 

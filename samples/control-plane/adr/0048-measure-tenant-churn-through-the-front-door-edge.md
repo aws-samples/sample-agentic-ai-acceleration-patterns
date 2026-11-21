@@ -77,9 +77,11 @@ Harder: the probe fits a front door in `single` addressing mode whose host is
 its `appDomain` and whose tenant claim is `tenant_id`; another front door
 answers 404, 403 or 401 whatever a tenant's state, and PS-5 stops with that
 cause. A change to the router's refusal bodies or its signature check breaks
-the reading, which `test/stress/churn.test.ts` guards by reading the router's
-own token pattern. An ingress that answers without API Gateway's request id
-would read as no answer, and the run would report the tenant never routable.
+the reading, and `test/stress/churn.test.ts` guards the token pattern and the
+refusal body by reading them from the router's own source. The router's
+signature check has no such test. An ingress that answers without API
+Gateway's request id would read as no answer, and the run would report the
+tenant never routable.
 
 Revisit when: the front door checks signatures at the edge, or its refusals
 change shape, or the platform run creates the identity users and a signed read

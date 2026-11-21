@@ -225,15 +225,11 @@ export function planRun(opts: Pick<RunOptions, 'repoRoot' | 'tier' | 'slices'>):
  * (spec §5.1), then each slice's own scenarios in the order it declares them.
  * `mode` picks what runs when no scenario is named (spec §5.2): a platform run
  * takes only the `PS-<n>` scenarios, a slice run takes everything but the
- * scenarios a slice marks `platformOnly`. Without `mode` it is every scenario.
+ * scenarios a slice marks `platformOnly`.
  */
-export function scenarioOrder(slices: readonly Slice[], mode?: 'slice' | 'platform'): string[] {
+export function scenarioOrder(slices: readonly Slice[], mode: 'slice' | 'platform'): string[] {
   const platformOnly = new Set(slices.flatMap((s) => s.platformOnly));
-  const all = [...new Set(slices.flatMap((s) => s.scenarios))].filter((sc) => {
-    if (mode === 'platform') return /^PS-\d+$/.test(sc);
-    if (mode === 'slice') return !platformOnly.has(sc);
-    return true;
-  });
+  const all = [...new Set(slices.flatMap((s) => s.scenarios))].filter((sc) => (mode === 'platform' ? /^PS-\d+$/.test(sc) : !platformOnly.has(sc)));
   const platform = all.filter((s) => /^PS-\d+$/.test(s)).sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
   return [...platform, ...all.filter((s) => !platform.includes(s))];
 }

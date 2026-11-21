@@ -73,7 +73,10 @@ With `STRESS_MODE=platform` the verbs work on the other slices' manifests instea
 sample's own stacks: `deploy` and `seed` read the manifests and deploy only the k6 host,
 `run` takes `PS-2`, `PS-3`, `PS-4`, `PS-6` and `PS-8` instead of `S1` to `S7`, `collect` reads
 the refusals from the driver's own lines, and `teardown` removes the run files (the last
-bullet under [Also](#also) has the details).
+bullet under [Also](#also) has the details). `platform.sh` reads and checks the manifests,
+`platform-tenants.jq` picks the tenants to drive, `k6/edge-refusals.js` counts each refused
+request by tenant, status and minute, and `collect-platform.sh` with `attribute-edge.jq`
+turns those lines into the record's refusals.
 
 `attribute.jq` is the P-7 step of `collect`: the refusals the hops log with a
 tenant, matched by count with the 4xx and 5xx the driver counted. Each tenant's

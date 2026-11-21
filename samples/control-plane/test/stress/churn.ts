@@ -106,7 +106,7 @@ async function read(s: ScenarioEnv, edge: Edge, tenant: string): Promise<EdgeSta
   const started = process.hrtime.bigint();
   const answer = await edge.probe(tenant);
   const state = edgeStateOf(answer);
-  s.rec.observe('edge-probe', asCall(answer.status, started), tenant, expectedAtEdge(answer.status, state));
+  s.rec.observe('edge-probe', asCall(answer.status, started), tenant, expectedAtEdge(answer.status, state), 'edge');
   if (answer.status === 404) {
     throw new EdgeMisconfigured(
       'the edge answered 404 for /agents/<backend>/invocations: the front door has no agent ingress, the backend name is wrong, or edgeUrl\'s host is not the front door\'s appDomain',
@@ -171,7 +171,7 @@ async function hold(s: ScenarioEnv, edge: Edge, tenant: string, state: 'suspende
 async function setRoute(s: ScenarioEnv, edge: Edge, tenant: string, status: 'active' | 'suspended'): Promise<boolean> {
   const started = process.hrtime.bigint();
   const answer = await edge.setStatus(tenant, status);
-  s.rec.observe('update-route-status', asCall(answer, started), tenant, answer === 200);
+  s.rec.observe('update-route-status', asCall(answer, started), tenant, answer === 200, 'registrar');
   // A 5xx is already a finding of its own (`observe`); the rest names the call.
   if (answer !== 200 && answer < 500) {
     const hint = answer === 0 ? ' (no answer, or no credentials for the registrar: the session needs the edge operator role)' : '';

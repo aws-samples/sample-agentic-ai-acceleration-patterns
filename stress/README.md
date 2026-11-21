@@ -41,9 +41,9 @@ A sample joins with two files in `samples/<name>/scripts/stress/`:
 `needs` names the slices this one reads through their published interfaces, or must follow
 in the order of a platform run (spec §3.4: `tenant-identity`, `control-plane`,
 `tenant-front-door`, then `agentic-runtime-isolation`). `control-plane` reads nothing from
-`tenant-identity`; its need only orders the run. The runner puts
-every slice after the slices it needs, and refuses a need that is no slice, a need left out of
-`--slices` and a cycle. With one slice named (slice mode) its needs are not required. A
+`tenant-identity`; its need only orders the run. The runner puts every slice after the
+slices it needs, and refuses a need that is no slice, a need left out of `--slices` and a
+cycle. With one slice named (slice mode) its needs are not required. A
 scenario in `platformOnly` needs the other slices' interfaces (the edge, the cells the control
 plane built): a slice-mode run leaves it out, and refuses one named in `--scenarios`.
 
@@ -72,10 +72,9 @@ the control plane's application). `teardown` runs in reverse order. Without `--s
 slice-mode run runs the slice's scenarios except its `platformOnly` ones (any `PS-<n>` first, by
 number), and a platform run (several slices) runs only the `PS-<n>` scenarios, by number;
 `--scenarios` runs the scenarios named, in the order given, and can name any scenario a
-slice declares (a
-slice-mode run refuses a `platformOnly` one), and a platform run that has no `PS-<n>` scenario
-to run is refused. A scenario no slice declares is refused before the run starts, so
-the run id stays free.
+slice declares (a slice-mode run refuses a `platformOnly` one), and a platform run that has
+no `PS-<n>` scenario to run is refused. A scenario no slice declares is refused before the
+run starts, so the run id stays free.
 
 A run fails when a scenario's record is missing, does not parse, belongs
 to another run, or makes no isolation assertion, when a record names a
@@ -141,8 +140,8 @@ set when each scenario starts, because the control plane onboards its tenants in
 every `seed`. A control-plane tenant with no entry in `tenant-identity.json` is refused with
 the reason `no-identity-tenant`, one with no admin user name with `no-user`; both are listed by
 tenant id in the scenario's output and in `platform-tenants.json` in the slice's folder of
-`$STRESS_HOME`, together with the identity tenants outside the control plane (`not-in-control-plane`,
-ignored). The scenario stops when fewer than two tenants are usable (the read-other probe needs
+`$STRESS_HOME`, together with the identity tenants outside the control plane
+(`not-in-control-plane`, ignored). The scenario stops when fewer than two tenants are usable (the read-other probe needs
 two). Nothing in a platform run creates the identity tenant and the users of a tenant the
 control plane onboarded (spec §3.3, steps 3 and 4), so this slice refuses every control-plane
 tenant and the run fails with the list, until something does.
@@ -236,11 +235,14 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 - PS-3 in platform mode cannot retire the cells' Lambda instances: they are in the cell
   accounts, where the slice has no write access. It waits 60 s idle and starts the herd from
   there, so its cold-start share is whatever the instances' age allows.
+- PS-4 in platform mode does not evaluate S3's noisy-tenant row (no other tenant refused with
+  a 429) or its delivery row; only the k6 delivery threshold holds. The slice's `budget` is the
+  slice-mode figure, all on `cell-account-1`, so it overstates what one cell account draws.
 - PS-2, PS-3, PS-4, PS-6 and PS-8 in platform mode attribute refusals from the driver's own
   lines. The edge's and the cells' logs are not joined, so the records hold the client's
-  latency hops only and no quota peaks or cost. A virtual user flushes its per-minute refusal counts on a change of
-  minute and once the scenario is 99 % done; a refusal in the last minute of a user that ends
-  earlier stays unattributed, and the run fails on it.
+  latency hops only and no quota peaks or cost. A virtual user flushes its per-minute
+  refusal counts on a change of minute and once the scenario is 99 % done; a refusal in the
+  last minute of a user that ends earlier stays unattributed, and the run fails on it.
 - `agentic-runtime-isolation` needs `tenant-front-door`, and no slice of that name exists, so
   the runner refuses every platform run that names `agentic-runtime-isolation` with
   `agentic-runtime-isolation needs tenant-front-door, which is not a slice`. PS-2, PS-3, PS-4,

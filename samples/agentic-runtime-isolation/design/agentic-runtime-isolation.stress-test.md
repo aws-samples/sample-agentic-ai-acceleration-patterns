@@ -218,8 +218,13 @@ scripts/stress/
   caps.jq            the driver's 429 count per tenant from the k6 summary, for attribute.jq
   noisy.jq           S3: the noisy tenant is refused and no other tenant is
   delivered.jq       S3: the steady VUs sent at least 95 % of steadyRps x seconds
+  platform.sh        platform mode: reads the other slices' manifests (tenant-front-door.json, identity.json, tenant-identity.json, control-plane.json) and picks the tenants to drive
+  platform-tenants.jq  platform mode: the tenants the identity and the control plane both know, with the refusal reason of each other one
+  attribute-edge.jq  platform mode: the refusals the driver printed by tenant and reason, matched with its count
+  collect-platform.sh  platform mode: `collect` from the driver's own refusal lines (the edge's and the cells' logs are not joined)
   k6/
     probe.js         the ingress call, the probes and their isolation assertions, warm-up and step (token refresh, pacing and counters are in stress/k6/lib.js)
+    edge-refusals.js platform mode: counts each refused request by tenant, status and minute and prints one `edge_refusal` line for each
     noisy-pace.js    S3's pacing arithmetic, no k6 import (test/stress/slice.test.ts checks it)
     s1-steady.js ... s7-eviction.js
   collect.sh         Section 7 for each record's window; fills the record's late fields; prints the pass table
@@ -231,7 +236,10 @@ The scripts run as a slice of the platform stress contract (ADR-0052): the
 runner, `stress/run.sh run --tier <tier> --slices agentic-runtime-isolation`,
 calls `slice.sh` for `deploy`, `seed`, `run S1`..`S7`, `collect` and
 `teardown`. `run` fails on k6's thresholds; `collect` fills each record's late
-fields and decides the §4 pass table from the settled logs and metrics.
+fields and decides the §4 pass table from the settled logs and metrics. In a
+platform run (`STRESS_MODE=platform`, ADR-0054) the same verbs read the other
+slices' manifests, `run` takes `PS-2`, `PS-3`, `PS-4`, `PS-6` and `PS-8`, and
+`collect` reads the refusals from the driver's own lines.
 
 The driver host and the shared k6 library are the repository's stress assets, `stress/driver/` and `stress/k6/` (stress ADR-0007, ADR-0008, ADR-0009). This slice deploys the host through `stress/driver/deploy.sh` and keeps only its own calls and assertions, in `k6/probe.js`.
 
