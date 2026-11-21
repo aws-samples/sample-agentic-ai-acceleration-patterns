@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0012: Onboard a tenant on its cell through the role pair's tenant role
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Deciders: Dave Roberts (PSA)
 

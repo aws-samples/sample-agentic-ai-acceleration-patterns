@@ -237,11 +237,16 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 - Scenarios run one after another. Spec §5.1 runs PS-5 (churn) and PS-7
   (cross-cell probes) during PS-2; the runner runs PS-5 and PS-7 on their
   own after PS-4, without PS-2's load.
-- Platform mode has not run live. Its parts are tested alone: the runner's order and
-  scenario filter, the slice scripts against stubbed manifests and a stubbed `aws`, and PS-5
-  against a simulated control plane, registrar and edge. `k6/probe.js`'s platform lines are
-  checked for syntax only; the first run on a driver host (`K6_COMMAND=inspect`, then PS-2)
-  is the check.
+- Platform mode ran live once, at `small`, one cell account (`stress/results/2026-11-21-small.md`).
+  `medium` and `large` are unproven: more cells need the per-cell ingress route (spec Q-7), and
+  the ingress reader role is one per Region and account. A second Region in a cell account
+  needs its own `CELL_POLICY_SUFFIX` and fleet name, because the policies and the role pair
+  name Region-specific ARNs and IAM names are account-wide.
+- PS-1 in platform mode times a tenant to its first served `/api/whoami`, not to an agent
+  call, so it does not cross the ingress (stress ADR-0020). The cell's log is not compared in
+  PS-7 (it is in another account). The PS-1 demo row is written with the cell owner's profile.
+- A platform run of the identity and control-plane slices without the front door is accepted
+  by the planner and fails in the warm-up step, after the cell build.
 - PS-3 in platform mode cannot retire the cells' Lambda instances: they are in the cell
   accounts, where the slice has no write access. It waits 60 s idle and starts the herd from
   there, so its cold-start share is whatever the instances' age allows.

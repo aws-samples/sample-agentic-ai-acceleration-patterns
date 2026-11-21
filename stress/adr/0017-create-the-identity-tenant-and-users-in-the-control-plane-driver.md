@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0017: Create each control-plane tenant's identity tenant and users in the control-plane driver
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Deciders: Dave Roberts (PSA)
 

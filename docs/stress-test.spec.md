@@ -720,7 +720,7 @@ deployed with 27 of 27 roles on `/cell/`. The shipped policies in
 `stress/application/` ran `probes.sh` in both cell accounts, as the
 execution role's stand-in and as a cell role under the workload boundary
 (`stress/application/README.md`). The request path in a cell account is
-Q-5.
+Q-5, answered by the first platform run at `small` (`stress/results/2026-11-21-small.md`).
 
 ## 9. Work items and parallel readiness
 
@@ -743,9 +743,9 @@ Q-5.
 | # | Question | Needed by |
 |---|---|---|
 | Q-1 | How long does one cell take to deploy from a CodeBuild cell script (expected about 8 minutes on Runtime V2), and does `BUILD_GENERAL1_SMALL` (3 GB) hold the synth? | Answered: a cell takes 486 s from `CreateDeployment` to the cell `ACTIVE`; inside the cell build the install takes 20 s, the synth 10 s and the deploy 421 s. `BUILD_GENERAL1_SMALL` holds the synth: the container has 3,831 MiB and 2 vCPUs and peaks at 1,977 MiB (`stress/application/README.md`, Results, run `20261120T142632Z`) |
-| Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? Answered no: its test runs the agent route against a stand-in ingress (front-door ADR-0024), so the first platform run at `small` is the first to drive the real ingress through the edge | W-7 |
+| Q-2 | Does the front door's integration test compose runtime-isolation for `/agents/*` (its Q-4)? Answered no: its test runs the agent route against a stand-in ingress (front-door ADR-0024), so the first platform run at `small` is the first to drive the real ingress through the edge | W-7; the W-9 run did (PS-2 to PS-8 through the edge to the cell's ingress) |
 | Q-3 | Does the platform run keep the `large` fleet in every account between runs, and what does it cost idle? | decision 5 |
 | Q-4 | Which hosted zone does the stress front door use? | W-7 |
-| Q-5 | Does the request path work in a standalone cell account with every role on `/cell/` (authoriser, TVM `sts:AssumeRole` of a `/cell/` tenant role, the model call, tools)? Proven by the first platform run at `small` | W-9 |
+| Q-5 | Does the request path work in a standalone cell account with every role on `/cell/` (authoriser, TVM `sts:AssumeRole` of a `/cell/` tenant role, the model call, tools)? Proven by the first platform run at `small` | Answered yes (run 2026-11-21, `stress/results/2026-11-21-small.md`): through the edge, the router, the ingress in the cell account and the authoriser, the TVM `sts:AssumeRole` of a `/cell/` tenant role, the agent's own-tenant and other-tenant reads and its streamed answers (PS-6, 301 of 301, p95 10.4 s) were served with 0 isolation mismatches in about 5,000 assertions, no unattributed refusal. The record does not count tool calls or model usage events apart, so the tool leg is not shown separately |
 | Q-6 | Does runtime-isolation's package entry export what the stress cell app needs (`RuntimeIsolationDemoStack`, `parseDemoContext`, `bundleAgent`)? The path spike imports them from `src/` by path | W-5 kept the path imports: `stress/application/cell-app.ts` loads them from the sample's `src/` with the sample's own CDK; an export is not needed for the stress test |
 | Q-7 | How do agent calls reach a per-cell ingress at `medium` and `large`, where there is more than one cell and the front door has one `agentIngress` (stress ADR-0016)? Candidates: (a) agent calls sent under `/api/*` to a per-cell origin Lambda in each stress cell, behind origin access control, that forwards to its ingress: no router change, but a different client path, the bearer mapped back from `x-tenant-token`, an extra hop, and response streaming for PS-6; (b) a front-door change for per-cell agent origins. Decided by a new stress ADR | before the first `medium` run |

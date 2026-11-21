@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0013: Pace waves at the build limit and retry conflicts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Deciders: Dave Roberts (PSA)
 

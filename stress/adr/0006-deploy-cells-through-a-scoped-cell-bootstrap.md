@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0006: Deploy cells in standalone accounts through a scoped cell bootstrap
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0011
 - Deciders: Dave Roberts (PSA)

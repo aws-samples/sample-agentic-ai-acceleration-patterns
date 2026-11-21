@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0011: Give the roles a cell creates a workload boundary without IAM
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0006
 - Deciders: Dave Roberts (PSA)
