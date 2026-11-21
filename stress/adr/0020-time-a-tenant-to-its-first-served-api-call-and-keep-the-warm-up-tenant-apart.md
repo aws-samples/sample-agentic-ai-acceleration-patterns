@@ -47,7 +47,18 @@ Easier: PS-1 is the same at every tier and costs no model calls.
 
 Harder: PS-1 says nothing of the ingress; a defect there shows in PS-2. The
 warm-up tenant's time is a cell build, not an onboarding, and PS-1's p50 and
-p99 leave it out.
+p99 leave it out. A tenant that was not placed in this run (a rerun) is timed
+apart as `rerun-ready`: its clock would start at the old `CreateDeployment`.
+
+The identity work starts at the next poll after ACTIVE (up to about ten seconds),
+at most four tenants at a time, with the identity calls paced at four a second,
+so in a wave `ready` includes that queue wait and grows with the wave. A large
+tier's p99 is not the platform's onboarding time alone.
+
+The end of the interval is the driver's clock, the start is the control plane's
+`createdAt`. W-9 saw the driver's clock about a minute behind CloudWatch's, so
+`ready` can carry that offset; at a p95 of minutes it is a few percent. Measuring
+the offset once at the start of PS-1 would remove it.
 
 Revisit if the first agent call after onboarding is slower than the rest in
 PS-2, which would mean PS-1 hides an onboarding cost.
