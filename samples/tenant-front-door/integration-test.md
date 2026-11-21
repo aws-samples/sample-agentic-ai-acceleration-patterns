@@ -137,15 +137,21 @@ unit tests.
 
 ## Runtime and cost
 
-About four and a half hours for a `single` run and two and a half for a
-`host` run (estimates): about 30 minutes of deploys, the control plane's
-script and hook builds one at a time, and about 50 minutes of teardown.
+About four and a half hours for a `single` run (an estimate, not run) and
+one hour for a `host` run (measured: 64 minutes): about 21 minutes of
+deploys, the control plane's script and hook builds one at a time, and
+about 11 minutes of teardown.
 The driver prints each stack's deploy and destroy time at the end
 (`.integ/<run id>/times.tsv`). The cost is a few dollars: CloudFront, a
 few dozen short CodeBuild builds, one ACM certificate request, Lambda,
 DynamoDB and API Gateway requests, all removed at the end.
 
-Last green run: none yet.
+Last green run: 2026-11-21, `host` mode, control plane in `eu-west-1`.
+103 checks passed, 0 failed, 3 skipped. Stack deploys took 1,289 s in all
+(the front door's main stack 375 s, the control plane 116 s; stacks of one
+phase overlap), the teardown 633 s of stack destroys, and the whole run 64
+minutes including the leftover check, which found 0. The cost was not
+measured; the estimate above stands. `single` mode has not run.
 
 ## After an interruption
 

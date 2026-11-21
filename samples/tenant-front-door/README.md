@@ -565,9 +565,10 @@ The full threat model, with every threat, mitigation and accepted risk, is in
 Open items and shortcuts. Each accepted risk is an `AR-n` in the
 [threat model](./threat-model.md).
 
-- **The integration test has no recorded green run.** The status block of
-  [`architecture.md`](./architecture.md) holds the date, Region and coverage
-  when one exists.
+- **The integration test ran live in `host` mode only.** `single` mode
+  (steps 5 to 10, 12 to 14, 16 and 19 to 22) has no live run. The status
+  block of [`architecture.md`](./architecture.md) holds the date, Region and
+  coverage of the last green run.
 - **No end-to-end demo script.** The smoke scripts and the integration test
   are the runnable walk-throughs; no `scripts/demo.sh` exists.
 - **The registrar retries a control-plane read once, inside 10 s.** A read

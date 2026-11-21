@@ -2,18 +2,17 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Tenant Front Door: Architecture
 
-> **Status: implemented; integration run pending.** The code, the unit
-> tests and the integration test driver are built. The integration test
-> ([`integration-test.md`](integration-test.md)) has no green run recorded
-> yet.
+> **Status: implemented; integration test green in `host` mode.** The
+> integration test ([`integration-test.md`](integration-test.md)) passed in
+> `host` mode; `single` mode has not run live.
 >
 > | Field | Value |
 > |---|---|
-> | Last green integration run | `<date, to be filled from the run>` |
-> | Region | `<Region of the run>` |
-> | Mode and steps passed | `<single and host: steps passed of the steps run>` |
-> | Not exercised live | `<steps left out of the run, with the reason>` |
-> | Unit tests | `<suites and tests of the same commit>` |
+> | Last green integration run | 2026-11-21, `host` mode, two accounts (103 checks passed, 0 failed, 3 skipped; 64 minutes with the teardown; leftover check 0 found) |
+> | Region | `eu-west-1` for the control plane and the cells, `us-east-1` for the edge stacks, `eu-central-1` for the `tenant-identity` shared pool |
+> | Mode and steps passed | `host`: steps 1, 2, 3, 4, 11, 15, 17, 18, 23 and 24 |
+> | Not exercised live | `single` mode and its steps (5 to 10, 12 to 14, 16, 19 to 22); in `host` mode, the inline callback script order (SPA build tests cover it), the CSP check of the callback in a browser, and a real sign-in through the issuer (run by hand) |
+> | Unit tests | 39 suites, 1,239 tests passed |
 
 This document describes what is built. The design is in
 [`design/tenant-front-door.spec.md`](design/tenant-front-door.spec.md), the
