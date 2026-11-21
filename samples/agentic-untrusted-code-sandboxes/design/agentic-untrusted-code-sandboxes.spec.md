@@ -483,8 +483,9 @@ with `busy`. The runner:
    (S-18). On `agentcore` the runner then reads the job group's
    `memory.current` less `file` plus `shmem` (as the `nitro` watchdog
    does, so the page cache of files in `/work` does not count). The read is
-   repeated for up to 1 s of the 3 s the runner allows after a job, because
-   the memory the sweep freed takes a moment to leave the group's counters.
+   repeated for the rest of the 3 s the runner allows after a job, because
+   the memory the sweep freed takes a moment to leave the group's counters
+   (a `memfd` fill near L took more than 1 s in the integration test).
    If it is still not below 32 MiB, the runner starts no further job and refuses every
    later one with `dirty`, which the tool treats as a dead handle
    (§4.1 step 3), so the takeover stops the session and the next start
@@ -498,7 +499,7 @@ with `busy`. The runner:
    tool's `runTimeout` + 5 s wait (§4.1 step 5). A step the budget cuts
    short, or a uid 1001 process that survives the kill, marks the runner
    `dirty` on every backend, and a `dirty` runner refuses every later job.
-   On `agentcore` the job group read above polls every 0.05 s for up to 1 s
+   On `agentcore` the job group read above polls every 0.05 s for the rest
    of that budget (ADR-0064, `runner/PROTOCOL.md`).
 4. Returns `exitCode`, `stdout`, `stderr` (together at most
    `maxOutputBytes`, stdout cut first, `truncated` flag), `durationMs`,
