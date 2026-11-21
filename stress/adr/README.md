@@ -25,6 +25,7 @@ that change a sample are recorded in that sample's `adr/`.
 | [0013](./0013-pace-waves-at-the-build-limit-and-retry-conflicts.md) | Pace waves at the build limit and retry conflicts | Proposed | 2026-11-20 |
 | [0014](./0014-ship-the-cell-source-as-a-zip-of-the-pinned-commit.md) | Ship the cell source as a zip of the pinned commit | Proposed | 2026-11-20 |
 | [0015](./0015-check-the-cell-accounts-with-the-owners-read-access.md) | Check the cell accounts with the owner's read access | Proposed | 2026-11-20 |
+| [0016](./0016-send-agent-traffic-to-the-one-cells-ingress-at-small.md) | Send agent traffic to the one cell's ingress at `small` | Proposed | 2026-11-20 |
 
 In `samples/control-plane/adr/`:
 
