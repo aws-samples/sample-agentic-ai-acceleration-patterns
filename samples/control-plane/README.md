@@ -773,10 +773,11 @@ route suspended and resumed, and the deployment deleted. Each change is timed fr
 call to the first edge answer that shows it (`routable`, `suspended`, `resumed` and
 `removed` in the record), and a suspended and a removed tenant are read again after the
 edge has settled. The edge's and the registrar's answers are counted under
-`edge:<status>` and `registrar:<status>` in the record's `requests`, so `collect` weighs
-only the control plane's own 5xx against its access log. PS-5 reads the edge and
-registrar addresses from the front door's manifest (`stress/README.md`, "Platform mode:
-manifests") and stops with a message when they are missing. The driver is
+`edge:<status>[:<reason>[:expected]]` and `registrar:<status>...` in the record's
+`requests`, so `collect` weighs only the control plane's own 5xx against its access log.
+PS-5 reads the edge and registrar addresses from the front door's manifest
+(`stress/README.md`, "Platform mode: manifests") and stops with a message when they are
+missing. The driver is
 [`test/stress/`](./test/stress/), the scripts
 [`scripts/stress/`](./scripts/stress/slice.sh); the manifest and the source zip
 stay outside the repository and hold no token or password. `--remove-fixtures`

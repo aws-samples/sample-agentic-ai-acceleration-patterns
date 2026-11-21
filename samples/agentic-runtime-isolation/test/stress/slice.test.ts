@@ -328,13 +328,17 @@ describe('slice.sh', () => {
       it('removes the host it deployed, and its run files, at teardown', () => {
         withHome(ALL, (h) => {
           expect(run(script(), env(h), 'deploy').status).toBe(0);
-          fs.writeFileSync(path.join(stateOf(h), 'manifest.json'), '{}');
+          fs.mkdirSync(path.join(stateOf(h), 'platform'));
+          fs.writeFileSync(path.join(stateOf(h), 'platform', 'manifest.json'), '{}');
           fs.writeFileSync(path.join(stateOf(h), 'platform-tenants.json'), '{}');
+          // The seed manifest of a slice-mode run (the fleet fixture at large) is not this run's.
+          fs.writeFileSync(path.join(stateOf(h), 'manifest.json'), '{"tenants":[]}');
           const teardown = run(script(), env(h), 'teardown', '--fixtures');
           expect(teardown.stderr).toBe('');
           expect(teardown.status).toBe(0);
           expect(calls()).toBe('driver deploy StressTest small\ndriver teardown StressTest small\n');
-          for (const f of ['platform-driver-owned', 'manifest.json', 'platform-tenants.json']) expect(fs.existsSync(path.join(stateOf(h), f))).toBe(false);
+          for (const f of ['platform-driver-owned', 'platform', 'platform-tenants.json']) expect(fs.existsSync(path.join(stateOf(h), f))).toBe(false);
+          expect(fs.readFileSync(path.join(stateOf(h), 'manifest.json'), 'utf8')).toBe('{"tenants":[]}');
           expect(fs.existsSync(path.join(fake, 'stacks', 'StressTest-driver'))).toBe(false);
         });
       });
@@ -345,9 +349,12 @@ describe('slice.sh', () => {
       it('runs PS-2 as the S1 shape against the edge, with the identity and the tenants of the manifests', () => {
         withHome(ALL, (h) => {
           fs.mkdirSync(path.join(h, 'results'));
+          fs.mkdirSync(stateOf(h), { recursive: true });
+          fs.writeFileSync(path.join(stateOf(h), 'manifest.json'), '{"tenants":[]}');
           const r = run(script(), runEnv(h), 'run', 'PS-2');
           expect(r.stderr).toBe('');
           expect(r.status).toBe(0);
+          expect(fs.readFileSync(path.join(stateOf(h), 'manifest.json'), 'utf8')).toBe('{"tenants":[]}');
           expect(r.stdout).toContain('platform tenants: 2 of 4 steady tenants usable');
           expect(r.stdout).toContain(`refused ${ids(4)[2]}: no-user`);
           expect(r.stdout).toContain('run: PS-2 (s1-steady.js) at small');
@@ -571,13 +578,13 @@ describe('slice.sh', () => {
         let now = 10 * MINUTE;
         const { track } = load().createEdgeRefusals(() => now, (l) => lines.push(l));
         track('A', 503);
-        expect(lines.map((l) => JSON.parse(l))).toEqual([{ kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 503, count: 1 }]);
+        expect(lines.map((l) => JSON.parse(l))).toEqual([{ kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 503 }]);
         now += MINUTE + 5_000;
         track('B', 429);
         track('B', 429);
         expect(lines.map((l) => JSON.parse(l)).slice(1)).toEqual([
-          { kind: 'edge_refusal', epochMinute: 11, tenantId: 'B', status: 429, count: 1 },
-          { kind: 'edge_refusal', epochMinute: 11, tenantId: 'B', status: 429, count: 1 },
+          { kind: 'edge_refusal', epochMinute: 11, tenantId: 'B', status: 429 },
+          { kind: 'edge_refusal', epochMinute: 11, tenantId: 'B', status: 429 },
         ]);
       });
 
@@ -606,8 +613,7 @@ describe('slice.sh', () => {
           fs.writeFileSync(
             path.join(k6, 's1-steady.k6-stdout.txt'),
             lines([
-              { kind: 'edge_refusal', epochMinute: 1, tenantId: 'A', status: 503, count: 3 },
-              { kind: 'edge_refusal', epochMinute: 2, tenantId: 'A', status: 503, count: 2 },
+              ...[1, 1, 1, 2, 2].map((epochMinute) => ({ kind: 'edge_refusal', epochMinute, tenantId: 'A', status: 503 })),
               { kind: 'body_refusal', epochMinute: 2, tenantId: 'B', reason: 'tool-403' },
               { kind: 'tenant_minute', epochMinute: 2, tenantId: 'A', sent: 9, r429: 0 },
             ]),

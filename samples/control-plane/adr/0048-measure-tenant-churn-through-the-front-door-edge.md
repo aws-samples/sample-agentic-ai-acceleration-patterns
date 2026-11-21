@@ -69,10 +69,10 @@ the platform it measures, and Option 3 does not measure the edge.
   records on the platform account's builds. Unbounded cycles would exceed it
   and fail on throttled builds.
 - **Counting.** The record's `requests` holds the edge's and the registrar's
-  answers under `edge:<status>` and `registrar:<status>`, so `collect` weighs
-  only the control plane's own 5xx against its access log (P-7). A suspended
-  tenant answers 503 on every poll, and those answers would hide a 5xx the
-  driver did not see.
+  answers under `edge:<status>[:<reason>[:expected]]` and `registrar:<status>...`,
+  so `collect` weighs only the control plane's own 5xx against its access log
+  (P-7). A suspended tenant answers 503 on every poll, and those answers would
+  hide a 5xx the driver did not see.
 - **Churn.** A cycle creates and deletes the tenant's deployment, and suspends
   and resumes its route. The tenant record is the one `seed` made.
 

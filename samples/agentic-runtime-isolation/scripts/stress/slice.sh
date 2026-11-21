@@ -301,7 +301,9 @@ case "$verb" in
       # No cell of this slice's own: the edge, the stress identity and the tenants come from
       # the other slices' manifests (platform.sh).
       need_platform_inputs run
-      manifest="${STRESS_STATE_DIR}/manifest.json"
+      # Not ${STRESS_STATE_DIR}/manifest.json, which is slice mode's seed manifest (the fleet
+      # fixture of a large run); k6 takes the file by its base name.
+      manifest="${STRESS_STATE_DIR}/platform/manifest.json"
       build_platform_manifest "$tier_json" "$manifest"
       env_args=(
         "MANIFEST=/opt/stress/inputs/manifest.json"
@@ -440,7 +442,8 @@ case "$verb" in
     if platform_mode; then
       # The slice made no tenant and no cell. It removes its run files, and the k6 host only
       # when its own deploy made it (fixtures stay with their owners).
-      rm -f "${STRESS_STATE_DIR}/manifest.json" "${STRESS_STATE_DIR}/platform-tenants.json"
+      rm -f "${STRESS_STATE_DIR}/platform/manifest.json" "${STRESS_STATE_DIR}/platform-tenants.json"
+      rmdir "${STRESS_STATE_DIR}/platform" 2> /dev/null || true
       if [[ -e "$DRIVER_MARK" ]]; then
         need_region
         echo "teardown: platform mode: ${DRIVER_STACK} (stress/driver/teardown.sh)"

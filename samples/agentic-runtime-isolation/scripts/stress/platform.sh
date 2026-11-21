@@ -74,7 +74,7 @@ build_platform_manifest() {
   built="$(jq -n --slurpfile cp "${d}/control-plane.json" --slurpfile ti "${d}/tenant-identity.json" \
     --argjson active "$active" --arg scale "${STRESS_TIER:-}" -f "${PLATFORM_DIR}/platform-tenants.jq")" \
     || { echo "slice.sh run: could not read ${d}/control-plane.json and ${d}/tenant-identity.json" >&2; exit 1; }
-  mkdir -p -m 700 "$STRESS_STATE_DIR"
+  mkdir -p -m 700 "$STRESS_STATE_DIR" "$(dirname "$out")"
   ( umask 077; jq .manifest <<<"$built" >"$out" )
   ( umask 077; jq '{refused, ignored}' <<<"$built" >"${STRESS_STATE_DIR}/platform-tenants.json" )
   usable="$(jq '.manifest.tenants | length' <<<"$built")"

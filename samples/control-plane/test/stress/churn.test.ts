@@ -455,6 +455,16 @@ describe('what the edge says about a tenant', () => {
     expect(w.recorder.findings[0]).toMatch(/the edge answered 404/);
   });
 
+  it('starts no further cycle when the edge turns wrong after the preflight', async () => {
+    const w = new World(1);
+    // The edge is right for the preflight read, then answers 404 once a deployment exists.
+    w.script = (tenant) => (w.created.has(tenant) ? { status: 404, router: true, origin: false } : undefined);
+    await ps5(w.env({ buildLimit: 1 }), w.timing);
+    expect(w.created.size).toBe(1);
+    expect(w.recorder.findings).toHaveLength(1);
+    expect(w.recorder.findings[0]).toMatch(/the edge answered 404/);
+  });
+
   it('stops before any build when a tenant with no deployment already has a live route', async () => {
     const w = new World(1);
     w.script = () => INGRESS_DENY;
