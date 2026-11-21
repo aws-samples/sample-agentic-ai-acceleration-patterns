@@ -209,8 +209,6 @@ interface Called { step: string; r: CallResult }
 export async function runaway(c: Ctx, u: Unit): Promise<void> {
   const backend = backendOf(u);
   const table = c.output('run-code', 'Table');
-  const row0 = await c.aws.row(table, A, backend);
-  const bootId0 = row0?.bootId;
   const since = Date.now() - 5_000;
   const run = async (mode: string, extra: Record<string, unknown> = {}): Promise<Called & { out: Record<string, unknown> }> => {
     const p = await c.probe('run-code', A, backend, 'runaway', { mode, ...extra });
@@ -219,6 +217,10 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
   const live = (x: Called): boolean => x.r.result !== undefined;
 
   const loop = await run('loop');
+  // The runner that serves this step: read after its first call, because A's session may have idled out since the
+  // last step, and the first call then starts a new one.
+  const row0 = await c.aws.row(table, A, backend);
+  const bootId0 = row0?.bootId;
   c.rec.check(`a loop returns timedOut (got ${String(loop.r.result?.timedOut)}, exit ${String(loop.r.result?.exitCode)})`, loop.r.result?.timedOut === true || (loop.r.result?.exitCode ?? 0) !== 0);
 
   const spawn = await run('setsid_spawn');
