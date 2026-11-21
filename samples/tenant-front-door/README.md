@@ -236,7 +236,9 @@ npx cdk deploy --all "${FD_CONTEXT[@]}"
 ```
 
 This deploys `TenantFrontDoor-edge`, `TenantFrontDoor-main` and
-`TenantFrontDoor-edge-logging` in the edge account. The stacks go to the
+`TenantFrontDoor-edge-logging` (CDK paths `TenantFrontDoor/Edge`,
+`TenantFrontDoor/Main` and `TenantFrontDoor/EdgeLogging`) in the edge
+account. The stacks go to the
 account of `edgeOperatorRoleArn`. Add `--context addressing=host` for one host
 per tenant, and the optional inputs you need. The deployer brings the edge
 operator role: the stack only names it.
@@ -254,10 +256,12 @@ aws ssm get-parameter --region <REGION> --name /application-plane/shared/front-d
 Then, with credentials for the control plane's account:
 
 ```bash
-npx cdk deploy TenantFrontDoor-route-hook-access "${FD_CONTEXT[@]}" --context registrarUrl=<REGISTRAR_URL>
+npx cdk deploy TenantFrontDoor/RouteHookAccess --exclusively "${FD_CONTEXT[@]}" --context registrarUrl=<REGISTRAR_URL>
 ```
 
-The stack writes the hook parameter
+The CDK commands take the construct path (`TenantFrontDoor/RouteHookAccess`).
+The CloudFormation commands take the stack name
+(`TenantFrontDoor-route-hook-access`). The stack writes the hook parameter
 `/application-plane/applications/<applicationId>/shared/front-door-hook` and
 the managed policy `tenant-front-door-route-hook-<applicationId>`. Read the
 policy ARN from the stack's `RouteHookPolicyArn` output:
@@ -349,11 +353,11 @@ policy is attached.
 3. Take the policy out of the control plane's `globalHookManagedPolicyArns`
    and deploy the control plane again.
 4. With credentials for the control plane's account, destroy
-   `TenantFrontDoor-route-hook-access`. It needs `registrarUrl` in the context,
-   as in step 2:
+   `TenantFrontDoor/RouteHookAccess` (stack `TenantFrontDoor-route-hook-access`).
+   It needs `registrarUrl` in the context, as in step 2:
 
    ```bash
-   npx cdk destroy TenantFrontDoor-route-hook-access "${FD_CONTEXT[@]}" --context registrarUrl=<REGISTRAR_URL>
+   npx cdk destroy TenantFrontDoor/RouteHookAccess --exclusively "${FD_CONTEXT[@]}" --context registrarUrl=<REGISTRAR_URL>
    ```
 
 5. Delete the hook parameter it kept, in the control plane's account:
@@ -366,9 +370,9 @@ policy is attached.
    stacks, last stack first:
 
    ```bash
-   npx cdk destroy TenantFrontDoor-edge-logging "${FD_CONTEXT[@]}"
-   npx cdk destroy TenantFrontDoor-main "${FD_CONTEXT[@]}"
-   npx cdk destroy TenantFrontDoor-edge "${FD_CONTEXT[@]}"
+   npx cdk destroy TenantFrontDoor/EdgeLogging --exclusively "${FD_CONTEXT[@]}"
+   npx cdk destroy TenantFrontDoor/Main --exclusively "${FD_CONTEXT[@]}"
+   npx cdk destroy TenantFrontDoor/Edge --exclusively "${FD_CONTEXT[@]}"
    ```
 
    A custom resource on the distribution disables and deletes every dedicated
