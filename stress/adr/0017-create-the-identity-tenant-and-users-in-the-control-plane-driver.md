@@ -210,8 +210,11 @@ tenant joins that script when the slices compose; and the cleanup, in
 the `control-plane` `teardown`, of the identity tenants of every
 deployment of the run that has one: the seeded tenants of `small` and
 `medium` and, at `large`, the churn tenants that PS-1 onboards and
-removes. The `large` fleet's identity tenants stay with the fixture. The
-cleanup is needed because the control plane's `DeleteDeployment` does
-not remove them and the `tenant-identity` `teardown` knows only the
-tenants it seeded. Revisit if the tenant-identity sample gains a
-control-plane hook, or if the platform API admits cell-account roles.
+removes. The `large` fleet's identity tenants stay with the fixture.
+With `--fixtures`, the `tenant-identity` `teardown` destroys the stress
+identity's stack and every identity tenant goes with it, so the cleanup
+makes no per-tenant call. The cleanup is needed because the control
+plane's `DeleteDeployment` does not remove them and the
+`tenant-identity` `teardown` knows only the tenants it seeded. Revisit
+if the tenant-identity sample gains a control-plane hook, or if the
+platform API admits cell-account roles.
