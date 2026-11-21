@@ -154,9 +154,10 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   PS-5 (churn) runs on its own after PS-4 and PS-7 (cross-cell probes)
   on its own after PS-6, without PS-2's load (spec §1.2, §5.1, stress
   ADR-0018).
-- The quota catalogue has no ids yet for the API Gateway control plane or
-  for CloudFront Functions compute and KeyValueStore size (spec §4.4), so
-  no slice can declare them. They are added with the first slice that
+- The quota catalogue has no ids yet for the API Gateway control plane,
+  for CloudFront Functions compute and KeyValueStore size, or for the
+  Cognito user-write categories that the control-plane driver's identity
+  calls draw on (spec §4.4), so no slice can declare them. They are added with the first slice that
   draws on them (W-7 for the front door).
 - The k6 library has no k6 run in this folder's build: `record.js` is tested, `lib.js` is
   checked by running `k6/smoke.js` and `K6_COMMAND=inspect` on a deployed host. A change to

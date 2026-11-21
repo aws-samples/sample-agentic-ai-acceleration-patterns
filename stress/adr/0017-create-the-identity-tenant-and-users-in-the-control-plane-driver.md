@@ -117,10 +117,10 @@ Pros: the identity follows the control plane's event with no driver or
 script code in the stress test; it would serve any vendor that composes
 the two samples.
 
-Cons: a change to `tenant-identity`, which has no control-plane hook, and
-a hook project in the control plane's account; the hook cannot know how
-many users or which addresses the tier wants, so users still need a
-caller; a second global hook widens the set a platform deploy registers
+Cons: a change to `tenant-identity`, which has no control-plane hook,
+and a hook project in the control plane's account; the hook cannot know
+how many users or which addresses the tier wants, so users still need a
+caller; a further global hook widens the set a platform deploy registers
 and tears down (spec §3.5).
 
 ## Decision
@@ -167,18 +167,19 @@ ADR-0037).
 The first platform run at `small` onboards 20 tenants, and builds that
 start together finish close together, so the driver can have up to 20
 `CreateTenant` calls (40 `CreateGroup` calls) to make within seconds.
-Against 15 requests a second that can throttle. The platform API has a 10
-requests a second stage throttle, but the group quota is the likely limit
-first: at 8 `CreateTenant` calls a second the driver makes 16
+Against 15 requests a second that can throttle. The platform API has a
+10 requests a second stage throttle, but the group quota is the likely
+limit first: at 8 `CreateTenant` calls a second the driver makes 16
 `CreateGroup` calls a second, and a seed at 8 requests a second answered
 500 on most calls (tenant-identity ADR-0037). So the driver paces
 `CreateTenant` and `CreateUser` at about four calls a second, as the
-`tenant-identity` seed does (tenant-identity ADR-0042). A throttle that
-remains shows in PS-1's time, which is a result, not an error. In a
-platform run the `tenant-identity` slice already books the groups of the
-control plane's tenants (tenant-identity ADR-0042, spec §4.4). The
-user-write categories have no id in the quota catalogue, so no slice
-books them.
+`tenant-identity` seed does (tenant-identity ADR-0042). The driver times
+each identity call apart from the time the call waited for the pace
+(spec §6), so a throttle that remains shows in the call time, which is a
+result, not an error. In a platform run the `tenant-identity` slice
+already books the groups of the control plane's tenants (tenant-identity
+ADR-0042, spec §4.4). The user-write categories have no id in the quota
+catalogue, so no slice books them.
 
 A throttled `CreateTenant` answers 503, and it may have created the
 tenant without its admin (tenant-identity ADR-0037). A blind repeat then
@@ -209,8 +210,9 @@ deployment is `ACTIVE`, with the scope and e-mail address above and the
 `control-plane.json`, and the runtime-isolation slice's read of it for
 control-plane tenants in place of `tenant-identity.json`;
 `execute-api:Invoke` on the platform API for the driver's session;
-pacing at about four calls a second, retry with backoff, and the rule
-above for a half-created tenant; the comment in
+pacing at about four calls a second with the timing of each call apart
+from its wait for the pace, retry with backoff, and the rule above for a
+half-created tenant; the comment in
 `stress/application/scripts/tenant/create.sh`, which says the identity
 tenant joins that script when the slices compose; and the cleanup, in
 the `control-plane` `teardown`, of the identity tenants of every
