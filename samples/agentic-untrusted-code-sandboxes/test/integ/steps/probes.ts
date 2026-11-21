@@ -374,10 +374,10 @@ export function reverseName(address: string | undefined): string | undefined {
  * other name still counts. The firewall is unchanged; only this check ignores those. Each name is listed once. Pure.
  */
 export function unexpectedBlocked(
-  rows: ReadonlyArray<{ query_name: string; query_type?: string; srcaddr?: string }>,
+  rows: ReadonlyArray<Readonly<Record<string, string>>>,
   lookedUp: ReadonlySet<string>,
 ): string[] {
-  const named = (r: { query_name: string }): string => r.query_name.replace(/\.$/, '').toLowerCase();
+  const named = (r: Readonly<Record<string, string>>): string => r.query_name.replace(/\.$/, '').toLowerCase();
   const unexpected = rows
     .filter((r) => !(r.query_type === 'PTR' && reverseName(r.srcaddr) === named(r)))
     .map(named)
@@ -393,6 +393,6 @@ export async function dnsPlatform(c: Ctx): Promise<void> {
   }
   await sleep(1000);
   const rows = await insights(c, [group], 'filter firewall_rule_action = "BLOCK" | stats count() as n by query_name, query_type, srcaddr | limit 1000', Date.now() - 6 * 3_600_000);
-  const unexpected = unexpectedBlocked(rows as ReadonlyArray<{ query_name: string; query_type?: string; srcaddr?: string }>, c.lookedUpNames);
+  const unexpected = unexpectedBlocked(rows, c.lookedUpNames);
   c.rec.check(`every blocked name is one a test script looked up, the NTP zone, or a sandbox's PTR for its own address (unexpected: ${unexpected.slice(0, 5).join(', ') || 'none'})`, unexpected.length === 0);
 }
