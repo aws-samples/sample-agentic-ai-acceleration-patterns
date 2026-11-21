@@ -12,11 +12,14 @@
  * bearer token's payload without checking its signature (front-door spec §3.3 step 5) and
  * answers from its route table before any origin sees the request: 403 for a tenant with no
  * route entry, 503 for a suspended one, and anything else once the request goes on to the
- * origin (the ingress refuses the unsigned token with 401, so no model call, no cost). The
+ * origin, where the ingress refuses the unsigned token (an `api-gateway` ingress answers 403
+ * with the body `forbidden`, so no model call, no cost). The router's 403 and the ingress's 403
+ * differ in the body: the router's is `{"status":403}`, so the probe reads the body too. The
  * token this file builds carries no signature and names a tenant id; no verifier accepts it
  * (P-1). The probe reads a front door in `single` addressing mode, where the bearer token alone
- * names the tenant: in `host` mode the router looks the host up first and the probe would read
- * 404 or 403 whatever the tenant's state.
+ * names the tenant, and `edgeUrl`'s host is the front door's `appDomain`: in `host` mode, or on
+ * any other host, the router looks the host up first and the probe reads 404 or 403 whatever
+ * the tenant's state.
  */
 
 import { execFile } from 'node:child_process';
@@ -71,22 +74,30 @@ export function readEdgeInputs(home: string, prefix: string): EdgeInputs {
   return parseEdgeInputs(fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined, file);
 }
 
-/** What the edge does for one tenant, read from one HTTP status. */
+/** What the edge does for one tenant, read from one answer. */
 export type EdgeState = 'unrouted' | 'suspended' | 'routed' | 'error';
 
+/** One answer of the edge: the HTTP status (0: no answer) and whether the router function wrote it. */
+export interface EdgeAnswer {
+  readonly status: number;
+  readonly router: boolean;
+}
+
+/** The router writes its refusals as `{"status":<code>}` (front-door router, `fail`); no origin or CloudFront error page has that body. */
+export const isRouterBody = (body: string): boolean => /^\{"status":\d{3}\}$/.test(body.trim());
+
 /**
- * 403: no route entry (never created, or removed). 503: suspended. 0 (no answer) and 404
- * (the router's answer for `/agents` when no agent ingress is configured) tell nothing about the
- * tenant: `error`. Any other status means the request left the router for an origin.
- *
- * shortcut: a 503 also comes from CloudFront when the router function fails, so a router that
- * hits its compute limit under load reads as a suspended tenant. The router's suspended answer
- * carries `retry-after: 300`; read that header here when a run shows 503 without a suspension.
+ * A router 403: no route entry (never created, or removed). A router 503: suspended. No answer
+ * and 404 (the router's answer for `/agents` when no agent ingress is configured, or for a
+ * host it does not know) tell nothing about the tenant: `error`, and so does a 503 the router
+ * did not write (CloudFront's, when the router function fails). Any other answer, the
+ * ingress's own 403 included, means the request left the router for an origin: `routed`.
  */
-export function edgeStateOf(status: number): EdgeState {
-  if (status === 403) return 'unrouted';
-  if (status === 503) return 'suspended';
+export function edgeStateOf(answer: EdgeAnswer): EdgeState {
+  const { status, router } = answer;
   if (status === 0 || status === 404) return 'error';
+  if (router && status === 403) return 'unrouted';
+  if (status === 503) return router ? 'suspended' : 'error';
   return 'routed';
 }
 
@@ -104,8 +115,8 @@ export function probeToken(tenantId: string): string {
 export interface Edge {
   /** Loads what `setStatus` needs (credentials) before the first timed call, so no hop includes it. */
   prepare?(): Promise<void>;
-  /** The HTTP status the edge answers for the tenant's probe request (0: no answer). */
-  probe(tenantId: string): Promise<number>;
+  /** The edge's answer to the tenant's probe request (status 0: no answer). */
+  probe(tenantId: string): Promise<EdgeAnswer>;
   /** `UpdateTenantRouteStatus`: the registrar's HTTP status (0: no answer, or no credentials). */
   setStatus(tenantId: string, status: 'active' | 'suspended'): Promise<number>;
 }
@@ -160,10 +171,9 @@ export function liveEdge(inputs: EdgeInputs, region: string, deps: EdgeDeps = { 
           redirect: 'manual',
           signal: AbortSignal.timeout(15_000),
         });
-        await res.arrayBuffer();
-        return res.status;
+        return { status: res.status, router: isRouterBody(await res.text()) };
       } catch {
-        return 0;
+        return { status: 0, router: false };
       }
     },
     async setStatus(tenantId, status) {

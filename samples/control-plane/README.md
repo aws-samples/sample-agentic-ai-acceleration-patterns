@@ -772,8 +772,8 @@ churn count of seeded tenants, each one's deployment is created, its route suspe
 resumed, and the deployment deleted. Each change is timed from the call to the first edge
 answer that shows it (`routable`, `suspended`, `resumed` and `removed` in the record), and a
 suspended and a removed tenant are read again after the edge has settled. It reads the edge
-and registrar addresses from the front door's manifest (`stress/README.md`, "Platform mode: manifests") and stops with a message when they are
-missing. The driver is
+and registrar addresses from the front door's manifest (`stress/README.md`, "Platform mode:
+manifests") and stops with a message when they are missing. The driver is
 [`test/stress/`](./test/stress/), the scripts
 [`scripts/stress/`](./scripts/stress/slice.sh); the manifest and the source zip
 stay outside the repository and hold no token or password. `--remove-fixtures`

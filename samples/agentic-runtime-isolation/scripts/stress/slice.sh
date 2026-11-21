@@ -27,7 +27,8 @@
 # control plane and tenant-identity both know, and sends the S1, S2, S3, S5 and S6 load
 # shapes to <edgeUrl>/agents as PS-2, PS-3, PS-4, PS-6 and PS-8 (spec §5.1); `collect` takes
 # each refusal's tenant and reason from the driver's own lines (collect-platform.sh);
-# `teardown` removes this slice's run files, and the k6 host only when its own `deploy` made it. stress/README.md has the manifest contract.
+# `teardown` removes this slice's run files, and the k6 host only when its own `deploy` made
+# it. stress/README.md has the manifest contract.
 #
 # State lives in $STRESS_HOME/$STRESS_PREFIX/agentic-runtime-isolation/: the stack
 # outputs, the tenant manifest and the deploy and destroy times; never a token,
@@ -307,7 +308,6 @@ case "$verb" in
         "PLATFORM_API=${IDENTITY_API}"
         "APP_CLIENT_ID=${IDENTITY_CLIENT}"
         "ISSUER=${IDENTITY_ISSUER}"
-        "REGION=${IDENTITY_REGION}"
         "RECORD_SCENARIO=${scenario}"
       )
     else

@@ -131,7 +131,8 @@ case "$verb" in
     # The published identity (ids only, no secret) as a manifest, for the slices that read it
     # in platform mode: stress/README.md, "Platform mode: manifests".
     # Written to a temporary file and moved into place, so a failed read leaves no empty manifest.
-    (umask 077 && aws ssm get-parameter --name "/${STRESS_PREFIX}/identity" --query Parameter.Value --output text >"${RUN_HOME}/identity.json.tmp" && mv "${RUN_HOME}/identity.json.tmp" "${RUN_HOME}/identity.json")
+    (umask 077 && aws ssm get-parameter --name "/${STRESS_PREFIX}/identity" --query Parameter.Value --output text >"${RUN_HOME}/identity.json.tmp" && mv "${RUN_HOME}/identity.json.tmp" "${RUN_HOME}/identity.json") \
+      || { rm -f "${RUN_HOME}/identity.json.tmp"; echo "deploy: could not read /${STRESS_PREFIX}/identity" >&2; exit 1; }
     ;;
 
   seed)

@@ -6,7 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { CallResult, ControlPlaneApi } from './api';
 import { ps5, type Timing } from './churn';
-import { type Edge, edgeStateOf, liveEdge, parseEdgeInputs, probeToken, readEdgeInputs, signedPut } from './edge';
+import { type Edge, type EdgeAnswer, edgeStateOf, isRouterBody, liveEdge, parseEdgeInputs, probeToken, readEdgeInputs, signedPut } from './edge';
 import { Recorder } from './recorder';
 import type { ScenarioEnv } from './scenarios';
 import { SCENARIOS } from './scenarios';
@@ -16,6 +16,12 @@ jest.mock('./aws', () => ({ ...jest.requireActual('./aws'), sleep: () => Promise
 
 const ID = { runId: 'r', tier: 'small', mode: 'platform', slice: 'control-plane', commit: '0123456' };
 const TENANTS = ['01HZX0000000000000000000A1', '01HZX0000000000000000000A2', '01HZX0000000000000000000A3'];
+
+/** The router's 403 (no route entry), the router's 503 (suspended), and the ingress's own 403 for the unsigned token of a routed tenant. */
+const NO_ROUTE: EdgeAnswer = { status: 403, router: true };
+const SUSPENDED: EdgeAnswer = { status: 503, router: true };
+const INGRESS_DENY: EdgeAnswer = { status: 403, router: false };
+const NO_ANSWER: EdgeAnswer = { status: 0, router: false };
 
 /**
  * A control plane, a registrar and an edge in one virtual clock. A route change reaches the
@@ -29,13 +35,13 @@ class World {
   readonly route = new Map<string, { at: number; status: 'active' | 'suspended' }[]>();
   registrarStatus = 200;
   probes = 0;
-  script?: (tenant: string, state: string, probes: number) => number | undefined;
+  script?: (tenant: string, state: string, probes: number) => EdgeAnswer | undefined;
 
   readonly edge: Edge = {
     probe: async (tenant) => {
       this.probes += 1;
       const state = this.state(tenant);
-      return this.script?.(tenant, state, this.probes) ?? { unrouted: 403, suspended: 503, routed: 401 }[state]!;
+      return this.script?.(tenant, state, this.probes) ?? { unrouted: NO_ROUTE, suspended: SUSPENDED, routed: INGRESS_DENY }[state]!;
     },
     setStatus: async (tenant, status) => {
       if (this.registrarStatus === 200) this.route.set(tenant, [...(this.route.get(tenant) ?? []), { at: this.now, status }]);
@@ -68,7 +74,7 @@ class World {
     return seen[seen.length - 1];
   }
 
-  /** What the router does for the tenant now: 403 no entry, 503 suspended, 401 the ingress refusing the unsigned token. */
+  /** What the edge does for the tenant now: the router refuses with 403 (no entry) or 503 (suspended), or the ingress refuses the unsigned token. */
   state(tenant: string): string {
     const created = this.created.get(tenant);
     const deleted = this.deleted.get(tenant);
@@ -135,10 +141,9 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
     }
     // A suspended and a removed tenant are each read again after the edge has settled: P-1 holds.
     expect(r.isolation).toEqual({ assertions: TENANTS.length * 2 * 3, mismatches: 0 });
-    // 403 before a route, 401 from the ingress once routed, 503 while suspended: all expected, none a refusal.
+    // The router's 403 before a route, the ingress's 403 once routed, the router's 503 while suspended: all expected, none a refusal.
     const seen = (status: number): number => Object.entries(r.requests).filter(([k]) => k.startsWith(`${status}:`) && k.endsWith(':expected')).reduce((n, [, v]) => n + v, 0);
     expect(seen(403)).toBeGreaterThan(0);
-    expect(seen(401)).toBeGreaterThan(0);
     expect(seen(503)).toBeGreaterThan(0);
     expect(r.refusals).toEqual({ byTenantReason: [], unattributed: 0 });
     expect(w.created.size).toBe(TENANTS.length);
@@ -159,7 +164,7 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
     w.script = (tenant, state) => {
       if (state !== 'unrouted' || !w.deleted.has(tenant)) return undefined;
       afterDelete += 1;
-      return afterDelete === 1 ? 403 : 401;
+      return afterDelete === 1 ? NO_ROUTE : INGRESS_DENY;
     };
     await ps5(w.env({ manifest: { version: 1, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: [TENANTS[0]], extra: [] } }), w.timing);
     const r = record(w);
@@ -173,7 +178,7 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
     w.script = (_tenant, state) => {
       if (state !== 'suspended') return undefined;
       n += 1;
-      return n === 1 ? 503 : 401;
+      return n === 1 ? SUSPENDED : INGRESS_DENY;
     };
     await ps5(w.env({ manifest: { version: 1, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: [TENANTS[0]], extra: [] } }), w.timing);
     expect(record(w).isolation.mismatches).toBe(3);
@@ -182,7 +187,7 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
 
   it('reports a change the edge never shows within its timeout, and stops that tenant', async () => {
     const w = new World(30);
-    w.script = (_t, state) => (state === 'routed' ? 403 : undefined);
+    w.script = (_t, state) => (state === 'routed' ? NO_ROUTE : undefined);
     await ps5(w.env({ manifest: { version: 1, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: [TENANTS[0]], extra: [] } }), w.timing);
     expect(w.recorder.findings).toEqual([`tenant ${TENANTS[0]}: the edge did not show routed within 900 s (last answer: unrouted)`]);
     expect(record(w).latency.routable).toBeUndefined();
@@ -191,7 +196,7 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
 
   it('stops with the cause when the edge answers 404: no agent ingress behind it', async () => {
     const w = new World(1);
-    w.script = () => 404;
+    w.script = () => ({ status: 404, router: true });
     await ps5(w.env({ manifest: { version: 1, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: [TENANTS[0]], extra: [] } }), w.timing);
     expect(w.recorder.findings.join('\n')).toMatch(/the edge answered 404 for \/agents\/<backend>\/invocations: the front door has no agent ingress/);
   });
@@ -228,7 +233,7 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
     w.script = (_t, state) => {
       if (state !== 'suspended') return undefined;
       firstSuspended ??= w.now;
-      return w.now >= firstSuspended + 90_000 && blips-- > 0 ? 0 : undefined;
+      return w.now >= firstSuspended + 90_000 && blips-- > 0 ? NO_ANSWER : undefined;
     };
     await ps5(w.env({ manifest: one }), w.timing);
     expect(w.recorder.findings).toEqual([]);
@@ -241,7 +246,7 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
     w.script = (_t, state) => {
       if (state !== 'suspended') return undefined;
       firstSuspended ??= w.now;
-      return w.now >= firstSuspended + 90_000 ? 0 : undefined;
+      return w.now >= firstSuspended + 90_000 ? NO_ANSWER : undefined;
     };
     await ps5(w.env({ manifest: one }), w.timing);
     expect(record(w).isolation.mismatches).toBe(0);
@@ -408,8 +413,44 @@ describe('liveEdge credentials', () => {
 });
 
 describe('what the edge says about a tenant', () => {
-  it('reads the status: 403 no route, 503 suspended, no answer or 404 nothing, the rest an origin\'s', () => {
-    expect([403, 503, 0, 404, 401, 200, 502].map(edgeStateOf)).toEqual(['unrouted', 'suspended', 'error', 'error', 'routed', 'routed', 'routed']);
+  it('reads the router\'s 403 as no route and its 503 as suspended, and tells them from the origin\'s and CloudFront\'s', () => {
+    const answers: EdgeAnswer[] = [
+      NO_ROUTE,
+      SUSPENDED,
+      INGRESS_DENY,
+      { status: 503, router: false },
+      { status: 0, router: false },
+      { status: 404, router: true },
+      { status: 401, router: false },
+      { status: 200, router: false },
+      { status: 502, router: false },
+    ];
+    expect(answers.map(edgeStateOf)).toEqual(['unrouted', 'suspended', 'routed', 'error', 'error', 'error', 'routed', 'routed', 'routed']);
+  });
+
+  it('knows a body the router wrote', () => {
+    expect(isRouterBody('{"status":403}')).toBe(true);
+    expect(isRouterBody('{"status":503}\n')).toBe(true);
+    expect(['forbidden', 'forbidden: expired', '<html>503</html>', '', '{"message":"Forbidden"}'].some(isRouterBody)).toBe(false);
+  });
+
+  it('reads a live answer by its body: the router\'s 403 and the ingress\'s 403 are two different states', async () => {
+    const inputs = { edgeUrl: 'https://stress.example.com', registrarUrl: 'https://abc123.execute-api.us-east-1.amazonaws.com/prod', agentBackend: 'default' };
+    const edge = liveEdge(inputs, 'us-east-1');
+    const fetchSpy = jest.spyOn(globalThis, 'fetch');
+    try {
+      fetchSpy.mockResolvedValueOnce(new Response('{"status":403}', { status: 403 }));
+      fetchSpy.mockResolvedValueOnce(new Response('forbidden', { status: 403 }));
+      fetchSpy.mockResolvedValueOnce(new Response('<html>CloudFront</html>', { status: 503 }));
+      fetchSpy.mockRejectedValueOnce(new Error('reset'));
+      expect((await edge.probe('T1')).router).toBe(true);
+      expect(await edge.probe('T1')).toEqual({ status: 403, router: false });
+      expect(edgeStateOf(await edge.probe('T1'))).toBe('error');
+      expect(await edge.probe('T1')).toEqual({ status: 0, router: false });
+      expect(fetchSpy.mock.calls[0][0]).toBe('https://stress.example.com/agents/default/invocations');
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it('builds a token whose payload names the tenant and whose signature is no signature', () => {
@@ -420,9 +461,13 @@ describe('what the edge says about a tenant', () => {
   });
 
   it('builds a token the front-door router decodes (its step 5 pattern needs three non-empty segments)', () => {
-    // The pattern of `decodeClaim` in samples/tenant-front-door/src/router/router.js.
-    const router = /^Bearer ([^.\s]+\.([^.\s]+)\.[^.\s]+)$/i;
+    // The pattern is read from the router's own source (`decodeClaim`), so a change there shows here.
+    const source = fs.readFileSync(path.join(__dirname, '../../../tenant-front-door/src/router/router.js'), 'utf8');
+    const literal = /const m = (\/\^Bearer .*\/i)\.exec\(auth\)/.exec(source)?.[1];
+    expect(literal).toBeDefined();
+    const router = new RegExp((literal as string).slice(1, -2), 'i');
     expect(router.test(`Bearer ${probeToken('01HZX0000000000000000000A1')}`)).toBe(true);
+    expect(router.test('Bearer a.b.')).toBe(false);
   });
 });
 

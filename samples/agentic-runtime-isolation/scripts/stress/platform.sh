@@ -9,10 +9,10 @@
 # the manifests those slices wrote to $STRESS_HOME/$STRESS_PREFIX and drives the edge. Needs
 # jq, STRESS_HOME, STRESS_PREFIX, STRESS_TIER and STRESS_STATE_DIR (slice.sh sets the last).
 
-# The slice that writes each manifest.
 PLATFORM_MANIFEST_DIR="${STRESS_HOME:-}/${STRESS_PREFIX:-}"
 PLATFORM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# platform_producer FILE -> the slice that writes that manifest.
 platform_producer() {
   case "$1" in
     tenant-front-door.json) echo tenant-front-door ;;
@@ -57,6 +57,9 @@ need_platform_inputs() {
   [[ "$IDENTITY_CLIENT" =~ ^[A-Za-z0-9]{1,128}$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): appClientId is missing or malformed" >&2; exit 1; }
   [[ "$IDENTITY_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): region is missing or malformed" >&2; exit 1; }
   [[ "$pool" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]_[A-Za-z0-9]+$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): userPoolId is missing or malformed" >&2; exit 1; }
+  # k6 signs IssueToken for AWS_REGION, so an identity in another Region would answer 403.
+  [[ -z "${AWS_REGION:-}" || "$IDENTITY_REGION" == "$AWS_REGION" ]] \
+    || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): region ${IDENTITY_REGION} is not this run's Region ${AWS_REGION}" >&2; exit 1; }
   IDENTITY_ISSUER="https://cognito-idp.${IDENTITY_REGION}.amazonaws.com/${pool}"
 
   for f in control-plane.json tenant-identity.json; do

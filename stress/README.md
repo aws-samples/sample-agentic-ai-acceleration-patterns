@@ -66,9 +66,9 @@ run. The runner times `deploy` and `teardown` itself and writes one
 Slices run in the order of their `needs`, and each one deploys and then seeds before the next
 starts, so a slice's `deploy` can read what an earlier slice seeded (the front door needs
 the control plane's application). `teardown` runs in reverse order. Without `--scenarios`, a
-slice-mode run runs the slice's scenarios except its `platformOnly` ones, and a platform run
-(several slices) runs only the `PS-<n>` scenarios, platform scenarios first by number, then
-each slice's own in slice order; `--scenarios` can name any scenario a slice declares (a
+slice-mode run runs the slice's scenarios except its `platformOnly` ones (any `PS-<n>` first, by
+number), and a platform run (several slices) runs only the `PS-<n>` scenarios, by number;
+`--scenarios` runs the scenarios named, in the order given, and can name any scenario a slice declares (a
 slice-mode run refuses a `platformOnly` one), and a platform run that has no `PS-<n>` scenario
 to run is refused. A scenario no slice declares is refused before the run starts, so
 the run id stays free.
@@ -95,7 +95,8 @@ anything it left running in its group gets SIGTERM, then SIGKILL after
 A run with several slices sets `STRESS_MODE=platform`. A slice then works on what the others
 made and reads it from manifest files in `$STRESS_HOME/$STRESS_PREFIX/`: ids and names only,
 never a token, a password or a key, mode 0600 in a 0700 folder. A slice that finds a manifest
-missing or unusable stops with a message that names the file, the slice that writes it and, when the content is wrong, the field.
+missing or unusable stops with a message that names the file, the slice that writes it and,
+when the content is wrong, the field.
 
 Who owns which platform scenario (spec §5.1):
 
@@ -118,8 +119,9 @@ The manifests a platform run reads and writes:
 The front-door slice writes `tenant-front-door.json`, and the fields above are the contract it
 meets. The edge serves agents at `/agents/<backend>/invocations` and reads the tenant from the
 token (front-door spec §3.3). `edgeUrl` is an edge in the front door's `single` addressing
-mode, where the token alone names the tenant; in `host` mode the router looks the host up first
-and answers 404 or 403 whatever the tenant's state.
+mode, where the token alone names the tenant, and its host is the front door's `appDomain`; in
+`host` mode, or on any other host, the router looks the host up first and answers 404 or 403
+whatever the tenant's state.
 
 What a slice does in platform mode:
 
@@ -244,11 +246,14 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   stops with a message that names the file. Name `--scenarios PS-1` for such a run.
 - PS-5 reads the edge with a token that names the tenant and carries no signature the router
   could check: the router does not verify it (front-door spec §3.3, step 5), so a probe reaches
-  the ingress at most and is refused there with 401. It shows what the router does for the
-  tenant, not what a signed request would get.
-- PS-5 reads 503 as a suspended tenant. CloudFront also answers 503 when the router function
-  fails, so a router that goes over its compute limit under load reads as a suspension. The
-  router's suspended answer carries `retry-after: 300`, which the probe does not read.
+  the ingress at most and is refused there. It shows what the router does for the tenant, not
+  what a signed request would get.
+- PS-5 tells the router's answers from the ingress's by the body. The router writes
+  `{"status":403}` for a tenant with no route and `{"status":503}` for a suspended one. The
+  `api-gateway` ingress answers 403 with the body `forbidden` for the unsigned token, which
+  reads as a routed tenant. An ingress whose refusal has a body of the router's shape, or a
+  proxy that rewrites bodies, would read as no route. A 503 without the router's body (the
+  one CloudFront gives when the router function fails) tells nothing and is read again.
 - PS-5 suspends and resumes tenants through the front door's route registrar with a SigV4
   call that `curl` (7.75 or later) signs with the driver session's own credentials. The
   registrar allows only its edge operator role for `UpdateTenantRouteStatus`, so the session

@@ -40,7 +40,10 @@ stress spec §4.3).
 |---|---|---|
 | `STRESS_TIER_JSON` | yes | the tier as JSON (`test/stress/tiers.ts`, which takes the shared figures from `stress/src/tiers.ts`): `name`, `tenantsActive`, `usersPerActiveTenant`, `steadyRps`, `peakRps` (required), `scenarioSeconds`, and this sample's `agents`, `tenantLimitRpm`, `ingressReservedConcurrency` |
 | `MANIFEST` | yes | absolute path of `manifest.json`: `{ tenants: [{ tenantId, admin, users: [...], active? }] }` |
-| `ENDPOINT` | yes | the ingress `EndpointUrl` output; `/<agent>/invocations` is appended as `lib.sh backend_url` does |
+| `ENDPOINT` | yes | the ingress `EndpointUrl` output; `/<agent>/invocations` is appended as `lib.sh backend_url` does. In platform mode it is the front door's `<edgeUrl>/agents` |
+| `STRESS_MODE` | no | `platform` turns on the `edge_refusal` lines (`edge-refusals.js`): one line per tenant, status and minute for the refused requests, which `collect-platform.sh` reads |
+| `AGENT_BACKEND` | no | the agent name `/agents/<agent>/invocations` names in platform mode; default `default` |
+| `RECORD_SCENARIO` | no | the scenario id the record is written under, `PS-<n>` in platform mode; default the script's own `S<n>` |
 | `PLATFORM_API` | yes | tenant-identity's API base URL (`.../prod/`): `platform/tenants/{t}/users/{u}/token` (SigV4) and `oauth2/token` (exchange) |
 | `APP_CLIENT_ID` | yes | tenant-identity's app client id (`/application-plane/shared/identity/appClientId`); the exchange form requires it |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` (or `REGION`) | yes | signs IssueToken. On the driver, `stress/driver/k6.sh` exports the instance role's credentials first; the k6 aws jslib does not read IMDS |

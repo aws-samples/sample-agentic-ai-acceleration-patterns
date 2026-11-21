@@ -10,7 +10,8 @@
 #   slice.sh deploy                 the cell account check, then the control plane and the
 #                                   stress application, reused when they are there
 #   slice.sh seed                   the tier's tenant records, from the manifest when it exists
-#   slice.sh run <scenario>         PS-1, placement-race, read-rate or build-limit-scaling
+#   slice.sh run <scenario>         PS-1, placement-race, read-rate or build-limit-scaling;
+#                                   PS-5, churn through the edge (platform mode only)
 #   slice.sh collect                server-side 5xx of this run's records (P-7)
 #   slice.sh teardown [--fixtures]  remove the run's deployments, cells and tenants; with
 #                                   --fixtures also the registrations and both stacks

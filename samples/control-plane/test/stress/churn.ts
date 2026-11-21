@@ -49,11 +49,12 @@ const STATUS_TIMEOUT_SECONDS = 300;
 const REMOVED_TIMEOUT_SECONDS = 900;
 
 /**
- * An answer PS-5 asks for: every state a tenant passes through in a cycle is wanted (403 before
- * the route and after its removal, 503 while suspended, an origin's answer while routed), so
- * only no answer, a 404 or a 5xx other than the suspended tenant's 503 is an unexpected one.
+ * An answer PS-5 asks for: every state a tenant passes through in a cycle is wanted (the
+ * router's 403 before the route and after its removal, its 503 while suspended, an origin's
+ * answer while routed), so only an answer that tells nothing about the tenant or a 5xx from an
+ * origin is an unexpected one.
  */
-const expectedAtEdge = (status: number): boolean => edgeStateOf(status) !== 'error' && (status < 500 || status === 503);
+const expectedAtEdge = (status: number, state: EdgeState): boolean => state !== 'error' && (status < 500 || state === 'suspended');
 
 class EdgeMisconfigured extends Error {}
 
@@ -79,12 +80,13 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
   // Cycles in flight: the most builds that can run at once, an upper bound on the draw on the
   // platform account's concurrent builds (a cycle also waits on the edge, with no build running).
   let active = 0;
+  let completed = 0;
   const worker = async (): Promise<void> => {
     for (let tenant = queue.shift(); tenant !== undefined; tenant = queue.shift()) {
       active += 1;
       s.rec.quotaPeak('platform', 'codebuild-linux-small', active);
       try {
-        await cycle(s, edge, tenant, timing);
+        if (await cycle(s, edge, tenant, timing)) completed += 1;
       } catch (e) {
         const cause = e instanceof EdgeMisconfigured ? e.message : `the churn cycle stopped (${e instanceof Error ? `${e.name}: ${e.message}` : 'unknown error'})`;
         s.rec.finding(`tenant ${tenant}: ${cause}`);
@@ -96,18 +98,21 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
   // The control plane's builds do not queue past the build limit (stress ADR-0013): the
   // workers never run more cycles at once than it allows.
   await Promise.all(Array.from({ length: Math.min(s.buildLimit, tenants.length) }, worker));
-  s.log(`PS-5: ${tenants.length} tenants created, suspended, resumed and deleted`);
+  s.log(`PS-5: ${completed} of ${tenants.length} churn tenants completed a deployment cycle`);
 }
 
 /** One edge read, recorded as a call of its own so a surprising answer is attributed to the tenant. */
 async function read(s: ScenarioEnv, edge: Edge, tenant: string): Promise<EdgeState> {
   const started = process.hrtime.bigint();
-  const status = await edge.probe(tenant);
-  s.rec.observe('edge-probe', asCall(status, started), tenant, expectedAtEdge(status));
-  if (status === 404) {
-    throw new EdgeMisconfigured('the edge answered 404 for /agents/<backend>/invocations: the front door has no agent ingress, or the backend name is wrong');
+  const answer = await edge.probe(tenant);
+  const state = edgeStateOf(answer);
+  s.rec.observe('edge-probe', asCall(answer.status, started), tenant, expectedAtEdge(answer.status, state));
+  if (answer.status === 404) {
+    throw new EdgeMisconfigured(
+      'the edge answered 404 for /agents/<backend>/invocations: the front door has no agent ingress, the backend name is wrong, or edgeUrl\'s host is not the front door\'s appDomain',
+    );
   }
-  return edgeStateOf(status);
+  return state;
 }
 
 /** Seconds from `since` until the edge shows `want`, or undefined (a finding) at the timeout. */
@@ -167,40 +172,41 @@ async function setRoute(s: ScenarioEnv, edge: Edge, tenant: string, status: 'act
   return answer === 200;
 }
 
-async function cycle(s: ScenarioEnv, edge: Edge, tenant: string, timing: Timing): Promise<void> {
+async function cycle(s: ScenarioEnv, edge: Edge, tenant: string, timing: Timing): Promise<boolean> {
   const created = timing.now();
   const placed = await placeDeployment(s, tenant, 'create-deployment-churn');
   if (placed !== 'accepted') {
     s.rec.finding(`tenant ${tenant}: CreateDeployment ${placed}`);
-    return;
+    return false;
   }
   const routable = await waitFor(s, edge, tenant, 'routed', created, ROUTABLE_TIMEOUT_SECONDS, timing);
-  if (routable === undefined) return;
+  if (routable === undefined) return false;
   s.rec.sample('routable', routable);
 
   const suspend = timing.now();
-  if (!(await setRoute(s, edge, tenant, 'suspended'))) return;
+  if (!(await setRoute(s, edge, tenant, 'suspended'))) return false;
   const suspended = await waitFor(s, edge, tenant, 'suspended', suspend, STATUS_TIMEOUT_SECONDS, timing);
-  if (suspended === undefined) return;
+  if (suspended === undefined) return false;
   s.rec.sample('suspended', suspended);
   await hold(s, edge, tenant, 'suspended', timing);
 
   const resume = timing.now();
-  if (!(await setRoute(s, edge, tenant, 'active'))) return;
+  if (!(await setRoute(s, edge, tenant, 'active'))) return false;
   const resumed = await waitFor(s, edge, tenant, 'routed', resume, STATUS_TIMEOUT_SECONDS, timing);
-  if (resumed === undefined) return;
+  if (resumed === undefined) return false;
   s.rec.sample('resumed', resumed);
 
   const removal = timing.now();
   if (!(await removeDeployment(s, tenant))) {
     s.rec.finding(`tenant ${tenant}: DeleteDeployment was refused`);
-    return;
+    return false;
   }
   const removed = await waitFor(s, edge, tenant, 'unrouted', removal, REMOVED_TIMEOUT_SECONDS, timing);
-  if (removed === undefined) return;
+  if (removed === undefined) return false;
   s.rec.sample('removed', removed);
   await hold(s, edge, tenant, 'unrouted', timing);
   // The delete build ends after the route is gone: wait for it, so a successful cycle leaves the
   // fleet as the scenario found it. A cycle that stops early leaves its deployment for the sweep.
   await waitDeployments(s, [tenant], { gone: true, timeoutSeconds: REMOVED_TIMEOUT_SECONDS });
+  return true;
 }
