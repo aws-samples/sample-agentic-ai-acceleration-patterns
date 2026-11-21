@@ -14,7 +14,7 @@
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { aws, sleep } from './aws';
+import { aws } from './aws';
 import { type EdgeInputs, FRONT_DOOR_FILE, parseEdgeInputs } from './edge';
 import { assertPlaced, cellsOf, type FleetEnv, placeDeployment, waitDeployments } from './fleet';
 import type { Manifest, WarmUp } from './manifest';
@@ -138,6 +138,12 @@ export async function warmUp(
     f.rec.finding('the manifest has no seeded tenant to warm up: run seed first');
     return undefined;
   }
+  // The front door's phase two needs the reader role: refuse before a cell build of about 9 minutes.
+  const noRole = f.cellAccounts.filter((a) => a.ingressReaderRoleArn === undefined);
+  if (noRole.length > 0) {
+    f.rec.finding(`warm-up: ${noRole.length} cell account(s) in the cell accounts file have no ingressReaderRoleArn (platform mode needs it, stress/application/README.md step 1)`);
+    return undefined;
+  }
   const started = deps.now();
   const placed = await placeDeployment(f, tenant);
   if (placed !== 'accepted' && placed !== 'exists') {
@@ -179,12 +185,3 @@ export async function warmUp(
   return warm;
 }
 
-/** Waits until `check` holds or `seconds` pass; true when it held. */
-export async function waitUntil(check: () => Promise<boolean>, seconds: number, everyMs = 5000): Promise<boolean> {
-  const deadline = Date.now() + seconds * 1000;
-  for (;;) {
-    if (await check()) return true;
-    if (Date.now() > deadline) return false;
-    await sleep(everyMs);
-  }
-}

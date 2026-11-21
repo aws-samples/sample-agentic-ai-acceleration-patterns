@@ -460,10 +460,10 @@ publishes and reads assets, and it holds only cell assets.
 
 - The stress cell is the runtime-isolation demo stack: its agents and tool
   targets are the demo's, not the tier's `agentsPerCell` and tool counts.
-  The tier-sized cell is W-3's stress ingress, which W-9 composes.
-- The tenant scripts subscribe a tenant on its cell only. The tenant-identity
-  tenant and the front-door route of spec §3.3 step 3 join when those slices
-  compose (W-9, W-7).
+  The tier-sized cell is W-3's stress ingress.
+- The tenant scripts subscribe a tenant on its cell only. A platform run adds
+  the tenant's identity (the control-plane driver, stress ADR-0017) and the
+  front-door route (the route hook); this folder's scripts do neither.
 - `cell-tenant-build-policy` reaches the tenant subscription methods of every
   API in the cell account, so a compromised tenant build can change any
   tenant's subscription on any cell there. The control plane's API role can

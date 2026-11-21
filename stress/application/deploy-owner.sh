@@ -46,7 +46,7 @@ echo "account=${account} region=${AWS_REGION}"
 start=$SECONDS
 npx cdk --app "npx ts-node --transpile-only application/owner-app.ts" deploy "${stacks[@]}" \
   --output cdk.application.out/owner --exclusively --require-approval never >&2
-echo "stacks=${stacks[*]// /,} deploy_seconds=$((SECONDS - start))"
+echo "stacks=$(IFS=,; echo "${stacks[*]}") deploy_seconds=$((SECONDS - start))"
 if [[ -n "${PLATFORM_ACCOUNT_ID:-}" ]]; then
   echo "IngressReaderRoleArn=$(aws cloudformation describe-stacks --stack-name CellAccountBase --query 'Stacks[0].Outputs[?OutputKey==`IngressReaderRoleArn`].OutputValue' --output text)"
 fi

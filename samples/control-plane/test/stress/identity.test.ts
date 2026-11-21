@@ -36,6 +36,14 @@ describe('the identity calls of the platform run (stress ADR-0017)', () => {
     expect(emailOf(T, 0)).toMatch(/^success\+01kaf5m0000000000000000t01@simulator\.amazonses\.com$/);
   });
 
+  it('saves the entry once the tenant exists and after each user, so a failure part way leaves one to sweep', async () => {
+    const f = fake({ 'POST /prod/platform/tenants': [created], [`POST /prod/platform/tenants/${T}/users`]: [{ status: 201, body: { user: { username: 'u-1' } } }, { status: 400 }] });
+    const saved: number[] = [];
+    const entry = await f.api.createIdentity(T, 'st-name', 2, (e) => saved.push(e.users.length));
+    expect(entry).toBeUndefined();
+    expect(saved).toEqual([0, 1]);
+  });
+
   it('registers the scope first when the catalogue lacks it', async () => {
     const f = fake({ 'GET /prod/platform/scopes/app%2Fuse': [{ status: 404 }], 'PUT /prod/platform/scopes/app%2Fuse': [{ status: 200 }], 'POST /prod/platform/tenants': [created] });
     expect(await f.api.createTenant(T, 'n')).toBe('admin-1');

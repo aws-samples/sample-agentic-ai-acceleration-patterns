@@ -334,6 +334,10 @@ async function unhookStep(): Promise<number> {
   try {
     c = await connect();
   } catch (e) {
+    if (fs.existsSync(path.join(home, prefix, 'hook-policy-arns'))) {
+      log(`unhook: the control plane is not reachable (${errorText(e)}) and the hook policy is still on ${n.fleet}-global-hook; the front door cannot be deleted until it is taken off`);
+      return 1;
+    }
     log(`unhook: the control plane is not reachable (${errorText(e)}); nothing to unregister`);
     return 0;
   }
@@ -615,19 +619,22 @@ async function sweep(seeded: boolean): Promise<number> {
   }
   if (m !== undefined) {
     const after = await deploymentsOf(f);
-    // The identity tenants of the swept tenants go first (stress ADR-0017): the control plane's
+    const tenants = (seeded ? allTenants(m) : transient).filter((t) => !after.has(t));
+    const { gone, kept } = await deleteTenants(f.api, tenants);
+    // The identity tenants of the tenants just deleted go next (stress ADR-0017): the control plane's
     // DeleteDeployment does not remove them, and they carry the control-plane tenant id. A fixture
     // tier keeps the seeded fleet's, and `identity[]` keeps the entry of one that could not be deleted.
+    // A platform run asks for every deleted tenant, with or without an entry: an
+    // identity made part way has none yet, and DeleteTenant answers 404 for a tenant that has no identity.
     let identities = m.identity ?? [];
-    const swept = new Set(seeded ? allTenants(m) : transient);
-    const doomed = identities.filter((e) => swept.has(e.tenantId));
+    const doomed = parseMode(process.env.STRESS_MODE) === 'platform' ? gone : [];
     if (doomed.length > 0) {
       try {
         const api = identityApiOf(() => undefined);
         const removed: string[] = [];
-        for (const e of doomed) {
-          if (await api.deleteTenant(e.tenantId)) removed.push(e.tenantId);
-          else log(`sweep: the identity tenant of ${e.tenantId} could not be deleted; it stays in identity[]`);
+        for (const id of doomed) {
+          if (await api.deleteTenant(id)) removed.push(id);
+          else log(`sweep: the identity tenant of ${id} could not be deleted; it stays in identity[]`);
         }
         identities = identities.filter((e) => !removed.includes(e.tenantId));
         log(`sweep: ${removed.length} of ${doomed.length} identity tenants removed`);
@@ -637,8 +644,6 @@ async function sweep(seeded: boolean): Promise<number> {
         status = 1;
       }
     }
-    const tenants = (seeded ? allTenants(m) : transient).filter((t) => !after.has(t));
-    const { gone, kept } = await deleteTenants(f.api, tenants);
     const keep = (ids: readonly string[]): string[] => ids.filter((t) => !gone.includes(t));
     // The warm-up record goes with its tenant: the cell it names is deleted with the seeded fleet.
     const { warmUp: warm, ...rest } = m;
@@ -694,7 +699,7 @@ async function main(argv: readonly string[]): Promise<number> {
   const [command, arg] = argv;
   switch (command) {
     case 'budget':
-      process.stdout.write(`${JSON.stringify({ draws: drawsOf(tier(), buildLimit()) })}\n`);
+      process.stdout.write(`${JSON.stringify({ draws: drawsOf(tier(), buildLimit(), parseMode(process.env.STRESS_MODE) === 'platform') })}\n`);
       return 0;
     case 'check-accounts':
       return checkAccounts();

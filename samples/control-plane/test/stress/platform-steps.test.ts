@@ -4,8 +4,9 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { parseManifest } from './manifest';
-import { hookCommitOf, hookPolicyFile, parseFrontDoor, readFrontDoor, setHookPolicy } from './platform-steps';
+import type { FleetEnv } from './fleet';
+import { type Manifest, parseManifest } from './manifest';
+import { hookCommitOf, hookPolicyFile, parseFrontDoor, readFrontDoor, setHookPolicy, warmUp } from './platform-steps';
 
 const DIST = 'arn:aws:cloudfront::123456789012:distribution/E2EXAMPLE12345';
 const POLICY = 'arn:aws:iam::123456789012:policy/tenant-front-door-route-hook-stress';
@@ -27,6 +28,23 @@ describe('the front-door manifest the control plane reads', () => {
     fs.mkdirSync(path.join(home, 'p'));
     fs.writeFileSync(path.join(home, 'p', 'tenant-front-door.json'), JSON.stringify(good));
     expect(readFrontDoor(home, 'p')?.hookPolicyArn).toBe(POLICY);
+  });
+});
+
+describe('the warm-up step', () => {
+  it('refuses a cell account with no ingress reader role before it places anything', async () => {
+    const findings: string[] = [];
+    const api = { call: jest.fn() };
+    const env = {
+      api,
+      rec: { finding: (t: string) => findings.push(t) },
+      cellAccounts: [{ label: 'cell-account-1', accountId: '111111111111', profile: 'p', accountBaseStackArns: [] }],
+      log: () => undefined,
+    } as unknown as FleetEnv;
+    const manifest = { seeded: ['01KAF5M0000000000000000T01'], churn: [], extra: [] } as unknown as Manifest;
+    expect(await warmUp(env, manifest, () => undefined)).toBeUndefined();
+    expect(findings.join()).toMatch(/no ingressReaderRoleArn/);
+    expect(api.call).not.toHaveBeenCalled();
   });
 });
 

@@ -175,14 +175,17 @@ export class IdentityApi {
   }
 
   /** The tenant and its `users` further users, recorded as an `identity[]` entry; undefined when any step failed. */
-  async createIdentity(tenantId: string, name: string, users: number): Promise<IdentityEntry | undefined> {
+  async createIdentity(tenantId: string, name: string, users: number, save?: (entry: IdentityEntry) => void): Promise<IdentityEntry | undefined> {
     const admin = await this.createTenant(tenantId, name);
     if (admin === undefined) return undefined;
     const entry: IdentityEntry = { tenantId, admin: { username: admin, email: emailOf(tenantId, 0) }, users: [] };
+    // `save` runs once the tenant exists and after each user, so a failure part way leaves an entry the sweep deletes.
+    save?.(entry);
     for (let n = 1; n <= users; n += 1) {
       const username = await this.createUser(tenantId, emailOf(tenantId, n));
       if (username === undefined) return undefined;
       (entry.users as { username: string; email: string }[]).push({ username, email: emailOf(tenantId, n) });
+      save?.(entry);
     }
     return entry;
   }
@@ -207,9 +210,8 @@ export class IdentityApi {
 
 /**
  * A `Send` that signs with the run's own AWS credentials (SigV4, `execute-api`) through curl
- * 7.75 or later. The key pair reaches curl on stdin, never in argv; the body goes in a
- * `--data-raw` argument (a user name or an e-mail address, never a secret, except the password
- * of IssueToken, which therefore goes on stdin as part of the curl config too).
+ * 7.75 or later. The key pair and every body (a user name, an e-mail address, the password of
+ * IssueToken) reach curl on stdin as a `--config -` file, never in argv.
  */
 export function curlSend(region: string, load: () => Promise<{ creds: Credentials; expiresAt: number } | undefined> = loadCredentials, curl = 'curl', now: () => number = Date.now): Send {
   let cached: { creds: Credentials; expiresAt: number } | undefined;

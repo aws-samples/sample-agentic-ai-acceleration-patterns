@@ -47,7 +47,7 @@ echo "memory_total_mib=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo) 
 # the app; nothing is logged but the parameter names.
 DISTRIBUTION_ARN="${PARAM_DISTRIBUTION_ARN:-}"
 if [ -n "$DISTRIBUTION_ARN" ]; then
-  if ! [[ "$DISTRIBUTION_ARN" =~ ^arn:aws:cloudfront::[0-9]{12}:distribution/[A-Z0-9]{8,32}$ ]]; then
+  if ! [[ "$DISTRIBUTION_ARN" =~ ^arn:aws[a-z-]*:cloudfront::[0-9]{12}:distribution/[A-Z0-9]{8,32}$ ]]; then
     echo "PARAM_DISTRIBUTION_ARN is not a CloudFront distribution ARN: refusing" >&2
     exit 1
   fi
@@ -56,7 +56,7 @@ if [ -n "$DISTRIBUTION_ARN" ]; then
   echo "Read /application-plane/shared/identity/userPoolId and appClientId; the cell gets a cell API for the distribution"
   export DISTRIBUTION_ARN IDENTITY_USER_POOL_ID IDENTITY_APP_CLIENT_ID
 else
-  unset DISTRIBUTION_ARN
+  DISTRIBUTION_ARN=""
 fi
 
 ensure_node

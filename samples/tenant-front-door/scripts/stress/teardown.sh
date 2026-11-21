@@ -173,7 +173,8 @@ destroy_stack() { # STACK
 # The hook parameter RouteHookAccess keeps when its stack goes (DeletionPolicy Retain, front-door ADR-0027): removed here, after the stack.
 HOOK_PARAM=""
 if (( platform )) && [[ -s "$CONTEXT" ]]; then
-  HOOK_PARAM="/application-plane/applications/$(jq -r .applicationId "$CONTEXT")/shared/front-door-hook"
+  app_id="$(jq -r '.applicationId // empty' "$CONTEXT")"
+  [[ -z "$app_id" ]] || HOOK_PARAM="/application-plane/applications/${app_id}/shared/front-door-hook"
 fi
 delete_hook_parameter() {
   local err

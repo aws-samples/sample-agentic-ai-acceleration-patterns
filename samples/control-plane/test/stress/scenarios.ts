@@ -212,16 +212,17 @@ async function whoamiOnce(edgeUrl: string, token: string): Promise<Whoami> {
  * the router sent names it. A tenant whose identity could not be made, or that is never
  * served, is a finding.
  */
-async function becomeReady(s: ScenarioEnv, p: PlatformEnv, tenant: string, createdAtMs: number, hop: 'ready' | 'warm-up-ready'): Promise<void> {
+async function becomeReady(s: ScenarioEnv, p: PlatformEnv, tenant: string, createdAtMs: number, hop: 'ready' | 'warm-up-ready' | 'rerun-ready'): Promise<void> {
   const identityStarted = Date.now();
+  const further = Math.max(0, p.users - 1);
   let entry = p.existing(tenant);
-  if (entry === undefined) {
-    entry = await p.identity.createIdentity(tenant, `st-${tenant.slice(-12).toLowerCase()}`, Math.max(0, p.users - 1));
+  // An entry with fewer users than the tier asks for is one an earlier run left part way: the same calls finish it.
+  if (entry === undefined || entry.users.length < further) {
+    entry = await p.identity.createIdentity(tenant, `st-${tenant.slice(-12).toLowerCase()}`, further, p.save);
     if (entry === undefined) {
       s.rec.finding(`tenant ${tenant}: its identity tenant could not be made`);
       return;
     }
-    p.save(entry);
   }
   // The demo row the agent's credential check reads: made with the identity, before the first served call.
   if (p.seedData !== undefined) {
@@ -266,7 +267,7 @@ async function becomeReady(s: ScenarioEnv, p: PlatformEnv, tenant: string, creat
  * tenant's `ready` time does not wait for the rest of the wave. `finish` stops looking, reads
  * once more and waits for every started tenant.
  */
-function startReadiness(s: ScenarioEnv, p: PlatformEnv, tenants: readonly string[]): { finish: () => Promise<void> } {
+function startReadiness(s: ScenarioEnv, p: PlatformEnv, tenants: readonly string[], placedNow: ReadonlySet<string>): { finish: () => Promise<void> } {
   const queued = new Set<string>();
   const jobs: Promise<void>[] = [];
   let running = 0;
@@ -288,7 +289,8 @@ function startReadiness(s: ScenarioEnv, p: PlatformEnv, tenants: readonly string
       jobs.push((async () => {
         await slot();
         try {
-          await becomeReady(s, p, t, Date.parse(d.createdAt), 'ready');
+          // A tenant placed in an earlier run is timed apart: its clock starts at the old CreateDeployment.
+          await becomeReady(s, p, t, Date.parse(d.createdAt), placedNow.has(t) ? 'ready' : 'rerun-ready');
         } finally {
           release();
         }
@@ -306,7 +308,7 @@ function startReadiness(s: ScenarioEnv, p: PlatformEnv, tenants: readonly string
     async finish() {
       stopped = true;
       await loop;
-      await tick();
+      await tick().catch((e: unknown) => s.rec.finding(`reading the deployments for readiness failed: ${(e as Error).message}`));
       await Promise.all(jobs);
     },
   };
@@ -330,7 +332,7 @@ async function ps1Platform(s: ScenarioEnv, p: PlatformEnv): Promise<void> {
   const others = s.manifest.seeded.filter((t) => t !== warm.tenantId);
   // A tenant that is ACTIVE already (a rerun) is not placed again but still gets its identity and its first served call.
   const tenants = others.filter((t) => existing.get(t)?.status !== 'ACTIVE');
-  const watcher = startReadiness(s, p, others);
+  const watcher = startReadiness(s, p, others, new Set(tenants));
   let r: Onboarded;
   try {
     r = await onboard(s, tenants, 'onboard');

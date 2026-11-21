@@ -74,6 +74,15 @@ describe('the budget (spec §4.4)', () => {
     expect(drawsOf(MEDIUM, 5).map((d) => d.account)).toEqual(['platform', 'platform', 'platform', 'platform', 'cell-account-1', 'cell-account-2']);
     expect(drawsOf(LARGE, 5).find((d) => d.quota === 'cognito-groups')?.amount).toBe(2 * (4000 + 100));
   });
+
+  it('slice mode draws on two projects and no Cognito groups: no global hook builds, no identity tenants', () => {
+    expect(drawsOf(SMALL, 50, false)).toEqual([
+      { account: 'platform', quota: 'codebuild-linux-small', amount: 100 },
+      { account: 'platform', quota: 'lambda-concurrency', amount: 120 },
+      { account: 'platform', quota: 'sts-assume-role-rps', amount: 3 },
+      { account: 'cell-account-1', quota: 'sts-assume-role-rps', amount: 1 },
+    ]);
+  });
 });
 
 describe('the cell accounts file', () => {

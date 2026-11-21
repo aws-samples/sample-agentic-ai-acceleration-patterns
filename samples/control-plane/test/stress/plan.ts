@@ -30,9 +30,9 @@ export const DEFAULT_BUILD_LIMIT = 50;
 /** Spec §5.2: the build limits the scaling scenario steps through. */
 export const SCALING_LIMITS = [5, 20, 50] as const;
 /**
- * The CodeBuild projects that run builds in a stress run: the cell and the tenant project and the
+ * The CodeBuild projects that run builds in a platform run: the cell and the tenant project and the
  * global hook project, which runs the front door's route hook on every cell and deployment event
- * of a platform run. The stress application declares no application hooks, so that project runs
+ * (a slice-mode run has the first two: `drawsOf`). The stress application declares no application hooks, so that project runs
  * none (spec §3.6). The limit applies to each of the four projects the control plane creates.
  */
 export const BUILD_PROJECTS = 3;
@@ -138,16 +138,19 @@ export interface Draw {
  * pair AssumeRole per build start, the limit's builds starting within a minute at most
  * (STS). In each cell account, a cell build assumes the cell bootstrap's three roles.
  */
-export function drawsOf(t: TierSizes, buildLimit: number): Draw[] {
-  const builds = buildLimit * BUILD_PROJECTS;
+export function drawsOf(t: TierSizes, buildLimit: number, platform = true): Draw[] {
+  // The global hook project runs builds in a platform run only.
+  const builds = buildLimit * (platform ? BUILD_PROJECTS : BUILD_PROJECTS - 1);
   const draws: Draw[] = [
     { account: 'platform', quota: 'codebuild-linux-small', amount: builds },
     { account: 'platform', quota: 'lambda-concurrency', amount: 2 * t.steadyRps + builds },
     { account: 'platform', quota: 'sts-assume-role-rps', amount: Math.ceil(builds / 60) + 1 },
-    // A platform run gives each onboarded tenant an identity tenant (stress ADR-0017): two Cognito
-    // groups each in the stress pool, for the seeded set and, at a fixture tier, the churn creates PS-1 is timed on.
-    { account: 'platform', quota: 'cognito-groups', amount: 2 * (t.onboarding === 'fixture' ? t.tenantsSeeded + t.churnPerRun : t.tenantsSeeded) },
   ];
+  // A platform run gives each onboarded tenant an identity tenant (stress ADR-0017): two Cognito
+  // groups each in the stress pool, for the seeded set and, at a fixture tier, the churn creates PS-1 is timed on.
+  if (platform) {
+    draws.push({ account: 'platform', quota: 'cognito-groups', amount: 2 * (t.onboarding === 'fixture' ? t.tenantsSeeded + t.churnPerRun : t.tenantsSeeded) });
+  }
   for (let n = 1; n <= t.cellAccounts; n += 1) {
     draws.push({ account: `cell-account-${n}`, quota: 'sts-assume-role-rps', amount: 1 });
   }
