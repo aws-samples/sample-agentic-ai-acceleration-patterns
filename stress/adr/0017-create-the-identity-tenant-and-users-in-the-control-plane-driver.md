@@ -179,7 +179,8 @@ each identity call apart from the time the call waited for the pace
 result, not an error. In a platform run the `tenant-identity` slice
 already books the groups of the control plane's tenants (tenant-identity
 ADR-0042, spec §4.4). The user-write categories have no id in the quota
-catalogue, so no slice books them.
+catalogue, so no slice books them yet; W-9 adds the ids and the
+`control-plane` slice's `budget` draw.
 
 A throttled `CreateTenant` answers 503, and it may have created the
 tenant without its admin (tenant-identity ADR-0037). A blind repeat then
@@ -209,20 +210,21 @@ deployment is `ACTIVE`, with the scope and e-mail address above and the
 `PutScope` before the first `CreateTenant`; `identity[]` in
 `control-plane.json`, and the runtime-isolation slice's read of it for
 control-plane tenants in place of `tenant-identity.json`;
-`execute-api:Invoke` on the platform API for the driver's session;
-pacing at about four calls a second with the timing of each call apart
-from its wait for the pace, retry with backoff, and the rule above for a
-half-created tenant; the comment in
+`execute-api:Invoke` on the platform API for the driver's session; the
+quota ids for the Cognito user-write categories and the slice's `budget`
+draw on them; pacing at about four calls a second with the timing of
+each call apart from its wait for the pace, retry with backoff, and the
+rule above for a half-created tenant; the comment in
 `stress/application/scripts/tenant/create.sh`, which says the identity
 tenant joins that script when the slices compose; and the cleanup, in
 the `control-plane` `teardown`, of the identity tenants of every
 deployment of the run that has one: the seeded tenants of `small` and
 `medium` and, at `large`, the churn tenants that PS-1 onboards and
 removes. The `large` fleet's identity tenants stay with the fixture.
-With `--fixtures`, the `tenant-identity` `teardown` destroys the stress
-identity's stack and every identity tenant goes with it, so the cleanup
-makes no per-tenant call. The cleanup is needed because the control
-plane's `DeleteDeployment` does not remove them and the
+With `--remove-fixtures`, the `tenant-identity` `teardown` destroys the
+stress identity's stack and every identity tenant goes with it, so the
+cleanup makes no per-tenant call. The cleanup is needed because the
+control plane's `DeleteDeployment` does not remove them and the
 `tenant-identity` `teardown` knows only the tenants it seeded. Revisit
 if the tenant-identity sample gains a control-plane hook, or if the
 platform API admits cell-account roles.

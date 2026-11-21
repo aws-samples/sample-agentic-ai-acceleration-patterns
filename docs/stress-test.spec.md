@@ -65,7 +65,7 @@ runtime-isolation deployment for up to `maxTenants` tenants.
 - Several Regions.
 - Churn and cross-cell probes under load. The runner runs scenarios one
   after another, so PS-5 and PS-7 run without PS-2's load beside them
-  (§5.1, [stress ADR-0018](../stress/adr/0018-run-churn-and-cross-cell-probes-after-the-load-scenarios.md)).
+  (§5.1, stress ADR-0018).
 - Soak runs over days. One platform run is a working day at most.
 
 ### 1.3 What the test is NOT
@@ -128,7 +128,7 @@ it first shows.
 | Contract | `stress/` at the repository root | `src/`: tiers, slice declaration, quota budget, result records, runner (`run.sh`); the k6 library (`stress/k6/`) |
 | Driver host | `stress/driver/`, its own CDK app (stress ADR-0009) | one EC2 instance, no inbound rule, no public IP, SSM Session Manager, k6 and the AWS CLI |
 | Stress application | `stress/application/` | a control-plane application whose cell scripts deploy one runtime-isolation cell with a cell API origin and whose tenant scripts subscribe one tenant on its cell (§3.3) |
-| Slice: `control-plane` | `samples/control-plane/scripts/stress/` | deploy the control plane, register accounts and the stress application, onboarding and churn scenarios; its driver creates each onboarded tenant's identity tenant and users (§3.3 step 4, [stress ADR-0017](../stress/adr/0017-create-the-identity-tenant-and-users-in-the-control-plane-driver.md)) |
+| Slice: `control-plane` | `samples/control-plane/scripts/stress/` | deploy the control plane, register accounts and the stress application, onboarding and churn scenarios; its driver creates each onboarded tenant's identity tenant and users (§3.3 step 4, stress ADR-0017) |
 | Slice: `tenant-identity` | `samples/tenant-identity/scripts/stress/` | the platform's identity deployment, token issue and refresh scenarios |
 | Slice: `tenant-front-door` | `samples/tenant-front-door/scripts/stress/` | the edge, route writes, edge scenarios |
 | Slice: `agentic-runtime-isolation` | `samples/agentic-runtime-isolation/scripts/stress/` (exists) | the cell's ingress, agents and tools; scenarios S1 to S7 |
@@ -347,12 +347,14 @@ is stopped when it exits.
    slice-mode run whose scenarios are all `platformOnly`).
 2. Sums `budget` per account and refuses to start when a sum is over its
    quota or another run holds the lock for the prefix.
-3. Runs `deploy` and then `seed` for one slice at a time, in the order of
-   the needs (§3.4), then the scenarios in the order of §5, then `collect`,
-   then `teardown` in reverse order. Without `--scenarios`, a platform
-   run (several slices) runs only the `PS-<n>` scenarios, and a slice-mode
-   run runs the slice's scenarios except its `platformOnly` ones. Teardown
-   runs on failure and after SIGINT, SIGTERM or SIGHUP too.
+3. Runs `deploy` and then `seed` for one slice at a time, in the order
+   of the needs (§3.4), then the scenarios, then `collect`, then
+   `teardown` in reverse order. Without `--scenarios`, a platform run
+   (several slices) runs only the `PS-<n>` scenarios, by number (§5),
+   and a slice-mode run runs the slice's scenarios except its
+   `platformOnly` ones; `--scenarios` runs the scenarios named, in the
+   order given. Teardown runs on failure and after SIGINT, SIGTERM or
+   SIGHUP too.
 4. Writes the run's result file (§4.3). Runner lines and all verb output
    go to `run.log` in the run folder, which only the runner's user can read.
 
@@ -413,8 +415,8 @@ give. In the reverse order the front door goes before the control plane,
 and the control plane's cell and deployment deletes run the front door's
 `PRE` hook (`CELL_DELETE`, `DEPLOYMENT_DELETE`) against the route
 registrar. When the run removes the fleet (`small`, `medium`, and
-`large` with `--fixtures`), the `tenant-front-door` `teardown` therefore
-unregisters its two global hooks from the control plane
+`large` with `--remove-fixtures`), the `tenant-front-door` `teardown`
+therefore unregisters its two global hooks from the control plane
 (`register-hooks.sh --delete`, front-door spec §5.2) before it removes
 the registrar, so the control plane deletes deployments and cells with
 no call to a registrar that is gone. The control plane is still deployed
@@ -425,9 +427,9 @@ route needs removing. The rest of front-door spec §6.2's order follows:
 the policy out of `globalHookManagedPolicyArns` with a control-plane
 update, then `RouteHookAccess` and its parameter, then the stacks; the
 slice's `teardown` verifies that none is left (§3.4). At `large` without
-`--fixtures` the fleet stays with its routes (P-5), so the registrar,
-the route table and the hooks stay with it, and the `tenant-front-door`
-`teardown` removes none of them.
+`--remove-fixtures` the fleet stays with its routes (P-5), so the
+registrar, the route table and the hooks stay with it, and the
+`tenant-front-door` `teardown` removes none of them.
 
 The lock is per prefix on the runner's host. A second run from another host
 against the same accounts is not detected; one run per set of accounts at a
@@ -563,29 +565,27 @@ tenants it drove) and `platform-tenants.json` (tenants it refused or
 ignored, by id and reason: `no-identity-tenant`, `no-user`,
 `not-in-control-plane`) in its own folder. It drives, in platform mode,
 every tenant in `control-plane.json` `seeded` that has an admin user in
-the `identity[]` of the same file (W-9 builds that read; the slice
-matches against `tenant-identity.json` until then), and builds that set
-when each scenario starts, because the control plane onboards its
-tenants in PS-1, after every `seed`. It stops when fewer than two
-tenants are usable. The identity tenants the control-plane driver
-creates (§3.3 step 4) are not in `tenant-identity.json`, which only that
-slice's `seed` writes; the driver records them in `identity[]` (stress
-ADR-0017, W-9), and a control-plane tenant with no entry is refused
-(`no-identity-tenant`). The identity tenants outlive the deployments
-they were made for: the control plane's `DeleteDeployment` does not
-remove them, and the `tenant-identity` `teardown` removes only the
-tenants it seeded. So the `control-plane` `teardown` deletes the
-identity tenants of every deployment of the run that has one, and
-removes their `identity[]` entries. Those are the seeded tenants of
-`small` and `medium` and, at `large`, the churn tenants that PS-1
-onboards and removes. The reverse order of §3.4 runs this before
-`tenant-identity`'s teardown. The `large` fleet is a fixture (P-5), and
-its identity tenants stay with it. With `--fixtures`, the
-`tenant-identity` `teardown` destroys the stress identity's stack, which
-removes every identity tenant, so the `control-plane` `teardown` makes
-no per-tenant call then. `DeleteTenant` scans the whole pool in
-`shared-pool` (tenant-identity README), so the time of the per-tenant
-deletes is a result.
+the `identity[]` of the same file (W-9), and builds that set when each
+scenario starts, because the control plane onboards its tenants in PS-1,
+after every `seed`. It stops when fewer than two tenants are usable. The
+identity tenants the control-plane driver creates (§3.3 step 4) are not
+in `tenant-identity.json`, which only that slice's `seed` writes; the
+driver records them in `identity[]` (stress ADR-0017, W-9), and a
+control-plane tenant with no entry is refused (`no-identity-tenant`).
+The identity tenants outlive the deployments they were made for: the
+control plane's `DeleteDeployment` does not remove them, and the
+`tenant-identity` `teardown` removes only the tenants it seeded. So the
+`control-plane` `teardown` deletes the identity tenants of every
+deployment of the run that has one, and removes their `identity[]`
+entries. Those are the seeded tenants of `small` and `medium` and, at
+`large`, the churn tenants that PS-1 onboards and removes. The reverse
+order of §3.4 runs this before `tenant-identity`'s teardown. The `large`
+fleet is a fixture (P-5), and its identity tenants stay with it. With
+`--remove-fixtures`, the `tenant-identity` `teardown` destroys the
+stress identity's stack, which removes every identity tenant, so the
+`control-plane` `teardown` makes no per-tenant call then. `DeleteTenant`
+scans the whole pool in `shared-pool` (tenant-identity README), so the
+time of the per-tenant deletes is a result.
 
 ### 4.3 Result records
 
@@ -624,6 +624,7 @@ Each slice's `budget` fills its column; the runner sums per account.
 The `control-plane` driver's identity calls (§3.3 step 4) also draw on
 the Cognito user-write categories and on the platform API's stage
 throttle. They have no id in the quota catalogue, so no slice books them
+yet; W-9 adds the ids and the `control-plane` slice's `budget` draw
 (stress ADR-0017).
 
 ## 5. Scenarios
@@ -738,7 +739,7 @@ correlation id.
 | 2 | `control-plane` exposes the concurrent build limit as a prop (default 5) | a cost guard (threat model T16, M17); the stress deployment raises it | control-plane ADR-0046 |
 | 3 | The stress test has its own `tenant-identity` deployment | one pool caps at 5,000 tenants (runtime-isolation finding F-11) and is shared by every integration run | stress ADR-0002 |
 | 4 | Cells split agents (four cells of 25 at `large`) | keeps the Runtime count flat while testing routing across cells | stress ADR-0003 |
-| 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds | stress ADR-0004 |
+| 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds | stress ADR-0004, stress ADR-0018 |
 | 6 | A correlation header, logged at every hop | the runtime-isolation ingress and the front door each log it; a change to both samples | stress ADR-0005 |
 | 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair and a scoped cell bootstrap | the cell build would otherwise act as an account administrator; see below | stress ADR-0006, stress ADR-0011, stress ADR-0012, stress ADR-0014, stress ADR-0016, control-plane ADR-0047 |
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios | stress ADR-0007 |
@@ -795,7 +796,7 @@ Q-5.
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | done in `samples/tenant-identity/scripts/stress/` |
 | W-7 front-door slice | the front door merged (done); its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | yes; phase two after W-11's ingress reader role |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part done; front-door part yes, now |
-| W-9 first platform run at `small`: also the control-plane driver's identity calls, timed as hops of their own (§6), with the `PutScope` before the first (§3.3 step 4), the record of them and the runtime-isolation slice's read of that record in place of `tenant-identity.json` for control-plane tenants (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), the interleaved set-up order in the runner (§3.5), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11 | no |
+| W-9 first platform run at `small`: also the control-plane driver's identity calls, timed as hops of their own (§6), with the `PutScope` before the first (§3.3 step 4) and the quota ids for the Cognito user-write categories with the slice's `budget` draw on them (§4.4), the record of them and the runtime-isolation slice's read of that record in place of `tenant-identity.json` for control-plane tenants (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), the interleaved set-up order in the runner (§3.5), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11 | no |
 
 ## 10. Open questions
 

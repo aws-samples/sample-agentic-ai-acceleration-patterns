@@ -2,7 +2,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# ADR-0018: Run churn and cross-cell probes after the load scenarios
+# ADR-0018: Run churn and cross-cell probes on their own, not beside the load
 
 - Status: Accepted
 - Date: 2026-11-21

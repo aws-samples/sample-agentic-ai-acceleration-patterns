@@ -157,8 +157,9 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 - The quota catalogue has no ids yet for the API Gateway control plane,
   for CloudFront Functions compute and KeyValueStore size, or for the
   Cognito user-write categories that the control-plane driver's identity
-  calls draw on (spec §4.4), so no slice can declare them. They are added with the first slice that
-  draws on them (W-7 for the front door).
+  calls draw on (spec §4.4), so no slice can declare them. They are
+  added with the first slice that draws on them (W-7 for the front door,
+  W-9 for the identity calls).
 - The k6 library has no k6 run in this folder's build: `record.js` is tested, `lib.js` is
   checked by running `k6/smoke.js` and `K6_COMMAND=inspect` on a deployed host. A change to
   `lib.js` needs that check again.
