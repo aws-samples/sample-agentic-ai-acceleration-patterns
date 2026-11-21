@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Proposed
 - Date: 2026-11-20
-- Amends: ADR-0006, ADR-0012
+- Amends: ADR-0006, ADR-0012, ADR-0014
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -33,10 +33,9 @@ per cell. A path of "router, then cell origin, then ingress" for agent
 calls, across every cell, does not exist. The router adds
 `x-tenant-route` to the request on both paths, but the ingress does not
 echo it, so an edge check on the response's route hint has no source on
-`/agents/*`. The
-front door's own test runs the agent route against a stand-in ingress
-(front-door ADR-0024), so the platform run is the first to drive the
-real ingress through the edge.
+`/agents/*`. The front door's own test runs the agent route against a
+stand-in ingress (front-door ADR-0024), so the platform run is the first
+to drive the real ingress through the edge.
 
 The tiers fix the cell count (spec §4.1): `small` has one cell, `medium`
 two, `large` four. The first platform run is at `small` (P-8).
@@ -152,7 +151,9 @@ every deployment's hook fails with 409 (front-door spec §3.2, §3.4). So
 the cell script deploys a cell API origin, the front door's demo cell
 API (`samples/tenant-front-door/src/demo-cell/`), with `CellRouteAccess`,
 which takes the distribution ARN from a cell parameter, and writes that
-output (spec §3.3 step 2, §3.5). The demo cell API checks that its cell
+output (spec §3.3 step 2, §3.5). The cell source zip of ADR-0014 also
+carries `samples/tenant-front-door/src/demo-cell/` and `src/shared/` for
+it; this record amends ADR-0014 on that point. The demo cell API checks that its cell
 hosts the tenant under `/application-plane/tenants/<tenant id>/<app id>`,
 so the tenant script records the deployment in the parameter
 `.../<app id>/deployment` and does not write a route; this record amends

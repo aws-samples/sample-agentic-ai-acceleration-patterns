@@ -116,6 +116,6 @@ their probe runs in both cell accounts.
 
 Note 2026-11-20: ADR-0016 adds one item to the account base: a read-only
 role, trusted by the platform account, that allows `ssm:GetParameter` on
-the stress cells' ingress parameters only, for front-door phase two. It deploys in
-an owner stack tagged `stress:part=account-base`, like the rest of the
-base.
+the stress cells' ingress parameters only, for front-door phase two. It
+deploys in an owner stack tagged `stress:part=account-base`, like the
+rest of the base.
