@@ -467,9 +467,56 @@ npx projen integ
 It deploys the front door, its own control plane and two cells in two
 accounts, runs the steps of `single` mode (1 to 16 and 19 to 24) and tears
 everything down; a `single` run takes about four and a half hours, a `host`
-run (`npx projen integ:host`) about two and a half, for a few dollars, both
-estimates. Its inputs, steps and shortcuts are in
+run (`npx projen integ:host`) about an hour (measured, 64 minutes), for a few
+dollars (an estimate). Its inputs, steps and shortcuts are in
 [integration-test.md](./integration-test.md).
+
+## End-to-end demo
+
+[`scripts/demo.sh`](./scripts/demo.sh) walks one tenant's path through the
+front door, and the edge's refusals, in `host` mode. It runs against the
+deployment an integration test run keeps up: the front door, two demo cells
+(A and B) and two tenants, `a` in cell A and `b` in cell B, each on its own
+host below the app domain. Pin the run id, keep the stacks, and run the
+`host` test with the inputs of [integration-test.md](./integration-test.md);
+then run the demo with the same credentials, and remove the run's stacks
+when you are done. From the sample directory:
+
+```bash
+export TFD_INTEG_RUN_ID=demo1
+export TFD_INTEG_KEEP=1
+npx projen integ:host
+scripts/demo.sh demo1
+scripts/integ.sh teardown demo1 host
+```
+
+Each tenant's host is `<tenant id in lower case>.<appDomain>`. The demo
+needs bash 4.4 or later, the AWS CLI v2, curl 7.75 or later and `jq`. Run it
+from the checkout that ran the test, with credentials of the same role: it
+reads the run's ids from `.integ/<run id>/`. The teardown needs the same
+inputs as the test.
+
+The demo takes about three minutes (137 to 199 s in three runs), uses only
+the run's synthetic tenants and prints no token. The test ends with `b`
+suspended (step 18), so the demo first sets both tenants active, and it
+suspends `b` once more for step 5. It undoes that suspension when the script exits, also after a
+failure. The tenants and stacks belong to the integration test run, so the
+teardown above removes them. The test's deployment limits one client IP to
+50 requests per tenant host in five minutes on `/api/*`, so the demo polls
+`/api/whoami` once every six seconds, and a second run needs a five-minute gap.
+
+| Step | Call | Expect |
+|---|---|---|
+| 1. Both tenants active | the edge operator role sets `a` and `b` active (`UpdateTenantRouteStatus`) | 200 each, then each tenant's own host answers `/config.json` once the route reaches the edge (up to about a minute), naming that tenant |
+| 2. Sign-in | each tenant signs in with tenant-identity's `IssueToken` test aid | a token for each, none shown |
+| 3. Own cell | `GET /api/whoami` on each tenant's host with its token, until three answers in a row are 200 | `a`: 200 from `cell-a`; `b`: 200 from `cell-b` |
+| 4. The other tenant | `a`'s token on `b`'s host, and `b`'s on `a`'s; `a`'s call with an `x-tenant-route` header naming `b` | 403 each; the header is ignored and `cell-a` answers |
+| 5. Suspend `b` | the edge operator role sets `b` suspended; `GET /api/whoami` on each host | 200 from the registrar; `b`: 503 with `Retry-After: 300` once the route propagates (about a minute, up to 90 s); `a`: 200 |
+| 6. Resume `b` | the edge operator role sets `b` active | 200; `b` is answered by `cell-b` again |
+
+The demo's sign-in is the same test aid the integration test uses. A browser
+sign-in through the issuer needs the issuer's callback URLs and is not part
+of it.
 
 ## Tests
 
@@ -487,6 +534,7 @@ estimates. Its inputs, steps and shortcuts are in
   `shared-pool` deployment, and they leave the stacks up. Conventions are in
   [`scripts/CONVENTIONS.md`](./scripts/CONVENTIONS.md).
 - **Integration test**: above.
+- **End-to-end demo**: above; it needs a kept `host` mode run.
 
 ## Registrar API
 
@@ -569,8 +617,11 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
   (steps 5 to 10, 12 to 14, 16 and 19 to 22) has no live run. The status
   block of [`architecture.md`](./architecture.md) holds the date, Region and
   coverage of the last green run.
-- **No end-to-end demo script.** The smoke scripts and the integration test
-  are the runnable walk-throughs; no `scripts/demo.sh` exists.
+- **The demo needs the integration test's deployment.** `scripts/demo.sh`
+  runs against a kept `host` mode run. The test takes about an hour (64
+  minutes measured, teardown included), and there is no lighter deploy
+  for it. It signs in with the `IssueToken` test aid,
+  not through a browser, and it does not run in `single` mode.
 - **The registrar retries a control-plane read once, inside 10 s.** A read
   that still fails answers 503 "control plane cannot be read" and writes
   nothing (spec §3.4 step 2). The caller retries; the integration driver does,

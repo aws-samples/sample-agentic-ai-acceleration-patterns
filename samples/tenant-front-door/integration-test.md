@@ -83,7 +83,7 @@ them first on `PATH`.
 | `TFD_INTEG_RUN_ID` | new per run | `[a-z0-9]{1,10}`; names every stack, role, policy and application of the run |
 | `TFD_IDENTITY_REGION` | `AWS_REGION` | The Region of the `tenant-identity` deployments |
 | `TFD_ISSUER_DOMAIN` | reserved example endpoints | A Cognito domain for the front door's `issuer` input |
-| `TFD_INTEG_KEEP` | unset | `1` skips the teardown; run `scripts/integ.sh teardown <run id> <mode>` after |
+| `TFD_INTEG_KEEP` | unset | `1` skips the teardown; run `scripts/integ.sh teardown <run id> <mode>` after. `scripts/demo.sh <run id>` walks the tenants of a kept `host` run: the run ends with tenant `b` suspended (step 18), and the demo sets it active first |
 
 Both accounts use CDK's default bootstrap qualifier (`hnb659fds`): the test
 apps use the default synthesizer, and the preflight reads the control

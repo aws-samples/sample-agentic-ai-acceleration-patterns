@@ -207,7 +207,7 @@ describe('the tfd-probe hook', () => {
 
 describe('the driver', () => {
   const DRIVER = path.join(SAMPLE_ROOT, 'scripts', 'integ.sh');
-  const parts = ['integ.sh', 'integ/lib.sh', 'integ/deploy.sh', 'integ/steps.sh', 'integ/teardown.sh'].map((f) => path.join(SAMPLE_ROOT, 'scripts', f));
+  const parts = ['integ.sh', 'integ/lib.sh', 'integ/deploy.sh', 'integ/steps.sh', 'integ/teardown.sh', 'demo.sh'].map((f) => path.join(SAMPLE_ROOT, 'scripts', f));
   const plan = (mode: string, runId = 'r1') => spawnSync('bash', [DRIVER, 'plan', mode], { env: { ...process.env, TFD_INTEG_RUN_ID: runId }, encoding: 'utf8' });
 
   it.each(parts)('%s parses and never traces', (file) => {

@@ -13,10 +13,13 @@ deletes the front door's two global hooks on the control plane (spec
 §5.2). `integ.sh`, with its parts in `integ/`, is the integration test
 driver (spec §10, ADR-0028); the integration test's demo application
 scripts and its `tfd-probe` hook in `../test/integ/` follow these
-conventions too. What a script prints lands in the operator's terminal
-and, in CI, the job log; what the route hook prints lands in the control
-plane's hook build log. The scripts handle access tokens, temporary
-passwords and SigV4 credentials, so none of those ever reach output.
+conventions too. `demo.sh` walks the tenants of a kept `host` run
+through the front door and suspends and resumes one of them (README,
+End-to-end demo); it sources `integ/lib.sh`. What a script prints lands
+in the operator's terminal and, in CI, the job log; what the route hook
+prints lands in the control plane's hook build log. The scripts handle
+access tokens, temporary passwords and SigV4 credentials, so none of
+those ever reach output.
 
 ## Log hygiene
 
@@ -61,6 +64,10 @@ passwords and SigV4 credentials, so none of those ever reach output.
   exit status is non-zero when any check failed.
 - The stacks stay up after `check`. The operator removes them with
   `cdk destroy` in the order dns, cell, front door, control plane, support.
+- `demo.sh` arms its `EXIT` trap before its first change. The trap resumes
+  tenant `b` when the run stops while `b` is suspended, then removes the
+  temp directory. The run's stacks and tenants belong to the integration
+  test, which removes them with `scripts/integ.sh teardown`.
 
 ## Shared fixtures
 
@@ -85,7 +92,7 @@ Its credentials reach `curl` through a mode-0600 `-K` file in its own
 `test/hooks/` runs `hooks/route-hook.sh` and `register-hooks.sh` with
 bash against stub `curl`, `aws` and `sleep` commands placed first on
 `PATH`. A change to either script keeps those tests passing. The smoke
-scripts are checked by running them live.
+scripts and `demo.sh` are checked by running them live.
 
 ## Scope
 
