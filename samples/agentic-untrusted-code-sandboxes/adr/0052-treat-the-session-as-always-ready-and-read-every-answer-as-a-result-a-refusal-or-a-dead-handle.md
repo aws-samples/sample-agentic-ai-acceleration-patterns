@@ -61,7 +61,7 @@ and returns `no_answer`. It returns:
 | a result with another `runId` or a proof that does not match | `dead`, `identity_check_failed` |
 | anything else a body can be: not JSON, not an object, a field of the wrong type, an unknown refusal code, a status other than 200 | `dead`, with a reason |
 | `ResourceNotFoundException`, `RuntimeClientError` | `dead`, `not_found` or `runtime_client_error` |
-| `RetryableConflictException` (the session is busy with another call, for example two first calls of one tenant at once; the platform refuses before the runner sees the job) | `refused`, `busy` |
+| `RetryableConflictException` (documented as a retryable client fault; seen in the integration test when two first calls of one tenant reach the session at once, before the runner sees the job; a session still tearing down is read the same way, so the caller retries until it is gone) | `refused`, `busy` |
 | any other error (throttle, access denied, network) | thrown to the caller |
 
 A dead handle makes the tool stop the session and start a new one under the
@@ -83,5 +83,5 @@ the integration test: that a stopped session started again under the same id
 gets a new `bootId`, the exact error AgentCore returns for a container that
 exited, and whether a call made while the session is still tearing down is
 answered with a conflict error (the `StopRuntimeSession` documentation lists
-one) or a throttle on session creation, both of which reach the caller as
-errors and are not retried.
+one, and it reads as `busy`) or a throttle on session creation (which reaches
+the caller as an error and is not retried).
