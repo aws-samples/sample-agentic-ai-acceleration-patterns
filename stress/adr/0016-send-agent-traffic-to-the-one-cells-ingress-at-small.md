@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Proposed
 - Date: 2026-11-20
+- Amends: ADR-0006
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -110,8 +111,9 @@ goes through the router's cell origin as the front door specifies. The
 front door is deployed in two phases (spec §3.5). Phase one is two
 deploys of the front-door app, the second with `registrarUrl`, which
 adds the `RouteHookAccess` stack, the hook parameter and policy
-(front-door ADR-0027); the global hooks are then registered with the
-control plane. So the first cell's route is registered when the cell is
+(front-door ADR-0027); the control plane's `globalHookManagedPolicyArns`
+update then attaches the hook policy, and the global hooks are
+registered. So the first cell's route is registered when the cell is
 built; a cell built before the hook has no cell route, and its
 deployments fail their hook with 409 (front-door spec §3.2, §3.4).
 Phase two, once the first cell exists, sets `agentIngress` only.
@@ -130,8 +132,9 @@ does not time it, and the cell account is registered with `maxCells` 1
 at `small`, so a placement during the build is refused rather than
 claiming a second cell (spec §3.5). The edge check on `/agents/*`
 cannot read a route hint. The route hook runs in a third control-plane
-CodeBuild project, so the Linux/Small draw at `buildLimit` 50 is 150
-(spec §3.6). Spec §5.3 asserts the token's tenant at the
+CodeBuild project, a project the stress run did not use before; the
+control plane creates four projects, so the Linux/Small quota is raised to
+`buildLimit` x 4, 200 at 50 (spec §3.6). Spec §5.3 asserts the token's tenant at the
 ingress and the vended credential instead, and sees an edge fault only
 as a wrong admit or refusal. The change that removes the limit is an
 ingress that echoes the hint it received; Option 1 would bring it too.
@@ -145,12 +148,18 @@ The stress cell serves a cell API origin. The front door writes a tenant
 route only for a cell that has a cell route, and the cell route needs the
 API domain from the cell script's `frontDoorApiDomain` output; without it
 every deployment's hook fails with 409 (front-door spec §3.2, §3.4). So
-the cell script deploys a cell API origin with `CellRouteAccess`, which
+the cell script deploys a cell API origin, the front door's demo cell
+API (`samples/tenant-front-door/src/demo-cell/`), with `CellRouteAccess`, which
 takes the distribution ARN from a cell parameter, and writes that output
 (spec §3.3 step 2, §3.5); a tenant is routed on `/agents/*` only once
 this holds. Phase two reads the ingress's `baseUrl` from its published
-parameter in the cell account (front-door spec §6.3) through a read-only
-role that allows `ssm:GetParameter` on that one parameter (spec §3.6,
-§3.7). The role adds one item to the account base that ADR-0006 lists.
-Revisit when Q-7 is decided, or if the front door gains per-cell agent
+parameter in the cell account, `StressCell-<cellId>/ingress` under
+`/application-plane/shared/agent-runtime/` (front-door spec §6.3; the
+stress cell does not publish the account-wide name), through a read-only
+role that allows `ssm:GetParameter` on that name only (spec §3.6, §3.7).
+The role adds one item to the account base that ADR-0006 lists; this
+record amends it. A cell build writes that parameter and the value picks
+the host that receives every tenant's bearer token on `/agents/*`, so
+phase two refuses a `baseUrl` that is not an API Gateway host (spec
+§3.5). Revisit when Q-7 is decided, or if the front door gains per-cell agent
 origins.
