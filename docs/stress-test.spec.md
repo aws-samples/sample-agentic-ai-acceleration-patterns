@@ -180,13 +180,12 @@ and the records in
    and the hint it received on `GET /api/whoami` (front-door spec §3.5,
    §10 step 4). The script writes the cell API's `frontDoorApiDomain`
    to its outputs, which the front door's global post hook reads to
-   register the cell route
-   (`PutCellRoute`) with the route registrar (front-door spec §3.2,
-   front-door ADR-0017). The ingress publishes its own parameter in the
-   cell account, as runtime-isolation does (front-door spec §6.3). The
-   cell sets `publishParameters` to false, so two cells in one account
-   do not overwrite each other, and the parameter sits under the cell's
-   stack name:
+   register the cell route (`PutCellRoute`) with the route registrar
+   (front-door spec §3.2, front-door ADR-0017). The ingress publishes
+   its own parameter in the cell account, as runtime-isolation does
+   (front-door spec §6.3). The cell sets `publishParameters` to false,
+   so two cells in one account do not overwrite each other, and the
+   parameter sits under the cell's stack name:
    `/application-plane/shared/agent-runtime/StressCell-<cellId>/ingress`.
 3. The tenant script runs: tenant-identity `CreateTenant` with the
    control-plane tenant id, then `PutTenantSubscription` on the cell
@@ -399,8 +398,9 @@ outside the account. This is a known limitation of the `small` platform
 run.
 
 The `control-plane` slice's `deploy` enforces the account check before
-the first cell build: it lists the account's CloudFormation stacks in every Region the run
-uses and refuses an account with any stack but the four kinds above
+the first cell build: it lists the account's CloudFormation stacks in
+every Region the run uses and refuses an account with any stack but the
+four kinds above
 (`CDKToolkit-cell` and the role pair by name, the account base by its
 tag together with no service role and a stack ARN on the list the
 account owner gives the check (W-11; an ARN pins the Region and the
