@@ -129,7 +129,9 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
   let joinedAll = 0;
   let expectedAll = 0;
 
-  for (const { scenario, file, record } of recordsOf(env)) {
+  const records = recordsOf(env);
+  if (records.length === 0) failures.push(`no tenant-front-door.<scenario>.json record in ${env.results}: run a scenario first, there is nothing to check`);
+  for (const { scenario, file, record } of records) {
     const lines = readRequestLog(env, scenario);
     const fromMs = Date.parse(record.window.start);
     const toMs = Date.parse(record.window.end);

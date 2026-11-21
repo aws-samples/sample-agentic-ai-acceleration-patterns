@@ -79,7 +79,7 @@ application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 | Id | What it sends | Pass criteria |
 |---|---|---|
 | `PS-7` | per round: a plain request, a token whose payload names another tenant, a client `x-tenant-route` header, a client `x-tenant-token` header, a token with a `tenants` list, a claim with no route, and a direct call to the cell's function URL | a probe that must be refused is never served; the headers the client supplies change nothing; the cell's log holds exactly the requests the driver saw reach it (the plain request, the two header probes, and the forged tokens, which the cell refuses with 403); the router refuses the `tenants` list and the unrouted claim, and IAM refuses the direct call, so none of those three reaches the cell |
-| `route-write` | a burst of 20 `PutTenantRoute` calls at once, then one a second for 30 s, as the global hook role; each written tenant is watched for 90 s with one request a second, then asked ten more times | every answer names the right tenant; after 90 s every request sees its route; the registrar answers a write with 200 or 503 only. The slice sets no pass limit on the write cycle or the time to routable (the Measured table gives the small tier's values), and a 503 that survives the driver's five attempts is counted by cause, not failed |
+| `route-write` | a burst of 20 `PutTenantRoute` calls at once, then one a second for 30 s, as the global hook role; each written tenant is watched for 90 s with one request a second, then asked ten more times | every answer names the right tenant; after 90 s every request sees its route; the registrar answers a write with 200 or with an answer the route hook retries (503, 429, another 5xx but 507, no answer). The slice sets no pass limit on the write cycle or the time to routable (the Measured table gives the small tier's values), and a retried answer that survives the driver's five attempts is counted by cause, not failed |
 | `router-load` | 10 requests a second for 40 s, then 40 a second for 20 s, over the active tenants; one in five carries a token padded to about 8,000 bytes that the cell refuses | no mismatch; every refusal is the cell's `403` for the padded token or its rate limit |
 | `edge-refusals` | 60 each of: no token, an undecodable token, a tenant with no route, a suspended tenant, a cross-site call, an Authorization over 8,192 bytes, `/agents`; first it routes the spare tenant, suspends it and reports the time from the suspend call to five 503s in a row | every request is refused with its reason; the cell's log has no line for the window |
 
@@ -93,8 +93,10 @@ with a reason that names the hop (`edge-no-route`, `cell-forbidden`,
 named, or `-` when it named none, which is also what the edge log shows
 (stress spec P-7). An answer no hop owns is an unattributed refusal and fails the
 run; so does a driver-side timeout or network error (status 0), which no hop
-answered. A 503 from the registrar is counted by cause: `route-table-busy`
-(five ETag conflicts), `control-plane-unreadable`, or `other`.
+answered. A registrar answer that is not a write is counted by cause: for a
+503, `route-table-busy` (five ETag conflicts), `control-plane-unreadable` or
+`other`; `throttled` for a 429; `server-error` for another 5xx but 507; and
+`network` for no answer.
 
 The tokens come from `tenant-identity`'s test aid `IssueToken`; they live
 5 minutes, so a scenario issues its own and issues new ones every 200 s while
@@ -174,11 +176,13 @@ What the numbers say:
   does. The 15 to 16 s the burst took
   includes the driver's own wait (about 5 s) before it retries a 503, so it is
   an upper bound on the store's time, not its throughput.
-- A route is not seen everywhere at once. Edge locations learn a write at
-  different times, up to 60 s in the measured runs, and a request can see a route and
-  then lose it before it settles. That is longer than the 45 s the route hook
-  waits for propagation. A suspension took 30 to 60 s after the call to show
-  as five 503s in a row. After 90 s every request saw every route.
+- A route is not seen by every request at once. From the one client and
+  location measured, the servers of an edge location learn a write at
+  different times, up to 60 s in the measured runs, and a request can see a
+  route and then lose it before it settles. That is longer than the 45 s the
+  route hook waits for propagation. A suspension took 30 to 60 s after the
+  call to answer five 503s in a row. After 90 s every request saw every
+  route.
 - The router's compute utilization reaches 94 % in a minute with ordinary
   load. The highest minute was 94 % for `PS-7`, `route-write` and
   `router-load` and 40 % for `edge-refusals`. The metric has one point a
@@ -225,8 +229,8 @@ What the numbers say:
   again for every tenant of the manifest.
 - The driver runs on the host that runs the slice, not the stress driver host,
   so client latencies include that host's path to CloudFront.
-- A write answered 503 is retried four more times, about 5 s apart (2.5 to
-  7.5 s); the real hook
+- A write answered with an answer the hook retries is retried four more
+  times, about 5 s apart (2.5 to 7.5 s); the real hook
   retries five times over about two minutes.
 - CloudFront's own metrics have one point a minute; short scenarios share
   minutes.

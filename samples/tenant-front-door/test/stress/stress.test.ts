@@ -468,7 +468,10 @@ describe('the registrar answer to a write', () => {
     expect(writeAnswer({ status: 503, body: '{"message":"the route table is busy; retry"}' })).toEqual({ written: false, retry: true, reason: 'registrar-route-table-busy' });
     expect(writeAnswer({ status: 503, body: '{"message":"the control plane could not be read"}' }).reason).toBe('registrar-control-plane-unreadable');
     expect(writeAnswer({ status: 403, body: '{}' })).toMatchObject({ written: false, retry: false, reason: 'registrar-refused', violation: expect.stringContaining('HTTP 403') });
-    expect(writeAnswer({ status: 0, body: '' })).toMatchObject({ reason: 'registrar-network', violation: expect.stringContaining('no answer') });
+    expect(writeAnswer({ status: 507, body: '{}' })).toMatchObject({ retry: false, violation: expect.stringContaining('HTTP 507') });
+    expect(writeAnswer({ status: 429, body: '{"message":"Too Many Requests"}' })).toEqual({ written: false, retry: true, reason: 'registrar-throttled' });
+    expect(writeAnswer({ status: 502, body: '' })).toEqual({ written: false, retry: true, reason: 'registrar-server-error' });
+    expect(writeAnswer({ status: 0, body: '' })).toEqual({ written: false, retry: true, reason: 'registrar-network' });
   });
 });
 

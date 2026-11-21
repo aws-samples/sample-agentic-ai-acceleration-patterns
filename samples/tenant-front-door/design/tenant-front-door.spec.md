@@ -1054,9 +1054,9 @@ given below):
 
    Every writer shares the store's one ETag (ADR-0003), so writes
    serialise and a conflict costs a re-read. A stale `IfMatch` is a
-   conflict whether the store answers `ConflictException` (409 or 412)
-   or a 400 `ValidationException` whose message says the pre-condition
-   failed (ADR-0031). The registrar attempts a
+   conflict whether the store answers `ConflictException` (409), an
+   HTTP 412, or a 400 `ValidationException` whose message says the
+   pre-condition failed (ADR-0031). The registrar attempts a
    write at most five times, with a jittered backoff of 50 to 500 ms
    between attempts, and then answers 503, which the route hook
    retries (route hook step 4: five attempts over about two
