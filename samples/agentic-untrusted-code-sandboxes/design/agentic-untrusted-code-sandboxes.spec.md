@@ -482,7 +482,11 @@ with `busy`. The runner:
    first `fork` failed with `EAGAIN` on `microvm` and `agentcore`
    (S-18). On `agentcore` the runner then reads the job group's
    `memory.current` less `file` plus `shmem` (as the `nitro` watchdog
-   does, so the page cache of files in `/work` does not count). The read is
+   does, so the page cache of files in `/work` does not count), less
+   `slab_reclaimable`: a disk fill leaves about 215 MiB of slab charged to
+   the group (the integration test's `dirty_group` line), and the
+   reclaimable part (dentries and inodes) the kernel frees under pressure. Unreclaimable slab stays counted, because SysV
+   semaphores and message queues are charged as kernel memory (S-18). The read is
    repeated for the rest of the 3 s the runner allows after a job, because
    the memory the sweep freed takes a moment to leave the group's counters
    (ADR-0064).
@@ -492,7 +496,8 @@ with `busy`. The runner:
    gets a fresh one under the same id. 32 MiB is a design value; the one
    spike result on it is §7 S-21 (a 2 GiB SysV fill drained below it inside
    1 s; 420 000 empty files in `/work` kept it above, seen before the poll
-   existed). Files in `/work` stay (below).
+   existed and before reclaimable slab was left out, which may make that
+   case clean now). Files in `/work` stay (below).
 
    After a job ends, the kill, the sweep and the thread joins of the runner
    share one budget of 3 s, so the answer comes with 2 s to spare inside the
@@ -1474,7 +1479,7 @@ task, function or log group of the runs was left.
 
 | Check | Result |
 |---|---|
-| `agentcore` job group after a sweep | 1000 SysV semaphore arrays (2 GiB) are swept and the group drains below 32 MiB inside the 1 s poll: no `dirty`; the 2 GiB case ran once, and five SysV jobs from 20 MiB to a fill-to-kill kept the session. 420 000 empty files in `/work` kept the group above 32 MiB (slab memory charged to it; seen before the poll existed, not run again with it), so the runner marked itself `dirty` and the next start gets a fresh session, which is the §3.5 rule |
+| `agentcore` job group after a sweep | 1000 SysV semaphore arrays (2 GiB) are swept and the group drains below 32 MiB inside the 1 s poll: no `dirty`; the 2 GiB case ran once, and five SysV jobs from 20 MiB to a fill-to-kill kept the session. 420 000 empty files in `/work` kept the group above 32 MiB (slab memory charged to it; seen before the poll existed and before reclaimable slab was left out of the read, not run again since), so the runner marked itself `dirty` and the next start gets a fresh session, which is the §3.5 rule |
 | `agentcore` stop line | for sessions the platform already ended at its idle timeout, the drain's stop lines carry `sandboxSeconds` of 560 to 900 s: the session's end is not known, so the line counts to the drain (§3.8). No AgentCore usage-log record arrived in 90 minutes of calls and stops, only the delivery's validation stream |
 | Stack delete with live sandboxes | `nitro` 27 min (the drain 80 s; the VPC-attached `RunCodeDrain` function 21 min, its network interfaces release late); `microvm` 23 min (cause not isolated); `agentcore`, two stacks, 31.7 min (the VPC-attached Reaper and Drain functions 19.5 min each). A delete of stacks that never ran a sandbox took 15 s |
 

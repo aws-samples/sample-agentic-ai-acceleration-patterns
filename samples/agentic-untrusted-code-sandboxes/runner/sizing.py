@@ -103,3 +103,13 @@ def counted(current_text: str, stat_text: str) -> int:
     """memory.current less file plus shmem: page cache of /work files does not count, memfd and tmpfs do."""
     stat = flat_keyed(stat_text)
     return int(current_text.strip()) - stat.get("file", 0) + stat.get("shmem", 0)
+
+
+def dirty_counted(current_text: str, stat_text: str) -> int:
+    """The agentcore dirty read (spec 3.5 step 3): counted() less reclaimable slab.
+
+    A disk fill leaves about 215 MiB of slab charged to the job group (seen in the integration test); its reclaimable
+    part (dentries and inodes) the kernel frees under pressure. Unreclaimable slab stays counted: SysV semaphores and message queues are charged as kernel
+    memory (S-18), and they are what the rule exists for.
+    """
+    return counted(current_text, stat_text) - flat_keyed(stat_text).get("slab_reclaimable", 0)

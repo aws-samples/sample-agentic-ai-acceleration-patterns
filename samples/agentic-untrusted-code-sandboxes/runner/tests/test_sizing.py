@@ -60,6 +60,12 @@ class CgroupTest(unittest.TestCase):
         self.assertEqual(sz.counted("900000000\n", stat), 900000000 - 870000000 + 5000)
         self.assertEqual(sz.flat_keyed("low 0\nhigh 0\nmax 3\noom 1\noom_kill 2\n")["oom_kill"], 2)
 
+    def test_dirty_counted_drops_reclaimable_slab_only(self):
+        stat = "anon 100\nfile 870000000\nshmem 5000\nslab_reclaimable 2000\nslab_unreclaimable 3000\n"
+        self.assertEqual(sz.dirty_counted("900000000\n", stat), sz.counted("900000000\n", stat) - 2000)
+        # without the key (an older kernel) it is the plain counted read
+        self.assertEqual(sz.dirty_counted("900000000\n", "file 0\n"), 900000000)
+
 
 if __name__ == "__main__":
     unittest.main()
