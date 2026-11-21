@@ -330,7 +330,9 @@ is refused, so `small` keeps one cell and one `agentIngress`. Steps 2
 to 6 alternate between two slices' verbs, which the runner's
 `deploy`-then-`seed` order (item 3 of the list in this section) does
 not express; the first platform run (W-9) adds the order to the runner
-and the slices' `needs`. Teardown interleaves the same verbs in the
+and the slices' `needs`.
+
+Teardown interleaves the same verbs in the
 front door's order (front-door spec §6.2), not the runner's reverse
 order: the `control-plane` slice deletes the deployments and cells while
 the registrar and the hooks are still in place; then
@@ -338,8 +340,10 @@ the registrar and the hooks are still in place; then
 `globalHookManagedPolicyArns` and the control plane is updated; then
 `RouteHookAccess` is destroyed and its retained parameter deleted; then
 the front door, the control plane and the stress identity are destroyed
-in that order. W-9 adds this order to the runner too. Phase two takes the origin's domain and its
-path, the ingress stage, from the ingress's published parameter,
+in that order. W-9 adds this order to the runner too.
+
+Phase two takes the origin's domain and its path, the ingress stage,
+from the ingress's published parameter,
 `/application-plane/shared/agent-runtime/StressCell-<cellId>/ingress`
 (`baseUrl`, front-door spec §6.3), where `<cellId>` is the warm-up
 tenant's cell, read from the control plane. The `tenant-front-door`
@@ -491,7 +495,7 @@ Each slice's `budget` fills its column; the runner sums per account.
 
 | Quota (per account) | `control-plane` | `tenant-identity` | `tenant-front-door` | `agentic-runtime-isolation` (per cell) |
 |---|---|---|---|---|
-| Lambda concurrency | API and workflow, and in `platform` mode each cell's cell API origin | platform and token functions | registrar | ingress, authoriser, tools |
+| Lambda concurrency | API and workflow; in `platform` mode, in each cell account, the cell's cell API origin | platform and token functions | registrar | ingress, authoriser, tools |
 | CodeBuild concurrent builds | `buildLimit` x the projects the run builds in (cell and tenant, plus the global hook project in `platform` mode); the control plane creates four, §3.6 | - | - | - |
 | STS `AssumeRole` | role pair per build | - | - | TVM |
 | KMS `Sign` | - | - | - | mint, tool contexts |
@@ -648,13 +652,13 @@ Q-5.
 | W-2 driver and k6 library moved to `stress/` | W-1 schema | done in `stress/driver/` and `stress/k6/` |
 | W-3 runtime-isolation slice on the contract | W-1, W-2 | done in `samples/agentic-runtime-isolation/scripts/stress/` |
 | W-4 control-plane build-limit prop | decision 2 | done: control-plane ADR-0046 |
-| W-5 control-plane slice and the stress application, with the stress cell's cell API origin, its `frontDoorApiDomain` output and the distribution ARN cell parameter (§3.3 step 2, §3.5) | W-1, W-4, W-10; W-11 for Q-1 and the account check | the slice in `samples/control-plane/scripts/stress/`, the stress application and the role pair in `stress/application/` are done (stress ADR-0012 to ADR-0015) and Q-1 is answered; the cell API origin, its output and the cell parameter are to build, now, with these changes around them: the source zip carries `samples/tenant-front-door/src/demo-cell/` and `samples/tenant-front-door/src/shared/`, and the origin bundles with runtime-isolation's dependency versions, which differ from the front door's (`jose` 5 against 6), so the demo cell's unit tests (`samples/tenant-front-door/test`) run against runtime-isolation's versions before the cell script ships it; the tenant scripts (`stress/application/scripts/tenant/{create,delete}.sh`) and the slice's read-back (`samples/control-plane/test/stress/fleet.ts`, with its test) use the parameter name of §3.3 step 3; the slice's `budget` counts the global hook project in `platform` mode (`BUILD_PROJECTS` in `samples/control-plane/test/stress/plan.ts`, 2 now); the slice's setup stack (`samples/control-plane/test/stress/stress-app.ts`) gains the registrar client, `vendorIdp.clientIds`, `readerRoles`, the client's secret in Secrets Manager and the `globalHookManagedPolicyArns` update that steps 1 and 3 of §3.5 need, and its vendor IdP moves from the V1 pre-token trigger, which puts the operator role on every ID token, to a V3 trigger on the Essentials plan that sets the role per client, the reader role for the registrar client only, with a user-pool domain, a resource server and scope for that client, and `vendorIdp.requiredScope` (control-plane R-38); and the comment in `stress/application/scripts/tenant/create.sh` stops saying the script writes the front-door route |
+| W-5 control-plane slice and the stress application, with the stress cell's cell API origin, its `frontDoorApiDomain` output and the distribution ARN cell parameter (§3.3 step 2, §3.5) | W-1, W-4, W-10; W-11 for Q-1 and the account check | the slice in `samples/control-plane/scripts/stress/`, the stress application and the role pair in `stress/application/` are done (stress ADR-0012 to ADR-0015) and Q-1 is answered; the cell API origin, its output and the cell parameter are to build, now, with these changes around them: the source zip carries `samples/tenant-front-door/src/demo-cell/` and `samples/tenant-front-door/src/shared/`, and the origin bundles with runtime-isolation's dependency versions, which differ from the front door's (`jose` 5 against 6), so the demo cell's unit tests (`samples/tenant-front-door/test`) run against runtime-isolation's versions before the cell script ships it; the tenant scripts (`stress/application/scripts/tenant/{create,delete}.sh`) and the slice's read-back (`samples/control-plane/test/stress/fleet.ts`, with its test) use the parameter name of §3.3 step 3; the slice's `budget` counts the global hook project in `platform` mode (`BUILD_PROJECTS` in `samples/control-plane/test/stress/plan.ts`, 2 now) and books the cell API origin's Lambda concurrency to the cell accounts; the slice's setup stack (`samples/control-plane/test/stress/stress-app.ts`) gains the registrar client, `vendorIdp.clientIds`, `readerRoles`, the client's secret in Secrets Manager and the `globalHookManagedPolicyArns` update that steps 1 and 3 of §3.5 need, and its vendor IdP moves from the V1 pre-token trigger, which puts the operator role on every ID token, to a V3 trigger on the Essentials plan that sets the role per client, the reader role for the registrar client only, with a user-pool domain, a resource server and scope for that client, and `vendorIdp.requiredScope` (control-plane R-38); and the comment in `stress/application/scripts/tenant/create.sh` stops saying the script writes the front-door route |
 | W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, workload boundary, `/cell/` path aspect and the cell bootstrap, in `stress/application/` | decision 7; the deny probes ran in the path spike (`stress/spikes/cell-path/`); the second boundary is ADR-0011 | done: the prop in control-plane ADR-0047, the rest in `stress/application/` |
 | W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair, and a read-only role in the account base that allows `ssm:GetParameter` on the ingress parameter only, for front-door phase two (§3.5) | §3.7; W-10's policies and prop for the bootstrap and the role pair | the owner stacks, `CDKToolkit-cell` and the role pair are done in both cell accounts (`stress/application/deploy-role-pair.sh`, W-5) and the account check passes on both; the ingress reader role is to build, now (`stress/application/`) |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | done in `samples/tenant-identity/scripts/stress/` |
 | W-7 front-door slice | the front door merged (done); its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | yes; phase two after W-11's ingress reader role |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part done; front-door part yes, now |
-| W-9 first platform run at `small` | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | no |
+| W-9 first platform run at `small` | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up and teardown order in the runner (§3.5) | no |
 
 ## 10. Open questions
 
