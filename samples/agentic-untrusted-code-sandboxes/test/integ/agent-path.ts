@@ -110,7 +110,8 @@ export async function agentPath(c: Ctx): Promise<void> {
     });
     const text = await res.text();
     const events = text.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6));
-    c.rec.check(`the agent answers (HTTP ${res.status}${res.status === 200 ? '' : `: ${text.replace(/\s+/g, ' ').slice(0, 200)}`})`, res.status === 200 && events.length > 0);
+    const answered = res.status === 200 && events.length > 0;
+    c.rec.check(`the agent answers (HTTP ${res.status}${answered ? '' : `: ${text.replace(/\s+/g, ' ').slice(0, 200)}`})`, answered);
     let toolText: string | undefined;
     for (const e of events) {
       try {

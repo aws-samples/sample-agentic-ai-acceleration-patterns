@@ -159,15 +159,17 @@ export async function runnerGroups(c: Ctx, instance: Instance, backend: Backend)
 }
 
 /**
- * Log lines from the groups since `sinceMs`, for a failed check's evidence. Read while the stack (and so the
- * groups) still exists, because the teardown deletes them. A read that fails gives the error instead.
+ * The newest log lines from the groups since `sinceMs`, oldest first, for a failed check's evidence. Read while the
+ * stack (and so the groups) still exists, because the teardown deletes them. `groups` is looked up inside, so a
+ * lookup or read that fails gives the error as the evidence and never ends the unit.
  */
-export async function logEvidence(c: Ctx, groups: readonly string[], sinceMs: number, filter = ''): Promise<string[]> {
-  if (groups.length === 0) return [];
+export async function logEvidence(c: Ctx, groups: () => Promise<readonly string[]>, sinceMs: number, filter = ''): Promise<string[]> {
   try {
-    const q = `fields @timestamp, @message${filter ? ` | filter ${filter}` : ''} | sort @timestamp asc | limit 1000`;
-    const rows = await insights(c, [...groups], q, sinceMs, 1, 60_000);
-    return evidenceLines(rows.map((r) => `${r['@timestamp'] ?? ''} ${r['@message'] ?? ''}`));
+    const names = await groups();
+    if (names.length === 0) return [];
+    const q = `fields @timestamp, @message${filter ? ` | filter ${filter}` : ''} | sort @timestamp desc | limit ${EVIDENCE_LINES}`;
+    const rows = await insights(c, [...names], q, sinceMs, 1, 60_000);
+    return evidenceLines(rows.reverse().map((r) => `${r['@timestamp'] ?? ''} ${r['@message'] ?? ''}`));
   } catch (e) {
     return [`log read failed: ${(e as Error).name}`];
   }

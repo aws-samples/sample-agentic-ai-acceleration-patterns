@@ -291,7 +291,8 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
   if (end?.bootId !== bootId0) {
     // Why the runner restarted (a dirty job group, a sweep past the post-job budget, a platform stop), read now:
     // the teardown deletes the runtime's groups.
-    const lines = await logEvidence(c, await runnerGroups(c, 'run-code', backend), since, '@message not like /"event":"run"/');
+    // The runner's plain-text lines other than the per-job ones, so the restart cause is not pushed out.
+    const lines = await logEvidence(c, () => runnerGroups(c, 'run-code', backend), since, '@message not like /job_done/');
     c.rec.note(`runner lines: ${lines.join(' | ') || 'none'}`);
   }
   const fin = await c.probe('run-code', A, backend, 'parse', {}, { input: 'invoice.csv' });

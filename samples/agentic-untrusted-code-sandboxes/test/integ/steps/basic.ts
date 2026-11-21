@@ -125,8 +125,8 @@ export async function race(c: Ctx, u: Unit): Promise<void> {
   c.rec.check(`both concurrent first calls for C returned a result on ${backend} (${shown(x.outcome)}, ${shown(y.outcome)})`, bothServed);
   if (!bothServed) {
     // The tool's lines for C and the runner's lines, read now: the teardown deletes the groups.
-    const tool = await logEvidence(c, [await logGroupOf(c, c.output('run-code', 'ToolFunction'))], since, `tenantId = "${C}"`);
-    const runner = await logEvidence(c, await runnerGroups(c, 'run-code', backend), since);
+    const tool = await logEvidence(c, async () => [await logGroupOf(c, c.output('run-code', 'ToolFunction'))], since, `tenantId = "${C}"`);
+    const runner = await logEvidence(c, () => runnerGroups(c, 'run-code', backend), since);
     c.rec.note(`tool lines for C: ${tool.join(' | ') || 'none'}`);
     c.rec.note(`runner lines: ${runner.join(' | ') || 'none'}`);
   }

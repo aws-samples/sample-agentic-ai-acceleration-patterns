@@ -183,9 +183,8 @@ describe('the consumer path and the evidence', () => {
     };
     expect(await ensureScope(send({ GET: 404, PUT: 200 }), api, 'r1')).toEqual({ registered: true, status: 200 });
     expect(calls).toEqual([`GET ${api}platform/scopes/app%2Fuse`, `PUT ${api}platform/scopes/app%2Fuse`]);
-    calls.length = 0;
     expect(await ensureScope(send({ GET: 200 }), api, 'r1')).toEqual({ status: 200 });
-    expect(calls).toEqual([`GET ${api}platform/scopes/app%2Fuse`]);
+    expect(calls.slice(2)).toEqual([`GET ${api}platform/scopes/app%2Fuse`]);
     expect(await ensureScope(send({ GET: 404, PUT: 500 }), api, 'r1')).toEqual({ registered: false, status: 500 });
     // never a delete: the shared pool keeps the scope
     expect(calls.some((x) => x.startsWith('DELETE'))).toBe(false);

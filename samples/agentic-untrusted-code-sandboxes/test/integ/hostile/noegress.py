@@ -22,9 +22,9 @@ def probe(name, fn):
 
 
 def workers():
-    # Each probe runs in a worker and starts at most one helper thread at a time (_bounded in _lib.py). RLIMIT_NPROC
-    # counts every thread of the job (9 on microvm at the default size, 64 elsewhere), so the pool keeps the main
-    # thread, the workers and their helpers under it, with one slot spare for a helper still ending.
+    # RLIMIT_NPROC counts every thread of the job (9 on microvm at the default size, 64 elsewhere). A probe starts at
+    # most one helper thread at a time (_bounded in _lib.py) and leaves at most one behind when it gives up, and four
+    # probes use helpers, so main + (soft - 2) // 2 workers + four helpers stays under the limit.
     soft = resource.getrlimit(resource.RLIMIT_NPROC)[0]
     return len(PROBES) if soft == resource.RLIM_INFINITY else max(1, min(len(PROBES), (soft - 2) // 2))
 

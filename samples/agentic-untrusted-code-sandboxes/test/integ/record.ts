@@ -20,7 +20,7 @@ export type Result = 'PASS' | 'FAIL' | 'SKIP';
 export interface StepRecord {
   readonly key: string;
   readonly result: Result;
-  /** The failed checks (FAIL), the skip reason (SKIP) or the evidence notes (PASS). */
+  /** The failed checks and the notes (FAIL), the skip reason (SKIP) or the notes (PASS). */
   readonly evidence: string;
   readonly seconds: number;
 }
