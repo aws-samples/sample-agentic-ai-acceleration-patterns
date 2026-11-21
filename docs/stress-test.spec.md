@@ -426,12 +426,13 @@ Region and the stack id, so the same name in another Region or a
 recreated stack does not pass), cells by their service role, the cell
 bootstrap's execution role), a stack whose service role is set and is
 not the cell execution role, a `cdk-hnb659fds-*` role, a role pair on
-`/cell/` or under either cell boundary, a role pair half holding a policy its stack did not give it (a
-managed policy other than its owner policy, `cell-build-policy` or
-`cell-tenant-build-policy` with the owner's suffix, or an inline policy
-other than the stack's default one with the control plane's SSM namespace
-actions on `/application-plane/`), a role pair half whose trust is not the
-stack's (one statement allowing `sts:AssumeRole` to the platform account,
+`/cell/` or under either cell boundary, a role pair half holding a
+policy its stack did not give it (a managed policy other than its owner
+policy, `cell-build-policy` or `cell-tenant-build-policy` with the
+owner's suffix, or an inline policy other than the stack's default one
+with the control plane's SSM namespace actions on
+`/application-plane/`), a role pair half whose trust is not the stack's
+(one statement allowing `sts:AssumeRole` to the platform account,
 conditioned on `aws:PrincipalArn` being the fleet's build role for that
 half or its API role, and nothing else), or a `/cell/` role trusted from
 outside (above). The stack list, `iam:ListRoles`, and for the role pair
