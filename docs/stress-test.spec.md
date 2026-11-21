@@ -59,6 +59,9 @@ runtime-isolation deployment for up to `maxTenants` tenants.
 - The front door's `host` addressing mode and custom domains. The first
   runs use `single`, the default.
 - The `agentcore-gateway` ingress of runtime-isolation.
+- Platform runs at `medium` and `large`: per-cell agent routing is open
+  (Q-7, stress ADR-0016). At `small` the edge check on agent calls reads
+  no route hint (§5.3).
 - Several Regions.
 - Soak runs over days. One platform run is a working day at most.
 
@@ -178,10 +181,11 @@ and the records in
    the token, refuses a hint that is not the token's tenant and a
    tenant its cell's account does not host with 403, and answers with
    the tenant, its cell id and the hint it received on
-   `GET /api/whoami` (front-door spec §3.5, §10 step 4). The script writes the cell API's `frontDoorApiDomain`
-   to its outputs, which the front door's global post hook reads to
-   register the cell route (`PutCellRoute`) with the route registrar
-   (front-door spec §3.2, front-door ADR-0017). The cell API origin,
+   `GET /api/whoami` (front-door spec §3.5, §10 step 4). The script
+   writes the cell API's `frontDoorApiDomain` to its outputs, which the
+   front door's global post hook reads to register the cell route
+   (`PutCellRoute`) with the route registrar (front-door spec §3.2,
+   front-door ADR-0017). The cell API origin,
    the cell parameter and the output exist in the platform run only:
    in `slice` mode there is no front door, the cell parameter has no
    value and the cell script deploys none of them. The ingress publishes
@@ -421,8 +425,8 @@ on the list the account owner gives the check (W-11; an ARN pins the
 Region and the stack id, so the same name in another Region or a
 recreated stack does not pass), cells by their service role, the cell
 bootstrap's execution role), a stack whose service role is set and is
-not the cell execution role, a `cdk-hnb659fds-*` role, a role pair on `/cell/` or under either cell
-boundary, a role pair half holding a policy its stack did not give it (a
+not the cell execution role, a `cdk-hnb659fds-*` role, a role pair on
+`/cell/` or under either cell boundary, a role pair half holding a policy its stack did not give it (a
 managed policy other than its owner policy, `cell-build-policy` or
 `cell-tenant-build-policy` with the owner's suffix, or an inline policy
 other than the stack's default one with the control plane's SSM namespace
