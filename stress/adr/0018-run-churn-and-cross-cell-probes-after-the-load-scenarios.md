@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0018: Run churn and cross-cell probes after the load scenarios
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-21
 - Amends: ADR-0004
 - Deciders: Dave Roberts (PSA)

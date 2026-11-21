@@ -40,7 +40,9 @@ the call only in the same account (tenant-identity
 `design/control-plane-mounting.spec.md` §3.3). The stress application's
 tenant script runs under the role pair's tenant role in a cell account
 (control-plane ADR-0025), which is a different account from the stress
-identity (spec §3.1).
+identity (spec §3.1). The stress identity is also deployed without the
+mount's policy, admin-password key and shared parameters, because it
+runs with `publishSharedParameters` off (tenant-identity ADR-0042).
 
 Four facts fix the options:
 
@@ -85,22 +87,26 @@ plane's `DeleteDeployment` does not reach the identity.
 The tenant script runs the sample's own `create.sh` (or calls
 `CreateTenant` and `CreateUser` itself) before `PutTenantSubscription`.
 
-Pros: it is the sample's own design, with its replay safety and its
-parking of the first admin's password; a deployment is `ACTIVE` only when
-the identity exists; `DeleteDeployment` removes the identity through the
-mount's delete script.
+Pros: it is the sample's own design, with its replay safety and, where
+the identity has the admin-password key, its parking of the first
+admin's password; a deployment is `ACTIVE` only when the identity
+exists; `DeleteDeployment` removes the identity through the mount's
+delete script.
 
 Cons: it cannot work from a cell account as the platform API is set up:
 the resource policy admits the platform account root only. Making it
 work takes a resource-policy change in `tenant-identity` that admits the
-role pair's tenant role in each cell account, and `PlatformInvokePolicy`
-attached in each cell account, which gives every tenant build there a
-way to create and delete tenants in the stress identity. The role pair
-is built to hold the cell's entitlement methods only (control-plane
-ADR-0022, ADR-0025). In the variant where the script calls
-`CreateTenant` itself, a script that fails halfway leaves an identity
-tenant that a retry must find (`CreateTenant` answers 409 for an
-existing id); `create.sh` reads state first and avoids it.
+role pair's tenant role in each cell account, and an equivalent grant in
+each cell account, which gives every tenant build there a way to create
+and delete tenants in the stress identity. The stress identity also
+lacks the mount's policy, admin-password key and shared parameters
+(tenant-identity ADR-0042), so the mount would need a parameter prefix
+and a key alias in `tenant-identity` as well. The role pair is built to
+hold the cell's entitlement methods only (control-plane ADR-0022,
+ADR-0025). In the variant where the script calls `CreateTenant` itself,
+a script that fails halfway leaves an identity tenant that a retry must
+find (`CreateTenant` answers 409 for an existing id); `create.sh` reads
+state first and avoids it.
 
 ### Option 3: A tenant-identity hook
 `tenant-identity` registers a global hook with the control plane that
@@ -142,10 +148,10 @@ that list for control-plane tenants, in place of the lookup in
 (spec §4.2).
 
 ## Consequences
-Easier: the tenant role stays an entitlement-only role, and the identity's
-platform API is called from one place, the session of the run. PS-1 shows
-the cost of a ready tenant including its identity, which a vendor's own
-onboarding would also pay.
+Easier: the tenant role stays an entitlement-only role, and the
+identity's platform API is called from one place, the session of the run.
+PS-1 shows the cost of a ready tenant including its identity, which a
+vendor's own onboarding would also pay.
 
 Harder: each onboarded tenant adds identity calls to the stress
 identity's Cognito quotas. At the shared-pool topology, `CreateTenant`
@@ -192,8 +198,8 @@ In a platform run the `control-plane` slice needs `identity.json`, a
 manifest of the `tenant-identity` slice, and its driver holds two
 credentials: the operator token for the control plane and the AWS
 session for the platform API. In slice mode the driver makes no identity
-call. The runtime-isolation slice reads `identity[]` of
-`control-plane.json` (spec §4.2). Until the driver writes it, the
+call. Once W-9 builds it, the runtime-isolation slice reads `identity[]`
+of `control-plane.json` (spec §4.2). Until the driver writes it, the
 runtime-isolation slice refuses every control-plane tenant and a
 platform run fails with the list.
 

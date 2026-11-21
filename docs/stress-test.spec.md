@@ -205,12 +205,13 @@ and the records in
    slice's read-back use the same name. It does not run tenant-identity's
    own control-plane mount (`scripts/control-plane/tenant/create.sh`),
    because the platform API admits a caller in the identity's own account
-   only and the tenant role runs in a cell account (stress ADR-0017). It
+   only, the tenant role runs in a cell account, and the stress identity
+   has no mount policy or shared parameters (stress ADR-0017). It
    does not call `PutTenantRoute`: the front door's global post hook
    writes the tenant route once the deployment's event has run
    (front-door ADR-0017, front-door spec §3.2).
 4. In a platform run, when the deployment is `ACTIVE`, the driver of the
-   `control-plane` slice creates the tenant's identity with the
+   `control-plane` slice creates the tenant's identity through the
    IAM-signed platform API of the stress identity (stress ADR-0017). It
    calls tenant-identity `CreateTenant` with the control-plane tenant
    id, `scopes` `["app/use"]` and an admin e-mail address, which creates
@@ -218,21 +219,22 @@ and the records in
    carry; the driver puts it in the identity's scope catalogue with
    `PutScope` first, as the runtime-isolation `deploy` does in slice
    mode. Then it calls `CreateUser` for each further user the tier lists
-   (§4.1; users per active tenant count the admin, so only active
-   tenants get further users). It does this for each tenant PS-1
+   (§4.1: users per active tenant count the admin, and a tenant that is
+   not active gets the admin only). It does this for each tenant PS-1
    onboards, for the warm-up tenant (after front-door phase two, §3.5)
-   and for the `large` fleet's seed. At `large`, the churn tenants that
-   PS-1 onboards get identity calls too; the tenants that PS-5 creates
-   get none, because PS-5's own probes need no token (§5.1). The driver
-   then polls through the edge until the first `report` is served. It
-   then makes one `GET /api/whoami` call through the edge to the cell
-   API, whose answer carries the route hint (§5.3). The identity calls
-   and the polling are part of PS-1's time to the first served request
-   (§5.1). The run's first tenant is the warm-up tenant of §3.5: its
-   deployment builds the cell, and `/agents/*` is refused at the edge
-   (404, or CloudFront's own 403 for a `POST`) until front-door phase
-   two, so it is not timed in PS-1. In slice mode there is no front door
-   and no token, and the driver makes no identity call.
+   and for the `large` fleet's seed. PS-5 makes no identity call,
+   because its probes need no token (§5.1); at `large` its tenants are
+   the churn tenants that PS-1 onboarded, whose identity tenants remain
+   until teardown (§4.2). The driver then polls through the edge until
+   the first `report` is served. It then makes one `GET /api/whoami`
+   call through the edge to the cell API, whose answer carries the route
+   hint (§5.3). The identity calls and the polling are part of PS-1's
+   time to the first served request (§5.1). The run's first tenant is
+   the warm-up tenant of §3.5: its deployment builds the cell, and
+   `/agents/*` is refused at the edge (404, or CloudFront's own 403 for
+   a `POST`) until front-door phase two, so it is not timed in PS-1. In
+   slice mode there is no front door and no token, and the driver makes
+   no identity call.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -561,27 +563,29 @@ tenants it drove) and `platform-tenants.json` (tenants it refused or
 ignored, by id and reason: `no-identity-tenant`, `no-user`,
 `not-in-control-plane`) in its own folder. It drives, in platform mode,
 every tenant in `control-plane.json` `seeded` that has an admin user in
-the `identity[]` of the same file, and builds that set when each
-scenario starts, because the control plane onboards its tenants in PS-1,
-after every `seed`. It stops when fewer than two tenants are usable. The
-identity tenants the control-plane driver creates (§3.3 step 4) are not
-in `tenant-identity.json`, which only that slice's `seed` writes; the
-driver records them in `identity[]` (stress ADR-0017, W-9), and a
-control-plane tenant with no entry is refused (`no-identity-tenant`).
-The identity tenants outlive the deployments they were made for: the
-control plane's `DeleteDeployment` does not remove them, and the
-`tenant-identity` `teardown` removes only the tenants it seeded. So
-the `control-plane` `teardown` deletes the identity tenants of every
-deployment of the run that has one, and removes their `identity[]`
-entries. Those are the seeded tenants of `small` and `medium` and, at
-`large`, the churn tenants that PS-1 onboards and removes. The reverse
-order of §3.4 runs this before `tenant-identity`'s teardown. The
-`large` fleet is a fixture (P-5), and its identity tenants stay with it.
-With `--fixtures`, the `tenant-identity` `teardown` destroys the stress
-identity's stack, which removes every identity tenant, so the
-`control-plane` `teardown` makes no per-tenant call then. `DeleteTenant`
-scans the whole pool in `shared-pool` (tenant-identity README), so the
-time of the per-tenant deletes is a result.
+the `identity[]` of the same file (W-9 builds that read; the slice
+matches against `tenant-identity.json` until then), and builds that set
+when each scenario starts, because the control plane onboards its
+tenants in PS-1, after every `seed`. It stops when fewer than two
+tenants are usable. The identity tenants the control-plane driver
+creates (§3.3 step 4) are not in `tenant-identity.json`, which only that
+slice's `seed` writes; the driver records them in `identity[]` (stress
+ADR-0017, W-9), and a control-plane tenant with no entry is refused
+(`no-identity-tenant`). The identity tenants outlive the deployments
+they were made for: the control plane's `DeleteDeployment` does not
+remove them, and the `tenant-identity` `teardown` removes only the
+tenants it seeded. So the `control-plane` `teardown` deletes the
+identity tenants of every deployment of the run that has one, and
+removes their `identity[]` entries. Those are the seeded tenants of
+`small` and `medium` and, at `large`, the churn tenants that PS-1
+onboards and removes. The reverse order of §3.4 runs this before
+`tenant-identity`'s teardown. The `large` fleet is a fixture (P-5), and
+its identity tenants stay with it. With `--fixtures`, the
+`tenant-identity` `teardown` destroys the stress identity's stack, which
+removes every identity tenant, so the `control-plane` `teardown` makes
+no per-tenant call then. `DeleteTenant` scans the whole pool in
+`shared-pool` (tenant-identity README), so the time of the per-tenant
+deletes is a result.
 
 ### 4.3 Result records
 
@@ -690,7 +694,8 @@ only for a cell whose route names the API domain from the cell script's
 script deploys a cell API origin and writes that output (§3.3 step 2,
 W-5). The platform's load is agent calls, so the `/api/*` rows are made
 on the one `/api/*` call per tenant at onboarding (§3.3 step 4) and on
-the PS-7 probes, not under the load of PS-2 to PS-8.
+the PS-7 probes, not under the load scenarios PS-2, PS-3, PS-4, PS-6 and
+PS-8.
 
 ## 6. Observability
 
