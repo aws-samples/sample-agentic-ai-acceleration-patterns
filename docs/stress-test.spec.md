@@ -181,7 +181,10 @@ and the records in
    §10 step 4). The script writes the cell API's `frontDoorApiDomain`
    to its outputs, which the front door's global post hook reads to
    register the cell route (`PutCellRoute`) with the route registrar
-   (front-door spec §3.2, front-door ADR-0017). The ingress publishes
+   (front-door spec §3.2, front-door ADR-0017). The cell API origin,
+   the cell parameter and the output exist in the platform run only:
+   in `slice` mode there is no front door, the cell parameter has no
+   value and the cell script deploys none of them. The ingress publishes
    its own parameter in the cell account, as runtime-isolation does
    (front-door spec §6.3). The cell sets `publishParameters` to false,
    so two cells in one account do not overwrite each other, and the
@@ -517,7 +520,7 @@ ingress (§3.3, stress ADR-0016). Scenarios above `small` wait for Q-7.
 | PS-1 onboarding | the tier's onboarding at `buildLimit`; at `large`, where the fleet is a fixture, PS-1 is timed on PS-5's creates | control plane, CodeBuild, tenant scripts, tenant-identity platform throttle, registrar | deployments per minute; time from `CreateDeployment` to the first served request, which includes the route hook build, for every tenant but the warm-up tenant, which builds the cell before front-door phase two (§3.5); build failures by cause |
 | PS-2 steady through the edge | runtime-isolation S1 shape through CloudFront to the cell's ingress | every hop of the agent path (§3.3) | latency per hop; edge overhead; router compute utilisation |
 | PS-3 herd through the edge | S2 shape: cold ingress instances in the cell, 0 to the peak rate in 5 s | cold starts behind the edge, per-account quotas | refusals by tenant; STS and Lambda throttles by account |
-| PS-4 noisy neighbour | S3 shape: one tenant at 10x its limit | the per-tenant limit behind the edge (`single` mode limits at the origin) | that tenant refused; every other tenant on its cell served |
+| PS-4 noisy neighbour | S3 shape: one tenant at 10x its limit | the per-tenant limit behind the edge: the ingress's own for agent calls | that tenant refused; every other tenant on its cell served |
 | PS-5 churn under load | during PS-2: create, suspend, resume and delete the churn count of tenants | control-plane writes reaching the edge and the cells | time to routable; time to suspended (503 at the edge); time to removed (403 at the edge); no request for a removed tenant at an origin |
 | PS-6 long streams | S5 shape through CloudFront to the ingress, with nothing between the edge and the ingress | streaming through the edge | first byte at the client against first byte at the ingress; broken streams |
 | PS-7 cross-cell probes | during PS-2: a token whose payload names another tenant (in another cell when the tier has more than one), a client route header, a direct `/api/*` call to a cell origin, a direct call to the ingress with a token whose payload names another tenant, and a direct call to the ingress with the tenant's own token | the router, the route hint check, origin access control, the ingress's own token check | every probe but the last refused at the edge, the cell, the origin or the ingress, never served; the last is served, because the ingress is public by design (front-door spec §1.2) |

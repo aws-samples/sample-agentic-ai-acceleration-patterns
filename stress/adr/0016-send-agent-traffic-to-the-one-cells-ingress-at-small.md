@@ -143,7 +143,8 @@ run. A direct call to the ingress with a valid token is served, by
 design (front-door spec §1.2), so PS-7 there refuses a token whose
 payload names another tenant and serves the tenant's own.
 
-The stress cell serves a cell API origin. The front door writes a tenant
+In the platform run, the stress cell serves a cell API origin; in `slice`
+mode there is no front door and no origin. The front door writes a tenant
 route only for a cell that has a cell route, and the cell route needs the
 API domain from the cell script's `frontDoorApiDomain` output; without it
 every deployment's hook fails with 409 (front-door spec §3.2, §3.4). So
