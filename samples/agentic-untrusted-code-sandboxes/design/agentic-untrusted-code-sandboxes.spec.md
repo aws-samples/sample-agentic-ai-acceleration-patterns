@@ -485,7 +485,7 @@ with `busy`. The runner:
    does, so the page cache of files in `/work` does not count). The read is
    repeated for the rest of the 3 s the runner allows after a job, because
    the memory the sweep freed takes a moment to leave the group's counters
-   (a `memfd` fill near L took more than 1 s in the integration test).
+   (ADR-0064).
    If it is still not below 32 MiB, the runner starts no further job and refuses every
    later one with `dirty`, which the tool treats as a dead handle
    (§4.1 step 3), so the takeover stops the session and the next start

@@ -19,7 +19,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from runner import sizing as sz
 from runner.seccomp import Filter
@@ -33,7 +33,7 @@ SWEEP_DEADLINE_S = 5.0
 # The tool waits timeoutMs + 5 s, so the answer comes with 2 s to spare.
 POST_JOB_DEADLINE_S = 3.0
 # Of that budget, how long the agentcore job group may take to show the memory the sweep freed (spec 3.5 step 3):
-# all that is left of it. A memfd fill near L took more than 1 s to drain in the integration test.
+# all that is left of it, so slowly freed memory is not called a leftover (ADR-0064).
 DIRTY_POLL_S = POST_JOB_DEADLINE_S
 READ_CHUNK = 65536
 CPU_LIMIT_SLACK_MS = 100
@@ -505,6 +505,19 @@ class Executor:
             log("sysv_sweep_failed")
             return -1
 
+    def group_memory(self) -> Dict[str, int]:
+        """The job group's memory in MiB, for the `dirty` log line: memory.current, the counted value and the memory.stat
+        keys that make it up. Sizes only, never content."""
+        g = self.job_group
+        current_text = read_text(os.path.join(g, "memory.current"))
+        stat_text = read_text(os.path.join(g, "memory.stat"))
+        stat = sz.flat_keyed(stat_text)
+        out = {"current_mib": int(current_text.strip()) // sz.MIB, "counted_mib": sz.counted(current_text, stat_text) // sz.MIB}
+        for key in ("anon", "file", "shmem", "kernel", "slab", "sock", "file_dirty", "file_writeback"):
+            if key in stat:
+                out[key + "_mib"] = stat[key] // sz.MIB
+        return out
+
     def dirty(self) -> bool:
         """agentcore: the job group still holds 32 MiB or more after the sweep (spec §3.5 step 3)."""
         if self.backend != "agentcore" or not self.job_group:
@@ -529,6 +542,10 @@ class Executor:
                 log("dirty_check_failed", error=type(e).__name__)
                 return True
             if time.monotonic() >= limit:
+                try:
+                    log("dirty_group", **self.group_memory())
+                except (OSError, ValueError) as e:
+                    log("dirty_group_unreadable", error=type(e).__name__)
                 return True
             time.sleep(min(0.05, max(0.0, limit - time.monotonic())))
 

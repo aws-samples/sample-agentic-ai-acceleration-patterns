@@ -191,6 +191,12 @@ class SettledDirtyTest(unittest.TestCase):
         timer.start()
         self.addCleanup(timer.cancel)
 
+    def test_a_dirty_group_logs_its_memory_split(self):
+        write(os.path.join(self.dir.name, "memory.stat"), "anon 41943040\nfile 10485760\nshmem 2097152\nkernel 5242880\nslab 3145728\n")
+        with mock.patch.object(jb, "DIRTY_POLL_S", 0.1), mock.patch.object(jb, "log") as log:
+            self.assertTrue(self.ex.settled_dirty(time.monotonic() + 3))
+        log.assert_any_call("dirty_group", current_mib=100, counted_mib=92, anon_mib=40, file_mib=10, shmem_mib=2, kernel_mib=5, slab_mib=3)
+
     def test_a_group_that_drains_after_a_delay_is_clean(self):
         self.assertTrue(self.ex.dirty())  # one read right after the sweep says dirty
         self.drain_after(0.3)
@@ -200,7 +206,7 @@ class SettledDirtyTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.0)
 
     def test_a_drain_slower_than_one_second_is_still_clean(self):
-        # The integration test's memfd fill near L: the group showed the freed memory for more than 1 s.
+        # A group whose freed memory shows for more than 1 s is still clean within the budget.
         self.drain_after(1.3)
         started = time.monotonic()
         self.assertFalse(self.ex.settled_dirty(time.monotonic() + 3))
