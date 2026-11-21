@@ -549,7 +549,7 @@ step_18() {
   st="$(edge GET "$ha" "/signin-state?nonce=bad" '' -H 'Sec-Fetch-Site: same-origin')"; check "malformed nonce 400" 400 "$st"
   st="$(edge GET "$login" "/callback?code=integcode&state=${state}")"; loc="$(header location)"
   check "the sign-in host sends the code to a's /callback" "302:yes" "${st}:$(yes_no grep -qE "^https://${ha}/callback\?state=[^&]+&code=integcode$" <<<"$loc")"
-  skip "a real sign-in through the issuer and the SPA's exchange: needs a browser and the issuer's callback URLs (spec §10, run by hand)"
+  skip "a real sign-in through the issuer, the issuer's sign-in form after /logout and the SPA's exchange: needs a browser and the issuer's callback URLs (spec §10, run by hand)"
   st="$(edge GET "$login" "/callback?code=integcode")"; check "no state 400" 400 "$st"
   st="$(edge GET "$login" "/callback?code=integcode&state=${state}x")"; check "changed state 400" 400 "$st"
   st="$(edge GET "$login" "/callback?code=integcode&state=$(edge_tool state "$KVS" "nobody-${RUN_ID}.${APP_DOMAIN}")")"; check "unregistered host's state 400" 400 "$st"

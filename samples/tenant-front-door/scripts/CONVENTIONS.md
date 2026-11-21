@@ -45,8 +45,11 @@ those ever reach output.
   on every exit.
 - `integ.sh` also keeps `.integ/<run id>/` (gitignored): its CDK
   assemblies, logs, deploy and destroy times, the CDK context and the
-  run's ids, so a teardown after an interruption can finish. Nothing
-  there holds a token, a password or a key.
+  run's ids, so a teardown after an interruption can finish. The directory
+  is mode 0700. Nothing there holds a token, a password or a key. The one
+  exception is the run's random external id for the test's role pair: it
+  is on the `cdk deploy` command line and in the cell-account CDK assembly,
+  and it is valid only for that run's test accounts.
 - A password or a body that holds a token reaches the AWS CLI in a 0600
   `--cli-input-json` or `fileb://` file, never as an argument.
 

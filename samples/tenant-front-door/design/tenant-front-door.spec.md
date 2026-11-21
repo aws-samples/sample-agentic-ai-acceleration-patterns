@@ -2434,8 +2434,8 @@ criteria and measurements are in [spikes.md](./spikes.md).
 
 `scripts/integ.sh` drives the test (ADR-0028). It deploys the stacks of
 two CDK apps, `test/integ.single.ts` for the default mode and
-`test/integ.host.ts`, which repeats the steps marked (host) with
-`addressing: 'host'`, one stack per CDK call so each stack's deploy and
+`test/integ.host.ts`, which runs steps 1 to 4, 11, 15, 17, 18, 23 and 24 with
+`addressing: 'host'` (steps 17 and 18, marked (host), run only there), one stack per CDK call so each stack's deploy and
 destroy time is reported. It runs the steps below, and runs step 24's
 ordered teardown from an `EXIT` trap, so a run that fails or stops still
 removes what it made. `npx projen integ` and `npx projen integ:host`
@@ -2484,12 +2484,17 @@ that zone only, for TXT records at `_tfd-challenge.<dd>` only, to write
 step 14's records, and `route53:GetChange` to wait for each change.
 
 Every name the run creates carries its run id (`TFD_INTEG_RUN_ID`,
-`[a-z0-9]{1,10}`, a new one per run by default): its stacks are
+`[a-z0-9]{1,10}` and none of `aws`, `amazon` or `cognito`, a new one per
+run by default): its stacks are
 `TfdInteg-<run id>-*`, its fleet is `tfdi-<run id>` and its applications
 are `tfd-<run id>` and `plain-<run id>`, so a run never meets another run
 or the smoke stacks. Its logs, its CDK assemblies and its state are in
 `.integ/<run id>/`. The state holds the ids a teardown after an
-interruption needs, and never a secret.
+interruption needs, and never a token, a password or a key. The directory is
+mode 0700. The run's random external id for the test's role pair is the one
+value of that kind outside the state file: it is on the cell-account `cdk
+deploy` command line and in that CDK assembly, and it is valid only for the
+run's test accounts.
 
 Test-only shortcuts, all by the test role and none by the sample's own
 code: the step 2 fixture, one `host#` key written straight to the route
@@ -2569,7 +2574,7 @@ which waits its 45 s bound (§4.2) before the operation ends. Step 20
 adds one probe build per event, and step 22 waits through two skipped
 delete hooks, each three builds of at least one 60 s poll with 60 s and
 120 s between them, so at least 6 minutes each. The step 2 fixture and
-the suspensions of steps 13 and 22 are writes the test makes without the
+the suspensions of steps 13, 18 and 22 are writes the test makes without the
 hook, so after each the test waits 90 s for propagation (§4.2) before
 its next call. The rotation check after the list is a separate run with
 its own time. The dedicated-domain checks (steps 3, 11 and 18) use a
@@ -2577,10 +2582,12 @@ fixture `host#` entry and `cloudfront:TestFunction`, so they deploy no
 distribution tenant and no certificate. Step 14 runs the domain
 challenge against the real `TFD_DEDICATED_DOMAIN`: it requests one
 certificate, creates no distribution tenant, and adds five waits of a
-little over 60 s for the TXT record's TTL (one after each TXT change), two daily sweeper runs
-started by hand, each followed by a wait for its page (at most 15 s for
-one entry), two stack updates of the main stack and a wait of up to 15
-minutes for the sweeper to delete the certificate. Step 23 adds the
+little over 60 s for the TXT record's TTL (one after each TXT change), two
+daily sweeper runs started by hand, each followed by a wait for its page (a
+few seconds for one entry, then a fixed 15 s; the check fails after 120 s),
+two stack updates of the main stack and a wait for the sweeper to delete
+the certificate (expected within 15 minutes; the check fails after 20).
+Step 23 adds the
 stand-in's deploy and destroy (67 s and 33 s in S-5), two 90 s waits
 around the suspended-tenant check, and a streamed call of a few seconds.
 The control plane the test deploys has its own deploy and destroy time,

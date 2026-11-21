@@ -60,7 +60,7 @@ can copy, and synthesise under cdk-nag in the build.
 
 ## Consequences
 - `npx projen integ` and `npx projen integ:host` run the driver. The
-  driver saves the run's ids (never a secret) in `.integ/<run id>/`, so
+  driver saves the run's ids (no token, password or key) in `.integ/<run id>/`, so
   `scripts/integ.sh teardown <run id> <mode>` can finish a teardown after
   an interruption.
 - Each teardown part is done, skipped or failed. A part is skipped only

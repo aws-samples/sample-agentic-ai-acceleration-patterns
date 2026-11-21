@@ -20,7 +20,7 @@
 #   TFD_APP_DOMAIN          the appDomain, a name below the hosted zone's apex
 #   TFD_HOSTED_ZONE_ID      the public hosted zone, in the account the credentials point at
 #   TFD_DEDICATED_DOMAIN    step 14's name: in the zone, outside TFD_APP_DOMAIN
-#   TFD_INTEG_RUN_ID        optional, [a-z0-9]{1,10}; default a new one per run
+#   TFD_INTEG_RUN_ID        optional, [a-z0-9]{1,10} without aws, amazon or cognito; default a new one per run
 #   TFD_IDENTITY_REGION     optional, the tenant-identity shared pool's Region; default AWS_REGION
 #   TFD_ISSUER_DOMAIN       optional, a Cognito domain for the front door's issuer input
 #   TFD_INTEG_KEEP=1        optional, skip the teardown (debugging; run `teardown` after)
@@ -106,6 +106,7 @@ ZONE_ID="$TFD_HOSTED_ZONE_ID"
 IDENTITY_REGION="${TFD_IDENTITY_REGION:-$REGION}"
 RUN_DIR="$SAMPLE_DIR/.integ/$RUN_ID"
 mkdir -p "$RUN_DIR/logs"
+chmod 700 "$RUN_DIR"
 TMP="$(mktemp -d)"
 # Removes TMP on an exit before the teardown trap (on_exit, below) replaces it.
 trap 'rm -f "$TMP"/*; rmdir "$TMP"' EXIT
