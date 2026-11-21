@@ -20,7 +20,7 @@ export type Result = 'PASS' | 'FAIL' | 'SKIP';
 export interface StepRecord {
   readonly key: string;
   readonly result: Result;
-  /** The failed checks (FAIL), the skip reason (SKIP) or the evidence notes (PASS). */
+  /** The failed checks and the notes (FAIL), the skip reason (SKIP) or the notes (PASS). */
   readonly evidence: string;
   readonly seconds: number;
 }
@@ -92,7 +92,8 @@ export class Recorder {
     this.steps.push({
       key: c.key,
       result: failed ? 'FAIL' : 'PASS',
-      evidence: failed ? c.failures.join('; ') : c.notes.join('; '),
+      // A failed unit keeps its notes too: they carry the logs and stderr read for the failure.
+      evidence: (failed ? [...c.failures, ...c.notes] : c.notes).join('; '),
       seconds,
     });
   }

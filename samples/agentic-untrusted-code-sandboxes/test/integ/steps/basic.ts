@@ -17,7 +17,7 @@ import { REGISTRY, registryPk, registrySk } from '../../../src/env';
 import { MAX_INPUT_BYTES_CAP } from '../../../src/props';
 import { agentPath } from '../agent-path';
 import { callStandalone, sleep, until } from '../aws';
-import { clusterArn, liveHandles, microvmTerminatedAt, sandboxState, stopOutOfBand, waitEnded } from '../cloud';
+import { clusterArn, liveHandles, logEvidence, logGroupOf, microvmTerminatedAt, runnerGroups, sandboxState, stopOutOfBand, waitEnded } from '../cloud';
 import { type Backend, TENANT } from '../common';
 import { type CallResult, type Ctx } from '../ctx';
 import { INPUT_AT_CAP, INPUT_OVER_CAP, INVOICES, inputAtCap } from '../fixtures';
@@ -116,11 +116,20 @@ export async function race(c: Ctx, u: Unit): Promise<void> {
   const backend = backendOf(u);
   const before = backend === 'agentcore' ? [] : await liveHandles(c, backend);
   const code = 'print("race")';
+  const since = Date.now() - 5_000;
   const [x, y] = await Promise.all([
     c.call('run-code', C, { code, backend }),
     c.call('run-code', C, { code, backend }),
   ]);
-  c.rec.check(`both concurrent first calls for C returned a result on ${backend} (${shown(x.outcome)}, ${shown(y.outcome)})`, x.result?.exitCode === 0 && y.result?.exitCode === 0);
+  const bothServed = x.result?.exitCode === 0 && y.result?.exitCode === 0;
+  c.rec.check(`both concurrent first calls for C returned a result on ${backend} (${shown(x.outcome)}, ${shown(y.outcome)})`, bothServed);
+  if (!bothServed) {
+    // The tool's lines for C and the runner's lines, read now: the teardown deletes the groups.
+    const tool = await logEvidence(c, async () => [await logGroupOf(c, c.output('run-code', 'ToolFunction'))], since, `tenantId = "${C}"`);
+    const runner = await logEvidence(c, () => runnerGroups(c, 'run-code', backend), since);
+    c.rec.note(`tool lines for C: ${tool.join(' | ') || 'none'}`);
+    c.rec.note(`runner lines: ${runner.join(' | ') || 'none'}`);
+  }
   const row = await c.aws.row(c.output('run-code', 'Table'), C, backend);
   c.rec.check('one registry row exists for C', row !== undefined && typeof row.handle === 'string');
   if (backend === 'agentcore') {

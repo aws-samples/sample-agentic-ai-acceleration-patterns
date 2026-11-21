@@ -10,7 +10,7 @@
 import { randomBytes } from 'node:crypto';
 import { AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { sleep } from '../aws';
-import { insights } from '../cloud';
+import { insights, logEvidence, runnerGroups } from '../cloud';
 import { type Backend, TENANT } from '../common';
 import { type Ctx, type CallResult } from '../ctx';
 import { INPUT_AT_CAP, INPUT_OVER_CAP, inputAtCap, sha256Hex } from '../fixtures';
@@ -32,10 +32,11 @@ const blocked = (out: Record<string, unknown>, name: string): boolean => {
   return a.ok === false && (a.err === 'PermissionError' || a.errno === 1);
 };
 
-/** The probe errors (test/integ/hostile/_lib.py) that never count as blocked: a completed connect, and a lookup with no answer. */
+/** The probe errors (test/integ/hostile/_lib.py) that never count as blocked: a completed connect, a lookup with no answer, a thread that did not start. */
 export const CONNECTED = 'ProbeConnected';
 export const LOOKUP_SLOW = 'ProbeLookupSlow';
-const NOT_BLOCKED: ReadonlySet<string> = new Set([CONNECTED, LOOKUP_SLOW]);
+// RuntimeError: a probe thread could not start (the job's process limit), so nothing was tried.
+const NOT_BLOCKED: ReadonlySet<string> = new Set([CONNECTED, LOOKUP_SLOW, 'RuntimeError']);
 
 /** True when a probe got no connection at all: an error, and not one that leaves the path open or unknown. */
 export const noConnection = (o: unknown): boolean => {
@@ -210,6 +211,7 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
   const table = c.output('run-code', 'Table');
   const row0 = await c.aws.row(table, A, backend);
   const bootId0 = row0?.bootId;
+  const since = Date.now() - 5_000;
   const run = async (mode: string, extra: Record<string, unknown> = {}): Promise<Called & { out: Record<string, unknown> }> => {
     const p = await c.probe('run-code', A, backend, 'runaway', { mode, ...extra });
     return { step: mode, r: p.call, out: p.out };
@@ -286,6 +288,13 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
 
   const end = await c.aws.row(table, A, backend);
   c.rec.check(`the runner that answers is the same: the registry bootId did not change (${String(bootId0).slice(0, 8)} then ${String(end?.bootId).slice(0, 8)})`, end?.bootId === bootId0);
+  if (end?.bootId !== bootId0) {
+    // Why the runner restarted (a dirty job group, a sweep past the post-job budget, a platform stop), read now:
+    // the teardown deletes the runtime's groups.
+    // The runner's plain-text lines other than the per-job ones, so the restart cause is not pushed out.
+    const lines = await logEvidence(c, () => runnerGroups(c, 'run-code', backend), since, '@message not like /job_done/');
+    c.rec.note(`runner lines: ${lines.join(' | ') || 'none'}`);
+  }
   const fin = await c.probe('run-code', A, backend, 'parse', {}, { input: 'invoice.csv' });
   c.rec.check(`A's next call works, on the same sandbox (sandbox ${String(fin.call.result?.sandbox)})`, fin.call.result?.exitCode === 0 && fin.call.result?.sandbox === 'reused');
 }
