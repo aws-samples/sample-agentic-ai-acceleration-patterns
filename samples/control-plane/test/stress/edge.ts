@@ -160,7 +160,11 @@ export interface EdgeDeps {
 export function liveEdge(
   inputs: EdgeInputs,
   region: string,
-  deps: EdgeDeps = { load: inputs.operatorRoleArn === undefined ? loadCredentials : assumedCredentials(inputs.operatorRoleArn), put: signedPut, now: Date.now },
+  deps: EdgeDeps = {
+    load: inputs.operatorRoleArn === undefined ? loadCredentials : assumedCredentials(inputs.operatorRoleArn),
+    put: signedPut,
+    now: Date.now,
+  },
 ): Edge {
   let cached: { creds: Credentials; expiresAt: number } | undefined;
   const credentials = async (): Promise<Credentials | undefined> => {
@@ -181,7 +185,11 @@ export function liveEdge(
           signal: AbortSignal.timeout(15_000),
         });
         await res.arrayBuffer();
-        return res.status;
+        // The router answers 403 (no route) and 503 (suspended) itself, as a CloudFront function response; the
+        // ingress's authorizer also answers 403 to a credential it cannot verify, which this probe's is. Only an
+        // answer the router generated tells the tenant's state: any other means the request was passed on.
+        const fromRouter = (res.headers.get('x-cache') ?? '').startsWith('FunctionGeneratedResponse');
+        return fromRouter ? res.status : 401;
       } catch {
         return 0;
       }

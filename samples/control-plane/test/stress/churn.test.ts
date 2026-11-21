@@ -423,6 +423,29 @@ describe('what the edge says about a tenant', () => {
   });
 });
 
+describe('the edge probe', () => {
+  const inputs = { edgeUrl: 'https://stress.example.com', registrarUrl: 'https://abc123.execute-api.us-east-1.amazonaws.com/prod', agentBackend: 'default' };
+  const answer = (status: number, cache: string): Response => new Response('{}', { status, headers: { 'x-cache': cache } });
+
+  it('reads the router\'s own answers, and takes anything else for a request passed on', async () => {
+    const edge = liveEdge(inputs, 'us-east-1', { load: async () => undefined, put: async () => 0, now: Date.now });
+    const spy = jest.spyOn(globalThis, 'fetch');
+    try {
+      spy.mockResolvedValueOnce(answer(403, 'FunctionGeneratedResponse from cloudfront'));
+      expect(await edge.probe('T')).toBe(403);
+      spy.mockResolvedValueOnce(answer(503, 'FunctionGeneratedResponse from cloudfront'));
+      expect(await edge.probe('T')).toBe(503);
+      // The ingress's authorizer refuses the made-up signature with 403: not the router's, so the tenant is routed.
+      spy.mockResolvedValueOnce(answer(403, 'Miss from cloudfront'));
+      expect(await edge.probe('T')).toBe(401);
+      spy.mockRejectedValueOnce(new Error('boom'));
+      expect(await edge.probe('T')).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('slice.json', () => {
   const declaration = parseDeclaration(fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'stress', 'slice.json'), 'utf8'), 'slice.json');
 
