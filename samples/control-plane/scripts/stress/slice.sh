@@ -111,7 +111,7 @@ need_cell_accounts() {
 # The script source: the repository at the commit the run is built from, as one zip. Only
 # what the cell and tenant scripts run: the stress application and the runtime-isolation
 # sample (spec §8, decision 7: the cell deploys from a pinned commit), plus the front door's cell
-# API origin source (`samples/tenant-front-door/src/demo-cell` and what it imports from `src/shared`,
+# API origin source (`samples/tenant-front-door/src/demo-cell`, what it imports from `src/shared` and the lock file the bundler roots at,
 # which the cell app deploys in a platform run), plus the runtime-isolation sample's
 # generated Smithy code, built here from the commit's own model: the build image has no
 # Smithy CLI, and the code is generated output the repository does not commit.
@@ -124,7 +124,7 @@ source_zip() {
     # source_zip runs in a command substitution, where bash does not apply set -e, so each
     # step is chained: a failed archive, build or zip leaves no tree and no partial zip, and
     # the function fails, which fails the caller's assignment.
-    if ! { git -C "$REPO" archive --format=tar "$commit" stress/application stress/tsconfig.json samples/agentic-runtime-isolation samples/tenant-front-door/src/demo-cell samples/tenant-front-door/src/shared | tar -x -C "$tree" &&
+    if ! { git -C "$REPO" archive --format=tar "$commit" stress/application stress/tsconfig.json samples/agentic-runtime-isolation samples/tenant-front-door/package-lock.json samples/tenant-front-door/src/demo-cell samples/tenant-front-door/src/shared | tar -x -C "$tree" &&
       (cd "${tree}/samples/agentic-runtime-isolation" && smithy build > /dev/null) &&
       rm -rf "${tree}/samples/agentic-runtime-isolation/build" &&
       (cd "$tree" && zip -q -r -X "${zip}.tmp" stress samples) &&
