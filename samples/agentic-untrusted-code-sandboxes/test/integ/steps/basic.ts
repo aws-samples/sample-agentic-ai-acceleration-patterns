@@ -19,7 +19,7 @@ import { agentPath } from '../agent-path';
 import { callStandalone, sleep, until } from '../aws';
 import { clusterArn, liveHandles, microvmTerminatedAt, sandboxState, stopOutOfBand, waitEnded } from '../cloud';
 import { type Backend, TENANT } from '../common';
-import { type Ctx } from '../ctx';
+import { type CallResult, type Ctx } from '../ctx';
 import { INPUT_AT_CAP, INPUT_OVER_CAP, INVOICES, inputAtCap } from '../fixtures';
 import { probeCode } from '../hostile';
 import { type Unit } from '../steps';
@@ -107,6 +107,11 @@ export async function apart(c: Ctx, u: Unit): Promise<void> {
   c.rec.check('A and B have separate sandboxes (distinct handles)', rowA?.handle !== undefined && rowB?.handle !== undefined && rowA.handle !== rowB.handle);
 }
 
+/** An outcome for a failed check: its kind, with the error code or the refusal status. */
+function shown(o: CallResult['outcome']): string {
+  return o.kind === 'error' ? `error ${o.code}` : o.kind === 'refused' ? `refused ${o.status}` : o.kind;
+}
+
 export async function race(c: Ctx, u: Unit): Promise<void> {
   const backend = backendOf(u);
   const before = backend === 'agentcore' ? [] : await liveHandles(c, backend);
@@ -115,7 +120,7 @@ export async function race(c: Ctx, u: Unit): Promise<void> {
     c.call('run-code', C, { code, backend }),
     c.call('run-code', C, { code, backend }),
   ]);
-  c.rec.check(`both concurrent first calls for C returned a result on ${backend} (${x.outcome.kind}, ${y.outcome.kind})`, x.result?.exitCode === 0 && y.result?.exitCode === 0);
+  c.rec.check(`both concurrent first calls for C returned a result on ${backend} (${shown(x.outcome)}, ${shown(y.outcome)})`, x.result?.exitCode === 0 && y.result?.exitCode === 0);
   const row = await c.aws.row(c.output('run-code', 'Table'), C, backend);
   c.rec.check('one registry row exists for C', row !== undefined && typeof row.handle === 'string');
   if (backend === 'agentcore') {
