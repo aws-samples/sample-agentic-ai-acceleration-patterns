@@ -118,10 +118,11 @@ script code in the stress test; it would serve any vendor that composes
 the two samples.
 
 Cons: a change to `tenant-identity`, which has no control-plane hook,
-and a hook project in the control plane's account; the hook cannot know
-how many users or which addresses the tier wants, so users still need a
-caller; a further global hook widens the set a platform deploy registers
-and tears down (spec §3.5).
+and a hook script with an access policy on the global hook role in the
+control plane's account; the hook cannot know how many users or which
+addresses the tier wants, so users still need a caller; a further global
+hook widens the set a platform deploy registers and tears down (spec
+§3.5).
 
 ## Decision
 Option 1, for these reasons: the platform API admits the run's own AWS

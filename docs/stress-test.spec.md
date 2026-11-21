@@ -335,7 +335,7 @@ is stopped when it exits.
 
 ### 3.5 Runner
 
-`stress/run.sh run --tier <tier> --slices <a,b,...> [--scenarios <x,y>] [--limits <file>]`:
+`stress/run.sh run --tier <tier> --slices <a,b,...> [--scenarios <x,y>] [--limits <file>] [--remove-fixtures]`:
 
 1. Reads every named `slice.json` and refuses:
    a need that is no slice, and a need left out of `--slices`, when more
@@ -358,8 +358,9 @@ is stopped when it exits.
 4. Writes the run's result file (§4.3). Runner lines and all verb output
    go to `run.log` in the run folder, which only the runner's user can read.
 
-With one slice named, the runner is that sample's stress test. With all of
-them, it is the platform run.
+With one slice named, the runner is that sample's stress test. With all
+of them, it is the platform run. `--remove-fixtures` passes `--fixtures`
+to every `teardown` (§3.4).
 
 In the platform run the front door deploys in two phases, because its
 `agentIngress` input is the first cell's ingress, which exists only
