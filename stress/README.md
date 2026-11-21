@@ -150,10 +150,10 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   files. Nothing on the host locks; give a concurrent run its own prefix and driver.
 - Budget limits are what `--limits` says; without it the runner checks
   against service defaults, not the accounts' applied quotas.
-- Scenarios run one after another, in the order of their numbers, so
-  PS-5 (churn) runs on its own after PS-4 and PS-7 (cross-cell probes)
-  on its own after PS-6, without PS-2's load (spec §1.2, §5.1, stress
-  ADR-0018).
+- Scenarios run one after another, by default in the order of their
+  numbers (spec §3.5), so PS-5 (churn) runs on its own after PS-4 and
+  PS-7 (cross-cell probes) on its own after PS-6, without PS-2's load
+  (spec §1.2, §5.1, stress ADR-0018).
 - The quota catalogue has no ids yet for the API Gateway control plane,
   for CloudFront Functions compute and KeyValueStore size, or for the
   Cognito user-write categories that the control-plane driver's identity

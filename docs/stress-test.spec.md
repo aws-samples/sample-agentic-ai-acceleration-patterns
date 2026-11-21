@@ -219,22 +219,23 @@ and the records in
    carry; the driver puts it in the identity's scope catalogue with
    `PutScope` first, as the runtime-isolation `deploy` does in slice
    mode. Then it calls `CreateUser` for each further user the tier lists
-   (§4.1: users per active tenant count the admin, and a tenant that is
-   not active gets the admin only). It does this for each tenant PS-1
-   onboards, for the warm-up tenant (after front-door phase two, §3.5)
-   and for the `large` fleet's seed. PS-5 makes no identity call,
-   because its probes need no token (§5.1); at `large` its tenants are
-   the churn tenants that PS-1 onboarded, whose identity tenants remain
-   until teardown (§4.2). The driver then polls through the edge until
-   the first `report` is served. It then makes one `GET /api/whoami`
-   call through the edge to the cell API, whose answer carries the route
-   hint (§5.3). The identity calls and the polling are part of PS-1's
-   time to the first served request (§5.1). The run's first tenant is
-   the warm-up tenant of §3.5: its deployment builds the cell, and
-   `/agents/*` is refused at the edge (404, or CloudFront's own 403 for
-   a `POST`) until front-door phase two, so it is not timed in PS-1. In
-   slice mode there is no front door and no token, and the driver makes
-   no identity call.
+   (§4.1). The driver paces the identity calls at about four a second
+   and repeats a throttled call with backoff, with the first-admin rule
+   of stress ADR-0017 for a half-created tenant. It does this for each
+   tenant PS-1 onboards, for the warm-up tenant (after front-door phase
+   two, §3.5) and for the `large` fleet's seed. PS-5 makes no identity
+   call, because its probes need no token (§5.1); at `large` its tenants
+   are the churn tenants that PS-1 onboarded, whose identity tenants
+   remain until teardown (§4.2). The driver then polls through the edge
+   until the first `report` is served. It then makes one `GET
+   /api/whoami` call through the edge to the cell API, whose answer
+   carries the route hint (§5.3). The identity calls and the polling are
+   part of PS-1's time to the first served request (§5.1). The run's
+   first tenant is the warm-up tenant of §3.5: its deployment builds the
+   cell, and `/agents/*` is refused at the edge (404, or CloudFront's
+   own 403 for a `POST`) until front-door phase two, so it is not timed
+   in PS-1. In slice mode there is no front door and no token, and the
+   driver makes no identity call.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -531,10 +532,11 @@ times a tenant build, not a cell build.
 
 Users per active tenant counts the admin that `CreateTenant` creates,
 when the control-plane driver (§3.3 step 4) or the `tenant-identity`
-`seed` creates the users: a tenant has the admin and the tier's count
-minus one further users (tenant-identity ADR-0042). The
-runtime-isolation slice's own `seed`, in slice mode, creates the tier's
-count of users beyond its admin.
+`seed` creates the users: an active tenant has the admin and the tier's
+count minus one further users, and a tenant that is not active has the
+admin only (tenant-identity ADR-0042). The runtime-isolation slice's own
+`seed`, in slice mode, creates the tier's count of users beyond its
+admin.
 
 The `large` row splits the runtime-isolation `large` tier over four cells:
 100 agents in total, the same as the runtime-isolation `large` tier, so
@@ -557,7 +559,7 @@ A platform run uses four manifests:
 | File | Written by | Read by | Holds |
 |---|---|---|---|
 | `tenant-identity.json` | `tenant-identity` `seed` | `agentic-runtime-isolation` | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each user as `{username, email}` |
-| `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation`; `control-plane`, for the identity calls of §3.3 step 4 (W-9); `tenant-front-door`, for the client id of the `issuer` input of §3.5 step 2 (W-7, Q-8) | the value of the SSM parameter `/<prefix>/identity`: `region`, `apiUrl` (the execute-api URL of the platform API), `userPoolId`, `appClientId`; the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>` |
+| `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation`; `control-plane`, for the identity calls of §3.3 step 4 (W-9); `tenant-front-door`, for the client id of the `issuer` input of §3.5 step 2 (W-7, Q-8) | the value of the SSM parameter `/<prefix>/identity`: `stack`, `region`, `apiUrl` (the execute-api URL of the platform API), `apiId`, `userPoolId`, `appClientId`; the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>` |
 | `control-plane.json` | `control-plane` `seed`; its driver adds an `identity[]` entry for each identity it creates (§3.3 step 4) | `agentic-runtime-isolation`; `control-plane` (teardown) | tenant ids in `seeded[]` (the platform's steady set), `churn[]` and `extra[]`; the last two belong to the control-plane scenarios; `identity[]`: for each tenant whose identity the driver created (§3.3 step 4), `tenantId`, `admin` and `users[]` as in `tenant-identity.json` |
 | `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` (W-7) | `agentic-runtime-isolation`; `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
 
@@ -797,7 +799,7 @@ Q-5.
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | done in `samples/tenant-identity/scripts/stress/` |
 | W-7 front-door slice | the front door merged (done); its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | yes; phase two after W-11's ingress reader role |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part done; front-door part yes, now |
-| W-9 first platform run at `small`: also the control-plane driver's identity calls, timed as hops of their own (§6), with the `PutScope` before the first (§3.3 step 4) and the quota ids for the Cognito user-write categories with the slice's `budget` draw on them (§4.4), the record of them and the runtime-isolation slice's read of that record in place of `tenant-identity.json` for control-plane tenants (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), the interleaved set-up order in the runner (§3.5), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11 | no |
+| W-9 first platform run at `small`: also the control-plane driver's identity calls, timed as hops of their own (§6), with the `PutScope` before the first (§3.3 step 4) and the quota ids for the Cognito user-write categories with the slice's `budget` draw on them (§4.4), their pacing and retry rules and the `execute-api:Invoke` grant for the driver's session (stress ADR-0017), the record of the identity tenants and users in `identity[]` of `control-plane.json` and the runtime-isolation slice's read of it in place of `tenant-identity.json` for control-plane tenants (§4.2), the comment in `stress/application/scripts/tenant/create.sh` that says the identity tenant joins that script, the cleanup of those identity tenants in the `control-plane` teardown (§4.2), the interleaved set-up order in the runner (§3.5), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11 | no |
 
 ## 10. Open questions
 
