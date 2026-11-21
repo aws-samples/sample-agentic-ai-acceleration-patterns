@@ -42,6 +42,9 @@ export class Pacer {
   }
 }
 
+/** The scope floor the ingress requires on every token (stress ADR-0017). */
+const SCOPE = 'app/use';
+
 /** The address of a tenant's n-th user (0: the admin), at the SES mailbox simulator, which no mail reaches. */
 export const emailOf = (tenantId: string, n: number): string => `success+${tenantId.toLowerCase()}${n === 0 ? '' : `-u${n}`}@simulator.amazonses.com`;
 
@@ -49,6 +52,7 @@ const jitter = (ms: number): number => Math.min(8000, ms) * (0.5 + Math.random()
 
 export class IdentityApi {
   private readonly base: string;
+  private scope?: Promise<boolean>;
 
   constructor(
     apiUrl: string,
@@ -79,6 +83,22 @@ export class IdentityApi {
     }
     this.observe(hop, result, tenant, expected.includes(result.status));
     return result;
+  }
+
+  /**
+   * Registers the `app/use` scope in the identity's catalogue when it is not there: `CreateTenant` refuses a
+   * scope the catalogue lacks (`invalid_scope`), and a vendor registers it once (a later run reuses it).
+   */
+  private ensureScope(): Promise<boolean> {
+    this.scope ??= (async () => {
+      const path = `platform/scopes/${encodeURIComponent(SCOPE)}`;
+      const got = await this.again(() => this.call('identity-get-scope', 'GET', path, '-', undefined, [404]), (s) => s === 0 || s === 429 || s === 503);
+      if (got.status === 200) return true;
+      if (got.status !== 404) return false;
+      const put = await this.again(() => this.call('identity-put-scope', 'PUT', path, '-', { description: 'platform stress test' }), (s) => s === 0 || s === 429 || s === 503);
+      return put.status === 200;
+    })();
+    return this.scope;
   }
 
   /** A paced write: `CreateTenant` and `CreateUser` count against the same Cognito quota. */
@@ -135,8 +155,9 @@ export class IdentityApi {
    */
   async createTenant(tenantId: string, name: string): Promise<string | undefined> {
     const adminEmail = emailOf(tenantId, 0);
+    if (!(await this.ensureScope())) return undefined;
     for (let attempt = 0; attempt < 12; attempt += 1) {
-      const r = await this.paced('identity-create-tenant', 'POST', 'platform/tenants', tenantId, { tenantId, name, adminEmail, scopes: ['app/use'] }, [409, 503]);
+      const r = await this.paced('identity-create-tenant', 'POST', 'platform/tenants', tenantId, { tenantId, name, adminEmail, scopes: [SCOPE] }, [409, 503]);
       if (r.status === 201) return typeof r.body?.admin?.user?.username === 'string' ? r.body.admin.user.username : undefined;
       if (r.status === 429) {
         await this.backoff(jitter(400 * 2 ** attempt));

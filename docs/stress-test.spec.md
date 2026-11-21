@@ -682,6 +682,9 @@ correlation id.
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios | stress ADR-0007 |
 | 9 | At `small`, the front door's one `agentIngress` is the one cell's ingress; per-cell agent routing for `medium` and `large` is Q-7 | the front door routes only `/api/*` per cell, so agent calls cannot reach a per-cell ingress through the router | stress ADR-0016 |
 | 10 | The driver of the `control-plane` slice creates each onboarded tenant's identity tenant and users, through the IAM-signed admin API of the stress identity; the tenant script keeps only the entitlement call | three components could do it, and the choice sets what PS-1 times and which role may call the identity admin API | stress ADR-0017 |
+| 11 | The runner owns the platform set-up order, and a slice implements the steps of it as `slice.sh step <name>` | the set-up of four slices is a cycle that one `deploy` and one `seed` per slice cannot express | stress ADR-0018 |
+| 12 | The stress cell deploys the front door's cell API origin, and the platform account reads the cell's ingress parameter with a reader role in the account base | the route hook needs a cell route, and phase two needs the ingress URL, which the control plane does not return | stress ADR-0019 |
+| 13 | PS-1 times a tenant to its first served `/api/whoami`, with the warm-up tenant timed apart | the agent path is not open for the first tenant, and a model call per tenant is not the onboarding | stress ADR-0020 |
 
 Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
 the account's CDK bootstrap roles. Each cell account carries one bootstrap,

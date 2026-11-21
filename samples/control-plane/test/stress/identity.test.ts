@@ -8,7 +8,8 @@ const T = '01KAF5M0000000000000000T01';
 type Reply = { status: number; body?: unknown };
 
 /** A fake platform API: replies by "METHOD path" in order, then repeats the last. */
-function fake(replies: Record<string, Reply[]>) {
+function fake(given: Record<string, Reply[]>) {
+  const replies: Record<string, Reply[]> = { 'GET /prod/platform/scopes/app%2Fuse': [{ status: 200 }], ...given };
   const calls: string[] = [];
   const bodies: unknown[] = [];
   const send: Send = async (method, url, body) => {
@@ -31,8 +32,15 @@ describe('the identity calls of the platform run (stress ADR-0017)', () => {
     const f = fake({ 'POST /prod/platform/tenants': [created], [`POST /prod/platform/tenants/${T}/users`]: [{ status: 201, body: { user: { username: 'u-1' } } }] });
     const entry = await f.api.createIdentity(T, 'st-name', 1);
     expect(entry).toEqual({ tenantId: T, admin: { username: 'admin-1', email: emailOf(T, 0) }, users: [{ username: 'u-1', email: emailOf(T, 1) }] });
-    expect(f.bodies[0]).toEqual({ tenantId: T, name: 'st-name', adminEmail: emailOf(T, 0), scopes: ['app/use'] });
+    expect(f.bodies[f.calls.indexOf('POST /prod/platform/tenants')]).toEqual({ tenantId: T, name: 'st-name', adminEmail: emailOf(T, 0), scopes: ['app/use'] });
     expect(emailOf(T, 0)).toMatch(/^success\+01kaf5m0000000000000000t01@simulator\.amazonses\.com$/);
+  });
+
+  it('registers the scope first when the catalogue lacks it', async () => {
+    const f = fake({ 'GET /prod/platform/scopes/app%2Fuse': [{ status: 404 }], 'PUT /prod/platform/scopes/app%2Fuse': [{ status: 200 }], 'POST /prod/platform/tenants': [created] });
+    expect(await f.api.createTenant(T, 'n')).toBe('admin-1');
+    expect(f.calls.slice(0, 3)).toEqual(['GET /prod/platform/scopes/app%2Fuse', 'PUT /prod/platform/scopes/app%2Fuse', 'POST /prod/platform/tenants']);
+    expect(f.calls.filter((c) => c.startsWith('PUT'))).toHaveLength(1);
   });
 
   it('claims the first-admin slot when a throttled create left the tenant without its admin', async () => {

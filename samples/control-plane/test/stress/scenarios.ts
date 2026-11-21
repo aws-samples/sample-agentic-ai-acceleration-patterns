@@ -317,8 +317,10 @@ async function ps1Platform(s: ScenarioEnv, p: PlatformEnv): Promise<void> {
   const warmDeployment = existing.get(warm.tenantId);
   if (warmDeployment?.status !== 'ACTIVE') s.rec.finding(`the warm-up tenant ${warm.tenantId} has no ACTIVE deployment: run the warm-up step first`);
   else await becomeReady(s, p, warm.tenantId, Date.parse(warmDeployment.createdAt), 'warm-up-ready');
-  const tenants = s.manifest.seeded.filter((t) => t !== warm.tenantId && existing.get(t)?.status !== 'ACTIVE');
-  const watcher = startReadiness(s, p, tenants);
+  const others = s.manifest.seeded.filter((t) => t !== warm.tenantId);
+  // A tenant that is ACTIVE already (a rerun) is not placed again but still gets its identity and its first served call.
+  const tenants = others.filter((t) => existing.get(t)?.status !== 'ACTIVE');
+  const watcher = startReadiness(s, p, others);
   let r: Onboarded;
   try {
     r = await onboard(s, tenants, 'onboard');

@@ -90,10 +90,28 @@ around one. When `slice.sh` exits,
 anything it left running in its group gets SIGTERM, then SIGKILL after
 30 seconds.
 
-## Platform mode: manifests
+## Platform mode: set-up order and manifests
 
-A run with several slices sets `STRESS_MODE=platform`. A slice then works on what the others
-made and reads it from manifest files in `$STRESS_HOME/$STRESS_PREFIX/`: ids and names only,
+A run with several slices sets `STRESS_MODE=platform`. The slices' set-up interleaves
+(spec §3.5, stress ADR-0018): the runner calls each slice's `deploy`, `seed` and `step <name>`
+in the order of `src/platform.ts`, and a slice lists the steps it implements under `steps` in
+its `slice.json`. In the order of a full run:
+
+| # | Slice | Action |
+|---|---|---|
+| 1 | `tenant-identity` | `deploy`, `seed` |
+| 2 | `control-plane` | `deploy` (no application yet), `seed` |
+| 3 | `tenant-front-door` | `deploy` (phase one), `seed` |
+| 4 | `control-plane` | `step hooks`, `step register`, `step warm-up` |
+| 5 | `tenant-front-door` | `step phase-two` |
+| 6 | `agentic-runtime-isolation` | `deploy`, `seed` |
+
+Teardown runs in the reverse order of the slices, with the control plane's `step unhook` before the
+front door's `teardown`. A platform run needs `STRESS_HOOK_COMMIT` (spec §3.6, `hookCommit`) and,
+in the cell accounts file, `ingressReaderRoleArn` for each cell account.
+
+A slice works on what the others made and reads it from manifest files in
+`$STRESS_HOME/$STRESS_PREFIX/`: ids and names only,
 never a token, a password or a key, mode 0600 in a 0700 folder. A slice that finds a manifest
 missing or unusable stops with a message that names the file, the slice that writes it and, when the content is wrong, the field.
 
@@ -101,43 +119,42 @@ Who owns which platform scenario (spec §5.1):
 
 | Scenario | Slice | What runs in platform mode |
 |---|---|---|
-| PS-1 | `tenant-identity`, `control-plane` | the onboarding each slice already runs in slice mode |
+| PS-1 | `tenant-identity`, `control-plane` | the onboarding each slice already runs in slice mode; the control-plane slice also creates each tenant's identity tenant and users and polls the edge until `/api/whoami` is served (stress ADR-0017, ADR-0020) |
 | PS-2, PS-3, PS-4, PS-6, PS-8 | `agentic-runtime-isolation` | its S1, S2, S3, S5 and S6 load shapes sent to `<edgeUrl>/agents/<agent>/invocations`; the record carries the `PS-n` id |
 | PS-5 | `control-plane` | the tier's churn count of tenants created, suspended, resumed and deleted, each change timed from its call to the first edge answer that shows it |
-| PS-7 | `tenant-front-door` | not in this folder's slices yet |
+| PS-7 | `tenant-front-door` | probes at the router and at the ingress, with the tenants of `control-plane.json` |
 
 The manifests a platform run reads and writes:
 
 | File | Written by | Read by | Holds |
 |---|---|---|---|
-| `tenant-identity.json` | `tenant-identity` `seed` | `agentic-runtime-isolation` | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each `{username, email}` |
-| `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation` | the value of the SSM parameter `/<prefix>/identity`: `region`, `apiUrl` (execute-api URL of the platform API), `userPoolId`, `appClientId` (the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>`) |
-| `control-plane.json` | `control-plane` `seed` | `agentic-runtime-isolation` | `seeded[]`, `churn[]`, `extra[]`: tenant ids. `seeded` is the platform's steady set; `churn` and `extra` belong to the control-plane scenarios |
-| `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` | `agentic-runtime-isolation`, `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
+| `identity.json` | `tenant-identity` `deploy` | `control-plane`, `tenant-front-door`, `agentic-runtime-isolation` | the value of the SSM parameter `/<prefix>/identity`: `region`, `apiUrl` (execute-api URL of the platform API), `userPoolId`, `appClientId` (the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>`) |
+| `tenant-identity.json` | `tenant-identity` `seed` | the identity slice's own scenarios | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each `{username, email}`; the platform's tenants are not in it |
+| `control-plane-connection.json` | `control-plane` `deploy` | `tenant-front-door` | `region`, `accountId`, `fleet`, `applicationId`, `apiUrl`, `vendorIdp` (`tokenUrl`, `clientId`, `clientSecretArn` of the registrar's reader client) |
+| `control-plane.json` | `control-plane` `seed`; its driver adds `identity[]` and `warmUp` | `agentic-runtime-isolation`, `tenant-front-door` | `seeded[]`, `churn[]`, `extra[]`: tenant ids. `seeded` is the platform's steady set; `churn` and `extra` belong to the control-plane scenarios. `identity[]`: each identity tenant the driver created, `tenantId`, `admin` and `users[]`. `warmUp`: the warm-up tenant, its cell and account, `cellApiDomain`, `ingressReaderRoleArn`, `ingressParameter` |
+| `tenant-front-door.json` | `tenant-front-door` `deploy`, rewritten by `step phase-two` | `agentic-runtime-isolation`, `control-plane` | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage); `agentBackend` (optional, default `default`); `appDomain`, `distributionArn`, `hookPolicyArn`, `operatorRoleArn`, `phase`; after phase two `agentIngressUrl` |
 
-Not written by this change: `tenant-front-door.json` is the front-door slice's to write, and
-the fields above are the contract it must meet. The edge serves agents at
-`/agents/<backend>/invocations` and reads the tenant from the token (front-door spec §3.3).
+The edge serves agents at `/agents/<backend>/invocations` and reads the tenant from the token
+(front-door spec §3.3).
 
 What a slice does in platform mode:
 
 | Slice | `deploy` | `seed` | `run` | `collect` | `teardown` |
 |---|---|---|---|---|---|
 | `tenant-identity` | as in slice mode, then writes `identity.json` | as in slice mode, a probe set of tenants | PS-1 as in slice mode | as in slice mode | as in slice mode; `--fixtures` also removes `identity.json` |
-| `control-plane` | as in slice mode | as in slice mode | PS-1 as in slice mode; PS-5 reads `tenant-front-door.json` and stops with a message when it is missing | as in slice mode | as in slice mode |
-| `agentic-runtime-isolation` | checks the four manifests; deploys the k6 host `<prefix>-driver` only when none is there | checks the four manifests, seeds nothing | picks the tenants (below), runs the load through the edge | takes each refusal's tenant and reason from the driver's own lines | removes its run files, and the k6 host only when its `deploy` made it |
+| `control-plane` | checks the cell accounts, deploys the control plane with the registrar's reader client, writes the connection manifest | as in slice mode | PS-1 with identity and the edge poll; PS-5 reads `tenant-front-door.json` | as in slice mode | as in slice mode, and deletes the identity tenants of the deployments it removes |
+| `tenant-front-door` | phase one: operator role, edge, main, logging, `RouteHookAccess` | nothing | PS-7 | joins the driver's request log with the edge log | `RouteHookAccess`, its parameter and the stacks, after the control plane's `unhook` |
+| `agentic-runtime-isolation` | checks the manifests; deploys the k6 host `<prefix>-driver` only when none is there | checks the manifests, seeds nothing | picks the tenants (below), runs the load through the edge | takes each refusal's tenant and reason from the driver's own lines | removes its run files, and the k6 host only when its `deploy` made it |
 
 `agentic-runtime-isolation` drives, in platform mode, every tenant in `control-plane.json`
-`seeded` that `tenant-identity.json` lists with an admin user, and nothing else. It builds this
-set when each scenario starts, because the control plane onboards its tenants in PS-1, after
-every `seed`. A control-plane tenant with no entry in `tenant-identity.json` is refused with
+`seeded` that has an entry with an admin user in the same file's `identity[]`, and nothing else.
+It builds this set when each scenario starts, because the control plane onboards its tenants in
+PS-1, after every `seed`. A control-plane tenant with no entry in `identity[]` is refused with
 the reason `no-identity-tenant`, one with no admin user name with `no-user`; both are listed by
 tenant id in the scenario's output and in `platform-tenants.json` in the slice's folder of
-`$STRESS_HOME`, together with the identity tenants outside the control plane (`not-in-control-plane`,
+`$STRESS_HOME`, together with the identity tenants that are not in the steady set (`not-in-control-plane`,
 ignored). The scenario stops when fewer than two tenants are usable (the read-other probe needs
-two). Nothing in a platform run creates the identity tenant and the users of a tenant the
-control plane onboarded yet (spec §3.3, steps 3 and 4), so until something does, this slice
-refuses every control-plane tenant and the run fails with the list.
+two).
 
 Every request through the edge that is refused (4xx, 5xx) or whose body shows a refusal gets a
 tenant and a reason in the record's `refusals.byTenantReason`: the tenant is the driver's, the
