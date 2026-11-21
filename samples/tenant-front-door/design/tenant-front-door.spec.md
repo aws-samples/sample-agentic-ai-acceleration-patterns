@@ -2576,8 +2576,8 @@ its own time. The dedicated-domain checks (steps 3, 11 and 18) use a
 fixture `host#` entry and `cloudfront:TestFunction`, so they deploy no
 distribution tenant and no certificate. Step 14 runs the domain
 challenge against the real `TFD_DEDICATED_DOMAIN`: it requests one
-certificate, creates no distribution tenant, and adds three waits of a
-little over 60 s for the TXT record's TTL, two daily sweeper runs
+certificate, creates no distribution tenant, and adds five waits of a
+little over 60 s for the TXT record's TTL (one after each TXT change), two daily sweeper runs
 started by hand, each followed by a wait for its page (at most 15 s for
 one entry), two stack updates of the main stack and a wait of up to 15
 minutes for the sweeper to delete the certificate. Step 23 adds the
