@@ -795,7 +795,7 @@ also carries the ECS Managed Instances' names.
 
 | Priority | Action | Domains |
 |---|---|---|
-| 100 | ALLOW | `amazonaws.com`, `*.amazonaws.com`, `*.on.aws` (MicroVM endpoints), `*.api.aws` (ECS Managed Instances), `time.aws.com`, `*.compute.internal`, plus `allowDomains` |
+| 100 | ALLOW | `amazonaws.com`, `*.amazonaws.com`, `*.on.aws` (MicroVM endpoints), `*.api.aws` (ECS Managed Instances), `time.aws.com`, `*.compute.internal`, `*.ec2.internal` (the private host names in us-east-1), plus `allowDomains` |
 | 200 | BLOCK, `NXDOMAIN` | `*` |
 
 The rule group is associated with the VPC at priority 101, the first free

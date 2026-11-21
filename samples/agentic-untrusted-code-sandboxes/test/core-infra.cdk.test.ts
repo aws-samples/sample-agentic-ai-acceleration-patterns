@@ -706,7 +706,7 @@ describe('DNS Firewall (spec 3.9, ADR-0016)', () => {
       ],
     });
     expect(ALLOW_PRIORITY).toBeLessThan(BLOCK_PRIORITY);
-    for (const d of ['amazonaws.com', '*.amazonaws.com', '*.on.aws', '*.api.aws', 'time.aws.com', '*.compute.internal']) {
+    for (const d of ['amazonaws.com', '*.amazonaws.com', '*.on.aws', '*.api.aws', 'time.aws.com', '*.compute.internal', '*.ec2.internal']) {
       expect(DNS_FIREWALL_ALLOWED_DOMAINS).toContain(d);
     }
   });
