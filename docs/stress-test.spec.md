@@ -335,10 +335,10 @@ to 6 alternate between two slices' verbs, which the runner's
 not express; the first platform run (W-9) adds the order to the runner
 and the slices' `needs`.
 
-Teardown interleaves the same verbs in the
-front door's order (front-door spec §6.2), not the runner's reverse
-order: the `control-plane` slice deletes the deployments and cells while
-the registrar and the hooks are still in place; then
+Teardown interleaves the same verbs in the front door's order
+(front-door spec §6.2), not the runner's reverse order: the
+`control-plane` slice deletes the deployments and cells while the
+registrar and the hooks are still in place; then
 `register-hooks.sh --delete`; then the `RouteHookAccess` policy leaves
 `globalHookManagedPolicyArns` and the control plane is updated; then
 `RouteHookAccess` is destroyed and its retained parameter deleted; then
@@ -415,8 +415,7 @@ run.
 The `control-plane` slice's `deploy` enforces the account check before
 the first cell build: it lists the account's CloudFormation stacks in
 every Region the run uses and refuses an account with any stack but the
-four kinds above
-(`CDKToolkit-cell` and the role pair by name, the account base by its
+four kinds above (`CDKToolkit-cell` and the role pair by name, the account base by its
 tag together with no service role and a stack ARN on the list the
 account owner gives the check (W-11; an ARN pins the Region and the
 stack id, so the same name in another Region or a recreated stack does
