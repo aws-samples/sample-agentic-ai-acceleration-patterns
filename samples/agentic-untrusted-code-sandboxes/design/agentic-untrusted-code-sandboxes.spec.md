@@ -814,6 +814,10 @@ Every allowed zone is answered by AWS. `*.amazon.pool.ntp.org`, which
 the MicroVM and AgentCore platforms look up, is a third-party zone and is
 left blocked: its servers would see every label. S-13 saw no failure with
 it blocked over 15 minutes; clock behaviour over hours is unverified.
+Each sandbox also makes one PTR lookup of its own address (for example
+`187.13.0.10.in-addr.arpa`) at start-up, which is left blocked and gets
+NXDOMAIN; the integration step `dns-platform` ignores a PTR for the
+querying sandbox's own address and nothing else.
 Names a vendor adds in `allowDomains` are the vendor's own exception to
 C-3.
 
@@ -1517,7 +1521,7 @@ touched.
 | synth | a unit test synthesises two construct instances in one stack and asserts that every §5.3 name is unique and matches its charset, and that the drain role's policy allows `ecs:DeregisterContainerInstance` on the cluster ARN and the reaper role's does not, and the offboard function runs as the reaper role |
 | session-files | `run-code-files`: A's session writes and reads its own `sessions/<sid>/`; a `GetObject` on B's session prefix is denied |
 | dns | `run-code` (firewall on): A's script looks up `example.com`, a unique `<token>.example.com`, a 40-character exfil label and a TXT name, then `logs.<region>.amazonaws.com`; the first four return NXDOMAIN and appear in the query log as `BLOCK`, the last resolves to an endpoint address. `run-code-files` (firewall off): `example.com` resolves to a public address. On `nitro` the `BLOCK` line's `srcaddr` is A's task address |
-| dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9); any other blocked name is a platform name missing from the allow list and fails the step |
+| dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9), or a PTR query by a sandbox for the reverse name of its own address (also left blocked, §3.9); any other blocked name, and any other PTR, is a platform name missing from the allow list and fails the step |
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | standalone | the driver invokes `run-code`'s `runCodeFunction` with IAM, as a vendor's own API would, with `tenantId` = `A`: A's script parses its invoice; `input` = `../B/invoice.csv`, `tenantId` = `A/x` and an empty `tenantId` each return `invalid_argument`; a role with no invoke grant is refused (shows IAM applies, not that only granted roles can reach it, T-82). Through the gateway, a `tenantId` argument returns `invalid_argument` |
 | standalone-build | before deploy, the driver runs `npm pack` on the sample and installs the tarball into a stub consumer app that has no `agentic-runtime-isolation` anywhere in its tree (a packed install carries no dev dependencies and no symlink back to the sample), with the consumer's default `cdk.json` app command (`ts-node --prefer-ts-exts`): `npm install` succeeds with no peer error, `tsc` compiles, and `cdk synth` of `UntrustedCodeSandboxes` with `standalone: true` succeeds, including the `runCodeFunction` bundle, and no module reached from the package root resolves to the producer |

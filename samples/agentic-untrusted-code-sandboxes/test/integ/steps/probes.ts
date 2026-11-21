@@ -132,7 +132,7 @@ const seen = (o: unknown): string => {
 export async function noCredentials(c: Ctx, u: Unit): Promise<void> {
   const backend = backendOf(u);
   const { call, out } = await c.probe('run-code', A, backend, 'nocreds', {});
-  c.rec.check(`the probe ran (exit ${call.result?.exitCode})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
+  c.rec.check(`the probe ran (${brief(call.result)})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
   c.rec.check('boto3 and environment credentials are absent', field(out, 'boto3_importable') === false && field(out, 'env_credentials') === false && field(out, 'credentials_file') === false);
   if (backend === 'agentcore') {
     c.rec.check('credentials load through the metadata service (C-2)', field(out, 'credentials_loaded') === true);
@@ -150,6 +150,11 @@ export async function noCredentials(c: Ctx, u: Unit): Promise<void> {
   }
   c.rec.check(`GetObject on B's invoice is ${backend === 'agentcore' ? 'refused with 403' : 'unreachable'} (got ${seen(out.get_object_b)})`, denied('s3', out.get_object_b, backend));
   c.rec.check(`GetItem on B's registry row is unreachable (got ${seen(out.get_row_b)})`, denied('dynamodb', out.get_row_b, backend));
+}
+
+/** What a failed check should show about a call: the exit status and the start of stderr (a probe prints no secret). */
+export function brief(r: { exitCode: number; timedOut?: boolean; stderr?: string } | undefined): string {
+  return r === undefined ? 'no result' : `exit ${r.exitCode}${r.timedOut ? ', timed out' : ''}${r.stderr ? `, stderr: ${r.stderr.replace(/\s+/g, ' ').slice(0, 240)}` : ''}`;
 }
 
 export async function noEgress(c: Ctx, u: Unit): Promise<void> {
@@ -175,7 +180,7 @@ export async function noEgress(c: Ctx, u: Unit): Promise<void> {
     Object.assign(peer, { peer_url: url, peer_ip: new URL(url).hostname, peer_port: 443 });
   }
   const { call, out } = await c.probe('run-code', A, backend, 'noegress', { presigned, public_ip: '1.1.1.1', ...peer });
-  c.rec.check(`the probe ran (exit ${call.result?.exitCode})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
+  c.rec.check(`the probe ran (${brief(call.result)})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
   c.rec.check(`the positive control: the same request code gets a status from the sandbox's own allowed address within the deadline (got ${seen(out.control)})`, controlAnswered(out.control));
   const names = ['https_name', 'tcp_public_ip', 'put_presigned', ...(peer.peer_ip ? ['tcp_peer'] : []), ...(peer.peer_url ? ['https_peer'] : [])];
   for (const n of names) {
@@ -260,7 +265,7 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
     const fill = await run('memfd_fill');
     c.rec.check(`a memfd fill at 1.5 times the cap returns memoryExceeded on ${backend} (target ${String(field(fill.out, 'target_mib'))} MiB)`, fill.r.result?.memoryExceeded === true);
     const next = await run('setsid_check');
-    c.rec.check(`the next call works on the same sandbox after the memfd kill (sandbox ${String(next.r.result?.sandbox)})`, next.r.result?.exitCode === 0 && next.r.result?.sandbox === 'reused');
+    c.rec.check(`the next call works on the same sandbox after the memfd kill (sandbox ${String(next.r.result?.sandbox)}, ${brief(next.r.result)})`, next.r.result?.exitCode === 0 && next.r.result?.sandbox === 'reused');
   }
   if (backend === 'agentcore') {
     const create = await run('sysv_create');
@@ -280,7 +285,7 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
   c.rec.check(`after that kill the next job forks N-1 children again (forked ${String(field(after.out, 'forked'))})`, field(after.out, 'forked') === field(base.out, 'forked'));
 
   const end = await c.aws.row(table, A, backend);
-  c.rec.check('the runner that answers is the same: the registry bootId did not change', end?.bootId === bootId0);
+  c.rec.check(`the runner that answers is the same: the registry bootId did not change (${String(bootId0).slice(0, 8)} then ${String(end?.bootId).slice(0, 8)})`, end?.bootId === bootId0);
   const fin = await c.probe('run-code', A, backend, 'parse', {}, { input: 'invoice.csv' });
   c.rec.check(`A's next call works, on the same sandbox (sandbox ${String(fin.call.result?.sandbox)})`, fin.call.result?.exitCode === 0 && fin.call.result?.sandbox === 'reused');
 }
@@ -319,7 +324,7 @@ export async function dns(c: Ctx, u: Unit): Promise<void> {
   for (const n of names.slice(0, 4)) c.lookedUpNames.add(n.name);
   const started = Date.now();
   const { call, out } = await c.probe(instance, A, backend, 'dns', { names });
-  c.rec.check(`the probe ran (exit ${call.result?.exitCode})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
+  c.rec.check(`the probe ran (${brief(call.result)})`, call.result?.exitCode === 0 && Object.keys(out).length > 0);
   const rc = (label: string): number | undefined => ((attempt(out, label).v ?? {}) as { rcode?: number }).rcode;
   const addr = (label: string): string | null | undefined => ((attempt(out, label).v ?? {}) as { address?: string | null }).address;
   if (instance === 'run-code') {
@@ -355,6 +360,28 @@ export async function dns(c: Ctx, u: Unit): Promise<void> {
 /** Query-log names that are the platform's own and stay blocked on purpose (spec §3.9). */
 const NTP_ZONE = /\.amazon\.pool\.ntp\.org\.?$/;
 
+/** The reverse name of an IPv4 address (`10.0.1.2` is `2.1.0.10.in-addr.arpa`), or undefined for anything else. */
+function reverseName(address: string | undefined): string | undefined {
+  const parts = (address ?? '').split('.');
+  return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p)) ? `${parts.reverse().join('.')}.in-addr.arpa` : undefined;
+}
+
+/**
+ * The blocked names of a query log that no test script looked up and that the platform has no standing to look up (spec §3.9):
+ * the NTP zone stays blocked on purpose, and so does a PTR query by a sandbox for the reverse name of its OWN address, which
+ * the platforms make once at start-up. A PTR for any other address, any other query type and any other name still counts.
+ * The firewall is unchanged; only this check ignores those two. Pure.
+ */
+export function unexpectedBlocked(
+  rows: ReadonlyArray<{ query_name: string; query_type?: string; srcaddr?: string }>,
+  lookedUp: ReadonlySet<string>,
+): string[] {
+  return rows
+    .filter((r) => !(r.query_type === 'PTR' && reverseName(r.srcaddr) === r.query_name.replace(/\.$/, '').toLowerCase()))
+    .map((r) => r.query_name.replace(/\.$/, '').toLowerCase())
+    .filter((n) => !lookedUp.has(n) && !NTP_ZONE.test(n));
+}
+
 export async function dnsPlatform(c: Ctx): Promise<void> {
   const group = c.out.QueryLogGroup;
   if (!group) {
@@ -362,7 +389,7 @@ export async function dnsPlatform(c: Ctx): Promise<void> {
     return;
   }
   await sleep(1000);
-  const rows = await insights(c, [group], 'filter firewall_rule_action = "BLOCK" | stats count() as n by query_name | limit 1000', Date.now() - 6 * 3_600_000);
-  const unexpected = rows.map((r) => r.query_name.replace(/\.$/, '').toLowerCase()).filter((n) => !c.lookedUpNames.has(n) && !NTP_ZONE.test(n));
-  c.rec.check(`every blocked name is one a test script looked up, or the NTP zone (unexpected: ${unexpected.slice(0, 5).join(', ') || 'none'})`, unexpected.length === 0);
+  const rows = await insights(c, [group], 'filter firewall_rule_action = "BLOCK" | stats count() as n by query_name, query_type, srcaddr | limit 1000', Date.now() - 6 * 3_600_000);
+  const unexpected = unexpectedBlocked(rows as ReadonlyArray<{ query_name: string; query_type?: string; srcaddr?: string }>, c.lookedUpNames);
+  c.rec.check(`every blocked name is one a test script looked up, the NTP zone, or a sandbox's PTR for its own address (unexpected: ${unexpected.slice(0, 5).join(', ') || 'none'})`, unexpected.length === 0);
 }

@@ -19,7 +19,7 @@ import { matrix, SPEC_TABLE_ORDER, STEPS, unitKey, validateSteps, type StepSpec 
 import { collectHandles, sameKeys } from './steps/basic';
 import { neededQuotaGb, slotsFree } from './steps/build';
 import { DRIVER_STEPS, IMPLS } from './steps/index';
-import { CONNECTED, LAMBDA_RESPONSE_BYTES, LOOKUP_SLOW, PROBE_BOUND_MS, controlAnswered, controlOutputOk, denied, egressFailed, noConnection } from './steps/probes';
+import { CONNECTED, LAMBDA_RESPONSE_BYTES, LOOKUP_SLOW, PROBE_BOUND_MS, controlAnswered, controlOutputOk, denied, egressFailed, noConnection, unexpectedBlocked } from './steps/probes';
 import { lastJsonLine, parseFunctionResponse, parseGatewayResponse } from './tool-result';
 
 describe('step order and matrix', () => {
@@ -345,6 +345,22 @@ describe('the leftover comparison', () => {
       { kind: 'image', prefix: '/aws/lambda-microvms/img' },
     ]);
     expect(serviceLogPrefixes({ runtimeNames: [], imageNames: [] })).toEqual([]);
+  });
+});
+
+describe('the dns-platform check (spec 3.9)', () => {
+  const none = new Set<string>();
+  test('a PTR for the querying sandbox\'s own address is ignored', () => {
+    expect(unexpectedBlocked([{ query_name: '187.13.0.10.in-addr.arpa.', query_type: 'PTR', srcaddr: '10.0.13.187' }], none)).toEqual([]);
+  });
+  test('a PTR for another address, another type or another name still fails', () => {
+    expect(unexpectedBlocked([{ query_name: '188.13.0.10.in-addr.arpa.', query_type: 'PTR', srcaddr: '10.0.13.187' }], none)).toEqual(['188.13.0.10.in-addr.arpa']);
+    expect(unexpectedBlocked([{ query_name: '187.13.0.10.in-addr.arpa.', query_type: 'A', srcaddr: '10.0.13.187' }], none)).toEqual(['187.13.0.10.in-addr.arpa']);
+    expect(unexpectedBlocked([{ query_name: 'evil.example.net.', query_type: 'PTR', srcaddr: '10.0.13.187' }], none)).toEqual(['evil.example.net']);
+    expect(unexpectedBlocked([{ query_name: '187.13.0.10.in-addr.arpa.', query_type: 'PTR' }], none)).toEqual(['187.13.0.10.in-addr.arpa']);
+  });
+  test('a looked-up name and the NTP zone stay ignored', () => {
+    expect(unexpectedBlocked([{ query_name: 'a.example.com.', query_type: 'A', srcaddr: '10.0.1.1' }, { query_name: '0.amazon.pool.ntp.org.', query_type: 'A', srcaddr: '10.0.1.1' }], new Set(['a.example.com']))).toEqual([]);
   });
 });
 
