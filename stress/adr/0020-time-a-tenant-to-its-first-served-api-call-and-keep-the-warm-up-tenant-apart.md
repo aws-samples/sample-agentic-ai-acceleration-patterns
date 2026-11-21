@@ -57,8 +57,9 @@ tier's p99 is not the platform's onboarding time alone.
 
 The end of the interval is the driver's clock, the start is the control plane's
 `createdAt`. W-9 saw the driver's clock about a minute behind CloudWatch's, so
-`ready` can carry that offset; at a p95 of minutes it is a few percent. Measuring
-the offset once at the start of PS-1 would remove it.
+`ready` can carry that offset; at `small` (p50 about 166 s) an offset of up to a minute is up to a
+third of the value, so read `ready` as an upper bound. Measuring the offset once at the start of
+PS-1 would remove it.
 
 Revisit if the first agent call after onboarding is slower than the rest in
 PS-2, which would mean PS-1 hides an onboarding cost.

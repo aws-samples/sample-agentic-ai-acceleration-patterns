@@ -574,7 +574,10 @@ scenarios by default (§3.5). The runner runs scenarios one after another,
 so PS-5 runs on its own after PS-4 and PS-7 on its own after PS-6, with no
 PS-2 load beside them. Agent calls go from the edge straight to the
 ingress; at `small` that is the one cell's ingress (§3.3, stress
-ADR-0016). Scenarios above `small` wait for Q-7.
+ADR-0016). Scenarios above `small` wait for Q-7. In PS-1 a tenant's `ready` time is
+`CreateDeployment` to its first served `/api/whoami` through the edge (stress ADR-0020); a
+tenant that was not placed in this run is timed apart as `rerun-ready`, and the warm-up
+tenant as `warm-up-ready`.
 
 | Id | Shape | What it stresses | Watch |
 |---|---|---|---|
@@ -734,7 +737,7 @@ Q-5, answered by the first platform run at `small` (`stress/results/2026-11-21-s
 | W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, workload boundary, `/cell/` path aspect and the cell bootstrap, in `stress/application/` | decision 7; the deny probes ran in the path spike (`stress/spikes/cell-path/`); the second boundary is ADR-0011 | done: the prop in control-plane ADR-0047, the rest in `stress/application/` |
 | W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair, and a read-only role in the account base that allows `ssm:GetParameter` on the ingress parameter only, for front-door phase two (§3.5) | §3.7; W-10's policies and prop for the bootstrap and the role pair | done in both cell accounts: the owner stacks, `CDKToolkit-cell` and the role pair (`stress/application/deploy-role-pair.sh`, W-5); the account check passes on both; the ingress reader role is W-9's |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
-| W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | no: blocked on the front door |
+| W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | done |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part yes; front-door part after its merge |
 | W-9 first platform run at `small`: also the control-plane driver's identity calls (§3.3 step 4) and the record of them that the runtime-isolation slice reads (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | no |
 

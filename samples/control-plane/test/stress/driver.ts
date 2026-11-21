@@ -334,7 +334,7 @@ async function unhookStep(): Promise<number> {
   try {
     c = await connect();
   } catch (e) {
-    if (fs.existsSync(path.join(home, prefix, 'hook-policy-arns'))) {
+    if (fs.existsSync(hookPolicyFile(home, prefix))) {
       log(`unhook: the control plane is not reachable (${errorText(e)}) and the hook policy is still on ${n.fleet}-global-hook; the front door cannot be deleted until it is taken off`);
       return 1;
     }
@@ -348,12 +348,12 @@ async function unhookStep(): Promise<number> {
   }
   const policyFile = hookPolicyFile(home, prefix);
   if (fs.existsSync(policyFile)) {
-    const arn = fs.readFileSync(policyFile, 'utf8').trim();
+    const text = fs.readFileSync(policyFile, 'utf8');
     setHookPolicy(home, prefix, undefined);
     log('unhook: redeploying the control plane without the hook policy');
     if ((await sliceCommand(['set-hook-policy'])) !== 0) {
-      // The policy is still on the role: keep the file, so a rerun redeploys instead of reporting success.
-      setHookPolicy(home, prefix, arn);
+      // The policy is still on the role: put the file back as it was, so a rerun redeploys instead of reporting success.
+      fs.writeFileSync(policyFile, text, { mode: 0o600 });
       return 1;
     }
   }
