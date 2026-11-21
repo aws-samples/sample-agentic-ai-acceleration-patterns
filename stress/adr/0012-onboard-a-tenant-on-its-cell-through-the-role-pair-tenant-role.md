@@ -70,6 +70,6 @@ records the deployment in the parameter
 `/application-plane/tenants/<tenant id>/<application id>/deployment`,
 below the namespace the cell API origin reads.
 
-Note 2026-11-21: ADR-0017 gives the tenant's identity tenant and users to
+Note 2026-11-20: ADR-0017 gives the tenant's identity tenant and users to
 the driver of the `control-plane` slice (spec §3.3 step 4). The tenant
 script makes no identity call.

@@ -206,28 +206,30 @@ and the records in
    does not call `PutTenantRoute`: the front door's global post hook
    writes the tenant route once the deployment's event has run
    (front-door ADR-0017, front-door spec §3.2).
-4. When the deployment is `ACTIVE`, the driver of the `control-plane`
-   slice creates the tenant's identity with the IAM-signed admin API of
-   the stress identity (stress ADR-0017): tenant-identity `CreateTenant`
-   with the control-plane tenant id, `scopes` `["app/use"]` (the vendor
-   scope the slice-mode tenants carry; the driver puts it in the
-   identity's scope catalogue with `PutScope` first, as the
-   runtime-isolation `deploy` does in slice mode) and an admin e-mail
-   address, which creates the first admin, then `CreateUser` for each
-   further user the tier lists (§4.1; users per active tenant count the
-   admin, so only active tenants get further users). It does this for
-   each tenant PS-1 onboards, for the warm-up tenant (after front-door
-   phase two, §3.5) and for the `large` fleet's seed. At `large`, the
-   churn tenants that PS-1 onboards get identity calls too; the tenants
-   that PS-5 creates get none, because PS-5's own probes need no token
-   (§5.1). The driver then polls through the edge until the first
-   `report` is served. It then makes one `GET /api/whoami` call through
-   the edge to the cell API, whose answer carries the route hint (§5.3).
-   The identity calls and the polling are part of PS-1's time to the
-   first served request (§5.1). The run's first tenant is the warm-up
-   tenant of §3.5: its deployment builds the cell, and `/agents/*` is
-   refused at the edge (404, or CloudFront's own 403 for a `POST`) until
-   front-door phase two, so it is not timed in PS-1.
+4. In a platform run, when the deployment is `ACTIVE`, the driver of the
+   `control-plane` slice creates the tenant's identity with the
+   IAM-signed admin API of the stress identity (stress ADR-0017):
+   tenant-identity `CreateTenant` with the control-plane tenant id,
+   `scopes` `["app/use"]` (the vendor scope the slice-mode tenants
+   carry; the driver puts it in the identity's scope catalogue with
+   `PutScope` first, as the runtime-isolation `deploy` does in slice
+   mode) and an admin e-mail address, which creates the first admin,
+   then `CreateUser` for each further user the tier lists (§4.1; users
+   per active tenant count the admin, so only active tenants get further
+   users). It does this for each tenant PS-1 onboards, for the warm-up
+   tenant (after front-door phase two, §3.5) and for the `large` fleet's
+   seed. At `large`, the churn tenants that PS-1 onboards get identity
+   calls too; the tenants that PS-5 creates get none, because PS-5's own
+   probes need no token (§5.1). The driver then polls through the edge
+   until the first `report` is served. It then makes one
+   `GET /api/whoami` call through the edge to the cell API, whose answer
+   carries the route hint (§5.3). The identity calls and the polling are
+   part of PS-1's time to the first served request (§5.1). The run's
+   first tenant is the warm-up tenant of §3.5: its deployment builds the
+   cell, and `/agents/*` is refused at the edge (404, or CloudFront's
+   own 403 for a `POST`) until front-door phase two, so it is not timed
+   in PS-1. In slice mode there is no front door and no token, and the
+   driver makes no identity call.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -299,7 +301,7 @@ and the ones the front-door slice will declare (W-7), are:
 |---|---|---|
 | `tenant-identity` | none | none |
 | `control-plane` | `tenant-identity` | PS-5 |
-| `tenant-front-door` | `control-plane` at least (§3.5, steps 1 to 3) | PS-7 |
+| `tenant-front-door` | `tenant-identity`, `control-plane` (§3.5, steps 0 and 1) | PS-7 |
 | `agentic-runtime-isolation` | `tenant-identity`, `control-plane`, `tenant-front-door` | PS-2, PS-3, PS-4, PS-6, PS-8 |
 
 The `agentic-runtime-isolation` cells are deployed by the control plane in
@@ -335,8 +337,9 @@ is stopped when it exits.
    one slice is named (one slice named is slice mode, which does not
    require its needs); a cycle in the needs; a `--scenarios` entry that no
    named slice declares; a `platformOnly` scenario named in a slice-mode
-   run, which has nothing to run against; and a platform run with no
-   `PS-<n>` scenario to run.
+   run, which has nothing to run against; and a run left with no
+   scenario to run (a platform run with no `PS-<n>` scenario, a
+   slice-mode run whose scenarios are all `platformOnly`).
 2. Sums `budget` per account and refuses to start when a sum is over its
    quota or another run holds the lock for the prefix.
 3. Runs `deploy` and then `seed` for one slice at a time, in the order of
@@ -353,20 +356,24 @@ them, it is the platform run.
 
 Teardown has one ordering rule that the reverse order alone does not
 give. In the reverse order the front door goes before the control plane,
-and the control plane's cell delete runs the front door's `PRE` hook
-(`CELL_DELETE`, `DEPLOYMENT_DELETE`) against the route registrar. The
-`tenant-front-door` `teardown` therefore unregisters its two global
-hooks from the control plane (`register-hooks.sh --delete`, front-door
-spec §5.2) before it removes the registrar, so the control plane deletes
-deployments and cells with no call to a registrar that is gone. The
-control plane is still deployed at that point. Front-door spec §6.2
-removes the routes through the hooks first (step 1) and then unregisters
-the hooks (step 2); here the registrar and the route table are destroyed
-in the same teardown, so no route needs removing. The rest of front-door
-spec §6.2's order follows: the policy out of
-`globalHookManagedPolicyArns` with a control-plane update, then
-`RouteHookAccess` and its parameter, then the stacks; the slice's
-`teardown` verifies that none is left (§3.4).
+and the control plane's cell and deployment deletes run the front door's
+`PRE` hook (`CELL_DELETE`, `DEPLOYMENT_DELETE`) against the route
+registrar. When the run removes the fleet (`small`, `medium`, and
+`large` with `--fixtures`), the `tenant-front-door` `teardown` therefore
+unregisters its two global hooks from the control plane
+(`register-hooks.sh --delete`, front-door spec §5.2) before it removes
+the registrar, so the control plane deletes deployments and cells with
+no call to a registrar that is gone. The control plane is still deployed
+at that point. Front-door spec §6.2 removes the routes through the hooks
+first (step 1) and then unregisters the hooks (step 2); here the
+registrar and the route table are destroyed in the same teardown, so no
+route needs removing. The rest of front-door spec §6.2's order follows:
+the policy out of `globalHookManagedPolicyArns` with a control-plane
+update, then `RouteHookAccess` and its parameter, then the stacks; the
+slice's `teardown` verifies that none is left (§3.4). At `large` without
+`--fixtures` the fleet stays with its routes (P-5), so the registrar,
+the route table and the hooks stay with it, and the `tenant-front-door`
+`teardown` removes none of them.
 
 In the platform run the front door deploys in two phases, because its
 `agentIngress` input is the first cell's ingress, which exists only
@@ -624,8 +631,8 @@ ADR-0016). Scenarios above `small` wait for Q-7.
 | PS-7 cross-cell probes | after PS-6: a token whose payload names another tenant (in another cell when the tier has more than one), a client route header, a direct `/api/*` call to a cell origin, a direct call to the ingress with a token whose payload names another tenant, and a direct call to the ingress with the tenant's own token | the router, the route hint check, origin access control, the ingress's own token check | every probe but the last refused at the edge, the cell, the origin or the ingress, never served; the last is served, because the ingress is public by design (front-door spec §1.2) |
 | PS-8 peak | S6 shape at the tier's peak for 60 s | the shared quotas at their limit | the first quota that gives out, per account; every refusal attributed |
 
-Each platform scenario has one owner slice, which declares it in its
-`slice.json` and writes its record:
+Each platform scenario is declared in the `slice.json` of the slice or
+slices that own it, and each of them writes its own record:
 
 | Scenarios | Owner slice | In `platformOnly` |
 |---|---|---|
