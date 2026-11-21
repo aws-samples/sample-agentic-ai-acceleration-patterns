@@ -30,10 +30,11 @@
 # shapes to <edgeUrl>/agents as PS-2, PS-3, PS-4, PS-6 and PS-8 (spec §5.1); `collect` takes
 # each refusal's tenant and reason from the driver's own lines (collect-platform.sh);
 # `teardown` removes this slice's run files, and the k6 host only when its own `deploy` made
-# it. stress/README.md has the manifest contract.
+# it (ADR-0054). stress/README.md has the manifest contract.
 #
 # State lives in $STRESS_HOME/$STRESS_PREFIX/agentic-runtime-isolation/: the stack
-# outputs, the tenant manifest and the deploy and destroy times; never a token,
+# outputs, the tenant manifest and the deploy and destroy times, and in platform mode
+# platform/manifest.json, platform-tenants.json and the platform-driver-owned marker; never a token,
 # a password or a key. Needs AWS_REGION and credentials for the account (every
 # verb but budget), bash, aws, jq, node and the sample's npm install (run once
 # when missing). Prints ids and counts only and never runs `set -x`: the runner
@@ -314,7 +315,6 @@ case "$verb" in
         "RECORD_SCENARIO=${scenario}"
       )
     else
-      manifest="${STRESS_STATE_DIR}/manifest.json"
       ident="/application-plane/shared/identity"
       platform_api="$(aws ssm get-parameter --name "${ident}/apiUrl" --query Parameter.Value --output text)"
       [[ "$platform_api" == */ ]] || platform_api="${platform_api}/"
@@ -395,7 +395,7 @@ case "$verb" in
     source "${here}/window.sh"
     prev_end=0
     shopt -s nullglob
-    for r in "${STRESS_RESULTS}"/agentic-runtime-isolation.S[1-7].json "${STRESS_RESULTS}"/agentic-runtime-isolation.PS-[2-8].json; do
+    for r in "${STRESS_RESULTS}"/agentic-runtime-isolation.S[1-7].json "${STRESS_RESULTS}"/agentic-runtime-isolation.PS-*.json; do
       end_iso="$(jq -er '.window.end' "$r" 2>/dev/null)" \
         || { echo "slice.sh run: ${r} has no window.end; cannot space ${scenario} after it" >&2; exit 1; }
       e="$(iso_epoch "$end_iso")" || { echo "slice.sh run: ${r}: window.end is not a timestamp" >&2; exit 1; }

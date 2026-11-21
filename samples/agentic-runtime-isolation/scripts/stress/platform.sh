@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT-0
 #
 # What slice.sh needs in platform mode (STRESS_MODE=platform; docs/stress-test.spec.md §3.3,
-# §3.4, §4.2; stress/README.md, "Platform mode: manifests"). Sourced, not run.
+# §3.4, §4.2; stress/README.md, "Platform mode: manifests"; ADR-0054). Sourced, not run.
 #
 # In platform mode the slice deploys no cell and seeds nothing. The control plane builds the
 # cells, tenant-identity holds the users, and the front door is the edge, so the slice reads

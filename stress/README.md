@@ -52,7 +52,7 @@ and `slice.sh <verb> [args]`, where the verb is one of:
 | Verb | Does | Prints or writes |
 |---|---|---|
 | `budget` | its draw on each declared quota at `$STRESS_TIER`, without credentials (no `AWS_*` variables, an empty `HOME`, no instance metadata) | stdout: `{"draws": [{"account": "platform" \| "cell-account-<n>", "quota": "<id>", "amount": <n>}]}` |
-| `deploy` | deploys or reuses its stacks; publishes what the next slice needs through its published parameters | - |
+| `deploy` | deploys or reuses its stacks; publishes what the next slice needs through its published parameters, or a manifest in `$STRESS_HOME/$STRESS_PREFIX/` | - |
 | `seed` | creates or reuses its data; never writes a token or a password | manifests in `$STRESS_HOME/$STRESS_PREFIX/` |
 | `run <scenario>` | runs one scenario; exits non-zero when a pass criterion fails | `$STRESS_RESULTS/<name>.<scenario>.json` |
 | `collect` | reads logs and metrics for the run window | may fill in its own records' late fields (`refusals`, `cost`) in `$STRESS_RESULTS` |
@@ -231,8 +231,8 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 - Platform mode has not run live. Its parts are tested alone: the runner's order and
   scenario filter, the slice scripts against stubbed manifests and a stubbed `aws`, and PS-5
   against a simulated control plane, registrar and edge. `k6/probe.js`'s platform lines are
-  checked for syntax only; the first run on a driver host (`K6_COMMAND=inspect`, then PS-2)
-  is the check.
+  pinned by a text match only; the first run on a driver host (`K6_COMMAND=inspect`, then
+  PS-2) is the check.
 - PS-3 in platform mode cannot retire the cells' Lambda instances: they are in the cell
   accounts, where the slice has no write access. It waits 60 s idle and starts the herd from
   there, so its cold-start share is whatever the instances' age allows.
@@ -246,8 +246,11 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   many lines as refusals.
 - `agentic-runtime-isolation` needs `tenant-front-door`, and no slice of that name exists, so
   the runner refuses every platform run that names `agentic-runtime-isolation` with
-  `agentic-runtime-isolation needs tenant-front-door, which is not a slice`. PS-2, PS-3, PS-4,
-  PS-6 and PS-8 are tested against stubs only until the front door declares its slice.
+  `agentic-runtime-isolation needs tenant-front-door, which is not a slice`, or, when the run
+  names `tenant-front-door`, with `no slice for tenant-front-door`. PS-2, PS-3, PS-4, PS-6
+  and PS-8 are tested against stubs only until the front door declares its slice.
+- A platform run that names a slice scenario (`S1` to `S7`) in `--scenarios` stops at that
+  scenario's `run`, after every `deploy` and `seed`.
 - A platform run of `tenant-identity` and `control-plane` runs `PS-1` and `PS-5` by default.
   PS-5 reads `tenant-front-door.json`, which nothing writes without the front-door slice, and
   stops with a message that names the file. Name `--scenarios PS-1` for such a run.

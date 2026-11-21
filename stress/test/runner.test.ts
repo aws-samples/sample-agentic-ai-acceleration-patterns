@@ -140,6 +140,13 @@ describe('runner (spec §3.5)', () => {
     expect(calls).toEqual([]);
   });
 
+  it('refuses a slice run whose scenarios are all platformOnly, before anything runs', async () => {
+    const { root, home } = fixture({ a: { scenarios: ['PS-7'], platformOnly: ['PS-7'] } });
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['a'], exec })).rejects.toThrow(/every scenario of the slice is platformOnly/);
+    expect(calls).toEqual([]);
+  });
+
   it('refuses an empty --scenarios list in a platform run with its own message', async () => {
     const { root, home } = fixture(slices);
     const { calls, exec } = stub();

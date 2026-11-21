@@ -254,6 +254,7 @@ describe('slice.sh', () => {
           [
             '#!/usr/bin/env bash',
             `echo "driver ${verb} $STRESS_PREFIX $STRESS_TIER" >> "$FAKE/calls.txt"`,
+            ...(verb === 'teardown' ? ['[[ -z "${FAKE_TEARDOWN_FAILS:-}" ]] || { echo "destroy failed" >&2; exit 1; }'] : []),
             `echo "stack=$STRESS_PREFIX-driver ${verb === 'deploy' ? 'deploy' : 'destroy'}_seconds=3"`,
             verb === 'deploy' ? 'mkdir -p "$FAKE/stacks/$STRESS_PREFIX-driver"' : 'rm -rf "$FAKE/stacks/$STRESS_PREFIX-driver"',
             '',
@@ -343,8 +344,38 @@ describe('slice.sh', () => {
         });
       });
 
+      it('keeps its ownership marker when the host teardown fails, so a rerun can still remove the host', () => {
+        withHome(ALL, (h) => {
+          expect(run(script(), env(h), 'deploy').status).toBe(0);
+          const teardown = run(script(), { ...env(h), FAKE_TEARDOWN_FAILS: '1' }, 'teardown', '--fixtures');
+          expect(teardown.status).not.toBe(0);
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(true);
+          expect(fs.existsSync(path.join(fake, 'stacks', 'StressTest-driver'))).toBe(true);
+          expect(run(script(), env(h), 'teardown', '--fixtures').status).toBe(0);
+          expect(fs.existsSync(path.join(fake, 'stacks', 'StressTest-driver'))).toBe(false);
+        });
+      });
+
       const k6Args = (): string[] => fs.readFileSync(path.join(fake, 'k6-args.txt'), 'utf8').trim().split('\n');
       const runEnv = (h: string): NodeJS.ProcessEnv => ({ ...env(h), STRESS_RESULTS: path.join(h, 'results'), STRESS_COMMIT: 'abc1234' });
+
+      it('starts a scenario on a fresh minute past the last platform record\'s metric window', () => {
+        withHome(ALL, (h) => {
+          fs.mkdirSync(path.join(h, 'results'));
+          const end = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+          fs.writeFileSync(path.join(h, 'results', 'agentic-runtime-isolation.PS-2.json'), JSON.stringify({ runId: 'r', scenario: 'PS-2', window: { start: end, end } }));
+          // A `sleep` that logs and returns, so the test does not wait for the minute.
+          const bin = path.join(fake, 'sleepbin');
+          fs.mkdirSync(bin, { recursive: true });
+          fs.writeFileSync(path.join(bin, 'sleep'), '#!/usr/bin/env bash\necho "$1" >> "$FAKE/sleeps.txt"\n', { mode: 0o755 });
+          fs.rmSync(path.join(fake, 'sleeps.txt'), { force: true });
+          const r = run(script(), { ...runEnv(h), PATH: `${bin}:${path.join(fake, 'bin')}:${process.env.PATH}` }, 'run', 'PS-4');
+          expect(r.stderr).toBe('');
+          expect(r.status).toBe(0);
+          expect(r.stdout).toMatch(/waiting \d+s for a fresh minute past the last scenario's metric window/);
+          expect(fs.readFileSync(path.join(fake, 'sleeps.txt'), 'utf8').trim()).toMatch(/^\d+$/);
+        });
+      });
 
       it('runs PS-2 as the S1 shape against the edge, with the identity and the tenants of the manifests', () => {
         withHome(ALL, (h) => {
