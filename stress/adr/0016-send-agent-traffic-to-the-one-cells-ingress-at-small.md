@@ -164,7 +164,8 @@ Phase two reads the ingress's `baseUrl` from its published parameter in
 the cell account, `StressCell-<cellId>/ingress` under
 `/application-plane/shared/agent-runtime/` (front-door spec §6.3; the
 stress cell does not publish the account-wide name), through a read-only
-role that allows `ssm:GetParameter` on that name only (spec §3.6, §3.7).
+role that allows `ssm:GetParameter` on the stress cells' ingress parameter
+names only, `.../agent-runtime/StressCell-*/ingress` (spec §3.6, §3.7).
 The role adds one item to the account base that ADR-0006 lists; this
 record amends it. A cell build writes that parameter and the value picks
 the host that receives every tenant's bearer token on `/agents/*`. Phase
@@ -173,3 +174,7 @@ that does not stop a compromised cell build that points the parameter at
 an API Gateway it owns elsewhere, so that path stays open at `small`
 (spec §3.7). Revisit when Q-7 is decided, or if the front door gains
 per-cell agent origins.
+
+The route hook's source is a commit fetched from the remote, so the
+platform run pins the hook to a pushed commit, not necessarily the run's
+own (spec §3.5).
