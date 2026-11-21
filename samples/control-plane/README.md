@@ -768,8 +768,8 @@ and a cell of the application in a cell account, that no cell goes over
 `maxTenants`, that a refused tenant has no deployment, and that the tenant
 build's record in the cell account names the tenant and the cell. In a platform run
 (`STRESS_MODE=platform`, with the front-door slice) it also runs `PS-5`: for the tier's
-churn count of seeded tenants, each one's deployment is created, its route suspended and
-resumed, and the deployment deleted. Each change is timed from the call to the first edge
+churn count of the churn tenants `seed` made, each one's deployment is created, its route
+suspended and resumed, and the deployment deleted. Each change is timed from the call to the first edge
 answer that shows it (`routable`, `suspended`, `resumed` and `removed` in the record), and a
 suspended and a removed tenant are read again after the edge has settled. It reads the edge
 and registrar addresses from the front door's manifest (`stress/README.md`, "Platform mode:

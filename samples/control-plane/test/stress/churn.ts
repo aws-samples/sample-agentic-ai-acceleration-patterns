@@ -147,15 +147,15 @@ async function waitFor(
 async function hold(s: ScenarioEnv, edge: Edge, tenant: string, state: 'suspended' | 'unrouted', timing: Timing): Promise<void> {
   await timing.sleep(timing.settleSeconds * 1000);
   for (let i = 0; i < timing.confirmations; i += 1) {
-    // No answer from the edge (a timeout, a dropped connection) says nothing about the tenant:
-    // read again a few times before it counts, and then as a finding, never as a served tenant.
+    // An answer that shows nothing of the tenant (no answer, or one only CloudFront wrote): read
+    // again a few times before it counts, and then as a finding, never as a served tenant.
     let now = await read(s, edge, tenant);
     for (let retry = 0; now === 'error' && retry < 3; retry += 1) {
       await timing.sleep(timing.pollMs);
       now = await read(s, edge, tenant);
     }
     if (now === 'error') {
-      s.rec.finding(`tenant ${tenant}: no answer from the edge when asserting the tenant is ${state === 'unrouted' ? 'removed' : 'suspended'}`);
+      s.rec.finding(`tenant ${tenant}: no answer from the edge that shows the tenant's state when asserting the tenant is ${state === 'unrouted' ? 'removed' : 'suspended'}`);
     } else {
       const kind = state === 'unrouted' ? 'removed' : 'suspended';
       // P-1: the tenant is still refused at the router. A refusal of the other kind (a removed

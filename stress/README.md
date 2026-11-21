@@ -38,9 +38,10 @@ A sample joins with two files in `samples/<name>/scripts/stress/`:
 }
 ```
 
-`needs` names the slices this one reads through their published interfaces, and it fixes the
-order of a platform run (spec §3.4: `tenant-identity`, `control-plane`, `tenant-front-door`,
-then `agentic-runtime-isolation`); the runner puts
+`needs` names the slices this one reads through their published interfaces, or must follow
+in the order of a platform run (spec §3.4: `tenant-identity`, `control-plane`,
+`tenant-front-door`, then `agentic-runtime-isolation`). `control-plane` reads nothing from
+`tenant-identity`; its need only orders the run. The runner puts
 every slice after the slices it needs, and refuses a need that is no slice, a need left out of
 `--slices` and a cycle. With one slice named (slice mode) its needs are not required. A
 scenario in `platformOnly` needs the other slices' interfaces (the edge, the cells the control
@@ -107,7 +108,7 @@ Who owns which platform scenario (spec §5.1):
 |---|---|---|
 | PS-1 | `tenant-identity`, `control-plane` | the onboarding each slice runs in slice mode |
 | PS-2, PS-3, PS-4, PS-6, PS-8 | `agentic-runtime-isolation` | its S1, S2, S3, S5 and S6 load shapes sent to `<edgeUrl>/agents/<agent>/invocations`; the record carries the `PS-n` id |
-| PS-5 | `control-plane` | the tier's churn count of seeded tenants: each one's deployment created, its route suspended and resumed, and the deployment deleted, each change timed from its call to the first edge answer that shows it |
+| PS-5 | `control-plane` | the tier's churn count of the churn tenants (`churn` in `control-plane.json`): each one's deployment created, its route suspended and resumed, and the deployment deleted, each change timed from its call to the first edge answer that shows it |
 | PS-7 | `tenant-front-door` | no slice declares it |
 
 The manifests a platform run reads and writes:
@@ -236,8 +237,8 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   accounts, where the slice has no write access. It waits 60 s idle and starts the herd from
   there, so its cold-start share is whatever the instances' age allows.
 - PS-2, PS-3, PS-4, PS-6 and PS-8 in platform mode attribute refusals from the driver's own
-  lines. The edge's and the cells' logs are not joined, so the records hold the client's latency hops only and no
-  quota peaks or cost. A virtual user flushes its per-minute refusal counts on a change of
+  lines. The edge's and the cells' logs are not joined, so the records hold the client's
+  latency hops only and no quota peaks or cost. A virtual user flushes its per-minute refusal counts on a change of
   minute and once the scenario is 99 % done; a refusal in the last minute of a user that ends
   earlier stays unattributed, and the run fails on it.
 - `agentic-runtime-isolation` needs `tenant-front-door`, and no slice of that name exists, so
@@ -254,13 +255,15 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 - PS-5 tells the router's answers from the ingress's by the body. The router writes
   `{"status":403}` for a tenant with no route and `{"status":503}` for a suspended one. The
   `api-gateway` ingress answers 403 with the body `forbidden` for the unsigned token, which
-  reads as a routed tenant. An ingress whose refusal has a body of the router's shape, or a
-  proxy that rewrites bodies, would read as no route. A 503 without the router's body (the
-  one CloudFront gives when the router function fails) and an answer CloudFront generates
-  itself (`x-cache: Error from cloudfront`, as for a geographic restriction) tell nothing and
-  are read again. The probe token names the tenant in the claim `tenant_id`, the front door's
-  default `tenantClaim`: a front door with another claim answers 401, and PS-5 stops with that
-  cause.
+  reads as a routed tenant when API Gateway's request id (`x-amzn-requestid`) is on it. An
+  ingress whose refusal has a body of the router's shape, or a proxy that rewrites bodies,
+  would read as no route. An answer with neither the router's body nor the request id (a 503
+  CloudFront gives when the router function fails, a 403 for a geographic restriction) tells
+  nothing and is read again; `x-cache` cannot tell these apart, because CloudFront sets
+  `Error from cloudfront` on an origin's 4xx too. A run reports the tenant never routable
+  when an ingress answers without the request id. The probe token names the tenant in the
+  claim `tenant_id`, the front door's default `tenantClaim`: a front door with another claim
+  answers 401, and PS-5 stops with that cause.
 - PS-5 suspends and resumes tenants through the front door's route registrar with a SigV4
   call that `curl` (7.75 or later) signs with the driver session's own credentials. The
   registrar allows only its edge operator role for `UpdateTenantRouteStatus`, so the session
