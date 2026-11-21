@@ -33,9 +33,16 @@ A sample joins with two files in `samples/<name>/scripts/stress/`:
   "name": "control-plane",
   "needs": ["tenant-identity"],
   "scenarios": ["PS-1", "PS-5", "placement-race"],
+  "platformOnly": ["PS-5"],
   "quotas": ["codebuild-linux-small", "lambda-concurrency"]
 }
 ```
+
+`needs` names the slices this one reads through their published interfaces; the runner puts
+every slice after the slices it needs, and refuses a need that is no slice, a need left out of
+`--slices` and a cycle. With one slice named (slice mode) its needs are not required. A
+scenario in `platformOnly` needs the other slices' interfaces (the edge, the cells the control
+plane built): a slice-mode run leaves it out, and refuses one named in `--scenarios`.
 
 and `slice.sh <verb> [args]`, where the verb is one of:
 
@@ -56,9 +63,15 @@ stops at the tier's `cellAccounts`; a draw on any other account fails the
 run. The runner times `deploy` and `teardown` itself and writes one
 `lifecycle` record per slice with the deploy and destroy seconds.
 
-Scenarios run platform scenarios first (`PS-1`, `PS-2`, ... by number),
-then each slice's own scenarios in slice order. A scenario no slice
-declares is refused before the run starts, so the run id stays free.
+Slices run in the order of their `needs`, and each one deploys and then seeds before the next
+starts, so a slice's `deploy` can read what an earlier slice seeded (the front door's needs
+the control plane's application). `teardown` runs in reverse order. Without `--scenarios`, a
+slice-mode run runs the slice's scenarios except its `platformOnly` ones, and a platform run
+(several slices) runs only the `PS-<n>` scenarios, platform scenarios first by number, then
+each slice's own in slice order; `--scenarios` can name any scenario a slice declares (a
+slice-mode run refuses a `platformOnly` one), and a platform run that has no `PS-<n>` scenario
+to run is refused. A scenario no slice declares is refused before the run starts, so
+the run id stays free.
 
 A run fails when a scenario's record is missing, does not parse, belongs
 to another run, or makes no isolation assertion, when a record names a
@@ -76,6 +89,60 @@ a verb never prints a token, a password or a key, and never runs `set -x`
 around one. When `slice.sh` exits,
 anything it left running in its group gets SIGTERM, then SIGKILL after
 30 seconds.
+
+## Platform mode: manifests
+
+A run with several slices sets `STRESS_MODE=platform`. A slice then works on what the others
+made and reads it from manifest files in `$STRESS_HOME/$STRESS_PREFIX/`: ids and names only,
+never a token, a password or a key, mode 0600 in a 0700 folder. A slice that finds a manifest
+missing or unusable stops with a message that names the file, the slice that writes it and, when the content is wrong, the field.
+
+Who owns which platform scenario (spec §5.1):
+
+| Scenario | Slice | What runs in platform mode |
+|---|---|---|
+| PS-1 | `tenant-identity`, `control-plane` | the onboarding each slice already runs in slice mode |
+| PS-2, PS-3, PS-4, PS-6, PS-8 | `agentic-runtime-isolation` | its S1, S2, S3, S5 and S6 load shapes sent to `<edgeUrl>/agents/<agent>/invocations`; the record carries the `PS-n` id |
+| PS-5 | `control-plane` | the tier's churn count of tenants created, suspended, resumed and deleted, each change timed from its call to the first edge answer that shows it |
+| PS-7 | `tenant-front-door` | not in this folder's slices yet |
+
+The manifests a platform run reads and writes:
+
+| File | Written by | Read by | Holds |
+|---|---|---|---|
+| `tenant-identity.json` | `tenant-identity` `seed` | `agentic-runtime-isolation` | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each `{username, email}` |
+| `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation` | the value of the SSM parameter `/<prefix>/identity`: `region`, `apiUrl` (execute-api URL of the platform API), `userPoolId`, `appClientId` (the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>`) |
+| `control-plane.json` | `control-plane` `seed` | `agentic-runtime-isolation` | `seeded[]`, `churn[]`, `extra[]`: tenant ids. `seeded` is the platform's steady set; `churn` and `extra` belong to the control-plane scenarios |
+| `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` | `agentic-runtime-isolation`, `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
+
+Not written by this change: `tenant-front-door.json` is the front-door slice's to write, and
+the fields above are the contract it must meet. The edge serves agents at
+`/agents/<backend>/invocations` and reads the tenant from the token (front-door spec §3.3).
+
+What a slice does in platform mode:
+
+| Slice | `deploy` | `seed` | `run` | `collect` | `teardown` |
+|---|---|---|---|---|---|
+| `tenant-identity` | as in slice mode, then writes `identity.json` | as in slice mode, a probe set of tenants | PS-1 as in slice mode | as in slice mode | as in slice mode; `--fixtures` also removes `identity.json` |
+| `control-plane` | as in slice mode | as in slice mode | PS-1 as in slice mode; PS-5 reads `tenant-front-door.json` and stops with a message when it is missing | as in slice mode | as in slice mode |
+| `agentic-runtime-isolation` | checks the four manifests; deploys the k6 host `<prefix>-driver` only when none is there | checks the four manifests, seeds nothing | picks the tenants (below), runs the load through the edge | takes each refusal's tenant and reason from the driver's own lines | removes its run files, and the k6 host only when its `deploy` made it |
+
+`agentic-runtime-isolation` drives, in platform mode, every tenant in `control-plane.json`
+`seeded` that `tenant-identity.json` lists with an admin user, and nothing else. It builds this
+set when each scenario starts, because the control plane onboards its tenants in PS-1, after
+every `seed`. A control-plane tenant with no entry in `tenant-identity.json` is refused with
+the reason `no-identity-tenant`, one with no admin user name with `no-user`; both are listed by
+tenant id in the scenario's output and in `platform-tenants.json` in the slice's folder of
+`$STRESS_HOME`, together with the identity tenants outside the control plane (`not-in-control-plane`,
+ignored). The scenario stops when fewer than two tenants are usable (the read-other probe needs
+two). Nothing in a platform run creates the identity tenant and the users of a tenant the
+control plane onboarded yet (spec §3.3, steps 3 and 4), so until something does, this slice
+refuses every control-plane tenant and the run fails with the list.
+
+Every request through the edge that is refused (4xx, 5xx) or whose body shows a refusal gets a
+tenant and a reason in the record's `refusals.byTenantReason`: the tenant is the driver's, the
+reason is `http-<status>`, or `tool-<status>` for a tool refused inside a 200 (P-7). What a run
+cannot attribute stays in `unattributed` and fails the run.
 
 ## The driver host and the k6 library
 
@@ -153,6 +220,26 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 - Scenarios run one after another. Spec §5.1 runs PS-5 (churn) and PS-7
   (cross-cell probes) during PS-2; the runner runs PS-5 and PS-7 on their
   own after PS-4, without PS-2's load.
+- Platform mode has not run live. Its parts are tested alone: the runner's order and
+  scenario filter, the slice scripts against stubbed manifests and a stubbed `aws`, and PS-5
+  against a simulated control plane, registrar and edge. `k6/probe.js`'s platform lines are
+  checked for syntax only; the first run on a driver host (`K6_COMMAND=inspect`, then PS-2)
+  is the check.
+- PS-3 in platform mode cannot retire the cells' Lambda instances: they are in the cell
+  accounts, where the slice has no write access. It waits 60 s idle and starts the herd from
+  there, so its cold-start share is whatever the instances' age allows.
+- PS-2 to PS-8 in platform mode attribute refusals from the driver's own lines. The edge's and
+  the cells' logs are not joined, so the records hold the client's latency hops only and no
+  quota peaks or cost.
+- PS-5 reads the edge with an unsigned token that names the tenant, which the router accepts
+  without checking the signature (front-door spec §3.3, step 5), so a probe reaches the ingress
+  at most and is refused there with 401. It shows what the router does for the tenant, not
+  what a signed request would get.
+- PS-5 suspends and resumes tenants through the front door's route registrar with a SigV4
+  call that `curl` (7.75 or later) signs with the driver session's own credentials. The
+  registrar allows only its edge operator role for `UpdateTenantRouteStatus`, so the session
+  that runs PS-5 must hold that role; with another role the finding reads `HTTP 403`, and with
+  no credentials `HTTP 0`.
 - The quota catalogue has no ids yet for the API Gateway control plane or
   for CloudFront Functions compute and KeyValueStore size (spec §4.4), so
   no slice can declare them. They are added with the first slice that

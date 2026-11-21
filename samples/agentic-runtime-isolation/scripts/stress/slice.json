@@ -1,7 +1,8 @@
 {
   "name": "agentic-runtime-isolation",
-  "needs": [],
-  "scenarios": ["S1", "S2", "S3", "S4", "S5", "S6", "S7"],
+  "needs": ["tenant-identity", "control-plane", "tenant-front-door"],
+  "scenarios": ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "PS-2", "PS-3", "PS-4", "PS-6", "PS-8"],
+  "platformOnly": ["PS-2", "PS-3", "PS-4", "PS-6", "PS-8"],
   "quotas": [
     "lambda-concurrency",
     "sts-assume-role-rps",

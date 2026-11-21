@@ -6,12 +6,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadSlice, orderSlices, parseDeclaration, type SliceDeclaration } from '../src/slice';
 
-const decl = (name: string, needs: string[] = []): SliceDeclaration => ({ name, needs, scenarios: ['PS-1'], quotas: [] });
+const decl = (name: string, needs: string[] = []): SliceDeclaration => ({ name, needs, scenarios: ['PS-1'], platformOnly: [], quotas: [] });
 
 describe('slice declaration (spec §3.4)', () => {
   it('parses a declaration', () => {
-    const d = parseDeclaration(JSON.stringify({ name: 'control-plane', needs: ['tenant-identity'], scenarios: ['PS-1', 'placement-race'], quotas: ['codebuild-linux-small'] }), 'f');
-    expect(d).toEqual({ name: 'control-plane', needs: ['tenant-identity'], scenarios: ['PS-1', 'placement-race'], quotas: ['codebuild-linux-small'] });
+    const d = parseDeclaration(JSON.stringify({ name: 'control-plane', needs: ['tenant-identity'], scenarios: ['PS-1', 'PS-5', 'placement-race'], platformOnly: ['PS-5'], quotas: ['codebuild-linux-small'] }), 'f');
+    expect(d).toEqual({ name: 'control-plane', needs: ['tenant-identity'], scenarios: ['PS-1', 'PS-5', 'placement-race'], platformOnly: ['PS-5'], quotas: ['codebuild-linux-small'] });
+  });
+
+  it('defaults platformOnly to none', () => {
+    expect(parseDeclaration(JSON.stringify({ name: 'a', scenarios: ['S1'] }), 'f').platformOnly).toEqual([]);
   });
 
   it.each([
@@ -22,18 +26,24 @@ describe('slice declaration (spec §3.4)', () => {
     ['missing scenarios', { name: 'a' }, /"scenarios"/],
     ['unknown quota', { name: 'a', scenarios: [], quotas: ['sqs'] }, /unknown quotas sqs/],
     ['reserved scenario', { name: 'a', scenarios: ['lifecycle'] }, /runner's own record/],
+    ['platform-only scenario the slice does not declare', { name: 'a', scenarios: ['S1'], platformOnly: ['PS-2'] }, /"platformOnly" names PS-2/],
+    ['bad platform-only entry', { name: 'a', scenarios: ['S1'], platformOnly: 'S1' }, /"platformOnly" must be an array/],
   ])('refuses %s', (_n, doc, pattern) => {
     expect(() => parseDeclaration(JSON.stringify(doc), 'f')).toThrow(pattern);
   });
 
   it('orders every slice after the slices it needs, keeping the given order otherwise', () => {
     const order = orderSlices([
-      decl('agentic-runtime-isolation', ['control-plane', 'tenant-identity']),
+      decl('agentic-runtime-isolation', ['tenant-front-door', 'control-plane', 'tenant-identity']),
+      decl('tenant-front-door', ['control-plane', 'tenant-identity']),
       decl('control-plane', ['tenant-identity']),
-      decl('tenant-front-door', ['control-plane']),
       decl('tenant-identity'),
     ]).map((s) => s.name);
-    expect(order).toEqual(['tenant-identity', 'control-plane', 'agentic-runtime-isolation', 'tenant-front-door']);
+    expect(order).toEqual(['tenant-identity', 'control-plane', 'tenant-front-door', 'agentic-runtime-isolation']);
+  });
+
+  it('keeps the given order of slices that do not need each other', () => {
+    expect(orderSlices([decl('b'), decl('a')]).map((s) => s.name)).toEqual(['b', 'a']);
   });
 
   it('runs one slice alone without its needs (slice mode)', () => {

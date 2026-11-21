@@ -7,7 +7,8 @@
 # one verb at a time and the STRESS_* environment:
 #
 #   slice.sh budget                 draws on the account-wide quotas, no credentials
-#   slice.sh deploy                 the stress-only identity stack, reused when it is there
+#   slice.sh deploy                 the stress-only identity stack, reused when it is there; also
+#                                   writes identity.json, the published identity, for platform mode
 #   slice.sh seed                   the tier's tenants and users, from the manifest when it exists
 #   slice.sh run <scenario>         PS-1, token-rate or create-tenant-burst
 #   slice.sh collect                late fields of this run's records, from API Gateway metrics
@@ -127,6 +128,9 @@ case "$verb" in
     echo "deploy: ${STACK} in ${AWS_REGION}"
     cdk deploy "$STACK" --require-approval never --progress events
     driver publish
+    # The published identity (ids only, no secret) as a manifest, for the slices that read it
+    # in platform mode: stress/README.md, "Platform mode: manifests".
+    (umask 077 && aws ssm get-parameter --name "/${STRESS_PREFIX}/identity" --query Parameter.Value --output text >"${RUN_HOME}/identity.json")
     ;;
 
   seed)
@@ -190,7 +194,7 @@ case "$verb" in
         status=1
       else
         if driver unpublish; then
-          rm -f "${RUN_HOME}/tenant-identity.json"
+          rm -f "${RUN_HOME}/tenant-identity.json" "${RUN_HOME}/identity.json"
         else
           status=1
         fi
