@@ -333,9 +333,9 @@ is stopped when it exits.
 `stress/run.sh run --tier <tier> --slices <a,b,...> [--scenarios <x,y>] [--limits <file>]`:
 
 1. Reads every named `slice.json` and refuses:
-   a need that is no slice; a need left out of `--slices` when more than
-   one slice is named (one slice named is slice mode, which does not
-   require its needs); a cycle in the needs; a `--scenarios` entry that no
+   a need that is no slice, and a need left out of `--slices`, when more
+   than one slice is named (one slice named is slice mode, which does not
+   check its needs); a cycle in the needs; a `--scenarios` entry that no
    named slice declares; a `platformOnly` scenario named in a slice-mode
    run, which has nothing to run against; and a run left with no
    scenario to run (a platform run with no `PS-<n>` scenario, a
@@ -552,16 +552,16 @@ A platform run uses four manifests:
 | `control-plane.json` | `control-plane` `seed`; its driver adds an `identity[]` entry for each identity it creates (§3.3 step 4) | `agentic-runtime-isolation`; `control-plane` (teardown) | tenant ids in `seeded[]` (the platform's steady set), `churn[]` and `extra[]`; the last two belong to the control-plane scenarios; `identity[]`: for each tenant whose identity the driver created (§3.3 step 4), `tenantId`, `admin` and `users[]` as in `tenant-identity.json` |
 | `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` (W-7) | `agentic-runtime-isolation`; `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
 
-`agentic-runtime-isolation` also writes `manifest.json` (the tenants it
-drove) and `platform-tenants.json` (tenants it refused or ignored, by id
-and reason: `no-identity-tenant`, `no-user`, `not-in-control-plane`) in
-its own folder. It drives, in platform mode, every tenant in
-`control-plane.json` `seeded` that has an admin user in the `identity[]`
-of the same file, and builds that set when each scenario starts, because
-the control plane onboards its tenants in PS-1, after every `seed`. It
-stops when fewer than two tenants are usable. The identity tenants the
-control-plane driver creates (§3.3 step 4) are not in
-`tenant-identity.json`, which only that slice's `seed` writes; the
+`agentic-runtime-isolation` also writes `platform/manifest.json` (the
+tenants it drove) and `platform-tenants.json` (tenants it refused or
+ignored, by id and reason: `no-identity-tenant`, `no-user`,
+`not-in-control-plane`) in its own folder. It drives, in platform mode,
+every tenant in `control-plane.json` `seeded` that has an admin user in
+the `identity[]` of the same file, and builds that set when each
+scenario starts, because the control plane onboards its tenants in PS-1,
+after every `seed`. It stops when fewer than two tenants are usable. The
+identity tenants the control-plane driver creates (§3.3 step 4) are not
+in `tenant-identity.json`, which only that slice's `seed` writes; the
 driver records them in `identity[]` (stress ADR-0017, W-9), and a
 control-plane tenant with no entry is refused (`no-identity-tenant`).
 The `control-plane` `teardown` deletes the identity tenants of every
