@@ -82,7 +82,12 @@ deploy_stack() {
 total_start=$SECONDS
 
 # 1. The two callers of the registrar and the stand-in control plane.
-jq -n --arg p "$PREFIX" --arg f "$FLEET" '{stackNamePrefix: $p, fleet: $f}' >"$CONTEXT"
+# A rerun keeps what the earlier deploy recorded: teardown needs it to find the cell stack when this run stops early.
+OLD_CONTEXT='{}'
+[[ ! -s "$CONTEXT" ]] || OLD_CONTEXT="$(cat "$CONTEXT")"
+jq -n --arg p "$PREFIX" --arg f "$FLEET" --argjson old "$OLD_CONTEXT" \
+  '($old | {distributionArn, cellIssuer, cellClientId} | with_entries(select(.value != null))) + {stackNamePrefix: $p, fleet: $f}' >"${CONTEXT}.new"
+mv "${CONTEXT}.new" "$CONTEXT"
 chmod 600 "$CONTEXT"
 deploy_stack "$STACK_SUPPORT" smoke
 deploy_stack "$STACK_CP" smoke
@@ -102,7 +107,9 @@ jq -n --arg d "$APP_DOMAIN" --arg zi "$STRESS_FD_ZONE_ID" --arg zn "$STRESS_FD_Z
   '{appDomain: $d, hostedZone: {zoneId: $zi, zoneName: $zn}, applicationId: $app, controlPlane: $cp, dedicatedDomains: "false", fleet: $f,
     edgeOperatorRoleArn: $op, issuer: {clientId: $ac, scopes: "openid", authorizeEndpoint: "https://issuer.example.com/oauth2/authorize",
     tokenEndpoint: "https://issuer.example.com/oauth2/token", logoutEndpoint: "https://issuer.example.com/logout"}, stackNamePrefix: $p,
-    cellIssuer: $ci, cellClientId: $ca}' >"$CONTEXT"
+    cellIssuer: $ci, cellClientId: $ca}' | jq --argjson old "$OLD_CONTEXT" '. + ($old | {distributionArn} | with_entries(select(.value != null)))' >"${CONTEXT}.new"
+mv "${CONTEXT}.new" "$CONTEXT"
+chmod 600 "$CONTEXT"
 deploy_stack "$STACK_EDGE" fd
 deploy_stack "$STACK_MAIN" fd
 deploy_stack "$STACK_LOGGING" fd

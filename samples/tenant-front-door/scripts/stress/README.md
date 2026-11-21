@@ -56,7 +56,7 @@ distribution, is most of it) and a destroy of the stacks about 9, with about
 
 | Input | Meaning |
 |---|---|
-| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it |
+| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it (a clean `teardown` clears the host's record of the prefix) |
 | `STRESS_FD_ZONE_ID`, `STRESS_FD_ZONE_NAME` | the test subdomain's hosted zone; the front door's `appDomain` is `<prefix in lower case>.<zone name>`: one name per run prefix, so two runs never share a host |
 | `STRESS_FD_IDENTITY_REGION` | the Region of the `tenant-identity` shared pool when it is not `AWS_REGION` |
 
@@ -96,7 +96,7 @@ named, or `-` when it named none, which is also what the edge log shows
 (spec P-7). An answer no hop owns is an unattributed refusal and fails the
 run; so does a driver-side timeout or network error (status 0), which no hop
 answered. A 503 from the registrar is counted by cause: `route-table-busy`
-(five ETag conflicts) or `control-plane-unreadable`.
+(five ETag conflicts), `control-plane-unreadable`, or `other`.
 
 The tokens come from `tenant-identity`'s test aid `IssueToken`; they live
 5 minutes, so a scenario issues its own and issues new ones every 200 s while
@@ -125,15 +125,19 @@ utilization of the scenario's minutes to `quotas.platform` under
 quota. The runner accepts both because it re-hashes the slice's own records
 after `collect`. Each scenario waits up to 5 minutes for its own edge logs and
 up to 5 for the cell's; the cell's counts must agree with the driver's and
-stay unchanged for 30 s (a minute when no request should reach the cell). A router error metric with no datapoint counts as zero
-errors when the router's invocations were counted for the same minutes, and is
-reported as not checked when they were not.
+stay unchanged for 30 s (a minute when no request should reach the cell). A
+router error metric with no datapoint counts as zero errors when the router's
+invocations were counted for the same minutes, and is reported as not checked
+when they were not.
 
 ## Measured (small tier)
 
 The ranges of three runs from a non-production test account: front door in
 one Region, `tenant-identity` in another, edge in us-east-1, one driver host.
-Latencies include the driver host's network path to CloudFront.
+Latencies include the driver host's network path to CloudFront. The time to
+routable and the time to the last miss are seconds from the registrar's answer
+to a write, to the first answer that serves the route and to the last one that
+does not.
 
 | Measure | Range over three runs |
 |---|---|
@@ -199,8 +203,9 @@ What the numbers say:
   placeholders on a reserved example domain, because the run signs nobody in:
   `/config.json` of the stress front door cannot be used to sign in, and the
   SPA is not exercised.
-- `route-write` writes the first 50 write tenants' routes and measures how
-  long each takes to reach the edge. A second run on the same stacks finds
+- `route-write` writes the routes of the first write tenants (the burst plus
+  the sustained writes: 50 at `small`) and measures how long each takes to
+  reach the edge. A second run on the same stacks finds
   those routes already there and measures nothing, so each deploy supports one
   `route-write`.
 - Slice mode only: the registrar reads a stand-in control plane, and the

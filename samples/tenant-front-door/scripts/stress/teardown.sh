@@ -104,7 +104,7 @@ destroy_stack() { # STACK KIND
   echo "$(date -u +%F) stack=${stack} destroy_seconds=${secs}" >>"$TIMINGS"
 }
 
-[[ -s "$CONTEXT" ]] || { echo "teardown: no ${CONTEXT}: deploy stopped before it created a stack"; exit "$status"; }
+[[ -s "$CONTEXT" ]] || { echo "teardown: no ${CONTEXT}: this host has no stack of the prefix to destroy (deploy stopped before it created one, or an earlier teardown finished clean)"; exit "$status"; }
 total_start=$SECONDS
 destroy_stack "$STACK_CELL" smoke
 destroy_stack "$STACK_LOGGING" fd
@@ -240,5 +240,7 @@ if (( status == 0 )); then
     kept=" The tenants of the fixture tier are kept (no --fixtures)."
   fi
   echo "teardown: no stack, resource, log group or edge parameter left (${unchecked} resources of types this check does not read; ${unowned} log groups noted above).${kept}"
+  # The host's record of the prefix ends with its stacks: a later deploy then checks that no stack of the prefix exists.
+  rm -f "$CONTEXT"
 fi
 exit "$status"
