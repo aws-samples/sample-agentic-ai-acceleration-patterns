@@ -222,7 +222,7 @@ billing-grade count comes from the cell's own log of verified requests.
 | Stack | Account | Region | Holds |
 |---|---|---|---|
 | Edge stack | edge | `us-east-1` | The ACM certificate for `<appDomain>` (and `*.<appDomain>` in `host` mode) and the CloudFront-scope web ACL with its rate rules (ADR-0009, ADR-0021) |
-| Main stack | edge | The deployment Region, the control plane's (`eu-central-1` in the integration test) | The multi-tenant distribution and the pooled distribution tenant, the router, the KeyValueStore, the response headers policy (§7.1) and the SPA bucket; the registrar (API, function, resource policy); the custom resources for the `signin` key and the teardown; the published parameter. With `dedicatedDomains` on: the sweeper, its table, queue, schedules, log group and alarms, the guard and the starter. The `dedicatedDomains` switch is an update of this stack |
+| Main stack | edge | The deployment Region, the control plane's (`AWS_REGION` in the integration test) | The multi-tenant distribution and the pooled distribution tenant, the router, the KeyValueStore, the response headers policy (§7.1) and the SPA bucket; the registrar (API, function, resource policy); the custom resources for the `signin` key and the teardown; the published parameter. With `dedicatedDomains` on: the sweeper, its table, queue, schedules, log group and alarms, the guard and the starter. The `dedicatedDomains` switch is an update of this stack |
 | Edge logging stack | edge | `us-east-1` | The log group, delivery source, delivery destination and delivery, after the main stack |
 | `RouteHookAccess` stack | the control plane's | The control plane's | The hook parameter and the hook policy (§3.1), after the main stack, with that stack's `registrarUrl` as an input (ADR-0027) |
 
@@ -2778,7 +2778,7 @@ whole run.
     `host` mode `x-host-header` agrees with it, and an `/assets/*` load
     on `a.<appDomain>` names `a` (host). Requests to
     `login.<appDomain>` leave the field empty (host). The registrar's API access
-    log, in `eu-central-1`, names the edge account on the refused calls
+    log, in the control plane's Region, names the edge account on the refused calls
     of steps 11 and 13 and the control plane's account on those of step
     12; in `host` mode, which skips steps 12 and 13, it names the edge
     account on step 11's. The registrar log names the global hook role on

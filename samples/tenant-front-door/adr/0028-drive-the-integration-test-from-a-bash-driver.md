@@ -48,7 +48,7 @@ and the ordered teardown are ordinary commands; each stack's deploy and
 destroy time is recorded; the smoke scripts (`smoke.sh`,
 `smoke-domains.sh`) already prove the same helpers live. Cons: the
 teardown is the driver's code, so a killed driver leaves stacks, which
-`scripts/integ.sh teardown <run id>` then removes from the run's saved
+`scripts/integ.sh teardown <run id> <mode>` then removes from the run's saved
 state; bash is unit tested only through stubs.
 
 ## Decision

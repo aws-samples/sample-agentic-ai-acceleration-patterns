@@ -466,9 +466,9 @@ npx projen integ
 
 It deploys the front door, its own control plane and two cells in two
 accounts, runs the steps of `single` mode (1 to 16 and 19 to 24) and tears
-everything down; a `single` run takes about four and a half hours, a `host`
-run (`npx projen integ:host`) about an hour (measured, 64 minutes), for a few
-dollars (an estimate). Its inputs, steps and shortcuts are in
+everything down; a `single` run takes about four and a half hours (an estimate, not run), a
+`host` run (`npx projen integ:host`) about an hour (measured, 64 minutes), for
+a few dollars (an estimate). Its inputs, steps and shortcuts are in
 [integration-test.md](./integration-test.md).
 
 ## End-to-end demo
