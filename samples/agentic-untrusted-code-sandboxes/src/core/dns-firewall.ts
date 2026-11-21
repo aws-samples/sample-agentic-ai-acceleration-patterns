@@ -17,6 +17,8 @@ export const DNS_FIREWALL_ALLOWED_DOMAINS: readonly string[] = [
   '*.api.aws',
   'time.aws.com',
   '*.compute.internal',
+  // us-east-1 names its private hosts `ip-*.ec2.internal`, not `*.compute.internal`; the VPC resolver answers both.
+  '*.ec2.internal',
 ];
 
 export const ALLOW_PRIORITY = 100;
