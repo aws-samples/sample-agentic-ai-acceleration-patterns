@@ -6,14 +6,12 @@
 # checks that nothing it owned is left.
 #
 # Order, which matters:
-#   1. the front door's two global hooks on the control plane, when the run has
-#      one (STRESS_CONTROL_PLANE_URL and CONTROL_PLANE_TOKEN set): a control
-#      plane whose hooks still point at a destroyed registrar fails every cell
-#      and deployment delete. A slice-mode run registers no hook, and says so;
-#   2. the run's tenants in tenant-identity and their namespace parameters, and
+#   1. the run's tenants in tenant-identity and their namespace parameters, and
 #      their routes while the registrar exists;
-#   3. the stacks, last deployed first: cell, edge logging, main, edge,
+#   2. the stacks, last deployed first: cell, edge logging, main, edge,
 #      stand-in control plane, support.
+# A slice-mode run registers no global hook on any control plane, so this
+# script unregisters none.
 # Each stack's destroy time is printed. The tenants stay only at a tier whose
 # onboarding is a fixture (`large`) and only without `--fixtures`; the stacks
 # always go, they are not fixtures.
@@ -51,15 +49,7 @@ echo "teardown: account ${account}, ${AWS_REGION}, prefix ${PREFIX}"
 
 driver() { (cd "$SAMPLE_DIR" && node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/driver.ts "$@"); }
 
-# 1. The global hooks, before anything they call goes.
-if [[ -n "${STRESS_CONTROL_PLANE_URL:-}" && -n "${CONTROL_PLANE_TOKEN:-}" ]]; then
-  echo "teardown: unregistering the front door's global hooks on the control plane"
-  CONTROL_PLANE_URL="$STRESS_CONTROL_PLANE_URL" "${SAMPLE_DIR}/scripts/register-hooks.sh" --delete || status=1
-else
-  echo "teardown: no control plane in this run (slice mode: a stand-in control plane, no hooks): no global hooks to unregister"
-fi
-
-# 2. Tenants, parameters, routes. At `large` the seeded tenants stay unless --fixtures (stress ADR-0004).
+# 1. Tenants, parameters, routes. At `large` the seeded tenants stay unless --fixtures (stress ADR-0004).
 : "${STRESS_TIER_JSON:?teardown.sh: STRESS_TIER_JSON is not set (slice.sh sets it)}"
 onboarding="$(jq -er .onboarding <<<"$STRESS_TIER_JSON")"
 if [[ "$fixtures" -eq 1 || "$onboarding" == every-run ]]; then
@@ -75,7 +65,7 @@ if [[ "$fixtures" -eq 1 || "$onboarding" == every-run ]]; then
   fi
 fi
 
-# 3. What the stacks own, read before they go: the ids are the only way back. A rerun adds to what an earlier run read.
+# 2. What the stacks own, read before they go: the ids are the only way back. A rerun adds to what an earlier run read.
 found="${LOGS}/resources.jsonl"
 : >"$found"
 for s in "$STACK_CELL" "$STACK_LOGGING" "$STACK_MAIN" "$STACK_EDGE" "$STACK_CP" "$STACK_SUPPORT"; do
@@ -124,14 +114,21 @@ destroy_stack "$STACK_CP" smoke
 destroy_stack "$STACK_SUPPORT" smoke
 echo "teardown: stacks destroyed in $((SECONDS - total_start)) s"
 
-# 4. Nothing left.
+# 3. Nothing left.
 for s in "$STACK_CELL" "$STACK_LOGGING" "$STACK_MAIN" "$STACK_EDGE" "$STACK_CP" "$STACK_SUPPORT"; do
   if stack_exists "$s"; then echo "teardown: stack ${s} is still there" >&2; status=1; fi
 done
-if err="$(aws ssm get-parameter --name "$PARAM_EDGE" 2>&1 >/dev/null)"; then
-  echo "teardown: ${PARAM_EDGE} is still there; remove it with: aws ssm delete-parameter --name ${PARAM_EDGE} --region ${AWS_REGION}" >&2
-  status=1
-elif ! grep -q 'ParameterNotFound' <<<"$err"; then
+if held="$(aws ssm get-parameter --name "$PARAM_EDGE" --query Parameter.Value --output text 2>"${LOGS}/edge-parameter.err")"; then
+  # The name is fixed per account and Region: a front door another person deployed since holds it under its own distribution.
+  mine="$(jq -r '.distributionArn // empty' "$CONTEXT" 2>/dev/null || true)"
+  theirs="$(jq -r '.distributionArn // empty' <<<"$held" 2>/dev/null || true)"
+  if [[ -n "$mine" && -n "$theirs" && "$mine" != "$theirs" ]]; then
+    echo "teardown: ${PARAM_EDGE} is held by another front door (${theirs##*/}), not by this run's; it is left as it is"
+  else
+    echo "teardown: ${PARAM_EDGE} is still there; remove it with: aws ssm delete-parameter --name ${PARAM_EDGE} --region ${AWS_REGION}" >&2
+    status=1
+  fi
+elif ! grep -q 'ParameterNotFound' "${LOGS}/edge-parameter.err"; then
   echo "teardown: could not tell whether ${PARAM_EDGE} is gone" >&2
   status=1
 fi

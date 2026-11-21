@@ -46,7 +46,7 @@ export interface Plan {
   readonly sustainedWritesPerSecond: number;
   readonly sustainedWriteSeconds: number;
   readonly sustainedWrites: number;
-  /** Seconds a written route is watched: every request must see it by then (spec §3.4 step 5). */
+  /** Seconds a written route is watched: every request must see it by then (spec §4.2). */
   readonly routeWatchSeconds: number;
   /** `router-load`: seconds at the steady rate, then at the peak rate. */
   readonly steadySeconds: number;
@@ -67,7 +67,7 @@ export interface Plan {
  */
 export const MAX_ACTIVE = 100;
 
-/** Spec §3.4 step 5: a burst of about 100 creates is the figure to measure. */
+/** The tier's write burst is capped at the registrar stage's burst limit (`REGISTRAR_THROTTLE`, spec §3.4 step 5). */
 export const MAX_BURST = 100;
 
 /** The scenario's tokens carry a payload this long, in bytes of Authorization, below the router's 8,192-byte limit. */

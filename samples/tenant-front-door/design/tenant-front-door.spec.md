@@ -420,11 +420,18 @@ The router reads at most three keys per request. `/api/*` on a host it
 looks up (`host` mode, or a dedicated domain) reads all three: `host#`,
 `tenant#` and `cell#`. The token decode reads no key, so the `host` mode
 agreement check of step 5 adds no read, and its compute is the decode
-S-7 measured (13-14 %). It checks no token signatures and writes
-nothing to the store; its only output besides the request or the
-answer is the tenant id it passes to `cf.logCustomData` (§3.1). In
-`single` mode it holds no secrets. In `host` mode it holds one, the
-sign-in HMAC key in the `signin` entry (§3.5, ADR-0016).
+S-7 measured (13-14 %). The stress slice reads the function's compute
+utilization once a minute, as the maximum over that minute's
+invocations, and its highest minute is 94 % under ordinary load. The
+two figures measure different things, one decode against the worst
+invocation of a minute. What raises the worst invocation to 94 % is
+not established, and the router's margin to the function's limit at
+that reading is a risk the slice leaves open. The router checks no
+token signatures and writes nothing to the store; its only output
+besides the request or the answer is the tenant id it passes to
+`cf.logCustomData` (§3.1). In `single` mode it holds no secrets. In
+`host` mode it holds one, the sign-in HMAC key in the `signin` entry
+(§3.5, ADR-0016).
 
 ### 3.4 Route registrar, step by step
 
@@ -1056,8 +1063,9 @@ given below):
    write takes 0.50 s at the median, 7.2 to 7.8 s at the 95th
    percentile and 8.2 to 8.6 s at the 99th, because every writer waits
    on the store's one ETag. The 20 writes of the burst are all written
-   within 16 s, which includes the writer's own wait of about 5 s
-   before it tries a 503 again, so the store takes no longer than that.
+   within 16 s, which includes the measuring client's own wait of about
+   5 s before it tries a 503 again, so the store takes no longer than
+   that.
    About one registrar call in twelve of such a run ends in 503 after
    five attempts, which the route hook retries. The load assumed is
    about one write a second; nothing throttles the registrar to it, and
@@ -1520,6 +1528,7 @@ carries over (step 5).
 | `ipRequestsPer5Min` | no | 500 | `host` mode only: the most requests one client IP may send to one tenant host's `/api/*` and `/agents/*` in 5 minutes before the edge answers 429, counted ahead of the per-host count (ADR-0021). One value for every tenant host; there is no per-tenant setting. A chosen value, not a measured one. Keep it below `tenantRequestsPer5Min`. A tenant whose users all reach the edge through one office NAT address shares one count: at 500 its whole user base gets about 1.7 requests per second before `tenantRequestsPer5Min` applies. Raising it raises it for every host |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports, on for the whole session in both modes. No report carries the callback's code, because the first inline script removes it from the URL before anything loads (§7.1 Reports) |
 | `registrarUrl` | no | none | The `registrarUrl` of this front door's edge parameter (§6.4), `https://<api id>.execute-api.<control plane Region>.amazonaws.com/v1/`, known once the main stack is deployed. Set, the app adds the `RouteHookAccess` stack in the control plane's account and Region (§3.1, ADR-0027); validated at synth |
+| `stackNamePrefix` | no | `TenantFrontDoor` | The start of every stack name, and of the app's construct id, which names the CloudFront policies and other account-wide resources. Two front doors in one account need different values, and different Regions, because the edge parameter's name is fixed (§6.4) |
 | `alarmTopicArn` | no | none | ARN of an SNS topic in the main stack's account and Region. The construct adds it as the ALARM action of every alarm this specification defines: the three-miss, `unverifiable`, queue-depth, missing-pages and no-lister alarms of the sweeper (§3.4 step 5) and the 80 % route table alarm on the registrar's `RouteTableBytes` metric (§4.1). Every one of these alarms is in the main stack's Region, so one topic serves them all. The deployer owns the topic, its policy (it must allow CloudWatch to publish) and its subscribers. With no topic the alarms exist and notify no one |
 
 `tenant_id` in this specification means the claim that `tenantClaim`

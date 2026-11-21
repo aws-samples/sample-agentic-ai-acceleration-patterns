@@ -205,7 +205,7 @@ export async function watchRoute(ctx: Ctx, sink: Sink, w: Watch, tokenOf: () => 
     }
     await sleep(Math.max(0, 1000 - (Date.now() - tick)));
   }
-  // Ninety seconds on, every request must see the route (spec §3.4 step 5): ten more, a quarter second apart.
+  // Ninety seconds on, every request must see the route (spec §4.2): ten more, a quarter second apart.
   for (let i = 0; i < 10; i += 1) {
     const r = await request({ method: 'GET', url: `https://${ctx.out.appDomain}/api/whoami`, headers: { authorization: bearer(tokenOf()) } });
     sink.take({ kind: 'route-watch', tenant: w.tenantId, edgeTenant: w.tenantId.toLowerCase(), expect: w.tenantId }, r);

@@ -59,10 +59,8 @@ distribution, is most of it) and a destroy of the stacks about 9, with about
 | `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it |
 | `STRESS_FD_ZONE_ID`, `STRESS_FD_ZONE_NAME` | the test subdomain's hosted zone; the front door's `appDomain` is `<prefix in lower case>.<zone name>`: one name per run prefix, so two runs never share a host |
 | `STRESS_FD_IDENTITY_REGION` | the Region of the `tenant-identity` shared pool when it is not `AWS_REGION` |
-| `STRESS_CONTROL_PLANE_URL`, `CONTROL_PLANE_TOKEN` | only in a run that has a control plane: `teardown` then runs `scripts/register-hooks.sh --delete` before it destroys any stack |
 
-The zone question of the stress spec (Q-4, which hosted zone the stress front
-door uses) is settled here: the account's existing test subdomain zone, one
+The stress front door uses a test subdomain zone that you supply: one
 application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 `STRESS_FD_ZONE_NAME`. No domain is written into the repository.
 
@@ -72,10 +70,10 @@ application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 |---|---|
 | `budget` | prints the draw on Lambda concurrency (the registrar's burst plus a quarter second of the cell at the peak rate); no credentials |
 | `deploy` | the smoke stacks, then the front door's three stacks one at a time, then the cell; prints `stack=<name> deploy_seconds=<n>` for each. Fails at once when another front door holds the edge parameter in this Region |
-| `seed` | tenants in `tenant-identity`, each tenant's namespace parameter in the cell's Region and its records in the stand-in control plane, the cell route and the active tenants' routes written through the registrar as the global hook role, and a wait until every active route answers five times in a row |
+| `seed` | tenants in `tenant-identity`, each tenant's namespace parameter in the cell's Region and its records in the stand-in control plane, the cell route and the active tenants' routes written through the registrar as the global hook role, and a wait until every active route answers five times in a row. It registers the vendor scope `app/use` on the shared pool when the catalogue lacks it, and leaves it there, as a later run reuses it |
 | `run <scenario>` | one scenario, one result record, one request log (below) |
 | `collect` | reads the edge and cell logs and the router's metrics for each scenario's window and checks them against the driver's counts; writes the `edge` hop and the router's compute utilization into the records |
-| `teardown` | the run's tenants, routes and parameters; the front door's global hooks when there is a control plane; then the stacks, last deployed first; then a check that nothing is left. Prints `stack=<name> destroy_seconds=<n>` for each |
+| `teardown` | the run's tenants, routes and parameters (the vendor scope `app/use` stays); then the stacks, last deployed first; then a check that nothing is left. Prints `stack=<name> destroy_seconds=<n>` for each |
 
 ## Scenarios
 
@@ -86,8 +84,10 @@ application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 | `router-load` | 10 requests a second for 40 s, then 40 a second for 20 s, over the active tenants; one in five carries a token padded to about 8,000 bytes that the cell refuses | no mismatch; every refusal is the cell's `403` for the padded token or its rate limit |
 | `edge-refusals` | 60 each of: no token, an undecodable token, a tenant with no route, a suspended tenant, a cross-site call, an Authorization over 8,192 bytes, `/agents`; first it routes the spare tenant, suspends it and reports the time from the suspend call to five 503s in a row | every request is refused with its reason; the cell's log has no line for the window |
 
-All four run against the smoke stack, so `PS-7` here is the slice's own set of
-probes at the router, not a run against another front door.
+All four run against the smoke stack, which has one cell. `PS-7` here is the
+stress spec's cross-cell probe set (§5.1) as far as one cell allows: the probes
+at the router, with no probe at a second cell. Platform mode is not part of this
+slice.
 
 Every answer is classified (`test/stress/classify.ts`) as served, or refused
 with a reason that names the hop (`edge-no-route`, `cell-forbidden`,
@@ -110,8 +110,8 @@ The router can log one value with `cf.logCustomData`, and it logs the
 tenant (ADR-0010). The slice adds no correlation header (ADR-0029). Every
 response carries `x-amz-cf-id`, and CloudFront's standard log carries the
 same value as `x-edge-request-id`, so `collect` joins each request to its
-edge log line on it. Every request joined in each live run (6,681 of 6,681
-in the final one). The same join gives the edge's own time (`time-taken`) as
+edge log line on it, and every request of the measured runs joined. The
+same join gives the edge's own time (`time-taken`) as
 the `edge` hop and shows that every router refusal is a
 `FunctionGeneratedResponse`. The origin is joined by its counts, not per
 request: the cell's log counts by status must equal the number of requests
@@ -124,37 +124,35 @@ utilization of the scenario's minutes to `quotas.platform` under
 `cloudfront-function-compute-utilization-pct`, a key that is not a budgeted
 quota. The runner accepts both because it re-hashes the slice's own records
 after `collect`. Each scenario waits up to 5 minutes for its own edge logs and
-up to 5 for the cell's. A router error metric with no datapoint counts as zero
+up to 5 for the cell's; the cell's counts must agree with the driver's and
+stay unchanged for 30 s (a minute when no request should reach the cell). A router error metric with no datapoint counts as zero
 errors when the router's invocations were counted for the same minutes, and is
 reported as not checked when they were not.
 
 ## Measured (small tier)
 
-Three runs from a non-production test account: front door in eu-west-2,
-`tenant-identity` in eu-central-1, edge in us-east-1, one driver host. Run 3
-is the gate run, which `stress/run.sh run --tier small --slices
-tenant-front-door` reported as PASSED. Latencies include the driver host's
-network path to CloudFront.
+The ranges of three runs from a non-production test account: front door in
+one Region, `tenant-identity` in another, edge in us-east-1, one driver host.
+Latencies include the driver host's network path to CloudFront.
 
-| Measure | Run 1 | Run 2 | Run 3 |
-|---|---|---|---|
-| Registrar write cycle p50 / p95 / p99 | 0.51 / 7.16 / 8.16 s | 0.50 / 7.49 / 8.33 s | 0.50 / 7.76 / 8.59 s |
-| Burst of 20 writes at once, time to write them all | 16 s | 16 s | 15 s |
-| Registrar 503 (`route-table-busy`) | 4 of 54 calls | 5 of 55 calls | 5 of 55 calls |
-| Time to routable p50 / p95 / p99 | 23.1 / 47.1 / 58.1 s | 40.1 / 49.1 / 50.1 s | 29.2 / 37.1 / 38.1 s |
-| Time to last miss p50 / p95 / p99 | 39.0 / 57.0 / 59.0 s | 41.0 / 52.0 / 54.0 s | 34.0 / 57.0 / 60.0 s |
-| Routes served once and then refused again | not counted | 30 of 50 routes, 75 requests | 29 of 50 routes, 210 requests |
-| Suspend call to five 503s in a row | 30 s | 30 s | 60 s |
-| Client latency, served `whoami`, p50 / p99 | 0.05 / 0.11 s | 0.05 / 0.11 s | 0.05 / 0.12 s |
-| Edge refusal latency, p50 / p99 | 4 / 9 ms | 3 / 7 ms | 3 / 8 ms |
-| Router compute utilization, highest minute | 94 % | 94 % | 94 % |
-| Isolation | 0 mismatches in 4,913 assertions | 0 in 4,680 | 0 in 5,120 |
-| Unattributed refusals | 0 | 0 | 0 |
+| Measure | Range over three runs |
+|---|---|
+| Registrar write cycle p50 | 0.50 to 0.51 s |
+| Registrar write cycle p95 / p99 | 7.2 to 7.8 s / 8.2 to 8.6 s |
+| Burst of 20 writes at once, time to write them all | 15 to 16 s |
+| Registrar 503 (`route-table-busy`) | 4 or 5 of 54 or 55 calls |
+| Time to routable p50 / p95 / p99 | 23 to 40 s / 37 to 49 s / 38 to 58 s |
+| Time to last miss p50 / p95 / p99 | 34 to 41 s / 52 to 57 s / 54 to 60 s |
+| Routes served once and then refused again | 29 or 30 of 50 routes |
+| Suspend call to five 503s in a row | 30 to 60 s |
+| Client latency, served `whoami`, p50 / p99 | 0.05 s / 0.11 to 0.12 s |
+| Edge refusal latency, p50 / p99 | 3 to 4 ms / 7 to 9 ms |
+| Router compute utilization, highest minute | 94 % |
+| Isolation | 0 mismatches in 4,680 to 5,120 assertions |
+| Unattributed refusals | 0 |
 
-Deploy and destroy time, seconds, of one clean deploy and one teardown. The
-runner's own figures for the gate run, 178 s to deploy and 913 s to destroy,
-differ: its deploy reused stacks that were already up, and its destroy
-includes a sweep of 71 tenants that took about 6.5 minutes:
+Deploy and destroy time, seconds, of one clean deploy and one teardown. A
+teardown that sweeps 71 tenants adds about 6.5 minutes before the stacks go:
 
 | Stack | Deploy | Destroy |
 |---|---|---|
@@ -174,12 +172,12 @@ What the numbers say:
   includes the driver's own wait (about 5 s) before it retries a 503, so it is
   an upper bound on the store's time, not its throughput.
 - A route is not seen everywhere at once. Edge locations learn a write at
-  different times, up to 60 s in these runs, and a request can see a route and
+  different times, up to 60 s in the measured runs, and a request can see a route and
   then lose it before it settles. That is longer than the 45 s the route hook
   waits for propagation. A suspension took 30 to 60 s after the call to show
   as five 503s in a row. After 90 s every request saw every route.
 - The router's compute utilization reaches 94 % in a minute with ordinary
-  load. In run 3 the highest minute was 94 % for `PS-7`, `route-write` and
+  load. The highest minute was 94 % for `PS-7`, `route-write` and
   `router-load` and 40 % for `edge-refusals`. The metric has one point a
   minute, so a short scenario shares its minute with its neighbours and each
   figure is an upper bound; it cannot show whether the padded tokens of
@@ -190,10 +188,9 @@ What the numbers say:
 - **One front door per Region, fixed SSM name.** The front door publishes
   `/application-plane/shared/front-door/edge`, a name with no prefix. A second
   front door in a Region and account fails at the parameter, and `deploy`
-  refuses to start when it finds the parameter. These runs used eu-west-2,
-  because eu-central-1 and eu-west-1 each held another front door, and kept
-  `tenant-identity` in eu-central-1 (`STRESS_FD_IDENTITY_REGION`). The
-  platform run needs a Region of its own for its front door.
+  refuses to start when it finds the parameter. Pick a Region with no front
+  door and set `STRESS_FD_IDENTITY_REGION` when `tenant-identity` is in
+  another one. A platform run needs a Region of its own for its front door.
 - CloudFront policy names and other account-wide names derive from the CDK
   construct id, so `src/main.ts` takes the id from `stackNamePrefix`; two
   front doors in one account need different prefixes as well as different
@@ -208,17 +205,18 @@ What the numbers say:
   `route-write`.
 - Slice mode only: the registrar reads a stand-in control plane, and the
   global hook role is a role of the same account. Nothing here runs the route
-  hook script, the real hooks or the cell scripts, and `teardown` has never run
-  `register-hooks.sh --delete` live (a slice-mode run registers no hook).
+  hook script, the real hooks or the cell scripts, and a slice-mode run
+  registers no hook on any control plane, so `teardown` unregisters none.
 - No quota ids for CloudFront Functions compute or the API Gateway control
   plane: neither has a Service Quotas code (checked with `list-service-quotas`
   for `cloudfront` and `apigateway`), so `stress/src/budget.ts` has nothing
   to name and the slice declares only Lambda concurrency. The router's compute
   utilization is reported in the record under a key of its own.
 - At most 100 active tenants and a write burst of `min(100, tenantsSeeded)`;
-  only the small tier (a burst of 20) has run. At `medium` and `large` a
-  scenario that outlasts 5 minutes relies on the token refresh, which has not
-  been run that long, and `large`'s tenants stay between runs while its stacks
+  the measurements above are of the small tier (a burst of 20). At `medium`
+  and `large` a scenario that outlasts 5 minutes relies on the token refresh,
+  which the small tier does not exercise for that long, and `large`'s tenants
+  stay between runs while its stacks
   and their stand-in control plane records do not: `seed` writes the records
   again for every tenant of the manifest.
 - The driver runs on the host that runs the slice, not the stress driver host,

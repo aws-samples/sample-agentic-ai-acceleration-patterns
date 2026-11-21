@@ -337,12 +337,14 @@ describe('load helpers', () => {
   it('rejects with the first error of a paced call after the others settled', async () => {
     const done: number[] = [];
     await expect(
-      paced(1000, 0.005, async (i) => {
+      paced(1000, 0.006, (i) => {
+        // One call throws at once and one after a tick: neither is an unhandled rejection.
         if (i === 1) throw new Error('one');
         done.push(i);
+        return i === 3 ? Promise.reject(new Error('three')) : Promise.resolve();
       }),
     ).rejects.toThrow('one');
-    expect(done).toEqual([0, 2, 3, 4]);
+    expect(done).toEqual([0, 2, 3, 4, 5]);
   });
 
   it('spaces a shared gate', async () => {

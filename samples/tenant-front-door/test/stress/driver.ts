@@ -175,7 +175,8 @@ export async function sweep(env: Env, routes: boolean): Promise<number> {
     }
   }
   if (failed === 0) fs.rmSync(file);
-  console.log(`sweep: ${manifest.tenants.length} tenants, ${routes ? 'their routes and ' : ''}parameters removed; ${failed} failures`);
+  const what = `${manifest.tenants.length} tenants, ${routes ? 'their routes and ' : ''}parameters`;
+  console.log(failed === 0 ? `sweep: ${what} removed` : `sweep: ${what} swept with ${failed} failures; the manifest is kept`);
   return failed === 0 ? 0 : 1;
 }
 

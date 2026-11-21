@@ -47,7 +47,8 @@ export async function paced(
     if (wait > 0) await sleep(wait);
     else if (wait < -1000) late += 1;
     if (inflight.size >= maxInflight) await Promise.race(inflight);
-    const p: Promise<void> = fn(i)
+    const p: Promise<void> = Promise.resolve()
+      .then(() => fn(i))
       .catch((e: unknown) => {
         failure ??= e;
       })

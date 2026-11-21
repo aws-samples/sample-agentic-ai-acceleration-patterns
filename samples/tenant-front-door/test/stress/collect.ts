@@ -173,11 +173,13 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
       if (key !== previous) quietSince = Date.now();
       previous = key;
       const total = [...want.values()].reduce((a, b) => a + b, 0);
-      const quiet = Date.now() - quietSince > 60_000;
-      if (diff.length === 0 && (total > 0 || quiet)) break;
+      // The counts agree: wait until they stop changing, so a line for a request that must not have reached the cell is not missed
+      // because it arrives after the poll that found them equal. A minute when nothing is expected, half of that when something is.
+      const quiet = Date.now() - quietSince > (total > 0 ? 30_000 : 60_000);
+      if (diff.length === 0 && quiet) break;
       if (Date.now() > cellDeadline) {
-        // Nothing expected at the cell and its log never stayed quiet for a minute: the check did not run to its end.
-        if (diff.length === 0) failures.push(`${scenario}: the cell log was still changing at the deadline; no origin call is not shown`);
+        // The counts agree but the log never stayed quiet: the check did not run to its end.
+        if (diff.length === 0) failures.push(`${scenario}: the cell log was still changing at the deadline; a request that should not have reached the origin may not be shown yet`);
         break;
       }
       await sleep(10_000);
@@ -211,7 +213,6 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
         `router compute max ${compute.points > 0 ? `${compute.max.toFixed(1)} %` : 'no datapoint yet'}`,
     );
   }
-  fs.writeFileSync(path.join(env.stateDir, 'correlation.json'), `${JSON.stringify({ requestsWithId: expectedAll, joinedOnAmzCfId: joinedAll })}\n`, { mode: 0o600 });
   notes.push(`correlation: ${joinedAll} of ${expectedAll} requests joined the edge log on x-amz-cf-id = x-edge-request-id`);
   return { failures, notes };
 }

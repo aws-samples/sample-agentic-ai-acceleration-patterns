@@ -22,7 +22,6 @@
 import { randomBytes } from 'node:crypto';
 import {
   CloudFrontKeyValueStoreClient,
-  ConflictException,
   DescribeKeyValueStoreCommand,
   GetKeyCommand,
   ResourceNotFoundException,
@@ -32,6 +31,7 @@ import {
 // signer registers it with the SDK's multi-Region signer.
 import '@aws-sdk/signature-v4a';
 import { CustomResourceEventBase, CustomResourceOutcome, respond, RESPONSE_TIMEOUT_MS } from './cfn-response';
+import { isEtagConflict } from '../shared/etag-conflict';
 import { decodeSigninEntry, encodeEntry, KEY_APP, KEY_SIGNIN, signinEntry, SigninEntry } from '../shared/route-table';
 
 export const PHYSICAL_RESOURCE_ID = 'route-table-keys';
@@ -113,7 +113,7 @@ export async function handleEvent(event: RouteTableKeysEvent, deps: Deps): Promi
       }), options);
       return { status: 'SUCCESS', physicalResourceId };
     } catch (error) {
-      if (error instanceof ConflictException && attempt < MAX_ATTEMPTS) {
+      if (isEtagConflict(error) && attempt < MAX_ATTEMPTS) {
         await deps.sleep(50 + Math.floor(Math.random() * 450));
         continue;
       }

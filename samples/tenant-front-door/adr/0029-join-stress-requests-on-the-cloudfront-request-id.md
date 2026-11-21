@@ -45,7 +45,9 @@ because no client header is logged or forwarded.
 - A request that reached the cell is not tied to its edge line. A
   mismatch between the counts shows that a hop dropped or added requests,
   not which one.
-- A platform run that needs the per-request cell hop joins on the header
-  of stress ADR-0005 in the sample that logs it; the slice does not.
+- The stress spec's decision 6 and the front-door part of its work item
+  W-8 describe a correlation header the front door logs. This decision
+  replaces that part for the front door: its hop joins on the CloudFront
+  request id, and the stress spec records it in its own change.
 - Revisit if the router gains a second custom log value or CloudFront
   Functions join a trace.
