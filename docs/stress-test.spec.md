@@ -185,14 +185,14 @@ and the records in
    writes the cell API's `frontDoorApiDomain` to its outputs, which the
    front door's global post hook reads to register the cell route
    (`PutCellRoute`) with the route registrar (front-door spec §3.2,
-   front-door ADR-0017). The cell API origin,
-   the cell parameter and the output exist in the platform run only:
-   in `slice` mode there is no front door, the cell parameter has no
-   value and the cell script deploys none of them. The ingress publishes
-   its own parameter in the cell account, as runtime-isolation does
-   (front-door spec §6.3). The cell sets `publishParameters` to false,
-   so two cells in one account do not overwrite each other, and the
-   parameter sits under the cell's stack name:
+   front-door ADR-0017). The cell API origin, the cell parameter and
+   the output exist in the platform run only: in `slice` mode there is
+   no front door, the cell parameter has no value and the cell script
+   deploys none of them. The ingress publishes its own parameter in the
+   cell account, as runtime-isolation does (front-door spec §6.3). The
+   cell sets `publishParameters` to false, so two cells in one account
+   do not overwrite each other, and the parameter sits under the cell's
+   stack name:
    `/application-plane/shared/agent-runtime/StressCell-<cellId>/ingress`.
 3. The tenant script runs: tenant-identity `CreateTenant` with the
    control-plane tenant id, then `PutTenantSubscription` on the cell
