@@ -22,6 +22,7 @@ import { INVOICES } from './fixtures';
 import { signRequest } from './sigv4';
 
 const IDENTITY_PREFIX = '/application-plane/shared/identity';
+const VENDOR_SCOPE = 'app/use';
 
 async function param(c: Ctx, name: string): Promise<string> {
   const r = await c.aws.ssm.send(new GetParameterCommand({ Name: name }));
@@ -62,8 +63,16 @@ export async function agentPath(c: Ctx): Promise<void> {
   if (!api.endsWith('/')) api += '/';
   const name = `rcinteg${c.runId}`.slice(0, 40);
   let tenantId: string | undefined;
+  // The scope the throwaway tenant gets must be in tenant-identity's catalogue; a fresh pool has none. The run adds it when missing and removes only what it added.
+  const scopeUrl = `${api}platform/scopes/${encodeURIComponent(VENDOR_SCOPE)}`;
+  let scopeAdded = false;
+  if ((await signed(c, 'GET', scopeUrl)).status === 404) {
+    const put = await signed(c, 'PUT', scopeUrl, { description: `run_code integ ${c.runId}` });
+    c.rec.check(`the vendor scope ${VENDOR_SCOPE} is registered in tenant-identity (HTTP ${put.status})`, put.status === 200);
+    scopeAdded = put.status === 200;
+  }
   try {
-    const t = await signed(c, 'POST', `${api}platform/tenants`, { name, adminEmail: `success+${name}@simulator.amazonses.com`, scopes: ['app/use'] });
+    const t = await signed(c, 'POST', `${api}platform/tenants`, { name, adminEmail: `success+${name}@simulator.amazonses.com`, scopes: [VENDOR_SCOPE] });
     tenantId = (t.json.tenant as { tenantId?: string } | undefined)?.tenantId;
     const admin = (t.json.admin as { user?: { username?: string } } | undefined)?.user?.username;
     c.rec.check(`a throwaway tenant and its admin are created in tenant-identity (HTTP ${t.status})`, t.status === 201 && tenantId !== undefined && admin !== undefined);
@@ -101,5 +110,6 @@ export async function agentPath(c: Ctx): Promise<void> {
     c.rec.check(`the run_code result came back through the agent (exit ${String(result?.exitCode)})`, result?.exitCode === 0 && (result.stdout ?? '').trim() === String(INVOICES.A.rows));
   } finally {
     if (tenantId) await signed(c, 'DELETE', `${api}platform/tenants/${tenantId}`);
+    if (scopeAdded) await signed(c, 'DELETE', scopeUrl);
   }
 }

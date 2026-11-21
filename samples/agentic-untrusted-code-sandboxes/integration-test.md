@@ -40,6 +40,10 @@ export AWS_PROFILE=<profile> AWS_REGION=eu-central-1
 npx cdk deploy TenantIdentity-shared-pool --context topology=shared-pool --require-approval never
 ```
 
+The `parse` step's consumer path creates a throwaway tenant with the scope
+`app/use`. A fresh pool has no such scope in its catalogue, so the step
+registers it when it is missing and removes it after, only when it added it.
+
 Before it deploys, the driver checks, and fails early naming the cause:
 
 - the account's "Max allocated ARM_64 MicroVM memory" quota (Service Quotas
