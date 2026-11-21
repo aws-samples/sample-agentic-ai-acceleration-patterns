@@ -1,18 +1,25 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { DeleteParametersCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { AssumeRoleCommand, STSClient } from '@aws-sdk/client-sts';
+import { mockClient } from 'aws-sdk-client-mock';
 import { classify, EXPECT, meets, type RequestKind } from './classify';
-import { forgeToken, newUlid, payloadOf, registrarCause, retrying, unsignedToken } from './clients';
+import { forgeToken, IdentityClient, newUlid, payloadOf, Registrar, registrarCause, retrying, unsignedToken } from './clients';
 import { loadEdgeRows } from './collect';
+import { sweep } from './driver';
 import * as http from './http';
 import { compareCell, expectedAtCell, joinEdge, type EdgeRow } from './join';
 import { paced, pool, Rate } from './load';
 import { drawsOf, parseTier, planOf, tenantsToSeed } from './plan';
 import { percentiles, Recorder } from './recorder';
 import { type Watch, watchRoute, writeAnswer } from './scenarios';
-import { regionOf } from './sigv4';
+import { assumedCredentials, regionOf, signedCaller } from './sigv4';
 import { Sink, answerOf } from './sink';
-import type { RequestLine } from './state';
+import type { Env, RequestLine } from './state';
 import { parseDraws } from '../../../../stress/src/budget';
 import { recordProblems } from '../../../../stress/src/result';
 
@@ -192,6 +199,95 @@ describe('signing Region', () => {
     expect(regionOf('https://abcde12345.execute-api.eu-central-1.amazonaws.com/prod/', 'eu-west-2')).toBe('eu-central-1');
     expect(regionOf('https://example.org/x', 'eu-west-2')).toBe('eu-west-2');
   });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('signs a call for execute-api in the Region of the host with the credentials it is given', async () => {
+    const sent = jest.spyOn(http, 'request').mockResolvedValue({ status: 200, headers: {}, body: '', ttfb: 0, total: 0 });
+    const caller = signedCaller('eu-west-2', async () => ({ accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'example-secret', sessionToken: 'example-session' }));
+    await caller.call('PUT', 'https://abcde12345.execute-api.eu-central-1.amazonaws.com/prod/tenants/T1', {});
+    const o = sent.mock.calls[0][0];
+    expect(o.headers?.authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\/\d{8}\/eu-central-1\/execute-api\/aws4_request/);
+    expect(o.headers?.['x-amz-security-token']).toBe('example-session');
+    expect(o.headers?.['x-amz-date']).toMatch(/^\d{8}T\d{6}Z$/);
+    expect(o.headers?.host).toBe('abcde12345.execute-api.eu-central-1.amazonaws.com');
+    expect(o.headers?.['content-type']).toBe('application/json');
+    expect(o.body).toBe('{}');
+  });
+});
+
+describe('assumed role credentials', () => {
+  const sts = mockClient(STSClient);
+  const answer = (expiresInMs: number) => ({
+    Credentials: { AccessKeyId: 'AKID', SecretAccessKey: 'secret', SessionToken: 'session', Expiration: new Date(Date.now() + expiresInMs) },
+  });
+
+  beforeEach(() => sts.reset());
+  afterEach(() => jest.restoreAllMocks());
+
+  it('assumes the role once for concurrent callers, and again five minutes before the credentials expire', async () => {
+    sts.on(AssumeRoleCommand).resolves(answer(3_600_000));
+    const credentials = assumedCredentials('arn:aws:iam::123456789012:role/example', 'eu-west-2', 'example');
+    const [a, b] = await Promise.all([credentials(), credentials()]);
+    expect(a.accessKeyId).toBe('AKID');
+    expect(b).toBe(a);
+    await credentials();
+    expect(sts.commandCalls(AssumeRoleCommand)).toHaveLength(1);
+    const real = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(real + 3_600_000 - 5 * 60_000 + 1000);
+    await credentials();
+    expect(sts.commandCalls(AssumeRoleCommand)).toHaveLength(2);
+  });
+
+  it('rejects an answer with no credentials, and asks again on the next call', async () => {
+    sts.on(AssumeRoleCommand).resolvesOnce({}).resolves(answer(3_600_000));
+    const credentials = assumedCredentials('arn:aws:iam::123456789012:role/example', 'eu-west-2', 'example');
+    await expect(credentials()).rejects.toThrow('returned no credentials');
+    await expect(credentials()).resolves.toMatchObject({ accessKeyId: 'AKID' });
+  });
+});
+
+describe('sweep', () => {
+  const ssm = mockClient(SSMClient);
+  let dir: string;
+  const env = (): Env => ({ tier: parseTier(SMALL), runId: 'r', prefix: 'P', mode: 'slice', results: '', commit: '', region: 'eu-west-2', stateDir: dir });
+  const outputs = Object.fromEntries(
+    ['region', 'edgeRegion', 'accountId', 'appDomain', 'applicationId', 'registrarUrl', 'cellId', 'cellApiDomain', 'cellFunctionUrl', 'cellLogGroup', 'edgeLogGroup', 'routerFunction', 'fixtureTable', 'operatorRoleArn', 'hookRoleArn', 'identityApiUrl', 'identityAppClientId'].map((k) => [k, `https://example.invalid/${k}`]),
+  );
+  const reply = (status: number) => ({ status, headers: {}, body: '', ttfb: 0, total: 0 });
+  const manifestFile = (): string => path.join(dir, 'manifest.json');
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tfd-sweep-'));
+    fs.writeFileSync(path.join(dir, 'outputs.json'), JSON.stringify(outputs));
+    fs.writeFileSync(manifestFile(), JSON.stringify({ version: 1, tenants: [{ tenantId: 'T1', username: 'u1', kind: 'active' }, { tenantId: 'T2', username: 'u2', kind: 'write' }] }));
+    ssm.reset();
+    ssm.on(DeleteParametersCommand).resolves({});
+    jest.spyOn(http, 'sleep').mockResolvedValue(undefined);
+    jest.spyOn(IdentityClient.prototype, 'deleteTenant').mockResolvedValue(200);
+    jest.spyOn(Registrar.prototype, 'deleteCell').mockResolvedValue(reply(200));
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('tries a busy registrar again, removes the manifest when everything went, and deletes the parameters', async () => {
+    const answers = [503, 0, 200, 200];
+    const del = jest.spyOn(Registrar.prototype, 'deleteTenant').mockImplementation(async () => reply(answers.shift() ?? 200));
+    expect(await sweep(env(), true)).toBe(0);
+    expect(del).toHaveBeenCalledTimes(4);
+    expect(fs.existsSync(manifestFile())).toBe(false);
+    expect(ssm.commandCalls(DeleteParametersCommand)[0].args[0].input.Names).toHaveLength(2);
+  });
+
+  it('keeps the manifest when a route could not be deleted, and does not touch routes with --no-routes', async () => {
+    const del = jest.spyOn(Registrar.prototype, 'deleteTenant').mockResolvedValue(reply(403));
+    expect(await sweep(env(), true)).toBe(1);
+    expect(fs.existsSync(manifestFile())).toBe(true);
+    del.mockClear();
+    expect(await sweep(env(), false)).toBe(0);
+    expect(del).not.toHaveBeenCalled();
+    expect(fs.existsSync(manifestFile())).toBe(false);
+  });
 });
 
 describe('what the runner reads', () => {
@@ -238,11 +334,28 @@ describe('load helpers', () => {
     expect(seen).toContain(1);
   });
 
+  it('rejects with the first error of a paced call after the others settled', async () => {
+    const done: number[] = [];
+    await expect(
+      paced(1000, 0.005, async (i) => {
+        if (i === 1) throw new Error('one');
+        done.push(i);
+      }),
+    ).rejects.toThrow('one');
+    expect(done).toEqual([0, 2, 3, 4]);
+  });
+
   it('spaces a shared gate', async () => {
+    const waits: number[] = [];
+    jest.spyOn(http, 'sleep').mockImplementation(async (ms) => {
+      waits.push(ms);
+    });
     const gate = new Rate(50);
-    const t0 = Date.now();
     await Promise.all([gate.take(), gate.take(), gate.take()]);
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(35);
+    jest.restoreAllMocks();
+    expect(waits).toHaveLength(2);
+    expect(waits[0]).toBeGreaterThan(15);
+    expect(waits[1]).toBeGreaterThan(waits[0] + 15);
   });
 
   it('retries a transient answer with a backoff and returns the last one', async () => {
@@ -252,6 +365,17 @@ describe('load helpers', () => {
     const still = await retrying(async () => ({ status: 503, headers: {}, body: '', ttfb: 0, total: 0 }), (x) => x.status === 503, 1);
     expect(still.status).toBe(503);
   }, 20_000);
+
+  it('does not wait after its last attempt', async () => {
+    const waits: number[] = [];
+    jest.spyOn(http, 'sleep').mockImplementation(async (ms) => {
+      waits.push(ms);
+    });
+    const r = await retrying(async () => ({ status: 503, headers: {}, body: '', ttfb: 0, total: 0 }), (x) => x.status === 503, 3);
+    jest.restoreAllMocks();
+    expect(r.status).toBe(503);
+    expect(waits).toHaveLength(2);
+  });
 
   it('names a registrar 503 by its cause', () => {
     const r = (body: string) => ({ status: 503, headers: {}, body, ttfb: 0, total: 0 });
@@ -272,6 +396,9 @@ describe('watching a written route', () => {
 
   async function watch(statuses: number[], seconds: number): Promise<{ w: Watch; rec: Recorder }> {
     const queue = [...statuses];
+    // A clock that moves one millisecond per reading, so the window holds a fixed number of requests whatever the host does.
+    let clock = 0;
+    jest.spyOn(Date, 'now').mockImplementation(() => (clock += 1));
     jest.spyOn(http, 'request').mockImplementation(async () => answer(queue.shift() ?? 200));
     jest.spyOn(http, 'sleep').mockResolvedValue(undefined);
     const rec = new Recorder();
@@ -293,7 +420,7 @@ describe('watching a written route', () => {
     const { w } = await watch([403, 403, 200, 403, 200], 0.05);
     expect(w.firstRoutable).toBeGreaterThanOrEqual(0);
     expect(w.lastMiss).toBeDefined();
-    expect(w.flaps).toBeGreaterThanOrEqual(1);
+    expect(w.flaps).toBe(1);
     expect(w.finalMisses).toBe(0);
   });
 });

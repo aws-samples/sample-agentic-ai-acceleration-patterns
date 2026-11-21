@@ -24,7 +24,10 @@ create the stacks (an IAM role, a CloudFront distribution and web ACL, Lambda
 functions, API Gateway, DynamoDB, Cognito); that account bootstrapped for the
 CDK in the Region you choose and in `us-east-1`; a public hosted zone in it for
 a test subdomain; and the `tenant-identity` shared-pool deployment's published
-parameters (`/application-plane/shared/identity/*`) in some Region. On the
+parameters (`/application-plane/shared/identity/*`) in some Region; and the
+account-wide API Gateway CloudWatch Logs role in the front door's Region (the
+registrar's stage writes access logs through it; set it once with `aws
+apigateway update-account`, a deployment prerequisite of the front door). On the
 machine: bash, the AWS CLI, `jq`, node, the `smithy` CLI (the registrar's
 generated server code is built on a fresh checkout) and `npm ci` in this
 sample and in `stress/`.
@@ -53,7 +56,7 @@ distribution, is most of it) and a destroy of the stacks about 9, with about
 
 | Input | Meaning |
 |---|---|
-| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain |
+| `STRESS_PREFIX` | names the stacks (`<prefix>-support`, `-control-plane`, `-edge`, `-main`, `-edge-logging`, `-cell`), the CDK construct id, the stand-in hook role (`<prefix in lower case>-global-hook`) and the application domain. `teardown` destroys every stack of the prefix, so `slice.sh` refuses `TenantFrontDoor` and `TfdSmoke` (the names of the front door's and the smoke test's own stacks), and `deploy` refuses a prefix whose stacks exist while this host has no deploy for it |
 | `STRESS_FD_ZONE_ID`, `STRESS_FD_ZONE_NAME` | the test subdomain's hosted zone; the front door's `appDomain` is `<prefix in lower case>.<zone name>`: one name per run prefix, so two runs never share a host |
 | `STRESS_FD_IDENTITY_REGION` | the Region of the `tenant-identity` shared pool when it is not `AWS_REGION` |
 | `STRESS_CONTROL_PLANE_URL`, `CONTROL_PLANE_TOKEN` | only in a run that has a control plane: `teardown` then runs `scripts/register-hooks.sh --delete` before it destroys any stack |
@@ -83,6 +86,9 @@ application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 | `router-load` | 10 requests a second for 40 s, then 40 a second for 20 s, over the active tenants; one in five carries a token padded to about 8,000 bytes that the cell refuses | no mismatch; every refusal is the cell's `403` for the padded token or its rate limit |
 | `edge-refusals` | 60 each of: no token, an undecodable token, a tenant with no route, a suspended tenant, a cross-site call, an Authorization over 8,192 bytes, `/agents`; first it routes the spare tenant, suspends it and reports the time from the suspend call to five 503s in a row | every request is refused with its reason; the cell's log has no line for the window |
 
+All four run against the smoke stack, so `PS-7` here is the slice's own set of
+probes at the router, not a run against another front door.
+
 Every answer is classified (`test/stress/classify.ts`) as served, or refused
 with a reason that names the hop (`edge-no-route`, `cell-forbidden`,
 `origin-iam-denied`, ...). A refusal is attributed to the tenant the request
@@ -101,19 +107,20 @@ ADR-0005) routes them and the cell refuses them.
 ## Correlation
 
 The router can log one value with `cf.logCustomData`, and it logs the
-tenant (ADR-0010). The slice adds no correlation header. Every response
-carries `x-amz-cf-id`, and CloudFront's standard log carries the same value
-as `x-edge-request-id`, so `collect` joins each request to its edge log line
-on it. In three live runs 6,682 of 6,682, 6,681 of 6,681 and 6,681 of 6,681
-requests joined. The same join gives the edge's own time (`time-taken`) as
+tenant (ADR-0010). The slice adds no correlation header (ADR-0029). Every
+response carries `x-amz-cf-id`, and CloudFront's standard log carries the
+same value as `x-edge-request-id`, so `collect` joins each request to its
+edge log line on it. Every request joined in each live run (6,681 of 6,681
+in the final one). The same join gives the edge's own time (`time-taken`) as
 the `edge` hop and shows that every router refusal is a
 `FunctionGeneratedResponse`. The origin is joined by its counts, not per
 request: the cell's log counts by status must equal the number of requests
 the driver saw reach it.
 
-`collect` writes more than the late `refusals` and `cost` fields of the
-contract: it adds the `edge` hop to `latency`, and the router's highest
-compute utilization of the scenario's minutes to `quotas.platform` under
+`collect` writes none of the contract's late `refusals` and `cost` fields:
+the driver records refusals when it sends, and the slice reads no cost. It
+adds the `edge` hop to `latency`, and the router's highest compute
+utilization of the scenario's minutes to `quotas.platform` under
 `cloudfront-function-compute-utilization-pct`, a key that is not a budgeted
 quota. The runner accepts both because it re-hashes the slice's own records
 after `collect`. Each scenario waits up to 5 minutes for its own edge logs and
@@ -123,13 +130,11 @@ reported as not checked when they were not.
 
 ## Measured (small tier)
 
-Three runs on 2026-11-20 from a non-production test account: front door in
-eu-west-2, `tenant-identity` in eu-central-1, edge in us-east-1, one driver
-host. Runs 1 and 2 are of an earlier version of this code (without the token
-refresh retry and the stricter join checks); run 3 is the gate run of the
-final code, which `stress/run.sh run --tier small --slices tenant-front-door`
-reported as PASSED. Latencies include the driver host's network path to
-CloudFront.
+Three runs from a non-production test account: front door in eu-west-2,
+`tenant-identity` in eu-central-1, edge in us-east-1, one driver host. Run 3
+is the gate run, which `stress/run.sh run --tier small --slices
+tenant-front-door` reported as PASSED. Latencies include the driver host's
+network path to CloudFront.
 
 | Measure | Run 1 | Run 2 | Run 3 |
 |---|---|---|---|
@@ -146,10 +151,10 @@ CloudFront.
 | Isolation | 0 mismatches in 4,913 assertions | 0 in 4,680 | 0 in 5,120 |
 | Unattributed refusals | 0 | 0 | 0 |
 
-Deploy and destroy time, seconds, from the clean deploy of run 2 and the
-teardown of run 3 (the runner's own figures for run 3, 178 s to deploy and 913 s
-to destroy, include a deploy that reused stacks that were already up and a sweep
-of 71 tenants that took about 6.5 minutes):
+Deploy and destroy time, seconds, of one clean deploy and one teardown. The
+runner's own figures for the gate run, 178 s to deploy and 913 s to destroy,
+differ: its deploy reused stacks that were already up, and its destroy
+includes a sweep of 71 tenants that took about 6.5 minutes:
 
 | Stack | Deploy | Destroy |
 |---|---|---|
@@ -193,6 +198,14 @@ What the numbers say:
   construct id, so `src/main.ts` takes the id from `stackNamePrefix`; two
   front doors in one account need different prefixes as well as different
   Regions.
+- The front door's issuer endpoints (authorize, token and logout) are
+  placeholders on a reserved example domain, because the run signs nobody in:
+  `/config.json` of the stress front door cannot be used to sign in, and the
+  SPA is not exercised.
+- `route-write` writes the first 50 write tenants' routes and measures how
+  long each takes to reach the edge. A second run on the same stacks finds
+  those routes already there and measures nothing, so each deploy supports one
+  `route-write`.
 - Slice mode only: the registrar reads a stand-in control plane, and the
   global hook role is a role of the same account. Nothing here runs the route
   hook script, the real hooks or the cell scripts, and `teardown` has never run
@@ -229,4 +242,4 @@ What the numbers say:
 |---|---|
 | `slice.sh`, `slice.json` | the verbs and the declaration the runner reads |
 | `deploy.sh`, `teardown.sh`, `lib.sh` | stacks and what they leave behind |
-| `../../test/stress/` | the driver: `driver.ts` (verbs), `scenarios.ts`, `classify.ts`, `sink.ts`, `recorder.ts`, `collect.ts`, `join.ts`, `clients.ts`, `sigv4.ts`, `plan.ts`; unit tests in `stress.test.ts` |
+| `../../test/stress/` | the driver: `driver.ts` (verbs), `scenarios.ts`, `classify.ts`, `sink.ts`, `recorder.ts`, `collect.ts`, `join.ts`, `clients.ts`, `sigv4.ts`, `plan.ts`, `http.ts`, `load.ts`, `state.ts`; unit tests in `stress.test.ts` |

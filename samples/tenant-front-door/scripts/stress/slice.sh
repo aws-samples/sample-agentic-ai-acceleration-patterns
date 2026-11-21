@@ -44,6 +44,14 @@ if ! [[ "$STRESS_PREFIX" =~ ^[A-Za-z][A-Za-z0-9]{0,27}$ ]]; then
   echo "slice.sh: STRESS_PREFIX must be 1 to 28 letters and digits, starting with a letter (it names the stacks and the application domain)" >&2
   exit 2
 fi
+# The default construct id and the smoke test's prefix name stacks a person deploys outside the stress run; teardown destroys every
+# stack of the prefix.
+case "$(printf '%s' "$STRESS_PREFIX" | tr '[:upper:]' '[:lower:]')" in
+  tenantfrontdoor | tfdsmoke)
+    echo "slice.sh: STRESS_PREFIX ${STRESS_PREFIX} is the name of the front door's own stacks (or the smoke test's); pick another" >&2
+    exit 2
+    ;;
+esac
 command -v jq >/dev/null 2>&1 || { echo "slice.sh: jq is not installed" >&2; exit 2; }
 
 # The packages package.json declares that node_modules lacks, one per line.

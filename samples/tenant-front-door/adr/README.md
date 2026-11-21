@@ -39,3 +39,4 @@ are in [spikes](../design/spikes.md).
 | [0025](./0025-change-a-route-status-without-reading-the-control-plane.md) | Change a route's status without reading the control plane | Accepted | 2026-11-19 |
 | [0026](./0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to cell accounts as a plain string | Accepted | 2026-11-19 |
 | [0027](./0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Write the hook parameter from a registrar URL input | Proposed | 2026-11-20 |
+| [0029](./0029-join-stress-requests-on-the-cloudfront-request-id.md) | Join stress requests on the CloudFront request id | Accepted | 2026-11-21 |

@@ -5,8 +5,9 @@
  * What the front-door stress slice does at a tier: the sizes every scenario
  * reads and the quota draws `budget` prints. The runner hands the whole tier
  * over as JSON in `STRESS_TIER_JSON` (docs/stress-test.spec.md §3.4); this
- * file reads the fields it needs and nothing else, so the sample imports no
- * code from `stress/`.
+ * file reads the fields it needs and nothing else, so the driver imports no
+ * code from `stress/`. The unit test imports the contract's parsers to check
+ * the records and the budget the driver writes.
  */
 
 export interface TierJson {

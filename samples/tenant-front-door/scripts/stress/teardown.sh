@@ -55,16 +55,13 @@ driver() { (cd "$SAMPLE_DIR" && node_modules/.bin/ts-node -T -P test/tsconfig.js
 if [[ -n "${STRESS_CONTROL_PLANE_URL:-}" && -n "${CONTROL_PLANE_TOKEN:-}" ]]; then
   echo "teardown: unregistering the front door's global hooks on the control plane"
   CONTROL_PLANE_URL="$STRESS_CONTROL_PLANE_URL" "${SAMPLE_DIR}/scripts/register-hooks.sh" --delete || status=1
-elif [[ "${STRESS_MODE:-slice}" == platform ]]; then
-  echo "teardown: a platform run needs STRESS_CONTROL_PLANE_URL and CONTROL_PLANE_TOKEN to unregister the front door's global hooks" >&2
-  status=1
 else
   echo "teardown: no control plane in this run (slice mode: a stand-in control plane, no hooks): no global hooks to unregister"
 fi
 
 # 2. Tenants, parameters, routes. At `large` the seeded tenants stay unless --fixtures (stress ADR-0004).
-onboarding=every-run
-[[ -z "${STRESS_TIER_JSON:-}" ]] || onboarding="$(jq -er .onboarding <<<"$STRESS_TIER_JSON")"
+: "${STRESS_TIER_JSON:?teardown.sh: STRESS_TIER_JSON is not set (slice.sh sets it)}"
+onboarding="$(jq -er .onboarding <<<"$STRESS_TIER_JSON")"
 if [[ "$fixtures" -eq 1 || "$onboarding" == every-run ]]; then
   # The tenants are not the stacks': remove them whether or not the front door is still there. Its routes go with it.
   if stack_exists "$STACK_MAIN"; then

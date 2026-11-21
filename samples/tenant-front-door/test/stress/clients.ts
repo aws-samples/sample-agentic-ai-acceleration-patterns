@@ -34,7 +34,7 @@ export async function retrying(fn: () => Promise<HttpResult>, retryOn: (r: HttpR
   let last: HttpResult | undefined;
   for (let i = 0; i < attempts; i += 1) {
     last = await fn();
-    if (!retryOn(last)) return last;
+    if (!retryOn(last) || i === attempts - 1) return last;
     await sleep(Math.min(8000, 300 * 2 ** i) * (0.5 + Math.random()));
   }
   return last as HttpResult;

@@ -25,8 +25,8 @@ import { TenantFrontDoor, TenantFrontDoorProps } from './index';
  * `TenantFrontDoor-route-hook-access` in the control plane's account, which
  * the deployer deploys with that account's credentials (spec §3.1, §6.1).
  * With `--context stackNamePrefix=<name>` every stack name starts with
- * `<name>` instead of `TenantFrontDoor`, and so does the construct id; the stress slice names its stacks
- * by run prefix.
+ * `<name>` instead of `TenantFrontDoor`, and so does the construct id; the
+ * stress slice names its stacks by run prefix.
  */
 const app = new App();
 

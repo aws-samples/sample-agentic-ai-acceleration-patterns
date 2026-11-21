@@ -41,6 +41,15 @@ trap 'rm -rf "$LOGS"' EXIT
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 echo "deploy: account ${ACCOUNT}, ${AWS_REGION} (edge in ${EDGE_REGION}, identity in ${IDENTITY_REGION}), prefix ${PREFIX}, application domain ${APP_DOMAIN}"
 
+# A prefix whose stacks exist while this host has no deploy for it names stacks the run did not make, and teardown
+# would destroy them. A rerun after a failed deploy has its context file.
+if [[ ! -s "$CONTEXT" ]]; then
+  for s in "$STACK_SUPPORT" "$STACK_CP" "$STACK_EDGE" "$STACK_MAIN" "$STACK_LOGGING" "$STACK_CELL"; do
+    if stack_exists "$s"; then
+      fail "stack ${s} exists and this host has no state for the prefix ${PREFIX}: pick another STRESS_PREFIX, or remove the stack"
+    fi
+  done
+fi
 # One front door per account and Region: the edge parameter has a fixed name (spec §6.4).
 if ! stack_exists "$STACK_MAIN" && aws ssm get-parameter --name "$PARAM_EDGE" >/dev/null 2>&1; then
   fail "another front door holds ${PARAM_EDGE} in this account and ${AWS_REGION}: one front door per account and Region (spec §6.4); remove it or use another Region"

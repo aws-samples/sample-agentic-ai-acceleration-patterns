@@ -122,7 +122,8 @@ async function seed(env: Env, out: Outputs): Promise<void> {
   console.log(`seed: every active route answered five times in a row ${Math.round((Date.now() - ready) / 1000)} s after the last write`);
 }
 
-async function sweep(env: Env, routes: boolean): Promise<number> {
+/** Removes the run's routes (when `routes`), tenants and namespace parameters; keeps the manifest when anything failed. Returns the exit code. */
+export async function sweep(env: Env, routes: boolean): Promise<number> {
   const file = path.join(env.stateDir, 'manifest.json');
   if (!fs.existsSync(file)) {
     console.log('sweep: no manifest: nothing to remove');
@@ -140,7 +141,7 @@ async function sweep(env: Env, routes: boolean): Promise<number> {
   await pool(manifest.tenants, SEED_CONCURRENCY, async (t) => {
     // The routes go with the front door's stacks: with `routes` off the registrar is gone and only the tenant remains to remove.
     if (routes) {
-      const route = await ctx.registrar.deleteTenant(t.tenantId);
+      const route = await retrying(() => ctx.registrar.deleteTenant(t.tenantId), (r) => r.status === 503 || r.status === 0);
       if (route.status !== 200) {
         failed += 1;
         console.log(`sweep: DeleteTenantRoute HTTP ${route.status}`);
@@ -167,7 +168,7 @@ async function sweep(env: Env, routes: boolean): Promise<number> {
     }
   }
   if (routes) {
-    const cell = await ctx.registrar.deleteCell(out.cellId);
+    const cell = await retrying(() => ctx.registrar.deleteCell(out.cellId), (r) => r.status === 503 || r.status === 0);
     if (cell.status !== 200) {
       failed += 1;
       console.log(`sweep: DeleteCellRoute HTTP ${cell.status}`);
@@ -226,10 +227,13 @@ async function main(): Promise<number> {
   }
 }
 
-main().then(
-  (code) => process.exit(code),
-  (e: unknown) => {
-    console.error(`driver: ${e instanceof Error ? e.message : String(e)}`);
-    process.exit(1);
-  },
-);
+// Not when the unit test imports `sweep`.
+if (require.main === module) {
+  main().then(
+    (code) => process.exit(code),
+    (e: unknown) => {
+      console.error(`driver: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    },
+  );
+}

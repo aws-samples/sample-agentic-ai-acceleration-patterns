@@ -14,7 +14,7 @@ import { readRequestLog, type Env, type Outputs, type RequestLine } from './stat
  * `collect`: reads the hops' logs for each scenario's window and checks
  * them against what the driver saw (P-7, docs/stress-test.spec.md §3.4).
  * Edge: every request's `x-amz-cf-id` is looked up as `x-edge-request-id` in
- * the standard log (the correlation join, ADR-0028). Cell: its log's count by
+ * the standard log (the correlation join, ADR-0029). Cell: its log's count by
  * status equals the number of requests the driver saw reach it, so a
  * refusal at the edge that also reached the origin shows. Router: the
  * function's compute utilization and its error metrics for the window.

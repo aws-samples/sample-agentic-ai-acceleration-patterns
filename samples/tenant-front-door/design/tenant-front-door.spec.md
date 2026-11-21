@@ -1051,22 +1051,23 @@ given below):
    between attempts, and then answers 503, which the route hook
    retries (route hook step 4: five attempts over about two
    minutes). These bounds are chosen. The rates that follow are
-   measured, by the stress slice (`scripts/stress/README.md`, two small
-   tier runs from a non-production test account, each a burst of 20
-   writes at once, then one write a second for 30 s): a write takes
-   0.50 s at the median, 7.2 to 7.5 s at the 95th percentile and 8.2
-   to 8.3 s at the 99th, because every writer waits on the store's one
-   ETag. The 20 writes of the burst were all written 16 s after it
-   started, which includes the writer's own wait of about 5 s before it
-   tries a 503 again, so the store takes no longer than that. 4 or 5 of
-   the 54 or 55 registrar calls of a run ended in 503 after five
-   attempts, which the route hook retries. The load assumed is about one
-   write a second; nothing throttles the registrar to it, and at that
-   load the store has room for the retries. A burst of 100 simultaneous
-   creates has not been run. A larger burst leaves creates in
-   `CREATE_FAILED`, which the operator deletes and creates again (route
-   hook, after step 4). Sharding by distribution, each shard with its
-   own store and ETag (ADR-0012), is the way past the ceiling.
+   measured by the stress slice (`scripts/stress/README.md`, small tier,
+   a burst of 20 writes at once, then one write a second for 30 s): a
+   write takes 0.50 s at the median, 7.2 to 7.8 s at the 95th
+   percentile and 8.2 to 8.6 s at the 99th, because every writer waits
+   on the store's one ETag. The 20 writes of the burst are all written
+   within 16 s, which includes the writer's own wait of about 5 s
+   before it tries a 503 again, so the store takes no longer than that.
+   About one registrar call in twelve of such a run ends in 503 after
+   five attempts, which the route hook retries. The load assumed is
+   about one write a second; nothing throttles the registrar to it, and
+   at that load the store has room for the retries. A burst of 20
+   creates at once is the largest one characterised, and the capacity
+   above it is not. A burst the store cannot clear within the hook's
+   retries leaves creates in `CREATE_FAILED`, which the operator
+   deletes and creates again (route hook, after step 4). Sharding by
+   distribution, each shard with its own store and ETag (ADR-0012), is
+   the way past the ceiling.
 6. Log the caller role, key and outcome, never the body.
 
 Deletes run steps 1 and 2, the write of step 5 with its ETag and its
@@ -2129,9 +2130,9 @@ Limits of these promises:
   application's creates and updates fail. The operator deletes the old
   application's parameter in the same change (§3.1).
 - Route writes share one store ETag, so sustained writes above about
-  one a second, or a burst above about 100, fail creates (§3.4
-  step 5). The first figure is the load the registrar is sized for; the
-  only burst run so far is 20 writes, written 16 s after it started.
+  one a second, or a burst larger than the 20 writes the stress slice
+  sends at once, can fail creates (§3.4 step 5). One a second is the
+  load the registrar is sized for; no larger burst is characterised.
 - `single` mode has no edge rate rule. The origin's per-tenant limit
   counts verified requests only (ADR-0009).
 - In `host` mode the edge rate rules count a request before the router
@@ -2384,6 +2385,7 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0025](../adr/0025-change-a-route-status-without-reading-the-control-plane.md) | The edge operator's status change skips the control-plane read, so a suspension works while the control plane is down | read the placement first; skip the read |
 | [ADR-0026](../adr/0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to each cell account as a plain string | a JSON document; a plain string |
 | [ADR-0027](../adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Proposed. Write the front door hook parameter, one JSON document, from a `registrarUrl` input once the main stack is deployed | an input read after the main stack's deploy; the hook reads the edge parameter across accounts; a fixed registrar domain; a separate app |
+| [ADR-0029](../adr/0029-join-stress-requests-on-the-cloudfront-request-id.md) | Join the stress slice's requests to the edge log on the CloudFront request id, with no correlation header; the origin is joined by counts | the stress ADR-0005 correlation header; the CloudFront request id; X-Ray trace ids |
 
 ## 9. Spikes
 
