@@ -19,7 +19,11 @@
  * (P-1). The probe reads a front door in `single` addressing mode, where the bearer token alone
  * names the tenant, and `edgeUrl`'s host is the front door's `appDomain`: in `host` mode, or on
  * any other host, the router looks the host up first and the probe reads 404 or 403 whatever
- * the tenant's state.
+ * the tenant's state. The token names the tenant in the claim `tenant_id`, the front door's
+ * default `tenantClaim`; a router that wants another claim answers 401, which PS-5 refuses.
+ * An answer CloudFront generates itself (its `x-cache` header says `Error from cloudfront`: a
+ * geographic restriction, a host the distribution does not serve) tells nothing about the
+ * tenant either (`adr/0048-measure-tenant-churn-through-the-front-door-edge.md`).
  */
 
 import { execFile } from 'node:child_process';
@@ -77,25 +81,34 @@ export function readEdgeInputs(home: string, prefix: string): EdgeInputs {
 /** What the edge does for one tenant, read from one answer. */
 export type EdgeState = 'unrouted' | 'suspended' | 'routed' | 'error';
 
-/** One answer of the edge: the HTTP status (0: no answer) and whether the router function wrote it. */
+/**
+ * One answer of the edge: the HTTP status (0: no answer), whether the router function wrote it,
+ * and whether CloudFront generated it itself (its `x-cache` header says `Error from cloudfront`,
+ * as for a geographic restriction or a host the distribution does not serve).
+ */
 export interface EdgeAnswer {
   readonly status: number;
   readonly router: boolean;
+  readonly cloudfront: boolean;
 }
 
+/** The statuses the router writes on `/agents` in `single` mode (front-door router: 401, 403, 404, 503). */
+export const ROUTER_STATUSES: readonly number[] = [401, 403, 404, 503];
+
 /** The router writes its refusals as `{"status":<code>}` (front-door router, `fail`); no origin or CloudFront error page has that body. */
-export const isRouterBody = (body: string): boolean => /^\{"status":\d{3}\}$/.test(body.trim());
+export const isRouterBody = (body: string, status: number): boolean => body.trim() === `{"status":${status}}`;
 
 /**
- * A router 403: no route entry (never created, or removed). A router 503: suspended. No answer
- * and 404 (the router's answer for `/agents` when no agent ingress is configured, or for a
- * host it does not know) tell nothing about the tenant: `error`, and so does a 503 the router
- * did not write (CloudFront's, when the router function fails). Any other answer, the
- * ingress's own 403 included, means the request left the router for an origin: `routed`.
+ * A router 403: no route entry (never created, or removed). A router 503: suspended. No answer,
+ * a 404 (the router's answer for `/agents` when no agent ingress is configured, or for a host it
+ * does not know), an answer CloudFront generated itself, and a 503 the router did not write
+ * (CloudFront's, when the router function fails) tell nothing about the tenant: `error`. Any
+ * other answer, the ingress's own 403 included, means the request left the router for an
+ * origin: `routed`. A router answer with another status is refused by the caller (`churn.ts`).
  */
 export function edgeStateOf(answer: EdgeAnswer): EdgeState {
-  const { status, router } = answer;
-  if (status === 0 || status === 404) return 'error';
+  const { status, router, cloudfront } = answer;
+  if (status === 0 || status === 404 || cloudfront) return 'error';
   if (router && status === 403) return 'unrouted';
   if (status === 503) return router ? 'suspended' : 'error';
   return 'routed';
@@ -171,9 +184,16 @@ export function liveEdge(inputs: EdgeInputs, region: string, deps: EdgeDeps = { 
           redirect: 'manual',
           signal: AbortSignal.timeout(15_000),
         });
-        return { status: res.status, router: isRouterBody(await res.text()) };
+        const cloudfront = /^error from cloudfront/i.test(res.headers.get('x-cache') ?? '');
+        // Only the statuses the router writes need the body, which is a few bytes; any other
+        // body (an origin's answer can be long) is never read.
+        if (!ROUTER_STATUSES.includes(res.status)) {
+          await res.body?.cancel().catch(() => undefined);
+          return { status: res.status, router: false, cloudfront };
+        }
+        return { status: res.status, router: isRouterBody(await res.text(), res.status), cloudfront };
       } catch {
-        return { status: 0, router: false };
+        return { status: 0, router: false, cloudfront: false };
       }
     },
     async setStatus(tenantId, status) {

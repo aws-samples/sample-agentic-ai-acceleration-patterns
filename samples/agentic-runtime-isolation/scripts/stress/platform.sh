@@ -23,7 +23,7 @@ platform_producer() {
 
 # need_platform_inputs VERB -> exits 1 naming every manifest that is missing or unusable.
 # Sets EDGE_URL (an https origin, no path), IDENTITY_API (with a trailing slash), IDENTITY_CLIENT,
-# IDENTITY_REGION and IDENTITY_ISSUER (the stress identity's token issuer).
+# and IDENTITY_REGION.
 need_platform_inputs() {
   local verb="$1" f bad=0 d="$PLATFORM_MANIFEST_DIR"
   for f in tenant-front-door.json identity.json control-plane.json tenant-identity.json; do
@@ -49,18 +49,14 @@ need_platform_inputs() {
   IDENTITY_API="$(jq -r '.apiUrl // empty' "${d}/identity.json")"
   IDENTITY_CLIENT="$(jq -r '.appClientId // empty' "${d}/identity.json")"
   IDENTITY_REGION="$(jq -r '.region // empty' "${d}/identity.json")"
-  local pool
-  pool="$(jq -r '.userPoolId // empty' "${d}/identity.json")"
   [[ "$IDENTITY_API" =~ ^https://[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com(/[A-Za-z0-9_./-]*)?$ ]] \
     || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): apiUrl must be an execute-api URL (got '${IDENTITY_API:-nothing}')" >&2; exit 1; }
   [[ "$IDENTITY_API" == */ ]] || IDENTITY_API="${IDENTITY_API}/"
   [[ "$IDENTITY_CLIENT" =~ ^[A-Za-z0-9]{1,128}$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): appClientId is missing or malformed" >&2; exit 1; }
   [[ "$IDENTITY_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): region is missing or malformed" >&2; exit 1; }
-  [[ "$pool" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]_[A-Za-z0-9]+$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): userPoolId is missing or malformed" >&2; exit 1; }
   # k6 signs IssueToken for AWS_REGION, so an identity in another Region would answer 403.
   [[ -z "${AWS_REGION:-}" || "$IDENTITY_REGION" == "$AWS_REGION" ]] \
     || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): region ${IDENTITY_REGION} is not this run's Region ${AWS_REGION}" >&2; exit 1; }
-  IDENTITY_ISSUER="https://cognito-idp.${IDENTITY_REGION}.amazonaws.com/${pool}"
 
   for f in control-plane.json tenant-identity.json; do
     jq -e '.seeded | type == "array"' "${d}/${f}" >/dev/null 2>&1 \

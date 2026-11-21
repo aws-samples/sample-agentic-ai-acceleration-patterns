@@ -7,7 +7,7 @@
  * deployment deleted, and each change is timed from the call to the first edge response that
  * shows it. The tenant records are the ones `seed` made, and they stay. Deployment creates and
  * deletes go to the control plane; suspend and resume go to the front door's route registrar
- * (`UpdateTenantRouteStatus`).
+ * (`UpdateTenantRouteStatus`). The choices are in `adr/0048-measure-tenant-churn-through-the-front-door-edge.md`.
  * The edge read is one request with an unsigned token naming the tenant (`edge.ts`).
  *
  * Hops in the record: `routable` (CreateDeployment to the first answer that left the router),
@@ -112,6 +112,9 @@ async function read(s: ScenarioEnv, edge: Edge, tenant: string): Promise<EdgeSta
       'the edge answered 404 for /agents/<backend>/invocations: the front door has no agent ingress, the backend name is wrong, or edgeUrl\'s host is not the front door\'s appDomain',
     );
   }
+  if (answer.router && answer.status === 401) {
+    throw new EdgeMisconfigured('the router answered 401 for the probe token: the front door reads the tenant from a claim other than tenant_id (its tenantClaim)');
+  }
   return state;
 }
 
@@ -154,7 +157,12 @@ async function hold(s: ScenarioEnv, edge: Edge, tenant: string, state: 'suspende
     if (now === 'error') {
       s.rec.finding(`tenant ${tenant}: no answer from the edge when asserting the tenant is ${state === 'unrouted' ? 'removed' : 'suspended'}`);
     } else {
-      s.rec.assertIsolation(now === state, `a ${state === 'unrouted' ? 'removed' : 'suspended'} tenant was answered as ${now}, not refused at the router`, tenant);
+      const kind = state === 'unrouted' ? 'removed' : 'suspended';
+      // P-1: the tenant is still refused at the router. A refusal of the other kind (a removed
+      // tenant that reads suspended, a suspended one that reads unrouted) is no breach, but a
+      // finding: the route table is not what the call left.
+      s.rec.assertIsolation(now === 'unrouted' || now === 'suspended', `a ${kind} tenant was answered as ${now}, not refused at the router`, tenant);
+      if (now !== state && (now === 'unrouted' || now === 'suspended')) s.rec.finding(`tenant ${tenant}: a ${kind} tenant read as ${now}`);
     }
     await timing.sleep(timing.pollMs);
   }

@@ -52,4 +52,4 @@ Harder: the slice and the platform run measure different shapes at `medium` and 
 
 Revisit when: the ingress logs the correlation id (join per request, drop the count match); W-5 lets the platform run deploy this sample as a cell (platform mode, the stress identity); or a slice run at `medium` shows the 10,000-group cap of the shared pool in the way.
 
-**2026-11-21.** Amended by ADR-0054: the slice's platform mode reads the other slices' manifests and drives the platform scenarios through the front door's edge, so the platform-mode bullet above no longer holds.
+**2026-11-21.** Amended by ADR-0054: in platform mode the slice reads the other slices' manifests and drives the platform scenarios through the front door's edge; ADR-0054's decision replaces the platform-mode bullet above.

@@ -38,7 +38,9 @@ A sample joins with two files in `samples/<name>/scripts/stress/`:
 }
 ```
 
-`needs` names the slices this one reads through their published interfaces; the runner puts
+`needs` names the slices this one reads through their published interfaces, and it fixes the
+order of a platform run (spec §3.4: `tenant-identity`, `control-plane`, `tenant-front-door`,
+then `agentic-runtime-isolation`); the runner puts
 every slice after the slices it needs, and refuses a need that is no slice, a need left out of
 `--slices` and a cycle. With one slice named (slice mode) its needs are not required. A
 scenario in `platformOnly` needs the other slices' interfaces (the edge, the cells the control
@@ -68,7 +70,8 @@ starts, so a slice's `deploy` can read what an earlier slice seeded (the front d
 the control plane's application). `teardown` runs in reverse order. Without `--scenarios`, a
 slice-mode run runs the slice's scenarios except its `platformOnly` ones (any `PS-<n>` first, by
 number), and a platform run (several slices) runs only the `PS-<n>` scenarios, by number;
-`--scenarios` runs the scenarios named, in the order given, and can name any scenario a slice declares (a
+`--scenarios` runs the scenarios named, in the order given, and can name any scenario a
+slice declares (a
 slice-mode run refuses a `platformOnly` one), and a platform run that has no `PS-<n>` scenario
 to run is refused. A scenario no slice declares is refused before the run starts, so
 the run id stays free.
@@ -112,7 +115,7 @@ The manifests a platform run reads and writes:
 | File | Written by | Read by | Holds |
 |---|---|---|---|
 | `tenant-identity.json` | `tenant-identity` `seed` | `agentic-runtime-isolation` | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each `{username, email}` |
-| `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation` | the value of the SSM parameter `/<prefix>/identity`: `region`, `apiUrl` (execute-api URL of the platform API), `userPoolId`, `appClientId` (the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>`) |
+| `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation` | the value of the SSM parameter `/<prefix>/identity`: `region` (the run's Region), `apiUrl` (execute-api URL of the platform API), `appClientId` |
 | `control-plane.json` | `control-plane` `seed` | `agentic-runtime-isolation` | `seeded[]`, `churn[]`, `extra[]`: tenant ids. `seeded` is the platform's steady set; `churn` and `extra` belong to the control-plane scenarios |
 | `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` | `agentic-runtime-isolation`, `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
 
@@ -232,8 +235,8 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
 - PS-3 in platform mode cannot retire the cells' Lambda instances: they are in the cell
   accounts, where the slice has no write access. It waits 60 s idle and starts the herd from
   there, so its cold-start share is whatever the instances' age allows.
-- PS-2 to PS-8 in platform mode attribute refusals from the driver's own lines. The edge's and
-  the cells' logs are not joined, so the records hold the client's latency hops only and no
+- PS-2, PS-3, PS-4, PS-6 and PS-8 in platform mode attribute refusals from the driver's own
+  lines. The edge's and the cells' logs are not joined, so the records hold the client's latency hops only and no
   quota peaks or cost. A virtual user flushes its per-minute refusal counts on a change of
   minute and once the scenario is 99 % done; a refusal in the last minute of a user that ends
   earlier stays unattributed, and the run fails on it.
@@ -253,7 +256,11 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   `api-gateway` ingress answers 403 with the body `forbidden` for the unsigned token, which
   reads as a routed tenant. An ingress whose refusal has a body of the router's shape, or a
   proxy that rewrites bodies, would read as no route. A 503 without the router's body (the
-  one CloudFront gives when the router function fails) tells nothing and is read again.
+  one CloudFront gives when the router function fails) and an answer CloudFront generates
+  itself (`x-cache: Error from cloudfront`, as for a geographic restriction) tell nothing and
+  are read again. The probe token names the tenant in the claim `tenant_id`, the front door's
+  default `tenantClaim`: a front door with another claim answers 401, and PS-5 stops with that
+  cause.
 - PS-5 suspends and resumes tenants through the front door's route registrar with a SigV4
   call that `curl` (7.75 or later) signs with the driver session's own credentials. The
   registrar allows only its edge operator role for `UpdateTenantRouteStatus`, so the session

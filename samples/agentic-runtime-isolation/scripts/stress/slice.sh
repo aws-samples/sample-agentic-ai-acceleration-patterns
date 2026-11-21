@@ -9,8 +9,10 @@
 #   slice.sh budget                  draws on the account-wide quotas, no credentials
 #   slice.sh deploy                  <prefix>-ingress, the agents stacks, <prefix>-driver (deploy.sh)
 #   slice.sh seed                    the tier's tenants, users, subscriptions and demo rows (seed.sh)
-#   slice.sh run <scenario>          S1 to S7 (slice mode) or PS-2, PS-3, PS-4, PS-6, PS-8 (platform mode): k6 on the driver host, one record per scenario
-#   slice.sh collect                 the late fields of this run's records, from the hops' logs (collect.sh; platform mode: collect-platform.sh)
+#   slice.sh run <scenario>          S1 to S7 (slice mode) or PS-2, PS-3, PS-4, PS-6, PS-8 (platform
+#                                    mode): k6 on the driver host, one record per scenario
+#   slice.sh collect                 the late fields of this run's records, from the hops' logs
+#                                    (collect.sh; platform mode: collect-platform.sh)
 #   slice.sh teardown [--fixtures]   destroys the stacks, and the tenants at small and medium or on --fixtures
 #
 # In slice mode the slice deploys its own cell: one ingress with the tier's agents
@@ -307,7 +309,6 @@ case "$verb" in
         "AGENT_BACKEND=${EDGE_BACKEND}"
         "PLATFORM_API=${IDENTITY_API}"
         "APP_CLIENT_ID=${IDENTITY_CLIENT}"
-        "ISSUER=${IDENTITY_ISSUER}"
         "RECORD_SCENARIO=${scenario}"
       )
     else

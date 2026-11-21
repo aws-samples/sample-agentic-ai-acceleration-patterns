@@ -211,7 +211,7 @@ scripts/stress/
   deploy.sh          cdk deploy of the stress stack (§3.1 props); the driver stack through stress/driver/deploy.sh; prints both deploy times
   seed.sh            Phase 1 steps 1.2 and 1.3; writes tenant ids and usernames to a local manifest (no tokens)
   count.sh           Phase 1 steps 1.4 to 1.7
-  slice.json         the slice declaration: S1 to S7, the platform scenarios PS-2 to PS-8 it owns, the slices it needs and the quotas it draws on (ADR-0052)
+  slice.json         the slice declaration: S1 to S7, the platform scenarios PS-2, PS-3, PS-4, PS-6 and PS-8 it owns, the slices it needs and the quotas it draws on (ADR-0052)
   slice.sh           the six verbs of the platform stress contract; run calls stress/driver/k6.sh; the budget and the sample's tier come from test/stress/slice-cli.ts
   window.sh          the window maths slice.sh run and collect.sh share: a scenario's CloudWatch minutes, the next scenario's start, ISO timestamps
   attribute.jq       P-7: the refusals the hops log with a tenant, matched with the driver's count

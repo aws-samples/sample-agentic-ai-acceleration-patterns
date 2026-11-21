@@ -18,10 +18,11 @@ const ID = { runId: 'r', tier: 'small', mode: 'platform', slice: 'control-plane'
 const TENANTS = ['01HZX0000000000000000000A1', '01HZX0000000000000000000A2', '01HZX0000000000000000000A3'];
 
 /** The router's 403 (no route entry), the router's 503 (suspended), and the ingress's own 403 for the unsigned token of a routed tenant. */
-const NO_ROUTE: EdgeAnswer = { status: 403, router: true };
-const SUSPENDED: EdgeAnswer = { status: 503, router: true };
-const INGRESS_DENY: EdgeAnswer = { status: 403, router: false };
-const NO_ANSWER: EdgeAnswer = { status: 0, router: false };
+const NO_ROUTE: EdgeAnswer = { status: 403, router: true, cloudfront: false };
+const SUSPENDED: EdgeAnswer = { status: 503, router: true, cloudfront: false };
+const INGRESS_DENY: EdgeAnswer = { status: 403, router: false, cloudfront: false };
+const NO_ANSWER: EdgeAnswer = { status: 0, router: false, cloudfront: false };
+const ONE_TENANT = { version: 1 as const, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: [TENANTS[0]], extra: [] };
 
 /**
  * A control plane, a registrar and an edge in one virtual clock. A route change reaches the
@@ -196,7 +197,7 @@ describe('PS-5 churn through the edge (spec §5.1, §7)', () => {
 
   it('stops with the cause when the edge answers 404: no agent ingress behind it', async () => {
     const w = new World(1);
-    w.script = () => ({ status: 404, router: true });
+    w.script = () => ({ status: 404, router: true, cloudfront: false });
     await ps5(w.env({ manifest: { version: 1, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: [TENANTS[0]], extra: [] } }), w.timing);
     expect(w.recorder.findings.join('\n')).toMatch(/the edge answered 404 for \/agents\/<backend>\/invocations: the front door has no agent ingress/);
   });
@@ -418,23 +419,54 @@ describe('what the edge says about a tenant', () => {
       NO_ROUTE,
       SUSPENDED,
       INGRESS_DENY,
-      { status: 503, router: false },
-      { status: 0, router: false },
-      { status: 404, router: true },
-      { status: 401, router: false },
-      { status: 200, router: false },
-      { status: 502, router: false },
+      { status: 503, router: false, cloudfront: false },
+      NO_ANSWER,
+      { status: 404, router: true, cloudfront: false },
+      { status: 401, router: false, cloudfront: false },
+      { status: 200, router: false, cloudfront: false },
+      { status: 502, router: false, cloudfront: false },
+      { status: 403, router: false, cloudfront: true },
     ];
-    expect(answers.map(edgeStateOf)).toEqual(['unrouted', 'suspended', 'routed', 'error', 'error', 'error', 'routed', 'routed', 'routed']);
+    expect(answers.map(edgeStateOf)).toEqual(['unrouted', 'suspended', 'routed', 'error', 'error', 'error', 'routed', 'routed', 'routed', 'error']);
   });
 
-  it('knows a body the router wrote', () => {
-    expect(isRouterBody('{"status":403}')).toBe(true);
-    expect(isRouterBody('{"status":503}\n')).toBe(true);
-    expect(['forbidden', 'forbidden: expired', '<html>503</html>', '', '{"message":"Forbidden"}'].some(isRouterBody)).toBe(false);
+  it('knows a body the router wrote, for the status it came with', () => {
+    expect(isRouterBody('{"status":403}', 403)).toBe(true);
+    expect(isRouterBody('{"status":503}\n', 503)).toBe(true);
+    expect(isRouterBody('{"status":403}', 503)).toBe(false);
+    expect(['forbidden', 'forbidden: expired', '<html>403</html>', '', '{"message":"Forbidden"}'].some((b) => isRouterBody(b, 403))).toBe(false);
   });
 
-  it('reads a live answer by its body: the router\'s 403 and the ingress\'s 403 are two different states', async () => {
+  it('stops with the cause when the router answers 401: the front door reads another claim', async () => {
+    const w = new World(1);
+    w.script = () => ({ status: 401, router: true, cloudfront: false });
+    await ps5(w.env({ manifest: ONE_TENANT }), w.timing);
+    expect(w.recorder.findings.join('\n')).toMatch(/the router answered 401 for the probe token: the front door reads the tenant from a claim other than tenant_id/);
+  });
+
+  it('never reads a CloudFront-generated 403 as a route, in either direction', async () => {
+    const w = new World(1);
+    w.script = () => ({ status: 403, router: false, cloudfront: true });
+    await ps5(w.env({ manifest: ONE_TENANT }), w.timing);
+    expect(record(w).latency.routable).toBeUndefined();
+    expect(w.recorder.findings[0]).toMatch(/the edge did not show routed within 900 s \(last answer: error\)/);
+  });
+
+  it('records a refusal of the other kind as a finding, not a breach of isolation', async () => {
+    const w = new World(10);
+    // A removed tenant that the router now reports suspended is still refused at the router.
+    let afterDelete = 0;
+    w.script = (tenant, state) => {
+      if (state !== 'unrouted' || !w.deleted.has(tenant)) return undefined;
+      afterDelete += 1;
+      return afterDelete === 1 ? NO_ROUTE : SUSPENDED;
+    };
+    await ps5(w.env({ manifest: ONE_TENANT }), w.timing);
+    expect(record(w).isolation.mismatches).toBe(0);
+    expect(w.recorder.findings.some((f) => /a removed tenant read as suspended/.test(f))).toBe(true);
+  });
+
+  it('reads a live answer by its body and its x-cache header: the router\'s 403, the ingress\'s 403 and CloudFront\'s are three different answers', async () => {
     const inputs = { edgeUrl: 'https://stress.example.com', registrarUrl: 'https://abc123.execute-api.us-east-1.amazonaws.com/prod', agentBackend: 'default' };
     const edge = liveEdge(inputs, 'us-east-1');
     const fetchSpy = jest.spyOn(globalThis, 'fetch');
@@ -442,11 +474,15 @@ describe('what the edge says about a tenant', () => {
       fetchSpy.mockResolvedValueOnce(new Response('{"status":403}', { status: 403 }));
       fetchSpy.mockResolvedValueOnce(new Response('forbidden', { status: 403 }));
       fetchSpy.mockResolvedValueOnce(new Response('<html>CloudFront</html>', { status: 503 }));
+      fetchSpy.mockResolvedValueOnce(new Response('<html>The request is blocked</html>', { status: 403, headers: { 'x-cache': 'Error from cloudfront' } }));
+      fetchSpy.mockResolvedValueOnce(new Response('{"output":"a long answer"}', { status: 200, headers: { 'x-cache': 'Miss from cloudfront' } }));
       fetchSpy.mockRejectedValueOnce(new Error('reset'));
-      expect((await edge.probe('T1')).router).toBe(true);
-      expect(await edge.probe('T1')).toEqual({ status: 403, router: false });
+      expect(await edge.probe('T1')).toEqual({ status: 403, router: true, cloudfront: false });
+      expect(await edge.probe('T1')).toEqual({ status: 403, router: false, cloudfront: false });
       expect(edgeStateOf(await edge.probe('T1'))).toBe('error');
-      expect(await edge.probe('T1')).toEqual({ status: 0, router: false });
+      expect(await edge.probe('T1')).toEqual({ status: 403, router: false, cloudfront: true });
+      expect(await edge.probe('T1')).toEqual({ status: 200, router: false, cloudfront: false });
+      expect(await edge.probe('T1')).toEqual({ status: 0, router: false, cloudfront: false });
       expect(fetchSpy.mock.calls[0][0]).toBe('https://stress.example.com/agents/default/invocations');
     } finally {
       fetchSpy.mockRestore();

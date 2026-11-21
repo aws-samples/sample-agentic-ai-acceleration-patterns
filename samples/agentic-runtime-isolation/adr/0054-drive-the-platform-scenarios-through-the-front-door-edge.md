@@ -25,10 +25,10 @@ Pros: one set of load shapes, tested in slice mode; no new k6 script; the slice 
 Pros: each script fits the platform's shape. Cons: a second copy of every load shape that goes stale; no comparison with the slice-mode records.
 
 ### Option 3: Deploy a cell of this sample's own inside the platform run
-Pros: the slice can retire instances and read its own logs. Cons: the platform run no longer measures the cells the control plane built, which is what a platform run is for.
+Pros: the slice can retire instances and read its own logs. Cons: the platform run measures a cell of this slice's own instead of the cells the control plane built, which is what a platform run is for.
 
 ## Decision
-Option 1.
+Option 1. It keeps one set of load shapes, comparable with slice mode, and needs no access to the cells' accounts; Option 3 would not measure the cells the control plane built, and Option 2 would keep a second copy of every shape.
 
 - **Mapping.** PS-2 sends the S1 shape, PS-3 the S2 shape, PS-4 the S3 shape, PS-6 the S5 shape and PS-8 the S6 shape, to `<edgeUrl>/agents/<agent>/invocations`. The record carries the `PS-<n>` id (`RECORD_SCENARIO`). `S1` to `S7` are refused in platform mode and the `PS-<n>` scenarios in slice mode, so a run cannot mix the two.
 - **Inputs.** The slice reads `tenant-front-door.json`, `identity.json`, `tenant-identity.json` and `control-plane.json` from `$STRESS_HOME/$STRESS_PREFIX/` (`stress/README.md`, "Platform mode: manifests") and stops with a message that names the file and the slice that writes it. It drives the control plane's seeded tenants that the identity manifest lists with an admin user, and refuses each other tenant with a reason.
@@ -36,7 +36,7 @@ Option 1.
 - **Refusals.** `collect` takes each refusal's tenant and reason from the `edge_refusal` lines the driver prints (`k6/edge-refusals.js`) and leaves the rest `unattributed`, which fails the run (P-7). It does not join the edge's or the cells' logs.
 
 ## Consequences
-Easier: a platform run exercises the same load shapes as slice mode through the real edge, and this slice needs nothing from the cells' accounts beyond what the front door already routes to.
+Easier: a platform run exercises the same load shapes as slice mode through the real edge, and this slice needs nothing from the cells' accounts beyond what the front door routes to.
 
 Harder: a platform record has the client's latency hops only, with no ingress latency, quota peaks or cost. PS-3 starts its herd after 60 s idle, so its cold-start share is whatever the instances' age allows. Until something creates the identity tenant and users for the tenants the control plane onboards (spec §3.3, steps 3 and 4), the slice refuses every control-plane tenant and the run fails with the list.
 

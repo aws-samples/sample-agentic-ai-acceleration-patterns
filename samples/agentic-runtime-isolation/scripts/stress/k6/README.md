@@ -31,8 +31,8 @@ one always-passing `tenant_429{tenant:<id>}` per tenant the scenario uses, so
 the summary keeps each tenant's 429 count; and in S3 `steady_sent` at least
 95 % of `steady_expected`. `handleSummary` writes `summary.json` (without
 `setup_data`) and the text summary to stdout, and, when `STRESS_RESULTS` is
-set, the scenario's result record (`agentic-runtime-isolation.S<n>.json`,
-stress spec §4.3).
+set, the scenario's result record (`agentic-runtime-isolation.S<n>.json`, or
+`agentic-runtime-isolation.PS-<n>.json` under `RECORD_SCENARIO`; stress spec §4.3).
 
 ## Environment
 
@@ -48,7 +48,7 @@ stress spec §4.3).
 | `APP_CLIENT_ID` | yes | tenant-identity's app client id (`/application-plane/shared/identity/appClientId`); the exchange form requires it |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` (or `REGION`) | yes | signs IssueToken. On the driver, `stress/driver/k6.sh` exports the instance role's credentials first; the k6 aws jslib does not read IMDS |
 | `STRESS_RUN_ID` (or `RUN_ID`) | no | names the run's conversations (`stress<run><tenant>`) and the correlation ids; default a timestamp |
-| `ISSUER` | no | when set, each report's `tokenIss` is checked against it (a check, not a mismatch) |
+| `ISSUER` | no | when set, each report's `tokenIss` is checked against it (a check, not a mismatch). Platform mode leaves it unset: no manifest names the cells' transaction-token issuer |
 | `ENTITLEMENTS_API` | no | read by the operator scripts; unused here |
 
 Tuning, all optional: `ISSUE_RPS` (8), `REFRESH_RPS` (17), `REFRESH_MARGIN_S` (90),

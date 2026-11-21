@@ -211,7 +211,6 @@ describe('slice.sh', () => {
         ['a bad agent backend', { 'tenant-front-door.json': { ...EDGE, agentBackend: 'A/b' } }, /agentBackend must match/],
         ['an identity API that is not execute-api', { 'identity.json': { ...IDENTITY, apiUrl: 'https://example.com/' } }, /apiUrl must be an execute-api URL/],
         ['an identity with no client', { 'identity.json': { ...IDENTITY, appClientId: '' } }, /appClientId is missing/],
-        ['an identity with a bad pool', { 'identity.json': { ...IDENTITY, userPoolId: 'pool' } }, /userPoolId is missing/],
         ['an identity in another Region than the run', { 'identity.json': { ...IDENTITY, region: 'us-east-1', userPoolId: 'us-east-1_AbCdEf123', apiUrl: 'https://abc123.execute-api.us-east-1.amazonaws.com/prod' } }, /region us-east-1 is not this run's Region eu-central-1/],
         ['a manifest that is not an object', { 'control-plane.json': '[1]' }, /control-plane.json \(written by the control-plane slice\) is not a JSON object/],
         ['a control-plane manifest with no seeded list', { 'control-plane.json': { version: 1 } }, /control-plane.json \(written by the control-plane slice\): "seeded" must be an array/],
@@ -357,7 +356,6 @@ describe('slice.sh', () => {
             'AGENT_BACKEND=default',
             'PLATFORM_API=https://abc123.execute-api.eu-central-1.amazonaws.com/prod/',
             'APP_CLIENT_ID=client123abc',
-            'ISSUER=https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_AbCdEf123',
             'RECORD_SCENARIO=PS-2',
           ]);
           const manifest = JSON.parse(fs.readFileSync(path.join(fake, 'k6-manifest.json'), 'utf8'));
