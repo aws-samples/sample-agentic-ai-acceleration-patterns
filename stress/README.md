@@ -72,9 +72,10 @@ the control plane's application). `teardown` runs in reverse order. Without `--s
 slice-mode run runs the slice's scenarios except its `platformOnly` ones (any `PS-<n>` first, by
 number), and a platform run (several slices) runs only the `PS-<n>` scenarios, by number;
 `--scenarios` runs the scenarios named, in the order given, and can name any scenario a
-slice declares (a slice-mode run refuses a `platformOnly` one), and a platform run that has
-no `PS-<n>` scenario to run is refused. A scenario no slice declares is refused before the
-run starts, so the run id stays free.
+slice declares (a slice-mode run refuses a `platformOnly` one). A run left with no scenario
+to run, a platform run with no `PS-<n>` scenario or a slice run whose scenarios are all
+`platformOnly`, is refused too. A scenario no slice declares is refused before the run
+starts, so the run id stays free.
 
 A run fails when a scenario's record is missing, does not parse, belongs
 to another run, or makes no isolation assertion, when a record names a

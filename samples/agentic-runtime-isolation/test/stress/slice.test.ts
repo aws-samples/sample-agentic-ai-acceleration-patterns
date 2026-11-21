@@ -74,7 +74,7 @@ describe('slice.json', () => {
     }
     // The record is written under the PS id: probe.js renames the slice's id with RECORD_SCENARIO.
     expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', 'probe.js'), 'utf8')).toContain("env('RECORD_SCENARIO', scenario)");
-    // Every response goes to the refusal tracker in platform mode, so a minute's counts are always written.
+    // Every response goes to the refusal tracker in platform mode, so every refusal prints its line.
     expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', 'probe.js'), 'utf8')).toMatch(/if \(PLATFORM\) \{\s+edgeRefusals\.track\(entry\.tenantId, r\.status\);/);
   });
 });
@@ -373,7 +373,9 @@ describe('slice.sh', () => {
           expect(r.stderr).toBe('');
           expect(r.status).toBe(0);
           expect(r.stdout).toMatch(/waiting \d+s for a fresh minute past the last scenario's metric window/);
-          expect(fs.readFileSync(path.join(fake, 'sleeps.txt'), 'utf8').trim()).toMatch(/^\d+$/);
+          // The record ends now, so the wait is at least a minute and 3 s; with no record at all it
+          // would be at most 59 s (window.sh). That is what shows the PS records are read.
+          expect(Number(fs.readFileSync(path.join(fake, 'sleeps.txt'), 'utf8').trim())).toBeGreaterThanOrEqual(63);
         });
       });
 

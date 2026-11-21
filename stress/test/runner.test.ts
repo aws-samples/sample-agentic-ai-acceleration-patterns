@@ -143,7 +143,7 @@ describe('runner (spec §3.5)', () => {
   it('refuses a slice run whose scenarios are all platformOnly, before anything runs', async () => {
     const { root, home } = fixture({ a: { scenarios: ['PS-7'], platformOnly: ['PS-7'] } });
     const { calls, exec } = stub();
-    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['a'], exec })).rejects.toThrow(/every scenario of the slice is platformOnly/);
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['a'], exec })).rejects.toThrow(/declares no scenario to run in slice mode/);
     expect(calls).toEqual([]);
   });
 
