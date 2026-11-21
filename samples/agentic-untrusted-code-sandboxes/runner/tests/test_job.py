@@ -197,7 +197,15 @@ class SettledDirtyTest(unittest.TestCase):
         started = time.monotonic()
         self.assertFalse(self.ex.settled_dirty(time.monotonic() + 3))
         self.assertGreaterEqual(time.monotonic() - started, 0.25)
-        self.assertLess(time.monotonic() - started, jb.DIRTY_POLL_S)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_drain_slower_than_one_second_is_still_clean(self):
+        # The integration test's memfd fill near L: the group showed the freed memory for more than 1 s.
+        self.drain_after(1.3)
+        started = time.monotonic()
+        self.assertFalse(self.ex.settled_dirty(time.monotonic() + 3))
+        self.assertGreaterEqual(time.monotonic() - started, 1.25)
+        self.assertLess(time.monotonic() - started, 2.5)
 
     def test_a_group_that_stays_full_is_dirty_after_the_poll_time(self):
         with mock.patch.object(jb, "DIRTY_POLL_S", 0.2):
