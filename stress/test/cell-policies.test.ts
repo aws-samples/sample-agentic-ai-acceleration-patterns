@@ -81,6 +81,7 @@ describe('cellPolicyNames', () => {
       boundary: 'cell-permissions-boundary',
       workloadBoundary: 'cell-workload-boundary',
       build: 'cell-build-policy',
+      tenantBuild: 'cell-tenant-build-policy',
     });
   });
   it('takes a short suffix and refuses anything else', () => {
@@ -94,8 +95,8 @@ describe('cellPolicyNames', () => {
 describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
   const { json } = policiesTemplate();
 
-  it('passes cdk-nag, holds the four managed policies and nothing else, with no CDK bootstrap dependency', () => {
-    expect(Object.values(json.Resources).map((r: any) => r.Type)).toEqual(Array(4).fill('AWS::IAM::ManagedPolicy'));
+  it('passes cdk-nag, holds the five managed policies and nothing else, with no CDK bootstrap dependency', () => {
+    expect(Object.values(json.Resources).map((r: any) => r.Type)).toEqual(Array(5).fill('AWS::IAM::ManagedPolicy'));
     // Legacy synthesizer: no bootstrap version parameter or rule.
     expect(json.Parameters?.BootstrapVersion).toBeUndefined();
     expect(json.Rules?.CheckBootstrapVersion).toBeUndefined();
@@ -292,6 +293,22 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
         },
       ]);
       expect(JSON.stringify(p.statements)).not.toContain('lookup');
+    });
+  });
+
+  describe('the tenant build policy (stress ADR-0012)', () => {
+    const p = managedPolicy(json, 'cell-tenant-build-policy');
+
+    it('invokes the tenant subscription methods of the account\'s APIs in its Region only', () => {
+      expect(p.statements).toEqual([
+        {
+          Sid: 'InvokeTenantSubscriptions',
+          Effect: 'Allow',
+          Action: 'execute-api:Invoke',
+          Resource: ['GET', 'PUT', 'DELETE'].map((m) => `arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:*/*/${m}/entitlements/tenants/*`),
+        },
+      ]);
+      expect(JSON.stringify(p.statements)).not.toMatch(/plans|POST|\/agents|\/tools/);
     });
   });
 

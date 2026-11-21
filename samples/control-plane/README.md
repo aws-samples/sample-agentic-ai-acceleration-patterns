@@ -713,6 +713,78 @@ takes its own fleet name, so two runs can share the accounts and the Region.
 See [integration-test.md](./integration-test.md) for the second account's
 bootstrap, what the run stands up in each account, its steps and its knobs.
 
+## Platform stress slice
+
+The sample is a slice of the repository's platform stress test
+([`docs/stress-test.spec.md`](../../docs/stress-test.spec.md),
+[`stress/`](../../stress/README.md)). The slice deploys a control plane of its
+own in the platform account, `<STRESS_PREFIX>-control-plane` with the fleet
+name `<STRESS_PREFIX>` in lower case and `concurrentBuildLimit` from
+`STRESS_BUILD_LIMIT` (default 50, [ADR-0046](./adr/0046-make-the-concurrent-build-limit-a-prop.md)),
+beside `<STRESS_PREFIX>-cp-setup`, a throwaway vendor IdP and the script
+source. It registers the stress application
+([`stress/application/`](../../stress/application/README.md)), whose cell
+scripts deploy one `agentic-runtime-isolation` cell into a standalone cell
+account through the account's role pair and cell bootstrap, and whose tenant
+scripts subscribe one tenant on its cell. Before every run it checks each cell
+account (spec §3.7) and refuses one that holds anything but the cell
+bootstrap, the role pair, the owner's listed account-base stacks and cells.
+
+Each cell account's owner first deploys the owner stacks, the cell bootstrap
+and the role pair there (`stress/application/README.md`, steps 1, 2 and 4).
+The run then needs a cell accounts file outside the repository:
+
+```json
+{ "accounts": [{ "label": "cell-account-1", "accountId": "<id>", "profile": "<a CLI profile with read access>",
+  "accountBaseStackArns": ["<CellPolicies stack ARN>", "<CellAccountBase stack ARN>"] }] }
+```
+
+```bash
+export AWS_REGION=eu-central-1 STRESS_PREFIX=StressCp STRESS_CELL_ACCOUNTS=<the file>
+cd ../../stress
+./run.sh run --tier small --slices control-plane --remove-fixtures
+```
+
+`STRESS_REGIONS` (comma-separated, default `AWS_REGION`) names the Regions the
+account check lists stacks in: every Region the run uses (spec §3.7). A
+record's `quotas` holds the peak of operations the driver's paced waves kept in
+flight (onboarding and every removal), which bounds its draw on the platform
+account's concurrent Linux/Small builds. The unpaced bursts, the placement
+race's racers and the read-rate churn, are not counted, so those two records
+show the peak of their paced removals only. Lambda concurrency and STS are
+budgeted (`slice.sh budget`) but not measured. The API Gateway control-plane
+draw of spec §4.4, each `set-build-limit` redeploy of the control plane, has no
+Service Quotas code, so the slice does not budget it. The platform account's
+CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds must hold the
+build limit times two (the cell and tenant projects; the service default is 1).
+Scenarios: `PS-1` (the seeded tenants onboarded at the build limit; the first
+deployment creates the cell, whose build time answers spec Q-1),
+`placement-race` (twice as many `CreateDeployment` calls as free slots, at
+once, on a nearly full fleet), `read-rate` (`ListDeployments`, `GetDeployment`
+and `ListCells` at the tier's steady rate while deployments are placed and
+tenants updated) and `build-limit-scaling` (the seeded tenants onboarded again
+at build limits 5, 20 and 50). Each asserts that a deployment names its tenant
+and a cell of the application in a cell account, that no cell goes over
+`maxTenants`, that a refused tenant has no deployment, and that the tenant
+build's record in the cell account names the tenant and the cell. The driver is
+[`test/stress/`](./test/stress/), the scripts
+[`scripts/stress/`](./scripts/stress/slice.sh); the manifest and the source zip
+stay outside the repository and hold no token or password. `--remove-fixtures`
+also deregisters the accounts and the application and destroys both stacks. A
+seeded tenant left `CREATE_FAILED` stops every later seed with that status: run
+`slice.sh teardown --fixtures`, which deletes it, then seed again.
+
+The driver keeps every wave of creates and deletes at the build limit:
+CodeBuild refuses a build over a project's limit rather than queueing it, and
+the workflow then fails the operation. Concurrent placements and deletes on one
+cell also meet each other in DynamoDB: the control plane answers a cancelled
+placement transaction with a 500 "Deployment placement failed ambiguously" and
+a cancelled terminal write with `CREATE_FAILED` or `DELETE_FAILED`. The driver
+retries them, a placement with its client token, and the records show them as
+`500:internal-server` requests with `ambiguous-placement` refusals and as
+`CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts
+([stress ADR-0013](../../stress/adr/0013-pace-waves-at-the-build-limit-and-retry-conflicts.md)).
+
 ## End-to-end demo
 
 The sample scripts provision a deliberately tiny cell: the cell scripts in
@@ -1243,3 +1315,35 @@ application's cells (threat T5, the highest-consequence open item).
   (`cp-integ-<run id>`); [integration-test.md](./integration-test.md),
   After an interruption, lists them. Delete them after a run; they hold test
   output only.
+- **The stress slice leaves log groups and API Gateway CloudWatch roles.**
+  `<STRESS_PREFIX>-cp-setup` gives its operator-minting function and its
+  bucket deployment log groups the stack owns, but the CDK's auto-delete
+  provider for the source bucket creates `/aws/lambda/<STRESS_PREFIX>-cp-setup-CustomS3AutoDeleteObjects...`
+  on first invoke, and a late write can recreate an owned group after the
+  destroy. `slice.sh teardown --fixtures` lists every log group named after
+  the two stacks and does not count them; delete them after the run, they
+  hold test output only. The API access log group above can reappear the
+  same way. Each `<STRESS_PREFIX>-control-plane` also leaves its REST API's
+  CloudWatch role (`<STRESS_PREFIX>-control-plane-ApiCloudWatchRole...`,
+  shortened by CloudFormation for a long prefix), which the CDK retains on
+  destroy because the account's API Gateway setting may still point at it.
+  `teardown --fixtures` reads its name from the stack before the destroy,
+  keeps it in `$STRESS_HOME/<STRESS_PREFIX>/cloudwatch-roles` across runs,
+  then lists it and does not count it. Delete one only when the account
+  setting names another role.
+- **Builds over the concurrent build limit are refused, not queued.**
+  CodeBuild refuses a `StartBuild` above a project's `concurrentBuildLimit`
+  (`AccountLimitExceededException`), and the workflow retries it a few times
+  about 30 seconds apart and then fails the operation (`CREATE_FAILED`,
+  `DELETE_FAILED`). ADR-0046 and the stack's comment say that excess builds
+  queue. Until the workflow waits for a free slot, keep a client's in-flight
+  creates, updates and deletes at or below the limit; the platform stress
+  slice paces its waves this way (stress ADR-0013).
+- **A transaction conflict between concurrent operations on one cell
+  surfaces as a failure.** A placement whose `TransactWriteItems` is
+  cancelled with `TransactionConflict` and no failed condition answers 500
+  "Deployment placement failed ambiguously", and a workflow's terminal
+  write cancelled the same way leaves the record `CREATE_FAILED` or
+  `DELETE_FAILED` although its build succeeded. A `CreateDeployment` retry
+  with the same `clientToken`, a new create after a delete, or another
+  delete clears it (stress ADR-0013).
