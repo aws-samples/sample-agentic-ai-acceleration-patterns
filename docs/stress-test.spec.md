@@ -151,11 +151,11 @@ Every cell trusts the same issuer, the stress identity. The front door's
 edge stack and edge logging stack are in `us-east-1`, as its
 specification requires; everything else is in `eu-central-1`. The
 driver host sits in the platform account, so it never shares an account
-with a cell build. The picture shows
-`large` and only the `/api/*` origins; at `small` there is one cell
-account with one cell, and agent calls go from the edge to that cell's
-ingress (§3.3, stress ADR-0016). At `medium` and `large`, how agent
-calls reach each cell's ingress is Q-7.
+with a cell build. The picture shows `large` and only the `/api/*`
+origins; at `small` there is one cell account with one cell, and agent
+calls go from the edge to that cell's ingress (§3.3, stress ADR-0016).
+At `medium` and `large`, how agent calls reach each cell's ingress is
+Q-7.
 
 ### 3.3 Paths
 
@@ -177,7 +177,8 @@ and the records in
    distribution ARN from a cell parameter (§3.5). The origin verifies
    the token, refuses a hint that is not the token's tenant and a
    tenant its cell does not host with 403, and answers with the tenant
-   and the hint it received (front-door spec §3.5). The script writes
+   and the hint it received on `GET /api/whoami` (front-door spec §3.5,
+   §10 step 4). The script writes
    the cell API's `frontDoorApiDomain` to its outputs, which the front
    door's global post hook reads to register the cell route
    (`PutCellRoute`) with the route registrar (front-door spec §3.2,
@@ -189,19 +190,21 @@ and the records in
    `/application-plane/shared/agent-runtime/StressCell-<cellId>/ingress`.
 3. The tenant script runs: tenant-identity `CreateTenant` with the
    control-plane tenant id, then `PutTenantSubscription` on the cell
-   ingress's Entitlements API. It records the deployment in a parameter
-   below `/application-plane/tenants/<tenant id>/stress/`, the
-   namespace the cell API's hosts check reads. It does not call
+   ingress's Entitlements API. It records the deployment in the
+   parameter `/application-plane/tenants/<tenant id>/stress/deployment`,
+   below the namespace the cell API's hosts check reads; the delete
+   script and the slice's read-back use the same name. It does not call
    `PutTenantRoute`: the front door's global post hook writes the
    tenant route once the deployment's event has run (front-door
    ADR-0017, front-door spec §3.2).
 4. The driver creates the tenant's users with tenant-identity `CreateUser`
    and polls through the edge until the first `report` is served. It
-   then makes one `/api/*` call through the edge to the cell API, whose
-   answer carries the route hint (§5.3). The run's first tenant is the
-   warm-up tenant of §3.5: its deployment builds the cell, and
-   `/agents/*` is refused at the edge (404, or CloudFront's own 403 for
-   a `POST`) until front-door phase two, so it is not timed in PS-1.
+   then makes one `GET /api/whoami` call through the edge to the cell
+   API, whose answer carries the route hint (§5.3). The run's first
+   tenant is the warm-up tenant of §3.5: its deployment builds the
+   cell, and `/agents/*` is refused at the edge (404, or CloudFront's
+   own 403 for a `POST`) until front-door phase two, so it is not timed
+   in PS-1.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -311,8 +314,8 @@ in it fails its hook with 409 until an operator backfills the route
 
 | # | Step | Owned by |
 |---|---|---|
-| 0 | stress identity deployed, whose issuer the control plane and the front door take as input, with an app client for the registrar and a `role` trigger on the vendor IdP (front-door spec §6.1) | `tenant-identity` `deploy` |
-| 1 | control plane deployed, with the registrar's client id in `vendorIdp.clientIds` and the reader roles (control-plane R-36, R-38) | `control-plane` `deploy` |
+| 0 | stress identity deployed, whose issuer the front door takes as its `issuer` input and every cell trusts | `tenant-identity` `deploy` |
+| 1 | control plane and its vendor IdP deployed, the vendor IdP with an app client with a secret for the registrar whose client-credentials tokens carry the reader role, that client's id in `vendorIdp.clientIds`, and `readerRoles` (control-plane R-36, R-38; front-door spec §6.1) | `control-plane` `deploy` |
 | 2 | front-door phase one, first deploy: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `applicationId` set to the stress application's id, `stress`, the value step 4 registers, with `controlPlane`, `fleet` and `edgeOperatorRoleArn` set (front-door spec §3.6), and with `agentIngress` unset, so the edge refuses `/agents/*` (404, or CloudFront's own 403 for a `POST`, front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
 | 3 | front-door phase one, second deploy: the same app with `registrarUrl`, read from the edge parameter, which adds the `RouteHookAccess` stack in the control plane's account (front-door ADR-0027); then the control plane's `globalHookManagedPolicyArns` update and the global hooks registered with `register-hooks.sh`, whose hook source is the front door's repository on GitHub, pinned to the run's commit (front-door spec §5.2) | `tenant-front-door` `deploy`, with a second `control-plane` update |
 | 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); then the cell account registered for it, with `maxCells` 1 at `small`. The cell app passes the ARN to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7. Both answer 202, so the runner waits until the application and the account are `ACTIVE` | `control-plane` (application and account registration) |
@@ -338,9 +341,10 @@ refuses a `baseUrl` that is not
 `https://<id>.execute-api.<region>.amazonaws.com/<stage>`: a cell build
 writes that parameter, and the value picks the host that receives every
 tenant's bearer token on `/agents/*`. The check proves the form of the
-host and not that the API is the cell's own (§3.7). It assumes the ingress reader
-role (§3.6), a read-only role in the cell account's account base (§3.7,
-W-11), with the platform account credentials it deploys with.
+host and not that the API is the cell's own (§3.7). The slice assumes
+the ingress reader role (§3.6), a read-only role in the cell account's
+account base (§3.7, W-11), with the platform account credentials it
+deploys with.
 Phase two is a CloudFront distribution change in the main stack, on
 every run at `small`. Its time is part of the front-door slice's
 `deploySeconds` (P-6), and the slice logs it on a line of its own.
@@ -479,7 +483,7 @@ Each slice's `budget` fills its column; the runner sums per account.
 | Quota (per account) | `control-plane` | `tenant-identity` | `tenant-front-door` | `agentic-runtime-isolation` (per cell) |
 |---|---|---|---|---|
 | Lambda concurrency | API and workflow | platform and token functions | registrar | ingress, authoriser, tools |
-| CodeBuild concurrent builds | `buildLimit` x the control plane's projects (4: cell, tenant, global hook and application hook; the run uses the first three, §3.6) | - | - | - |
+| CodeBuild concurrent builds | `buildLimit` x the projects the run builds in (cell and tenant, plus the global hook project in `platform` mode); the control plane creates four, §3.6 | - | - | - |
 | STS `AssumeRole` | role pair per build | - | - | TVM |
 | KMS `Sign` | - | - | - | mint, tool contexts |
 | API Gateway control plane | deploy | deploy | deploy | deploy, tenant keys |
@@ -636,11 +640,11 @@ Q-5.
 | W-2 driver and k6 library moved to `stress/` | W-1 schema | done in `stress/driver/` and `stress/k6/` |
 | W-3 runtime-isolation slice on the contract | W-1, W-2 | done in `samples/agentic-runtime-isolation/scripts/stress/` |
 | W-4 control-plane build-limit prop | decision 2 | done: control-plane ADR-0046 |
-| W-5 control-plane slice and the stress application, with the stress cell's cell API origin, its `frontDoorApiDomain` output and the distribution ARN cell parameter (§3.3 step 2, §3.5) | W-1, W-4, W-10; W-11 for Q-1 and the account check | the slice in `samples/control-plane/scripts/stress/`, the stress application and the role pair in `stress/application/` are done (stress ADR-0012 to ADR-0015) and Q-1 is answered; the cell API origin, its output and the cell parameter are to build, now, with four changes around them: the source zip carries `samples/tenant-front-door/src/demo-cell/` and `src/shared/`, and the origin bundles with runtime-isolation's dependency versions; the tenant script writes below the namespace the origin reads (§3.3 step 3, `scripts/tenant/{create,delete}.sh`); the slice's `budget` counts the global hook project in `platform` mode (`BUILD_PROJECTS` in `test/stress/plan.ts`, 2 now); and the comment in `scripts/tenant/create.sh` stops saying the script writes the front-door route |
+| W-5 control-plane slice and the stress application, with the stress cell's cell API origin, its `frontDoorApiDomain` output and the distribution ARN cell parameter (§3.3 step 2, §3.5) | W-1, W-4, W-10; W-11 for Q-1 and the account check | the slice in `samples/control-plane/scripts/stress/`, the stress application and the role pair in `stress/application/` are done (stress ADR-0012 to ADR-0015) and Q-1 is answered; the cell API origin, its output and the cell parameter are to build, now, with four changes around them: the source zip carries `samples/tenant-front-door/src/demo-cell/` and `src/shared/`, and the origin bundles with runtime-isolation's dependency versions; the tenant scripts and the slice's read-back (`test/stress/fleet.ts`, with its test) use the parameter name of §3.3 step 3 (`scripts/tenant/{create,delete}.sh`); the slice's `budget` counts the global hook project in `platform` mode (`BUILD_PROJECTS` in `test/stress/plan.ts`, 2 now); the slice's setup stack gains the registrar client, `vendorIdp.clientIds`, `readerRoles` and the `globalHookManagedPolicyArns` update that steps 1 and 3 of §3.5 need; and the comment in `scripts/tenant/create.sh` stops saying the script writes the front-door route |
 | W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, workload boundary, `/cell/` path aspect and the cell bootstrap, in `stress/application/` | decision 7; the deny probes ran in the path spike (`stress/spikes/cell-path/`); the second boundary is ADR-0011 | done: the prop in control-plane ADR-0047, the rest in `stress/application/` |
 | W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair, and a read-only role in the account base that allows `ssm:GetParameter` on the ingress parameter only, for front-door phase two (§3.5) | §3.7; W-10's policies and prop for the bootstrap and the role pair | the owner stacks, `CDKToolkit-cell` and the role pair are done in both cell accounts (`stress/application/deploy-role-pair.sh`, W-5) and the account check passes on both; the ingress reader role is to build, now (`stress/application/`) |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | done in `samples/tenant-identity/scripts/stress/` |
-| W-7 front-door slice | the front door merged (done); its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | yes, after W-1; phase two after W-11's ingress reader role |
+| W-7 front-door slice | the front door merged (done); its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | yes; phase two after W-11's ingress reader role |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part done; front-door part yes, now |
 | W-9 first platform run at `small` | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | no |
 

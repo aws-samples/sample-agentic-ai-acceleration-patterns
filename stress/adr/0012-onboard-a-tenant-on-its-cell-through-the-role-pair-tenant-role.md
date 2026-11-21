@@ -66,6 +66,6 @@ account holds cells of more than one application.
 
 Note 2026-11-20: ADR-0016 gives the tenant's front-door route to the front
 door's global route hook. The tenant script does not write a route; it
-records the deployment under the tenant's namespace, below
-`/application-plane/tenants/<tenant id>/<application id>/`, where the cell
-API origin reads it.
+records the deployment in the parameter
+`/application-plane/tenants/<tenant id>/<application id>/deployment`,
+below the namespace the cell API origin reads.

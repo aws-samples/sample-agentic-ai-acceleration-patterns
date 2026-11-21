@@ -29,9 +29,8 @@ differently:
 The runtime-isolation ingress is a public API Gateway that verifies the
 token itself (front-door spec §1.2, §3.3 step 7). It is not a cell
 origin, and the router cannot point `/agents/*` at a different ingress
-per cell. A path
-of "router, then cell origin, then ingress" for agent calls, across
-every cell, does not exist. The router adds `x-tenant-route` to the
+per cell. A path of "router, then cell origin, then ingress" for agent
+calls, across every cell, does not exist. The router adds `x-tenant-route` to the
 request on both paths, but the ingress does not echo it, so an edge
 check on the response's route hint has no source on `/agents/*`. The
 front door's own test runs the agent route against a stand-in ingress
@@ -154,8 +153,9 @@ API (`samples/tenant-front-door/src/demo-cell/`), with `CellRouteAccess`,
 which takes the distribution ARN from a cell parameter, and writes that
 output (spec §3.3 step 2, §3.5). The demo cell API checks that its cell
 hosts the tenant under `/application-plane/tenants/<tenant id>/<app id>`,
-so the tenant script records the deployment below that path and does not
-write a route; this record amends ADR-0012 on that point. A tenant is
+so the tenant script records the deployment in the parameter
+`.../<app id>/deployment` and does not write a route; this record amends
+ADR-0012 on those points. A tenant is
 routed on `/agents/*` only once the cell API holds.
 
 Phase two reads the ingress's `baseUrl` from its published parameter in
