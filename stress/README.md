@@ -43,9 +43,9 @@ in the order of a platform run (spec §3.4: `tenant-identity`, `control-plane`,
 `tenant-front-door`, then `agentic-runtime-isolation`). `control-plane` reads nothing from
 `tenant-identity`; its need only orders the run. The runner puts every slice after the
 slices it needs, and refuses a need that is no slice, a need left out of `--slices` and a
-cycle. With one slice named (slice mode) its needs are not required. A
-scenario in `platformOnly` needs the other slices' interfaces (the edge, the cells the control
-plane built): a slice-mode run leaves it out, and refuses one named in `--scenarios`.
+cycle. With one slice named (slice mode) its needs are not required. A scenario in
+`platformOnly` needs the other slices' interfaces (the edge, the cells the control plane
+built): a slice-mode run leaves it out, and refuses one named in `--scenarios`.
 
 and `slice.sh <verb> [args]`, where the verb is one of:
 
@@ -115,7 +115,7 @@ The manifests a platform run reads and writes:
 | File | Written by | Read by | Holds |
 |---|---|---|---|
 | `tenant-identity.json` | `tenant-identity` `seed` | `agentic-runtime-isolation` | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each `{username, email}` |
-| `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation` | the value of the SSM parameter `/<prefix>/identity`: `region` (the run's Region), `apiUrl` (execute-api URL of the platform API), `appClientId` |
+| `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation` | the value of the SSM parameter `/<prefix>/identity`. The fields read are `region` (the run's Region), `apiUrl` (execute-api URL of the platform API) and `appClientId`; it also holds the stack name, the API id and the user pool id |
 | `control-plane.json` | `control-plane` `seed` | `agentic-runtime-isolation` | `seeded[]`, `churn[]`, `extra[]`: tenant ids. `seeded` is the platform's steady set; `churn` and `extra` belong to the control-plane scenarios |
 | `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` | `agentic-runtime-isolation`, `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
 
@@ -141,8 +141,8 @@ every `seed`. A control-plane tenant with no entry in `tenant-identity.json` is 
 the reason `no-identity-tenant`, one with no admin user name with `no-user`; both are listed by
 tenant id in the scenario's output and in `platform-tenants.json` in the slice's folder of
 `$STRESS_HOME`, together with the identity tenants outside the control plane
-(`not-in-control-plane`, ignored). The scenario stops when fewer than two tenants are usable (the read-other probe needs
-two). Nothing in a platform run creates the identity tenant and the users of a tenant the
+(`not-in-control-plane`, ignored). The scenario stops when fewer than two tenants are
+usable (the read-other probe needs two). Nothing in a platform run creates the identity tenant and the users of a tenant the
 control plane onboarded (spec §3.3, steps 3 and 4), so this slice refuses every control-plane
 tenant and the run fails with the list, until something does.
 
