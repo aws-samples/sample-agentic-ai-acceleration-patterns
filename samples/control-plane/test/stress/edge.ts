@@ -32,6 +32,11 @@ export interface EdgeInputs {
   readonly registrarUrl: string;
   /** The agent backend the probe names in `/agents/<backend>/invocations`; default `default`. */
   readonly agentBackend: string;
+  /**
+   * The edge operator role the registrar admits for `UpdateTenantRouteStatus` (front-door spec §5.1): the caller's own
+   * credentials are not on its resource policy, so a platform run assumes this role for the calls.
+   */
+  readonly operatorRoleArn?: string;
 }
 
 const EDGE_URL = /^https:\/\/[A-Za-z0-9.-]+(:\d+)?$/;
@@ -59,7 +64,11 @@ export function parseEdgeInputs(text: string | undefined, file: string): EdgeInp
   if (!REGISTRAR_URL.test(registrar)) throw new Error(`${file} (written by the tenant-front-door slice): registrarUrl must be the registrar's execute-api URL`);
   const backend = doc.agentBackend ?? 'default';
   if (typeof backend !== 'string' || !BACKEND.test(backend)) throw new Error(`${file} (written by the tenant-front-door slice): agentBackend must match ${BACKEND}`);
-  return { edgeUrl: edge, registrarUrl: registrar, agentBackend: backend };
+  const operator = doc.operatorRoleArn;
+  if (operator !== undefined && (typeof operator !== 'string' || !/^arn:aws[a-z-]*:iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]{1,512}$/.test(operator))) {
+    throw new Error(`${file} (written by the tenant-front-door slice): operatorRoleArn must be an IAM role ARN`);
+  }
+  return { edgeUrl: edge, registrarUrl: registrar, agentBackend: backend, ...(operator === undefined ? {} : { operatorRoleArn: operator }) };
 }
 
 /** Reads the front-door manifest of this run's prefix, or undefined when it is not there. */
@@ -83,10 +92,14 @@ export function edgeStateOf(status: number): EdgeState {
   return 'routed';
 }
 
-/** An unsigned bearer token whose payload names `tenantId`. Never sent anywhere but the edge. */
+/**
+ * A bearer credential whose payload names `tenantId` and whose signature is a made-up word. Never sent anywhere
+ * but the edge. The router needs three non-empty parts (`decodeClaim`) and does not check the signature, so
+ * it routes on the claim; no verifier accepts it.
+ */
 export function probeToken(tenantId: string): string {
   const part = (o: object): string => Buffer.from(JSON.stringify(o)).toString('base64url');
-  return `${part({ alg: 'none', typ: 'JWT' })}.${part({ tenant_id: tenantId })}.`;
+  return `${part({ alg: 'RS256', kid: 'stress' })}.${part({ tenant_id: tenantId })}.${Buffer.from('stress').toString('base64url')}`;
 }
 
 /** The edge as PS-5 uses it; the unit tests give it a fake. */
@@ -122,6 +135,20 @@ export async function loadCredentials(): Promise<{ creds: Credentials; expiresAt
   }
 }
 
+/** The credentials of `roleArn`, assumed with the caller's own (the AWS CLI), kept in memory only. */
+export function assumedCredentials(roleArn: string): () => Promise<{ creds: Credentials; expiresAt: number } | undefined> {
+  return async () => {
+    try {
+      const out = await aws(['sts', 'assume-role', '--role-arn', roleArn, '--role-session-name', 'stress-edge-operator', '--duration-seconds', '3600']);
+      const c = out.Credentials;
+      if (typeof c?.AccessKeyId !== 'string' || typeof c.SecretAccessKey !== 'string') return undefined;
+      return { creds: { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: typeof c.SessionToken === 'string' ? c.SessionToken : undefined }, expiresAt: Date.parse(String(c.Expiration)) };
+    } catch {
+      return undefined;
+    }
+  };
+}
+
 /** What `liveEdge` calls for credentials and for the signed PUT; the tests replace both. */
 export interface EdgeDeps {
   readonly load: () => Promise<{ creds: Credentials; expiresAt: number } | undefined>;
@@ -130,7 +157,11 @@ export interface EdgeDeps {
 }
 
 /** The edge and registrar at the addresses in `inputs`. */
-export function liveEdge(inputs: EdgeInputs, region: string, deps: EdgeDeps = { load: loadCredentials, put: signedPut, now: Date.now }): Edge {
+export function liveEdge(
+  inputs: EdgeInputs,
+  region: string,
+  deps: EdgeDeps = { load: inputs.operatorRoleArn === undefined ? loadCredentials : assumedCredentials(inputs.operatorRoleArn), put: signedPut, now: Date.now },
+): Edge {
   let cached: { creds: Credentials; expiresAt: number } | undefined;
   const credentials = async (): Promise<Credentials | undefined> => {
     if (cached === undefined || cached.expiresAt - deps.now() < 60_000) cached = await deps.load();

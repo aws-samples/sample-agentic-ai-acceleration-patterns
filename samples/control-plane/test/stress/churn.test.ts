@@ -306,6 +306,9 @@ describe('the front door\'s manifest (stress/README.md, "Platform mode: manifest
   it('takes the edge and the registrar and defaults the agent backend', () => {
     expect(parseEdgeInputs(JSON.stringify(valid), 'f')).toEqual({ edgeUrl: 'https://stress.example.com', registrarUrl: 'https://abc123.execute-api.us-east-1.amazonaws.com/prod', agentBackend: 'default' });
     expect(parseEdgeInputs(JSON.stringify({ ...valid, agentBackend: 'a001' }), 'f').agentBackend).toBe('a001');
+    const role = 'arn:aws:iam::123456789012:role/StressW9-support-EdgeOperatorAB12';
+    expect(parseEdgeInputs(JSON.stringify({ ...valid, operatorRoleArn: role }), 'f').operatorRoleArn).toBe(role);
+    expect(() => parseEdgeInputs(JSON.stringify({ ...valid, operatorRoleArn: 'x' }), 'f')).toThrow(/operatorRoleArn must be an IAM role ARN/);
   });
 
   it('names the slice that writes it when it is missing', () => {
@@ -412,11 +415,11 @@ describe('what the edge says about a tenant', () => {
     expect([403, 503, 0, 404, 401, 200, 502].map(edgeStateOf)).toEqual(['unrouted', 'suspended', 'error', 'error', 'routed', 'routed', 'routed']);
   });
 
-  it('builds an unsigned token whose payload names the tenant', () => {
+  it('builds a credential with three non-empty parts whose payload names the tenant', () => {
     const [header, payload, signature] = probeToken('01HZX0000000000000000000A1').split('.');
-    expect(JSON.parse(Buffer.from(header, 'base64url').toString())).toEqual({ alg: 'none', typ: 'JWT' });
+    expect(JSON.parse(Buffer.from(header, 'base64url').toString())).toEqual({ alg: 'RS256', kid: 'stress' });
     expect(JSON.parse(Buffer.from(payload, 'base64url').toString())).toEqual({ tenant_id: '01HZX0000000000000000000A1' });
-    expect(signature).toBe('');
+    expect(signature).not.toBe('');
   });
 });
 
