@@ -41,10 +41,11 @@ function sliceEnv(tier: 'small' | 'medium' | 'large', extra: Record<string, stri
 }
 
 describe('slice.json', () => {
-  it('names the sample and its scenarios S1 to S7 on the quotas the budget draws on', () => {
+  it('names the sample, its slice scenarios S1 to S7 and the platform scenarios it owns', () => {
     expect(declaration.name).toBe('agentic-runtime-isolation');
-    expect(declaration.scenarios).toEqual(['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7']);
-    expect(declaration.needs).toEqual([]);
+    expect(declaration.scenarios).toEqual(['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'PS-2', 'PS-3', 'PS-4', 'PS-6', 'PS-8']);
+    expect(declaration.platformOnly).toEqual(['PS-2', 'PS-3', 'PS-4', 'PS-6', 'PS-8']);
+    expect(declaration.needs).toEqual(['tenant-identity', 'control-plane', 'tenant-front-door']);
   });
 
   it('has a k6 script for every scenario it declares, as slice.sh run maps them', () => {
@@ -56,12 +57,25 @@ describe('slice.json', () => {
     }
   });
 
-  it('is the scenario id every k6 script writes its record under', () => {
-    for (const scenario of declaration.scenarios) {
+  it('is the scenario id every k6 script writes its record under in slice mode', () => {
+    for (const scenario of declaration.scenarios.filter((s) => /^S\d$/.test(s))) {
       const files = fs.readdirSync(path.join(STRESS_DIR, 'k6')).filter((f) => new RegExp(`^${scenario.toLowerCase()}-.*\\.js$`).test(f));
       expect(files).toHaveLength(1);
       expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', files[0]), 'utf8')).toContain(`summarize(data, '${scenario}')`);
     }
+  });
+
+  it('maps each platform scenario to the slice scenario whose shape it sends to the edge (spec §5.1)', () => {
+    const script = fs.readFileSync(SLICE_SH, 'utf8');
+    const shape: Record<string, string> = { 'PS-2': 'S1', 'PS-3': 'S2', 'PS-4': 'S3', 'PS-6': 'S5', 'PS-8': 'S6' };
+    for (const [ps, s] of Object.entries(shape)) {
+      const file = (id: string): string => new RegExp(`^\\s*${id}\\) k6_file=(\\S+\\.js) ;;`, 'm').exec(script)![1];
+      expect(file(ps)).toBe(file(s));
+    }
+    // The record is written under the PS id: probe.js renames the slice's id with RECORD_SCENARIO.
+    expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', 'probe.js'), 'utf8')).toContain("env('RECORD_SCENARIO', scenario)");
+    // Every response goes to the refusal tracker in platform mode, so a minute's counts are always written.
+    expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', 'probe.js'), 'utf8')).toMatch(/if \(PLATFORM\) \{\s+edgeRefusals\.track\(entry\.tenantId, r\.status\);/);
   });
 });
 
@@ -115,12 +129,541 @@ describe('slice.sh', () => {
     }
   }, 150_000);
 
-  it('refuses the platform mode for every verb but budget', () => {
-    for (const verb of ['deploy', 'seed', 'run', 'collect', 'teardown']) {
-      const r = spawnSync('bash', [SLICE_SH, verb, 'S1'], { env: sliceEnv('small', { STRESS_MODE: 'platform', AWS_REGION: 'eu-central-1' }), encoding: 'utf8' });
-      expect(r.status).toBe(2);
-      expect(r.stderr).toContain('control plane');
+  describe('platform mode (STRESS_MODE=platform)', () => {
+    const IDENTITY = { stack: 'StressTest-identity', region: 'eu-central-1', apiUrl: 'https://abc123.execute-api.eu-central-1.amazonaws.com/prod', apiId: 'abc123', userPoolId: 'eu-central-1_AbCdEf123', appClientId: 'client123abc' };
+    const EDGE = { version: 1, prefix: 'StressTest', edgeUrl: 'https://stress.example.com' };
+    const ids = (n: number): string[] => Array.from({ length: n }, (_, i) => `01HZX0000000000000000000${String(i).padStart(2, '0')}`);
+    const user = (name: string) => ({ username: name, email: `${name}@example.com` });
+    // identity[] is what the control-plane driver records for each identity tenant it creates (stress ADR-0017).
+    const IDENTITIES = [
+      { tenantId: ids(4)[0], admin: user('a0'), users: [user('u0')] },
+      { tenantId: ids(4)[1], admin: user('a1'), users: [] },
+      { tenantId: ids(4)[2], admin: user(''), users: [] },
+      { tenantId: '01HZX00000000000000000PROB', admin: user('p0'), users: [] },
+    ];
+    const CONTROL_PLANE = { version: 1, prefix: 'StressTest', tier: 'small', commit: 'abc1234', seeded: ids(4), churn: ids(6).slice(4), extra: [], identity: IDENTITIES };
+    const ALL = { 'tenant-front-door.json': EDGE, 'identity.json': IDENTITY, 'control-plane.json': CONTROL_PLANE };
+
+    /** A STRESS_HOME with the manifests platform mode reads, as the other slices write them. */
+    function home(files: Record<string, unknown> = ALL): string {
+      const h = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-platform-'));
+      fs.mkdirSync(path.join(h, 'StressTest'), { recursive: true });
+      for (const [name, doc] of Object.entries(files)) fs.writeFileSync(path.join(h, 'StressTest', name), typeof doc === 'string' ? doc : JSON.stringify(doc));
+      return h;
     }
+    const platformEnv = (h: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv =>
+      sliceEnv('small', { STRESS_MODE: 'platform', STRESS_HOME: h, AWS_REGION: 'eu-central-1', ...extra });
+    const run = (script: string, env: NodeJS.ProcessEnv, ...args: string[]) => spawnSync('bash', [script, ...args], { env, encoding: 'utf8' });
+    const withHome = (files: Record<string, unknown>, body: (h: string) => void): void => {
+      const h = home(files);
+      try {
+        body(h);
+      } finally {
+        fs.rmSync(h, { recursive: true, force: true });
+      }
+    };
+
+    it('refuses a slice scenario here and a platform scenario in slice mode, before it touches AWS', () => {
+      withHome(ALL, (h) => {
+        const s1 = run(SLICE_SH, platformEnv(h, { STRESS_RESULTS: h, STRESS_COMMIT: 'abc1234' }), 'run', 'S1');
+        expect(s1.status).toBe(2);
+        expect(s1.stderr).toContain('S1 runs in slice mode only');
+        const ps = run(SLICE_SH, sliceEnv('small', { AWS_REGION: 'eu-central-1', STRESS_RESULTS: h, STRESS_COMMIT: 'abc1234' }), 'run', 'PS-2');
+        expect(ps.status).toBe(2);
+        expect(ps.stderr).toContain('PS-2 runs in platform mode only');
+        const odd = run(SLICE_SH, platformEnv(h), 'run', 'PS-7');
+        expect(odd.status).toBe(2);
+        expect(odd.stderr).toContain('unknown scenario PS-7');
+        const mode = run(SLICE_SH, sliceEnv('small', { STRESS_MODE: 'both' }), 'budget');
+        expect(mode.status).toBe(2);
+        expect(mode.stderr).toContain('STRESS_MODE must be slice or platform');
+      });
+    });
+
+    it('refuses PS-3 when this run holds no PS-2 record (PS-3 reuses its conversations)', () => {
+      withHome(ALL, (h) => {
+        const r = run(SLICE_SH, platformEnv(h, { STRESS_RESULTS: h, STRESS_COMMIT: 'abc1234' }), 'run', 'PS-3');
+        expect(r.status).toBe(2);
+        expect(r.stderr).toContain('agentic-runtime-isolation.PS-2.json');
+        expect(r.stderr).toContain('run PS-2 first');
+      });
+    });
+
+    describe.each(['deploy', 'seed'])('%s', (verb) => {
+      it('names each manifest it needs that is missing, with the slice that writes it', () => {
+        withHome({ 'tenant-front-door.json': EDGE }, (h) => {
+          const r = run(SLICE_SH, platformEnv(h), verb);
+          expect(r.status).toBe(1);
+          expect(r.stderr).toContain('identity.json, which the tenant-identity slice writes');
+          expect(r.stderr).toContain('control-plane.json, which the control-plane slice writes');
+          expect(r.stderr).not.toContain('tenant-front-door.json');
+        });
+      });
+
+      it.each([
+        ['an edge URL with a path', { 'tenant-front-door.json': { ...EDGE, edgeUrl: 'https://stress.example.com/prod' } }, /edgeUrl must be an https origin/],
+        ['an edge URL that is not https', { 'tenant-front-door.json': { ...EDGE, edgeUrl: 'http://stress.example.com' } }, /edgeUrl must be an https origin/],
+        ['no edge URL', { 'tenant-front-door.json': { version: 1 } }, /edgeUrl must be an https origin with no path \(got 'nothing'\)/],
+        ['a bad agent backend', { 'tenant-front-door.json': { ...EDGE, agentBackend: 'A/b' } }, /agentBackend must match/],
+        ['an identity API that is not execute-api', { 'identity.json': { ...IDENTITY, apiUrl: 'https://example.com/' } }, /apiUrl must be an execute-api URL/],
+        ['an identity with no client', { 'identity.json': { ...IDENTITY, appClientId: '' } }, /appClientId is missing/],
+        ['an identity with a bad pool', { 'identity.json': { ...IDENTITY, userPoolId: 'pool' } }, /userPoolId is missing/],
+        ['a manifest that is not an object', { 'control-plane.json': '[1]' }, /control-plane.json \(written by the control-plane slice\) is not a JSON object/],
+        ['a control-plane manifest whose identity is no list', { 'control-plane.json': { ...CONTROL_PLANE, identity: {} } }, /"identity" must be an array/],
+        ['a control-plane manifest with no seeded list', { 'control-plane.json': { version: 1 } }, /control-plane.json \(written by the control-plane slice\): "seeded" must be an array/],
+      ])('refuses %s', (_name, change, pattern) => {
+        withHome({ ...ALL, ...change }, (h) => {
+          const r = run(SLICE_SH, platformEnv(h), verb);
+          expect(r.status).toBe(1);
+          expect(r.stderr).toMatch(pattern);
+        });
+      });
+    });
+
+    describe('in a repository copy with a stubbed `aws` and a stubbed k6 host', () => {
+      let repo: string;
+      let fake: string;
+      beforeAll(() => {
+        repo = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-platform-repo-'));
+        const sample = path.join(repo, 'samples', 'agentic-runtime-isolation');
+        fs.mkdirSync(path.join(sample, 'scripts', 'stress'), { recursive: true });
+        fs.mkdirSync(path.join(sample, 'src', 'smithy'), { recursive: true });
+        fs.writeFileSync(path.join(sample, 'package.json'), '{"name":"slice-platform-test"}');
+        for (const f of ['slice.sh', 'platform.sh', 'window.sh', 'platform-tenants.jq']) fs.copyFileSync(path.join(STRESS_DIR, f), path.join(sample, 'scripts', 'stress', f));
+        fs.mkdirSync(path.join(repo, 'stress', 'driver'), { recursive: true });
+        // The sample's own tier, as slice.sh reads it through ts-node, and the k6 launcher: both print what they got.
+        fs.mkdirSync(path.join(sample, 'node_modules', '.bin'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sample, 'node_modules', '.bin', 'ts-node'),
+          '#!/usr/bin/env bash\n[[ "${!#}" == tier ]] && echo \'{"scenarioSeconds":60,"tenantsActive":20,"usersPerActiveTenant":2}\'\nexit 0\n',
+          { mode: 0o755 },
+        );
+        fs.writeFileSync(
+          path.join(repo, 'stress', 'driver', 'k6.sh'),
+          '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$FAKE/k6-args.txt"\ncp "$K6_INPUTS" "$FAKE/k6-manifest.json"\nexit 0\n',
+          { mode: 0o755 },
+        );
+        // The shared driver's scripts: log the call, print the `stack=` line, make or remove the fake stack.
+        const driver = (verb: 'deploy' | 'teardown'): string =>
+          [
+            '#!/usr/bin/env bash',
+            `echo "driver ${verb} $STRESS_PREFIX $STRESS_TIER" >> "$FAKE/calls.txt"`,
+            `echo "stack=$STRESS_PREFIX-driver ${verb === 'deploy' ? 'deploy' : 'destroy'}_seconds=3"`,
+            verb === 'deploy' ? 'mkdir -p "$FAKE/stacks/$STRESS_PREFIX-driver"' : 'rm -rf "$FAKE/stacks/$STRESS_PREFIX-driver"',
+            '',
+          ].join('\n');
+        for (const verb of ['deploy', 'teardown'] as const) fs.writeFileSync(path.join(repo, 'stress', 'driver', `${verb}.sh`), driver(verb), { mode: 0o755 });
+        fake = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-platform-fake-'));
+        fs.mkdirSync(path.join(fake, 'bin'), { recursive: true });
+        fs.writeFileSync(
+          path.join(fake, 'bin', 'aws'),
+          [
+            '#!/usr/bin/env bash',
+            'if [[ "$1 $2" == "ssm get-parameter" ]]; then',
+            '  case "$4" in',
+            '    */apiUrl) echo https://slice1.execute-api.eu-central-1.amazonaws.com/prod ;;',
+            '    */appClientId) echo clientslice1 ;;',
+            '    *) echo "unexpected parameter $4" >&2; exit 1 ;;',
+            '  esac',
+            '  exit 0',
+            'fi',
+            '[[ "$1 $2" == "cloudformation describe-stacks" ]] || { echo "unexpected aws call: $*" >&2; exit 1; }',
+            '[[ -d "$FAKE/stacks/$4" ]] || { echo "Stack with id $4 does not exist" >&2; exit 254; }',
+            'if [[ -f "$FAKE/stacks/$4/status" ]]; then cat "$FAKE/stacks/$4/status"; else echo CREATE_COMPLETE; fi',
+            '',
+          ].join('\n'),
+          { mode: 0o755 },
+        );
+      });
+      afterAll(() => {
+        fs.rmSync(repo, { recursive: true, force: true });
+        fs.rmSync(fake, { recursive: true, force: true });
+      });
+      beforeEach(() => {
+        fs.rmSync(path.join(fake, 'calls.txt'), { force: true });
+        fs.rmSync(path.join(fake, 'stacks'), { recursive: true, force: true });
+      });
+      const script = (): string => path.join(repo, 'samples', 'agentic-runtime-isolation', 'scripts', 'stress', 'slice.sh');
+      const env = (h: string): NodeJS.ProcessEnv => ({ ...platformEnv(h), FAKE: fake, PATH: `${path.join(fake, 'bin')}:${process.env.PATH}` });
+      const calls = (): string => (fs.existsSync(path.join(fake, 'calls.txt')) ? fs.readFileSync(path.join(fake, 'calls.txt'), 'utf8') : '');
+      const stateOf = (h: string): string => path.join(h, 'StressTest', 'agentic-runtime-isolation');
+
+      it('reads the manifests, deploys the k6 host when none is there, and seeds nothing', () => {
+        withHome(ALL, (h) => {
+          const deploy = run(script(), env(h), 'deploy');
+          expect(deploy.stderr).toBe('');
+          expect(deploy.status).toBe(0);
+          expect(deploy.stdout).toContain('stack=StressTest-driver deploy_seconds=3');
+          expect(calls()).toBe('driver deploy StressTest small\n');
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(true);
+          const seed = run(script(), env(h), 'seed');
+          expect(seed.stderr).toBe('');
+          expect(seed.status).toBe(0);
+          expect(seed.stdout).toContain('nothing to seed');
+          expect(calls()).toBe('driver deploy StressTest small\n');
+        });
+      });
+
+      it('leaves a k6 host that is already there to its owner, and tears down only a host it made', () => {
+        withHome(ALL, (h) => {
+          fs.mkdirSync(path.join(fake, 'stacks', 'StressTest-driver'), { recursive: true });
+          expect(run(script(), env(h), 'deploy').status).toBe(0);
+          expect(calls()).toBe('');
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
+          // No marker: teardown makes no AWS call at all.
+          const teardown = run(script(), { ...env(h), PATH: process.env.PATH }, 'teardown');
+          expect(teardown.status).toBe(0);
+          expect(teardown.stdout).toContain('deployed and created nothing');
+          expect(calls()).toBe('');
+          expect(fs.existsSync(path.join(fake, 'stacks', 'StressTest-driver'))).toBe(true);
+        });
+      });
+
+      it('removes the host it deployed, and its run files, at teardown', () => {
+        withHome(ALL, (h) => {
+          expect(run(script(), env(h), 'deploy').status).toBe(0);
+          fs.writeFileSync(path.join(stateOf(h), 'manifest.json'), '{}');
+          fs.writeFileSync(path.join(stateOf(h), 'platform-tenants.json'), '{}');
+          const teardown = run(script(), env(h), 'teardown', '--fixtures');
+          expect(teardown.stderr).toBe('');
+          expect(teardown.status).toBe(0);
+          expect(calls()).toBe('driver deploy StressTest small\ndriver teardown StressTest small\n');
+          for (const f of ['platform-driver-owned', 'manifest.json', 'platform-tenants.json']) expect(fs.existsSync(path.join(stateOf(h), f))).toBe(false);
+          expect(fs.existsSync(path.join(fake, 'stacks', 'StressTest-driver'))).toBe(false);
+        });
+      });
+
+      const k6Args = (): string[] => fs.readFileSync(path.join(fake, 'k6-args.txt'), 'utf8').trim().split('\n');
+      const runEnv = (h: string): NodeJS.ProcessEnv => ({ ...env(h), STRESS_RESULTS: path.join(h, 'results'), STRESS_COMMIT: 'abc1234' });
+
+      it('runs PS-2 as the S1 shape against the edge, with the identity and the tenants of the manifests', () => {
+        withHome(ALL, (h) => {
+          fs.mkdirSync(path.join(h, 'results'));
+          const r = run(script(), runEnv(h), 'run', 'PS-2');
+          expect(r.stderr).toBe('');
+          expect(r.status).toBe(0);
+          expect(r.stdout).toContain('platform tenants: 2 of 4 steady tenants usable');
+          expect(r.stdout).toContain(`refused ${ids(4)[2]}: no-user`);
+          expect(r.stdout).toContain('run: PS-2 (s1-steady.js) at small');
+          const args = k6Args();
+          expect(args[0]).toBe('samples/agentic-runtime-isolation/scripts/stress/k6/s1-steady.js');
+          expect(args.slice(1)).toEqual([
+            'MANIFEST=/opt/stress/inputs/manifest.json',
+            'ENDPOINT=https://stress.example.com/agents',
+            'AGENT_BACKEND=default',
+            'PLATFORM_API=https://abc123.execute-api.eu-central-1.amazonaws.com/prod/',
+            'APP_CLIENT_ID=client123abc',
+            'ISSUER=https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_AbCdEf123',
+            'REGION=eu-central-1',
+            'RECORD_SCENARIO=PS-2',
+          ]);
+          const manifest = JSON.parse(fs.readFileSync(path.join(fake, 'k6-manifest.json'), 'utf8'));
+          expect(manifest.tenants.map((t: { tenantId: string }) => t.tenantId)).toEqual(ids(4).slice(0, 2));
+        });
+      });
+
+      it('runs S1 as before in slice mode: its own ingress and the shared identity, no platform record id', () => {
+        withHome(ALL, (h) => {
+          fs.mkdirSync(path.join(h, 'results'));
+          fs.mkdirSync(stateOf(h), { recursive: true });
+          fs.writeFileSync(path.join(stateOf(h), 'manifest.json'), JSON.stringify({ tenants: [] }));
+          fs.writeFileSync(path.join(stateOf(h), 'outputs.json'), JSON.stringify({ EndpointUrl: 'https://ingress1.execute-api.eu-central-1.amazonaws.com/prod/default/invocations', EntitlementsApiUrl: 'https://ent1.execute-api.eu-central-1.amazonaws.com/prod/', Issuer: 'https://issuer.example.com/pool' }));
+          const r = run(script(), { ...runEnv(h), STRESS_MODE: 'slice' }, 'run', 'S1');
+          expect(r.stderr).toBe('');
+          expect(r.status).toBe(0);
+          expect(k6Args()).toEqual([
+            'samples/agentic-runtime-isolation/scripts/stress/k6/s1-steady.js',
+            'MANIFEST=/opt/stress/inputs/manifest.json',
+            'ENDPOINT=https://ingress1.execute-api.eu-central-1.amazonaws.com/prod/default/invocations',
+            'ENTITLEMENTS_API=https://ent1.execute-api.eu-central-1.amazonaws.com/prod/',
+            'PLATFORM_API=https://slice1.execute-api.eu-central-1.amazonaws.com/prod/',
+            'APP_CLIENT_ID=clientslice1',
+            'ISSUER=https://issuer.example.com/pool',
+            'REGION=eu-central-1',
+          ]);
+        });
+      });
+
+      it('passes the front door\'s agent backend to k6', () => {
+        withHome({ ...ALL, 'tenant-front-door.json': { ...EDGE, agentBackend: 'a001' } }, (h) => {
+          fs.mkdirSync(path.join(h, 'results'));
+          expect(run(script(), runEnv(h), 'run', 'PS-2').status).toBe(0);
+          expect(k6Args()).toContain('AGENT_BACKEND=a001');
+        });
+      });
+
+      it('refuses a k6 host in a state it cannot reuse, without deploying or marking anything', () => {
+        withHome(ALL, (h) => {
+          const stack = path.join(fake, 'stacks', 'StressTest-driver');
+          fs.mkdirSync(stack, { recursive: true });
+          fs.writeFileSync(path.join(stack, 'status'), 'ROLLBACK_COMPLETE\n');
+          const r = run(script(), env(h), 'deploy');
+          expect(r.status).toBe(1);
+          expect(r.stderr).toContain('StressTest-driver is ROLLBACK_COMPLETE: remove or repair it');
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
+          expect(calls()).toBe('');
+        });
+      });
+
+      it('reuses a k6 host whose last update rolled back, and ignores a warning the CLI prints on success', () => {
+        withHome(ALL, (h) => {
+          const stack = path.join(fake, 'stacks', 'StressTest-driver');
+          fs.mkdirSync(stack, { recursive: true });
+          fs.writeFileSync(path.join(stack, 'status'), 'UPDATE_ROLLBACK_COMPLETE\n');
+          const warning = path.join(fake, 'bin-warning');
+          fs.mkdirSync(warning, { recursive: true });
+          fs.writeFileSync(path.join(warning, 'aws'), '#!/usr/bin/env bash\necho "a deprecation warning" >&2\necho UPDATE_ROLLBACK_COMPLETE\n', { mode: 0o755 });
+          const r = run(script(), { ...env(h), PATH: `${warning}:${process.env.PATH}` }, 'deploy');
+          expect(r.status).toBe(0);
+          expect(r.stdout).toContain('is already there');
+          expect(calls()).toBe('');
+        });
+      });
+
+      it('reads an AWS error it cannot interpret as a refusal, never as an absent or a reusable host', () => {
+        withHome(ALL, (h) => {
+          const failing = path.join(fake, 'bin-failing');
+          fs.mkdirSync(failing, { recursive: true });
+          fs.writeFileSync(path.join(failing, 'aws'), '#!/usr/bin/env bash\necho "An error occurred (ExpiredToken) when calling the DescribeStacks operation" >&2\nexit 254\n', { mode: 0o755 });
+          const expired = run(script(), { ...env(h), PATH: `${failing}:${process.env.PATH}` }, 'deploy');
+          expect(expired.status).toBe(1);
+          expect(expired.stderr).toContain('could not read the status of StressTest-driver (ExpiredToken)');
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
+          expect(calls()).toBe('');
+        });
+      });
+
+      it('shows the first line of an AWS error that has no code', () => {
+        withHome(ALL, (h) => {
+          const failing = path.join(fake, 'bin-nocreds');
+          fs.mkdirSync(failing, { recursive: true });
+          fs.writeFileSync(path.join(failing, 'aws'), '#!/usr/bin/env bash\necho "Unable to locate credentials. You can configure credentials by running aws configure." >&2\nexit 253\n', { mode: 0o755 });
+          const r = run(script(), { ...env(h), PATH: `${failing}:${process.env.PATH}` }, 'deploy');
+          expect(r.status).toBe(1);
+          expect(r.stderr).toContain('could not read the status of StressTest-driver (Unable to locate credentials.');
+        });
+      });
+
+      it('keeps its ownership marker when the k6 host deploy failed after it made the stack, so teardown removes it', () => {
+        withHome(ALL, (h) => {
+          const driverDeploy = path.join(repo, 'stress', 'driver', 'deploy.sh');
+          const original = fs.readFileSync(driverDeploy, 'utf8');
+          fs.writeFileSync(driverDeploy, '#!/usr/bin/env bash\nmkdir -p "$FAKE/stacks/$STRESS_PREFIX-driver"\necho "failed later" >&2\nexit 1\n', { mode: 0o755 });
+          try {
+            const r = run(script(), env(h), 'deploy');
+            expect(r.status).toBe(1);
+            expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(true);
+          } finally {
+            fs.writeFileSync(driverDeploy, original, { mode: 0o755 });
+          }
+          const teardown = run(script(), env(h), 'teardown');
+          expect(teardown.status).toBe(0);
+          expect(calls()).toBe('driver teardown StressTest small\n');
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
+        });
+      });
+
+      it('drops its ownership marker when the k6 host deploy failed before it made the stack', () => {
+        withHome(ALL, (h) => {
+          const driverDeploy = path.join(repo, 'stress', 'driver', 'deploy.sh');
+          const original = fs.readFileSync(driverDeploy, 'utf8');
+          fs.writeFileSync(driverDeploy, '#!/usr/bin/env bash\necho "missing tool" >&2\nexit 1\n', { mode: 0o755 });
+          try {
+            const r = run(script(), env(h), 'deploy');
+            expect(r.status).toBe(1);
+            expect(r.stderr).toContain('stress/driver/deploy.sh failed');
+            expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(false);
+          } finally {
+            fs.writeFileSync(driverDeploy, original, { mode: 0o755 });
+          }
+        });
+      });
+
+      it('stops a platform run with fewer than two usable tenants before it starts k6', () => {
+        withHome({ ...ALL, 'control-plane.json': { ...CONTROL_PLANE, identity: IDENTITIES.slice(0, 1) } }, (h) => {
+          fs.mkdirSync(path.join(h, 'results'));
+          fs.rmSync(path.join(fake, 'k6-args.txt'), { force: true });
+          const r = run(script(), runEnv(h), 'run', 'PS-2');
+          expect(r.status).toBe(1);
+          expect(r.stderr).toContain('needs at least two usable tenants, 1 found');
+          expect(fs.existsSync(path.join(fake, 'k6-args.txt'))).toBe(false);
+        });
+      });
+    });
+
+    (hasJq ? describe : describe.skip)('the tenants it drives (platform-tenants.jq, platform.sh)', () => {
+      const jq = (cp: unknown, active: number) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-tenants-'));
+        try {
+          fs.writeFileSync(path.join(dir, 'cp.json'), JSON.stringify(cp));
+          const r = spawnSync('jq', ['-n', '-c', '--slurpfile', 'cp', path.join(dir, 'cp.json'), '--argjson', 'active', String(active), '--arg', 'scale', 'small', '-f', path.join(STRESS_DIR, 'platform-tenants.jq')], { encoding: 'utf8' });
+          expect(r.status).toBe(0);
+          return JSON.parse(r.stdout);
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      };
+
+      it('drives the steady tenants that have an identity tenant with a user, refuses the rest by reason, and ignores identity-only tenants', () => {
+        const out = jq(CONTROL_PLANE, 1);
+        expect(out.manifest.scale).toBe('small');
+        expect(out.manifest.tenants).toEqual([
+          { tenantId: ids(4)[0], admin: { username: 'a0' }, users: [{ username: 'u0' }], active: true },
+          { tenantId: ids(4)[1], admin: { username: 'a1' }, users: [], active: false },
+        ]);
+        expect(out.refused).toEqual([
+          { tenantId: ids(4)[2], reason: 'no-user' },
+          { tenantId: ids(4)[3], reason: 'no-identity-tenant' },
+        ]);
+        expect(out.ignored).toEqual([{ tenantId: '01HZX00000000000000000PROB', reason: 'not-in-control-plane' }]);
+      });
+
+      it('never drives the control plane\'s churn or extra tenants', () => {
+        const out = jq({ seeded: [], churn: ids(2), extra: ids(3), identity: IDENTITIES }, 2);
+        expect(out.manifest.tenants).toEqual([]);
+        expect(out.refused).toEqual([]);
+      });
+
+      it('writes the manifest and the refusals, and stops with fewer than two usable tenants', () => {
+        withHome({ ...ALL, 'control-plane.json': { ...CONTROL_PLANE, identity: IDENTITIES.slice(0, 1) } }, (h) => {
+          const state = path.join(h, 'StressTest', 'agentic-runtime-isolation');
+          const env = { STRESS_HOME: h, STRESS_PREFIX: 'StressTest', STRESS_TIER: 'small', STRESS_STATE_DIR: state };
+          const call = (tier: object) =>
+            spawnSync('bash', ['-c', 'source "$1"; build_platform_manifest "$2" "$3"', '_', path.join(STRESS_DIR, 'platform.sh'), JSON.stringify(tier), path.join(h, 'manifest.json')], { env: { ...process.env, ...env }, encoding: 'utf8' });
+          const one = call({ tenantsActive: 20 });
+          expect(one.status).toBe(1);
+          expect(one.stdout).toContain('1 of 4 steady tenants usable');
+          expect(one.stdout).toContain(`refused ${ids(4)[1]}: no-identity-tenant`);
+          expect(one.stderr).toContain('needs at least two usable tenants, 1 found');
+          expect(JSON.parse(fs.readFileSync(path.join(state, 'platform-tenants.json'), 'utf8')).refused).toHaveLength(3);
+          expect((fs.statSync(path.join(state, 'platform-tenants.json')).mode % 0o1000).toString(8)).toBe('600');
+        });
+        withHome(ALL, (h) => {
+          const state = path.join(h, 'StressTest', 'agentic-runtime-isolation');
+          const r = spawnSync('bash', ['-c', 'source "$1"; build_platform_manifest "$2" "$3"', '_', path.join(STRESS_DIR, 'platform.sh'), JSON.stringify({ tenantsActive: 20 }), path.join(h, 'manifest.json')], {
+            env: { ...process.env, STRESS_HOME: h, STRESS_PREFIX: 'StressTest', STRESS_TIER: 'small', STRESS_STATE_DIR: state },
+            encoding: 'utf8',
+          });
+          expect(r.status).toBe(0);
+          expect(JSON.parse(fs.readFileSync(path.join(h, 'manifest.json'), 'utf8')).tenants).toHaveLength(2);
+        });
+      });
+    });
+
+    describe('the edge-refusal lines (k6/edge-refusals.js)', () => {
+      // The file has no k6 import, so it runs here as it is, with its `export` keyword dropped.
+      type Tracker = { track: (tenant: string, status: number) => void };
+      type Loaded = { createEdgeRefusals: (now: () => number, progress: () => number, log: (l: string) => void) => Tracker };
+      const load = (): Loaded => {
+        const ctx: Record<string, unknown> = {};
+        vm.runInNewContext(`${fs.readFileSync(path.join(STRESS_DIR, 'k6', 'edge-refusals.js'), 'utf8').replace(/^export /gm, '')}\nthis.createEdgeRefusals = createEdgeRefusals;`, ctx);
+        return ctx as never;
+      };
+      const MINUTE = 60_000;
+
+      it('writes a minute\'s refusals when the next minute\'s first response arrives, even a success', () => {
+        const lines: string[] = [];
+        let now = 10 * MINUTE;
+        const { track } = load().createEdgeRefusals(() => now, () => 0.2, (l) => lines.push(l));
+        track('A', 503);
+        track('A', 503);
+        track('B', 403);
+        track('A', 200);
+        expect(lines).toEqual([]);
+        now += MINUTE;
+        track('A', 200);
+        expect(lines.map((l) => JSON.parse(l))).toEqual([
+          { kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 503, count: 2 },
+          { kind: 'edge_refusal', epochMinute: 10, tenantId: 'B', status: 403, count: 1 },
+        ]);
+        now += MINUTE;
+        track('A', 200);
+        expect(lines).toHaveLength(2);
+      });
+
+      it('writes after every response in the last 1 % of the scenario, a success included', () => {
+        const lines: string[] = [];
+        let progress = 0.5;
+        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, () => progress, (l) => lines.push(l));
+        track('A', 429);
+        expect(lines).toEqual([]);
+        progress = 0.995;
+        track('A', 200);
+        expect(lines.map((l) => JSON.parse(l))).toEqual([{ kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 429, count: 1 }]);
+        track('A', 200);
+        expect(lines).toHaveLength(1);
+      });
+
+      it('counts nothing for a success', () => {
+        const lines: string[] = [];
+        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, () => 1, (l) => lines.push(l));
+        track('A', 200);
+        expect(lines).toEqual([]);
+      });
+    });
+
+    (hasJq ? describe : describe.skip)('collect (attribute-edge.jq, collect-platform.sh)', () => {
+      const lines = (rows: object[]): string => rows.map((r) => `time="2026-11-20T10:00:00Z" level=info msg=${JSON.stringify(JSON.stringify(r))} source=console`).join('\n');
+
+      it('names the tenant and reason of every refusal the driver saw, and leaves the rest unattributed', () => {
+        const run1 = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-collect-'));
+        try {
+          const results = path.join(run1, 'results');
+          const k6 = path.join(run1, 'k6');
+          fs.mkdirSync(results);
+          fs.mkdirSync(k6);
+          const record = { runId: 'test-run', scenario: 'PS-2', refusals: { byTenantReason: [], unattributed: 8 } };
+          fs.writeFileSync(path.join(results, 'agentic-runtime-isolation.PS-2.json'), JSON.stringify(record));
+          fs.writeFileSync(path.join(results, 'agentic-runtime-isolation.PS-4.json'), JSON.stringify({ ...record, runId: 'other-run', scenario: 'PS-4' }));
+          fs.writeFileSync(path.join(k6, 's1-steady.summary.json'), JSON.stringify({ metrics: { refusals_seen: { values: { count: 8 } } } }));
+          fs.writeFileSync(
+            path.join(k6, 's1-steady.k6-stdout.txt'),
+            lines([
+              { kind: 'edge_refusal', epochMinute: 1, tenantId: 'A', status: 503, count: 3 },
+              { kind: 'edge_refusal', epochMinute: 2, tenantId: 'A', status: 503, count: 2 },
+              { kind: 'body_refusal', epochMinute: 2, tenantId: 'B', reason: 'tool-403' },
+              { kind: 'tenant_minute', epochMinute: 2, tenantId: 'A', sent: 9, r429: 0 },
+            ]),
+          );
+          const r = spawnSync('bash', [path.join(STRESS_DIR, 'collect-platform.sh')], { env: { PATH: process.env.PATH, STRESS_RESULTS: results, STRESS_RUN_ID: 'test-run' }, encoding: 'utf8' });
+          expect(r.stderr).toContain('agentic-runtime-isolation.PS-4.json belongs to another run');
+          expect(r.status).toBe(0);
+          expect(r.stdout).toContain('collect PS-2: refusals seen 8, attributed 6 over 2 tenants, unattributed 2');
+          const out = JSON.parse(fs.readFileSync(path.join(results, 'agentic-runtime-isolation.PS-2.json'), 'utf8'));
+          expect(out.refusals).toEqual({
+            byTenantReason: [
+              { tenant: 'A', reason: 'http-503', count: 5 },
+              { tenant: 'B', reason: 'tool-403', count: 1 },
+            ],
+            unattributed: 2,
+          });
+          // Collecting twice gives the same answer: it counts against k6's summary, not the record.
+          expect(spawnSync('bash', [path.join(STRESS_DIR, 'collect-platform.sh')], { env: { PATH: process.env.PATH, STRESS_RESULTS: results, STRESS_RUN_ID: 'test-run' }, encoding: 'utf8' }).status).toBe(0);
+          expect(JSON.parse(fs.readFileSync(path.join(results, 'agentic-runtime-isolation.PS-2.json'), 'utf8')).refusals.unattributed).toBe(2);
+          expect(JSON.parse(fs.readFileSync(path.join(results, 'agentic-runtime-isolation.PS-4.json'), 'utf8')).refusals.unattributed).toBe(8);
+        } finally {
+          fs.rmSync(run1, { recursive: true, force: true });
+        }
+      });
+
+      it('fails closed with no k6 summary, and has nothing to do with no record', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slice-collect-'));
+        try {
+          const results = path.join(dir, 'results');
+          fs.mkdirSync(results);
+          const none = spawnSync('bash', [path.join(STRESS_DIR, 'collect-platform.sh')], { env: { PATH: process.env.PATH, STRESS_RESULTS: results, STRESS_RUN_ID: 'test-run' }, encoding: 'utf8' });
+          expect(none.status).toBe(0);
+          expect(none.stdout).toContain('nothing to collect');
+          fs.writeFileSync(path.join(results, 'agentic-runtime-isolation.PS-8.json'), JSON.stringify({ runId: 'test-run', scenario: 'PS-8', refusals: { byTenantReason: [], unattributed: 4 } }));
+          const r = spawnSync('bash', [path.join(STRESS_DIR, 'collect-platform.sh')], { env: { PATH: process.env.PATH, STRESS_RESULTS: results, STRESS_RUN_ID: 'test-run' }, encoding: 'utf8' });
+          expect(r.status).toBe(1);
+          expect(r.stderr).toContain('no k6 summary for PS-8');
+          expect(JSON.parse(fs.readFileSync(path.join(results, 'agentic-runtime-isolation.PS-8.json'), 'utf8')).refusals.unattributed).toBe(4);
+        } finally {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      });
+    });
   });
 
   it('refuses a prefix that could name an integration-test stack', () => {
@@ -195,6 +738,7 @@ describe('slice.sh', () => {
       fs.writeFileSync(path.join(root, 'package.json'), '{"name":"slice-teardown-test"}');
       fs.copyFileSync(SLICE_SH, path.join(scripts, 'slice.sh'));
       fs.copyFileSync(path.join(STRESS_DIR, 'window.sh'), path.join(scripts, 'window.sh'));
+      fs.copyFileSync(path.join(STRESS_DIR, 'platform.sh'), path.join(scripts, 'platform.sh'));
       fs.writeFileSync(path.join(scripts, 'teardown.sh'), '#!/usr/bin/env bash\necho "teardown.sh [$*]"\n', { mode: 0o755 });
     });
     afterAll(() => fs.rmSync(root, { recursive: true, force: true }));

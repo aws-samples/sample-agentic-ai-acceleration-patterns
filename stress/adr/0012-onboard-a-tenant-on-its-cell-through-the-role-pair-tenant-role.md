@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0012: Onboard a tenant on its cell through the role pair's tenant role
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Deciders: Dave Roberts (PSA)
 
@@ -46,10 +46,12 @@ cell script runs once per cell.
 Option 1. The grant is the narrowest that lets a tenant build do its one write, it is the
 owner's to give or withdraw (the account check refuses nothing it does), and it follows the
 same pattern as the cell build policy. The script records the deployment under
-`/application-plane/tenants/<tenant id>/<application id>` with the cell and the
-subscription version, which the control-plane slice reads back as an isolation assertion
-(P-1). The tenant-identity tenant and the front-door route join when those slices compose
-(W-9, W-7).
+`/application-plane/tenants/<tenant id>/<application id>/state` with the cell and the
+subscription version (a child of the tenant namespace, because the front door cell API's
+hosts check reads that namespace with `GetParametersByPath`; changed in W-9), which the
+control-plane slice reads back as an isolation assertion (P-1). In a platform run the
+tenant-identity tenant is made by the control-plane driver (ADR-0017) and the front-door
+route by the route hook.
 
 ## Consequences
 The owner redeploys `CellPolicies` and the role pair once (`deploy-owner.sh`,

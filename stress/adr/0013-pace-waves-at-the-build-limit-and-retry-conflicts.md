@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0013: Pace waves at the build limit and retry conflicts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Deciders: Dave Roberts (PSA)
 
@@ -100,3 +100,6 @@ The slice's records show `500:internal-server` requests, `ambiguous-placement` r
 and `CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts; the control-plane README's
 stress section says how to read them. If the control plane adopts Option 3, they drop to
 zero and the special case can go.
+
+The platform run at `small` (W-9) placed 19 tenants under a build limit of 50 and met no
+conflict, so pacing and retry are proven by the slice run only.

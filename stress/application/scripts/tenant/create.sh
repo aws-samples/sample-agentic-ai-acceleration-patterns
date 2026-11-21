@@ -13,10 +13,10 @@
 #
 # It subscribes the tenant to the cell's agents and tools on the cell's Entitlements API
 # (PutTenantSubscription, SigV4) and records the deployment under
-# /application-plane/tenants/<tenant id>/<application id>: the cell and the subscription
+# /application-plane/tenants/<tenant id>/<application id>/state (a child of the tenant namespace, which the front door cell API origin reads for its hosts check): the cell and the subscription
 # version, which the control-plane slice reads back as an isolation assertion. TENANT_NAME is
-# never used. The tenant-identity tenant and the front-door route of the platform run
-# (spec §3.3) join when those slices compose (W-9).
+# never used. The tenant-identity tenant is the control-plane driver's (stress ADR-0017) and the front-door route
+# the route hook's (spec §3.3).
 set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"
@@ -65,7 +65,7 @@ echo "Subscribed ${TENANT_ID} on cell ${CELL_ID} (version ${version})"
 
 state="$(jq -cn --arg cell "$CELL_ID" --arg app "$APPLICATION_ID" --arg tenant "$TENANT_ID" --argjson version "$version" \
   '{tenantId: $tenant, applicationId: $app, cellId: $cell, subscriptionVersion: $version}')"
-put_param "/application-plane/tenants/${TENANT_ID}/${APPLICATION_ID}" "$state"
+put_param "/application-plane/tenants/${TENANT_ID}/${APPLICATION_ID}/state" "$state"
 if [ -n "${OUTPUTS_FILE:-}" ]; then
   printf '{"cellId":"%s"}\n' "$CELL_ID" > "$OUTPUTS_FILE"
 fi

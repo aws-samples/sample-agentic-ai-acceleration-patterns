@@ -13,8 +13,10 @@
 # It deploys one runtime-isolation cell, `StressCell-<cell id>`, from the source the control
 # plane fetched (the repository at the pinned commit): installs the sample, synthesises
 # stress/application/cell-app.ts (every role on /cell/ under the workload boundary, qualifier
-# `cell`) and deploys it through CDKToolkit-cell. Then it publishes the cell's stack name and
-# its Entitlements API URL under /application-plane/cells/<cell id>/ for the tenant scripts.
+# `cell`) and deploys it through CDKToolkit-cell. Then it publishes, under
+# /application-plane/cells/<cell id>/, the cell's stack name and its Entitlements API URL for
+# the tenant scripts and, with a distribution ARN (platform mode), the cell API's host as
+# `api-domain`.
 # It prints timings and the build container's peak memory (spec Q-1), never a value.
 set -euo pipefail
 
@@ -39,8 +41,29 @@ STACK="$(node -e 'const id = process.argv[1]; if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.te
 echo "Cell ${CELL_ID} of ${APPLICATION_ID} (${OPERATION:-CREATE}): stack ${STACK} in ${CELL_ACCOUNT_ID}"
 echo "memory_total_mib=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo) cpus=$(nproc)"
 
+# Platform mode (spec §3.3, step 2): the cell parameter DISTRIBUTION_ARN, the tenant front
+# door's edge distribution, adds the cell API origin; empty is slice mode, nothing added.
+# The cell API trusts the stress identity the account base names, read here and passed to
+# the app; nothing is logged but the parameter names.
+DISTRIBUTION_ARN="${PARAM_DISTRIBUTION_ARN:-}"
+if [ -n "$DISTRIBUTION_ARN" ]; then
+  if ! [[ "$DISTRIBUTION_ARN" =~ ^arn:aws[a-z-]*:cloudfront::[0-9]{12}:distribution/[A-Z0-9]{8,32}$ ]]; then
+    echo "PARAM_DISTRIBUTION_ARN is not a CloudFront distribution ARN: refusing" >&2
+    exit 1
+  fi
+  IDENTITY_USER_POOL_ID="$(get_param /application-plane/shared/identity/userPoolId)"
+  IDENTITY_APP_CLIENT_ID="$(get_param /application-plane/shared/identity/appClientId)"
+  echo "Read /application-plane/shared/identity/userPoolId and appClientId; the cell gets a cell API for the distribution"
+  export DISTRIBUTION_ARN IDENTITY_USER_POOL_ID IDENTITY_APP_CLIENT_ID
+else
+  DISTRIBUTION_ARN=""
+fi
+
 ensure_node
 install_sample
+if [ -n "$DISTRIBUTION_ARN" ]; then
+  link_front_door_modules
+fi
 
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
@@ -71,8 +94,24 @@ entitlements="$(node -e 'const o = require(process.argv[1])[process.argv[2]] ?? 
 put_param "$(cell_param stack)" "$STACK"
 put_param "$(cell_param entitlements-api-url)" "$entitlements"
 
-# Outputs for the post hooks (control-plane R-43): the stack name only.
+# Platform mode: the cell API's host, for the control-plane driver and the route hook (spec §5.2).
+# Only a Lambda function URL host of this Region is published.
+if [ -n "$DISTRIBUTION_ARN" ]; then
+  api_domain="$(node -e 'const o = require(process.argv[1])[process.argv[2]] ?? {}; if (!o.FrontDoorApiDomain) process.exit(1); console.log(o.FrontDoorApiDomain)' "${OUT}/outputs.json" "$STACK")"
+  if ! [[ "$api_domain" =~ ^[a-z0-9]{32}\.lambda-url\.${AWS_REGION}\.on\.aws$ ]]; then
+    echo "FrontDoorApiDomain is not a Lambda function URL host in ${AWS_REGION}: refusing" >&2
+    exit 1
+  fi
+  put_param "$(cell_param api-domain)" "$api_domain"
+fi
+
+# Outputs for the post hooks (control-plane R-43): the stack name, and in platform mode the
+# cell API's host (spec §5.2). One JSON object of strings; the host passed the check above.
 if [ -n "${OUTPUTS_FILE:-}" ]; then
-  printf '{"stackName":"%s"}\n' "$STACK" > "$OUTPUTS_FILE"
+  if [ -n "$DISTRIBUTION_ARN" ]; then
+    printf '{"stackName":"%s","frontDoorApiDomain":"%s"}\n' "$STACK" "$api_domain" > "$OUTPUTS_FILE"
+  else
+    printf '{"stackName":"%s"}\n' "$STACK" > "$OUTPUTS_FILE"
+  fi
 fi
 echo "Cell ${CELL_ID} ready"

@@ -42,6 +42,8 @@ import {
   warmSpacingMs,
 } from '../../../../../stress/k6/lib.js';
 
+import { createEdgeRefusals } from './edge-refusals.js';
+
 export {
   iterationSkipped,
   loadManifest,
@@ -59,6 +61,8 @@ export const SLICE = 'agentic-runtime-isolation';
 
 const SAMPLE = {
   sessionScope: env('SESSION_SCOPE', 'tenant'),
+  /** The agent every tenant calls unless AGENT_SPREAD spreads them; platform mode takes it from the front door's manifest. */
+  agent: env('AGENT_BACKEND', 'default'),
   agentSpread: env('AGENT_SPREAD', 'false') === 'true',
 };
 
@@ -110,10 +114,18 @@ export function buildOptions(scenarios, p, mode, extra = {}) {
   return buildOptionsShared(scenarios, p, mode, thresholds);
 }
 
-/** handleSummary: SCENARIO is the plan's id (`S1` ... `S7`). */
+/** handleSummary: SCENARIO is the plan's id (`S1` ... `S7`); RECORD_SCENARIO renames it in platform mode (`PS-2` ...). */
 export function summarize(data, scenario) {
-  return summarizeShared(data, { slice: SLICE, scenario });
+  return summarizeShared(data, { slice: SLICE, scenario: env('RECORD_SCENARIO', scenario) });
 }
+
+// -- refusals through the edge (platform mode) ----------------------------------
+
+// A 4xx or 5xx through the edge is one `edge_refusal` line per VU, tenant, status and minute
+// (edge-refusals.js); collect-platform.sh gives each its tenant and reason (P-7). It runs on every
+// response, so the last minute's counts are written too.
+const PLATFORM = env('STRESS_MODE', 'slice') === 'platform';
+const edgeRefusals = createEdgeRefusals(Date.now, () => exec.scenario.progress, (line) => console.log(line));
 
 // -- tokens and conversations --------------------------------------------------
 
@@ -138,7 +150,7 @@ export function setupTokens(manifest, tier, opts = {}) {
     Object.assign({}, opts, {
       decorate: (entry) => ({
         conversationId: `stress${convRun}${String(entry.tenantIndex).padStart(6, '0')}`,
-        agent: SAMPLE.agentSpread ? tier.agents[entry.tenantIndex % tier.agents.length] : 'default',
+        agent: SAMPLE.agentSpread ? tier.agents[entry.tenantIndex % tier.agents.length] : SAMPLE.agent,
       }),
     }),
   );
@@ -300,6 +312,9 @@ export function probe(entry, kind, opts = {}) {
   const phase = opts.phase || 'main';
   const r = invoke(entry, promptOf(kind, entry, opts), { probe: kind, phase });
   countStatus(r.status, entry.tenantId);
+  if (PLATFORM) {
+    edgeRefusals.track(entry.tenantId, r.status);
+  }
   if (phase !== 'warm') {
     timed(r.ttfb, r.total, { probe: kind });
     ledger(entry.tenantId, r.status);

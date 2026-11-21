@@ -180,13 +180,13 @@ export async function assertPlaced(f: FleetEnv, deployments: readonly Deployment
     if (profile === undefined) continue;
     for (let i = 0; i < list.length; i += 10) {
       const batch = list.slice(i, i + 10);
-      const names = batch.map((d) => `/application-plane/tenants/${d.tenantId}/${f.applicationId}`);
+      const names = batch.map((d) => `/application-plane/tenants/${d.tenantId}/${f.applicationId}/state`);
       const out = await aws(['ssm', 'get-parameters', '--names', ...names], { profile, region: f.region });
       const values = new Map<string, string>((out.Parameters ?? []).map((p: any) => [String(p.Name), String(p.Value)]));
       for (const d of batch) {
         let state: any;
         try {
-          state = JSON.parse(values.get(`/application-plane/tenants/${d.tenantId}/${f.applicationId}`) ?? 'null');
+          state = JSON.parse(values.get(`/application-plane/tenants/${d.tenantId}/${f.applicationId}/state`) ?? 'null');
         } catch {
           state = null;
         }
