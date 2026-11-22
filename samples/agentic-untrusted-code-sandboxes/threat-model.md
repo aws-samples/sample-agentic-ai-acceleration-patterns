@@ -186,10 +186,11 @@ commits on the branch change documents only:
 ASH's cfn-nag, grype, opengrep and syft did not run (their dependencies are
 not installed); cdk-nag at synth and ProtoShield's checkov, CVE and IAM
 passes cover the same areas. The ASH suppressions are in `.ash/.ash.yaml`:
-the test vectors and fixtures that look like secrets, the Dockerfile rules that do not apply to a root
-runner that drops to uid 1001 (CKV_DOCKER_2 and CKV_DOCKER_3,
-missing-user), and B310 and B108 for `test/integ/hostile/*`, whose probes
-open URLs and write to `/dev/shm` on purpose. cdk-nag `AwsSolutionsChecks`
+the test vectors and fixtures that look like secrets, the Dockerfile
+rules that do not apply to a root runner that drops to uid 1001
+(CKV_DOCKER_2 and CKV_DOCKER_3, missing-user), and B310 and B108 for
+`test/integ/hostile/*`, whose probes open URLs and write to `/dev/shm` on
+purpose. cdk-nag `AwsSolutionsChecks`
 runs at synth (ProtoShield reads its report: 0 findings, 5 acknowledged in
 the construct code with their reasons).
 
