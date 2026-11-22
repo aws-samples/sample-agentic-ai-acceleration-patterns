@@ -975,6 +975,7 @@ describe('known wildcards (ADR-0030)', () => {
     const role = new iam.Role(stack, 'R', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
     role.addToPolicy(new iam.PolicyStatement({ actions: ['ec2:CreateNetworkInterface', 'ec2:DeleteNetworkInterface'], resources: ['*'] }));
     role.addToPolicy(new iam.PolicyStatement({ actions: ['lambda:ListMicrovms'], resources: ['*'] }));
+    role.addToPolicy(new iam.PolicyStatement({ actions: ['ec2:DescribeSubnets'], resources: ['*'] }));
     acknowledgeKnownFindings(stack, { inputBucket: '<Bucket.Arn>', logGroups: [], logGroupPrefixes: [], invokable: [] });
     const policy = stack.node.findAll().find((n) => n instanceof iam.CfnPolicy) as iam.CfnPolicy;
     const iam5 = policy.node.metadata
@@ -983,6 +984,7 @@ describe('known wildcards (ADR-0030)', () => {
     expect(iam5).toHaveLength(1);
     expect(iam5[0]).toMatch(/network interfaces/);
     expect(iam5[0]).toMatch(/take no resource/);
+    expect(iam5[0].match(/manages its own network interfaces/g)).toHaveLength(1);
   });
 });
 

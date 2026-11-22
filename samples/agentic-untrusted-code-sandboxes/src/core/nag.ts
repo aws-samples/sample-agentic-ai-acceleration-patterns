@@ -216,8 +216,8 @@ export function acknowledgeKnownFindings(root: IConstruct, ctx: KnownContext): v
 }
 
 function acknowledgeStatements(target: IConstruct, statements: ResolvedStatement[], ctx: KnownContext): void {
-  // One finding id per resource text, so statements that share a wildcard (`*`) share one acknowledgement:
-  // it carries the reason of every known entry they match, not only the first.
+  // One finding id per resource text, so statements that share a wildcard (`*`) share one acknowledgement,
+  // which carries the reason of every known entry they match, each once.
   const reasons = new Map<string, string[]>();
   for (const s of statements) {
     const actions = ([] as string[]).concat(s.Action ?? []);
