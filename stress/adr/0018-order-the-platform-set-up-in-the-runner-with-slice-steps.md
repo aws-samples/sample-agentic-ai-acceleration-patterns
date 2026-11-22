@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0018: Order the platform set-up in the runner, with slice steps
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-21
 - Deciders: Dave Roberts (PSA)
 
@@ -64,3 +64,6 @@ platform run adds its entries to the table. A slice-mode run is unchanged.
 
 Revisit if more than two slices need steps, or if the order has to differ per
 tier.
+
+The first platform run at `small` (W-9, `stress/results/2026-11-21-small.md`)
+ran the set-up and the teardown in this order.

@@ -205,7 +205,8 @@ and the records in
    request (§5.1). The run's first tenant is the warm-up tenant of §3.5:
    its deployment builds the cell, and `/agents/*` is refused at the edge
    (404, or CloudFront's own 403 for a `POST`) until front-door phase two,
-   so it is not timed in PS-1.
+   so it is left out of PS-1's percentiles and timed apart as `warm-up-ready`,
+   which also holds the set-up between the warm-up step and PS-1 (§5.1).
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -365,7 +366,7 @@ action of it:
 | 2 | front-door phase one, first deploy: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `agentIngress` unset, so the edge refuses `/agents/*` (404, or CloudFront's own 403 for a `POST`, front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
 | 3 | front-door phase one, second deploy: the same app with `registrarUrl`, read from the edge parameter, which adds the `RouteHookAccess` stack in the control plane's account (front-door ADR-0027); then the control plane's `globalHookManagedPolicyArns` update and the global hooks registered with the front door's `register-hooks.sh`, pinned to `hookCommit` | `tenant-front-door` `deploy`, then `control-plane` step `hooks` |
 | 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); then the cell account registered for it, with `maxCells` 1 at `small`. The cell app passes the ARN to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7. Both answer 202, so the step waits until the application and the account are `ACTIVE` | `control-plane` step `register` |
-| 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the step waits for the deployment and the cell to be `ACTIVE`, then records the tenant, the cell, its account, the cell API's domain and the ingress parameter in `control-plane.json` (`warmUp`); the tenant's identity and users and the readiness poll (§3.3 step 4) run at the start of PS-1, after step 6 | `control-plane` step `warm-up`, not timed in PS-1 |
+| 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the step waits for the deployment and the cell to be `ACTIVE`, then records the tenant, the cell, its account, the cell API's domain and the ingress parameter in `control-plane.json` (`warmUp`); the tenant's identity and users and the readiness poll (§3.3 step 4) run at the start of PS-1, after step 6 | `control-plane` step `warm-up`; left out of PS-1's percentiles, timed apart as `warm-up-ready` (§5.1) |
 | 6 | front-door phase two: a main-stack update with `agentIngress` set to that cell's ingress, `registrarUrl` kept | `tenant-front-door` step `phase-two` |
 | 7 | the rest of the tier's onboarding (PS-1 at `buildLimit`), then the other scenarios | §5.1 |
 
@@ -577,7 +578,8 @@ ingress; at `small` that is the one cell's ingress (§3.3, stress
 ADR-0016). Scenarios above `small` wait for Q-7. In PS-1 a tenant's `ready` time is
 `CreateDeployment` to its first served `/api/whoami` through the edge (stress ADR-0020); a
 tenant that was not placed in this run is timed apart as `rerun-ready`, and the warm-up
-tenant as `warm-up-ready`.
+tenant as `warm-up-ready`, which holds its cell build and the set-up between the warm-up
+step and PS-1, so it is not a cell build time.
 
 | Id | Shape | What it stresses | Watch |
 |---|---|---|---|
@@ -733,9 +735,9 @@ Q-5, answered by the first platform run at `small` (`stress/results/2026-11-21-s
 | W-2 driver and k6 library moved to `stress/` | W-1 schema | yes, once W-1's schema is fixed |
 | W-3 runtime-isolation slice on the contract | W-1, W-2 | yes, after W-1 and W-2 |
 | W-4 control-plane build-limit prop | decision 2 | yes, now |
-| W-5 control-plane slice and the stress application, with the stress cell's cell API origin, its `frontDoorApiDomain` output and the distribution ARN cell parameter (§3.3 step 2, §3.5) | W-1, W-4, W-10; W-11 for Q-1 and the account check | the slice in `samples/control-plane/scripts/stress/`, the stress application and the role pair in `stress/application/` (stress ADR-0012 to ADR-0015) are done; Q-1 answered; the cell API origin, the output and the cell parameter are W-9's |
+| W-5 control-plane slice and the stress application, with the stress cell's cell API origin, its `frontDoorApiDomain` output and the distribution ARN cell parameter (§3.3 step 2, §3.5) | W-1, W-4, W-10; W-11 for Q-1 and the account check | the slice in `samples/control-plane/scripts/stress/`, the stress application and the role pair in `stress/application/` (stress ADR-0012 to ADR-0015) are done; Q-1 answered; the cell API origin, the output and the cell parameter are done in W-9 (`stress/application/cell-app.ts`) |
 | W-10 `cellBuildManagedPolicyArns` prop; cell execution policy, permissions boundary, workload boundary, `/cell/` path aspect and the cell bootstrap, in `stress/application/` | decision 7; the deny probes ran in the path spike (`stress/spikes/cell-path/`); the second boundary is ADR-0011 | done: the prop in control-plane ADR-0047, the rest in `stress/application/` |
-| W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair, and a read-only role in the account base that allows `ssm:GetParameter` on the ingress parameter only, for front-door phase two (§3.5) | §3.7; W-10's policies and prop for the bootstrap and the role pair | done in both cell accounts: the owner stacks, `CDKToolkit-cell` and the role pair (`stress/application/deploy-role-pair.sh`, W-5); the account check passes on both; the ingress reader role is W-9's |
+| W-11 two standalone cell accounts, bootstrapped with the cell bootstrap and the role pair, and a read-only role in the account base that allows `ssm:GetParameter` on the ingress parameter only, for front-door phase two (§3.5) | §3.7; W-10's policies and prop for the bootstrap and the role pair | done in both cell accounts: the owner stacks, `CDKToolkit-cell` and the role pair (`stress/application/deploy-role-pair.sh`, W-5); the account check passes on both; the ingress reader role is done in W-9 (`CellAccountBaseStack` in `stress/application/cell-account.cdk.ts`) |
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
 | W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | done |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part yes; front-door part after its merge |

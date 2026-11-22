@@ -166,7 +166,7 @@ deploy_stack() {
 # json_private FILE: reads JSON on stdin and writes it to FILE with mode 0600, by way of a temporary file, so a reader never sees half a file.
 json_private() {
   local file="$1"
-  cat >"${file}.new"
+  (umask 077; cat >"${file}.new")
   chmod 600 "${file}.new"
   mv "${file}.new" "$file"
 }

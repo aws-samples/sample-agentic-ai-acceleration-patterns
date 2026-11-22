@@ -211,7 +211,7 @@ describe('runner (spec §3.5)', () => {
     expect(life.deploySeconds).toBeGreaterThanOrEqual(0);
   });
 
-  it('refuses a platform order that calls a step the slice does not declare, and skips the hook steps without the front door', async () => {
+  it('refuses a platform order that calls a step the slice does not declare', async () => {
     const { root, home } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-1'], steps: ['register'] } });
     const { calls, exec } = stub();
     await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec })).rejects.toThrow(/control-plane step warm-up, which the slice's slice.json does not list/);

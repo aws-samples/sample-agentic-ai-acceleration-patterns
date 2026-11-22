@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0019: Give the stress cell a cell API origin, and read its ingress with a reader role
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-21
 - Deciders: Dave Roberts (PSA)
 
@@ -72,3 +72,7 @@ unreachable identity issuer answers 403 where the front door's tests expect
 
 Revisit if the cell policies grow a Region wildcard (one role for all Regions
 of an account), or if the control plane returns script outputs.
+
+The first platform run at `small` (W-9, `stress/results/2026-11-21-small.md`)
+served every PS-1 tenant's `/api/whoami` from this origin, and front-door phase
+two read the ingress through the reader role.

@@ -90,7 +90,7 @@ around one. When `slice.sh` exits,
 anything it left running in its group gets SIGTERM, then SIGKILL after
 30 seconds.
 
-## Platform mode: set-up order and manifests
+## Platform mode: set-up order
 
 A run with several slices sets `STRESS_MODE=platform`. The slices' set-up interleaves
 (spec §3.5, stress ADR-0018): the runner calls each slice's `deploy`, `seed` and `step <name>`
@@ -109,6 +109,8 @@ its `slice.json`. In the order of a full run:
 Teardown runs in the reverse order of the slices, with the control plane's `step unhook` before the
 front door's `teardown`. A platform run needs `STRESS_HOOK_COMMIT` (spec §3.6, `hookCommit`) and,
 in the cell accounts file, `ingressReaderRoleArn` for each cell account.
+
+## Platform mode: manifests
 
 A slice works on what the others made and reads it from manifest files in
 `$STRESS_HOME/$STRESS_PREFIX/`: ids and names only,
@@ -264,8 +266,9 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   no credentials `HTTP 0`.
 - The quota catalogue has no ids yet for the API Gateway control plane or
   for CloudFront Functions compute and KeyValueStore size (spec §4.4), so
-  no slice can declare them. They are added with the first slice that
-  draws on them (W-7 for the front door).
+  no slice can declare them. The front-door slice found no Service Quotas
+  code for the API Gateway control plane or CloudFront Functions compute
+  (its `scripts/stress/README.md`, Known limitations).
 - The k6 library has no k6 run in this folder's build: `record.js` is tested, `lib.js` is
   checked by running `k6/smoke.js` and `K6_COMMAND=inspect` on a deployed host. A change to
   `lib.js` needs that check again.

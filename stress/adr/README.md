@@ -27,9 +27,9 @@ that change a sample are recorded in that sample's `adr/`.
 | [0015](./0015-check-the-cell-accounts-with-the-owners-read-access.md) | Check the cell accounts with the owner's read access | Accepted | 2026-11-20 |
 | [0016](./0016-send-agent-traffic-to-the-one-cells-ingress-at-small.md) | Send agent traffic to the one cell's ingress at `small` | Accepted | 2026-11-20 |
 | [0017](./0017-create-the-identity-tenant-and-users-in-the-control-plane-driver.md) | Create each control-plane tenant's identity tenant and users in the control-plane driver | Accepted | 2026-11-20 |
-| [0018](./0018-order-the-platform-set-up-in-the-runner-with-slice-steps.md) | Order the platform set-up in the runner, with slice steps | Proposed | 2026-11-21 |
-| [0019](./0019-give-the-stress-cell-a-cell-api-origin-and-read-its-ingress-with-a-reader-role.md) | Give the stress cell a cell API origin, and read its ingress with a reader role | Proposed | 2026-11-21 |
-| [0020](./0020-time-a-tenant-to-its-first-served-api-call-and-keep-the-warm-up-tenant-apart.md) | Time a tenant to its first served API call, and keep the warm-up tenant apart | Proposed | 2026-11-21 |
+| [0018](./0018-order-the-platform-set-up-in-the-runner-with-slice-steps.md) | Order the platform set-up in the runner, with slice steps | Accepted | 2026-11-21 |
+| [0019](./0019-give-the-stress-cell-a-cell-api-origin-and-read-its-ingress-with-a-reader-role.md) | Give the stress cell a cell API origin, and read its ingress with a reader role | Accepted | 2026-11-21 |
+| [0020](./0020-time-a-tenant-to-its-first-served-api-call-and-keep-the-warm-up-tenant-apart.md) | Time a tenant to its first served API call, and keep the warm-up tenant apart | Accepted | 2026-11-21 |
 
 In `samples/control-plane/adr/`:
 

@@ -116,7 +116,7 @@ export const liveWarmUpDeps: WarmUpDeps = {
   now: Date.now,
 };
 
-/** Spec §3.5 step 5. The deployment and the cell build take about nine minutes (Q-1); one hour is the budget. */
+/** Spec §3.5 step 5. The deployment and the cell build took 759 s in the first platform run at `small`; one hour is the budget. */
 const WARM_UP_TIMEOUT_SECONDS = 3600;
 
 /**
@@ -138,7 +138,7 @@ export async function warmUp(
     f.rec.finding('the manifest has no seeded tenant to warm up: run seed first');
     return undefined;
   }
-  // The front door's phase two needs the reader role: refuse before a cell build of about 9 minutes.
+  // The front door's phase two needs the reader role: refuse before a cell build of about 13 minutes.
   const noRole = f.cellAccounts.filter((a) => a.ingressReaderRoleArn === undefined);
   if (noRole.length > 0) {
     f.rec.finding(`warm-up: ${noRole.length} cell account(s) in the cell accounts file have no ingressReaderRoleArn (platform mode needs it, stress/application/README.md step 1)`);

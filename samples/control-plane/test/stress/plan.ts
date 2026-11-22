@@ -133,7 +133,8 @@ export interface Draw {
 
 /**
  * The slice's draw on each account-wide quota (spec §4.4). In the platform account: the
- * build limit on each of the two projects (Linux/Small); the API and authorizer functions
+ * build limit on each build project (Linux/Small): the cell and tenant projects, plus the
+ * global hook project in a platform run; the API and authorizer functions
  * at the read rate plus a workflow callback per running build (Lambda concurrency); one role
  * pair AssumeRole per build start, the limit's builds starting within a minute at most
  * (STS). In each cell account, a cell build assumes the cell bootstrap's three roles.

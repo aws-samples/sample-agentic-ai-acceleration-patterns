@@ -65,6 +65,7 @@ application domain per run prefix under it, passed in `STRESS_FD_ZONE_ID` and
 `STRESS_FD_ZONE_NAME`. No domain is written into the repository.
 
 ## What it does (slice mode)
+
 | Verb | Does |
 |---|---|
 | `budget` | prints the draw on Lambda concurrency (the registrar's burst plus a quarter second of the cell at the peak rate); no credentials |
@@ -302,20 +303,20 @@ What the numbers say:
   role is a role of the same account. Nothing in slice mode runs the route hook
   script, the real hooks or the cell scripts, and `teardown` has never run
   `register-hooks.sh --delete` live (a slice-mode run registers no hook).
-- Platform mode has not run live. `deploy-platform.sh`, `phase-two.sh` and the
-  platform branches of `teardown.sh` and `slice.sh` are checked with `bash -n`
-  only (no `shellcheck` here); the pure parts (manifests, outputs, the
-  `agentIngress` derivation, the probe classification) have unit tests. Not
-  exercised without AWS: the CDK deploys, the `RouteHookAccess` hook stack's
-  deletion order, the phase-two wait, the ingress probes against a real ingress
-  (the shape is the k6 probe's; an ingress whose first `data:` line is not the
-  `report` fails PS-7 as a mismatch), and `collect` without a cell log.
+- Platform mode ran live once, at `small` (`stress/results/2026-11-21-small.md`):
+  the CDK deploys, phase two, PS-7 against the real ingress (90 assertions, 0
+  mismatches), `collect` without a cell log, and a teardown that deleted the
+  `RouteHookAccess` hook stack and left nothing the check reads. Not run live:
+  a rerun of phase two after a failure, `medium` and `large`. The shell scripts
+  are checked with `bash -n` only (no `shellcheck` here). An ingress whose
+  first `data:` line is not the `report` fails PS-7 as a mismatch.
 - Platform PS-7 sends one `report` per round to the ingress, which opens a
   Runtime session for the tenant's conversation: 10 at `small`, 25 above it.
   A cold session can take longer than the edge probes; those calls wait up to
   90 s.
 - Phase two is a distribution update on every run; its time is the number to
-  watch (stress ADR-0016 consequences). A run that fails between the
+  watch (stress ADR-0016 consequences). The first platform run took 134 s for
+  the deploy and 21 s more until the edge routed `/agents/*`. A run that fails between the
   `context.json` write and the manifest rewrite leaves `agentIngress` in the
   context and the manifest at phase 1: run the step again, it is idempotent.
 - `deploy` in platform mode rewrites `context.json` without `agentIngress`: do

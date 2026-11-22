@@ -756,7 +756,8 @@ budgeted (`slice.sh budget`) but not measured. The API Gateway control-plane
 draw of spec §4.4, each `set-build-limit` redeploy of the control plane, has no
 Service Quotas code, so the slice does not budget it. The platform account's
 CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds must hold the
-build limit times two (the cell and tenant projects; the service default is 1).
+build limit times two in slice mode (the cell and tenant projects) and times
+three in a platform run (plus the global hook project); the service default is 1.
 Scenarios: `PS-1` (the seeded tenants onboarded at the build limit; the first
 deployment creates the cell, whose build time answers spec Q-1),
 `placement-race` (twice as many `CreateDeployment` calls as free slots, at
@@ -772,8 +773,12 @@ count of tenants created, suspended, resumed and deleted, each change timed from
 to the first edge answer that shows it (`routable`, `suspended`, `resumed` and `removed`
 in the record), with a suspended and a removed tenant read again after the edge has
 settled. It reads the edge and registrar addresses from the front door's manifest
-(`stress/README.md`, "Platform mode: manifests") and stops with a message when they are
-missing. The driver is
+(`stress/README.md`, "Platform mode: set-up order and manifests") and stops with a message
+when they are missing. A platform run also calls the slice's steps `hooks` (registers the
+front door's global route hooks, which run `route-hook.sh` at `STRESS_HOOK_COMMIT`),
+`register` (the application and the cell accounts), `warm-up` (one tenant that builds the
+cell) and, at teardown, `unhook`; PS-1 then gives each onboarded tenant an identity tenant
+and users (stress ADR-0017). The driver is
 [`test/stress/`](./test/stress/), the scripts
 [`scripts/stress/`](./scripts/stress/slice.sh); the manifest and the source zip
 stay outside the repository and hold no token or password. `--remove-fixtures`
