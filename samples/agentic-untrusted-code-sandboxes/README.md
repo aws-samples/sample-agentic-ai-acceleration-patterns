@@ -165,7 +165,8 @@ deploys, the integration runs and the demo run, 2026-11-19 to 2026-11-22):
 
 | Deployment | Deploy | Destroy with sandboxes live |
 |---|---|---|
-| `microvm` only (the demo stack) | 635 to 641 s | 1371 to 1374 s |
+| `microvm` only (smoke deploy) | 641 s | 1371 s |
+| `microvm` only (the demo stack, tenants offboarded before the delete) | 635 to 645 s | 1374 to 1459 s |
 | `nitro` only | about 450 s (CloudFormation; image build not timed) | 1618 s |
 | `agentcore` (two instances, one with `sessionFiles`) | 924 to 989 s | 1895 s |
 | All three backends, two instances, gateway entry (integration stack) | 1123 to 1328 s | 2422 s in the one clean delete |
@@ -221,7 +222,9 @@ The demo stack, not the construct, writes one JSON parameter (ADR-0069):
 A parameter only names resources. A consumer in another app still needs the
 grants made in the app that owns the construct: `grantInvokeRunCode` for the
 standalone entry, or a `RunCodeToolTarget` and the tenants' tool grants for
-the gateway entry.
+the gateway entry. The name is fixed, so an account and Region hold one
+demo stack; a vendor's own app that deploys more names its parameters
+itself.
 
 ## Deployment integration test
 
@@ -246,6 +249,8 @@ export AWS_PROFILE=<profile> AWS_REGION=<region>
 scripts/demo.sh
 ```
 
+It needs `aws`, `jq` and `openssl`, bash 4 or later, and a role that may
+read the parameter and invoke `runCodeFunction` and the offboard function.
 It reads the published parameter, then on each deployed backend calls
 `runCodeFunction` with IAM as the vendor's own API would, for two synthetic
 tenants named per run. It checks each answer, prints step names and
@@ -261,10 +266,16 @@ outcome codes only, and offboards both tenants on exit, also on failure.
 | 6 | A runs `while True: pass` | `timedOut` true, at `runTimeout` |
 | 7 | `offboardTenant` for A | one stopped sandbox per backend |
 
+A `sandbox_starting` or `sandbox_failed` answer is retried after its
+`retryAfterSeconds`, as a caller should, and the retry is printed with its
+outcome code. A MicroVM start can fail with a platform error
+(`Internal service error.` in the run line's `stoppedReason`); the tool
+returns `sandbox_failed` and the next start after the back-off succeeds.
+
 Last run: 2026-11-22, a non-production test account, `eu-west-1`, a demo
 stack with `backends=microvm` and `standalone=true`: all seven steps
-passed in 44 s. The stack deployed in 635 s and deleted cleanly in 1374 s,
-with no network interface, log group or parameter left.
+passed in 72 s, one first start retried after a `sandbox_failed`.
+The stack deployed in 645 s and deleted cleanly (`DELETE_COMPLETE`) in 1459 s; a read-only check afterwards found no network interface, log group, MicroVM or parameter of the stack.
 
 ## Tool API
 
@@ -346,7 +357,10 @@ wait before the roles are deleted, invoked or not. One deploy of this
 construct with the `microvm` backend only also deleted cleanly, in 1449 s
 with no network interface left. It was deleted about 30 minutes after it
 was created, after three rounds of calls to its tool, reaper and offboard
-functions, with a MicroVM live.
+functions, with a MicroVM live. The `microvm` smoke deploy and the demo
+stack deleted cleanly too (see the times under Deploy); neither had the
+integration stack's second instance or its `nitro` and `agentcore`
+resources.
 
 To finish a stuck delete, delete the `available` interfaces of the stack,
 then the stack again:

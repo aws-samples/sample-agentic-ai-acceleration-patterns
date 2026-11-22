@@ -51,4 +51,5 @@ is `none` in the demo stack, which has no gateway entry, and
 names resources: a consumer in another app still needs the grants the
 construct makes in its own app (`grantInvokeRunCode`, a `RunCodeToolTarget`).
 Adding a field is compatible; renaming or removing one needs a new ADR and a
-`version` change.
+`version` change. The name is fixed, so an account and Region hold one demo
+stack; a vendor's own app that deploys more names its parameters itself.
