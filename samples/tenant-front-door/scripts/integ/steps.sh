@@ -461,8 +461,6 @@ step_15() {
       '[.[] | fromjson? | select(.["x-host-header"] == $h) | select((.["viewer-request-log-data"] // "-" | ascii_downcase) as $f | $f != "-" and $f != $t)] | length' <<<"$events")"
     check "an /assets/* load on a's host names a" yes "$(yes_no jq -e --arg h "$(host_of "$TENANT_A")" --arg t "${TENANT_A,,}" \
       'any(.[] | fromjson? ; .["x-host-header"] == $h and (.["cs-uri-stem"] | startswith("/assets/")) and ((.["viewer-request-log-data"] // "") | ascii_downcase) == $t)' <<<"$events")"
-    check "login.<appDomain> leaves the field empty" 0 "$(jq --arg h "login.${APP_DOMAIN}" \
-      '[.[] | fromjson? | select(.["x-host-header"] == $h) | select((.["viewer-request-log-data"] // "-") != "-")] | length' <<<"$events")"
   fi
   # The refused calls of steps 11 to 13 (step 11 alone in host mode: steps 12 and 13 are single-mode steps).
   local refused last=13
@@ -541,7 +539,7 @@ step_17() {
 
 step_18() {
   section "18. the sign-in host (ADR-0016)"
-  local ha login st state loc logout_state
+  local ha login st state loc logout_state login_events
   ha="$(host_of "$TENANT_A")"; login="login.${APP_DOMAIN}"
   st="$(edge GET "$ha" "/signin-state?nonce=integnonce000000000000" '' -H 'Sec-Fetch-Site: same-origin')"
   state="$(json_get .state)"; check "/signin-state same-origin returns a state" "200:yes" "${st}:$(yes_no test -n "$state")"
@@ -575,6 +573,13 @@ step_18() {
   st="$(edge GET "$login" "/callback?code=integcode&state=${logout_state}")"
   check "after the issuer's sign-out, the sign-in host sends a's / with no code or state" "302:https://${ha}/" "${st}:$(header location)"
   st="$(edge GET "$login" /logout)"; check "login.<appDomain>/logout: the signed-out page" 200 "$st"
+  # The edge log holds the step's own requests to the sign-in host once it is delivered (33 s in S-1).
+  sleep 60
+  login_events="$(as_test aws logs filter-log-events --region us-east-1 --log-group-name "$EDGE_LOG" --start-time "$RUN_T0_MS" \
+    --query 'events[].message' --output json 2>/dev/null || echo '[]')"
+  login_events="$(jq -c --arg h "$login" '[.[] | fromjson? | select(.["x-host-header"] == $h)]' <<<"$login_events")"
+  check "the edge log holds requests to login.<appDomain>" yes "$(yes_no jq -e 'length > 0' <<<"$login_events")"
+  check "login.<appDomain> leaves the field empty" 0 "$(jq '[.[] | select((.["viewer-request-log-data"] // "-") != "-")] | length' <<<"$login_events")"
 }
 
 # -- Steps 19 to 23 ------------------------------------------------------------------------------

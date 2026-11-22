@@ -2444,7 +2444,9 @@ that fails or stops still removes what it made. `npx projen integ` and
 
 It runs in one Region, `AWS_REGION`, the control plane's (for example
 `eu-central-1`), with the edge stacks in `us-east-1` (ADR-0010),
-in two accounts. The edge account is the one the driver's credentials
+in two accounts. The `tenant-identity` deployments it reads may be in
+another Region, `TFD_IDENTITY_REGION` (default `AWS_REGION`); the last
+run used `eu-central-1` for them and `eu-west-1` for the rest. The edge account is the one the driver's credentials
 point at, because the test's hosted zone is there. The control plane's
 account, `TFD_INTEG_ACCOUNT_B`, is CDK-bootstrapped to trust it, so the
 driver deploys into both accounts with the edge account's credentials.
@@ -2487,16 +2489,16 @@ step 14's records, and `route53:GetChange` to wait for each change.
 Every name the run creates carries its run id (`TFD_INTEG_RUN_ID`,
 `[a-z0-9]{1,10}` and none of `aws`, `amazon` or `cognito`, words that a
 Cognito domain prefix and some other resource names refuse; a new one per
-run by default): its stacks are
-`TfdInteg-<run id>-*`, its fleet is `tfdi-<run id>` and its applications
-are `tfd-<run id>` and `plain-<run id>`, so a run never meets another run
-or the smoke stacks. Its logs, its CDK assemblies and its state are in
-`.integ/<run id>/`. The state holds the ids a teardown after an
-interruption needs, and never a token, a password or a key. The directory is
-mode 0700. The run's random external id for the test's role pair is the one
-value of that kind outside the state file: it is on the cell-account `cdk
-deploy` command line and in that CDK assembly, and it is valid only for the
-run's test accounts.
+run by default): its stacks are `TfdInteg-<run id>-*`, its fleet is
+`tfdi-<run id>` and its applications are `tfd-<run id>` and
+`plain-<run id>`, so a run never meets another run or the smoke stacks.
+Its logs, its CDK assemblies and its state are in `.integ/<run id>/`. The
+state holds the ids a teardown after an interruption needs, and never a
+token, a password or a key. The directory is mode 0700. The run's random
+external id for the test's role pair is the one value of that kind
+outside the state file: it is on the command line of the cell-account
+deploy and in that CDK assembly, and it is valid only for the run's test
+accounts.
 
 Test-only shortcuts, all by the test role and none by the sample's own
 code: the step 2 fixture, one `host#` key written straight to the route
@@ -2786,10 +2788,9 @@ The credentials the driver starts with must last the whole run.
     `a` and `b`, queried in `us-east-1` where the log group is
     (ADR-0010), from `viewer-request-log-data` in both modes (§3.1); in
     `host` mode `x-host-header` agrees with it, and an `/assets/*` load
-    on `a.<appDomain>` names `a` (host). Requests to
-    `login.<appDomain>` leave the field empty (host). The registrar's API access
-    log, in the control plane's Region, names the edge account on the refused calls
-    of steps 11 and 13 and the control plane's account on those of step
+    on `a.<appDomain>` names `a` (host). The registrar's API access
+    log, in the control plane's Region, names the edge account on the
+    refused calls of steps 11 and 13 and the control plane's account on those of step
     12; in `host` mode, which skips steps 12 and 13, it names the edge
     account on step 11's. The registrar log names the global hook role on
     the writes of step 2 and of step 13 (single), each counted within that
@@ -2847,7 +2848,9 @@ The credentials the driver starts with must last the whole run.
     `https://a.<appDomain>/` with no `code` and no `state`.
     `login.<appDomain>/logout` returns the static signed-out page. For the
     suspended-host check, the edge operator role suspends `b` and the test
-    waits 90 s (§4.2); it leaves `b` suspended.
+    waits 90 s (§4.2); it leaves `b` suspended. After 60 s for log
+    delivery, the edge log holds requests to `login.<appDomain>`, and none
+    of them names a tenant in `viewer-request-log-data`.
 19. An application without a front door. Register `plain-<run id>`, which
     has no `RouteHookAccess` stack and whose scripts write no outputs,
     and create a deployment of `a` in it: its cell and its deployment

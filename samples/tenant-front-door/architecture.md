@@ -12,6 +12,7 @@
 > | Region | `eu-west-1` for the control plane and the cells, `us-east-1` for the edge stacks, `eu-central-1` for the `tenant-identity` shared pool |
 > | Mode and steps passed | `host`: steps 1, 2, 3, 4, 11, 15, 17, 18, 23 and 24 |
 > | Not exercised live | `single` mode and its steps (5 to 10, 12 to 14, 16, 19 to 22), and the `single`-mode parts of steps 3, 15 and 23 (including the streamed call to the stand-in); in `host` mode, the inline callback script order (SPA build tests cover it), the CSP check of the callback in a browser, and a real sign-in through the issuer (both left to a manual check) |
+> | Driver changes after that run | The 0700 run directory, moving a reused run id's `state.env` aside, the wording of one skip in step 18, and the check of the sign-in host's log lines, which moved from step 15 to the end of step 18. Only the driver's stub tests cover them; run `npx projen integ:host` after changing the driver |
 > | End-to-end demo | 2026-11-21, against a kept `host` mode deployment: three runs of `scripts/demo.sh` passed (137 s, 153 s and 199 s) |
 > | Unit tests | 39 suites, 1,240 tests passed (`npx projen build`, 2026-11-21) |
 

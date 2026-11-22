@@ -238,10 +238,10 @@ npx cdk deploy --all "${FD_CONTEXT[@]}"
 This deploys `TenantFrontDoor-edge`, `TenantFrontDoor-main` and
 `TenantFrontDoor-edge-logging` (CDK paths `TenantFrontDoor/Edge`,
 `TenantFrontDoor/Main` and `TenantFrontDoor/EdgeLogging`) in the edge
-account. The stacks go to the
-account of `edgeOperatorRoleArn`. Add `--context addressing=host` for one host
-per tenant, and the optional inputs you need. The deployer brings the edge
-operator role: the stack only names it.
+account. The stacks go to the account of `edgeOperatorRoleArn`. Add
+`--context addressing=host` for one host per tenant, and the optional
+inputs you need. The deployer brings the edge operator role: the stack
+only names it.
 
 ### Step 2: deploy `RouteHookAccess` with the registrar's URL
 
@@ -470,10 +470,10 @@ npx projen integ
 
 It deploys the front door, its own control plane and two cells in two
 accounts, runs the steps of `single` mode (1 to 16 and 19 to 24) and tears
-everything down; a `single` run takes about four and a half hours (an estimate, not run), a
-`host` run (`npx projen integ:host`) about an hour (measured, 64 minutes), for
-a few dollars (an estimate). Its inputs, steps and shortcuts are in
-[integration-test.md](./integration-test.md).
+everything down; a `single` run takes about four and a half hours (an
+estimate, not run), a `host` run (`npx projen integ:host`) about an hour
+(measured, 64 minutes), for a few dollars (an estimate). Its inputs, steps
+and shortcuts are in [integration-test.md](./integration-test.md).
 
 ## End-to-end demo
 
@@ -495,17 +495,17 @@ scripts/integ.sh teardown demo1 host
 ```
 
 Each tenant's host is `<tenant id in lower case>.<appDomain>`. The demo
-needs bash 4.4 or later, the AWS CLI v2.9 or later, curl 7.75 or later and `jq`. Run it
-from the checkout that ran the test, with credentials of the same role: it
-reads the run's ids from `.integ/<run id>/`. The teardown needs the same
-inputs as the test.
+needs bash 4.4 or later, the AWS CLI v2.9 or later, curl 7.75 or later and
+`jq`. Run it from the checkout that ran the test, with credentials of
+the same role: it reads the run's ids from `.integ/<run id>/`. The
+teardown needs the same inputs as the test.
 
 The demo takes about three minutes (137 to 199 s in three runs on
 2026-11-21 against a kept `host` mode deployment), uses only
 the run's synthetic tenants and prints no token. The test ends with `b`
 suspended (step 18), so the demo first sets both tenants active, and it
-suspends `b` once more for step 5. It undoes that suspension when the script exits, also after a
-failure. The tenants and stacks belong to the integration test run, so the
+suspends `b` once more for step 5. It undoes that suspension when the
+script exits, also after a failure. The tenants and stacks belong to the integration test run, so the
 teardown above removes them. The test's deployment limits one client IP to
 50 requests per tenant host in five minutes on `/api/*`, so the demo polls
 `/api/whoami` once every six seconds, and a second run needs a five-minute gap.
@@ -621,9 +621,8 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
 - **The integration test ran live in `host` mode only.** `single` mode
   (steps 5 to 10, 12 to 14, 16 and 19 to 22, and the `single`-mode parts of
   steps 3, 15 and 23, including the streamed call to the stand-in) has no
-  live run. The status
-  block of [`architecture.md`](./architecture.md) holds the date, Region and
-  coverage of the last green run.
+  live run. The status block of [`architecture.md`](./architecture.md)
+  holds the date, Region and coverage of the last green run.
 - **The demo needs the integration test's deployment.** `scripts/demo.sh`
   runs against a kept `host` mode run. The test takes about an hour (64
   minutes measured, teardown included), and there is no lighter deploy

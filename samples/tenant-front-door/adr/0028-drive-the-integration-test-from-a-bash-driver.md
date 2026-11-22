@@ -21,8 +21,7 @@ outside CloudFormation.
 
 The control-plane sample's own test uses `@aws-cdk/integ-runner` with
 integ-tests-alpha assertions. Its assertion stack for 18 steps in one
-account is already close to CloudFormation's limit of 200 outputs and its
-1 MB template limit.
+account is already close to CloudFormation's limit of 200 outputs.
 
 The sample standard (§5.2) allows either driver and asks for an ADR when
 the test uses the CDK CLI from `scripts/integ.sh`.
@@ -31,8 +30,8 @@ the test uses the CDK CLI from `scripts/integ.sh`.
 ### Option 1: integ-runner with integ-tests-alpha
 Pros: the standard's default; the runner destroys its stacks in a
 `finally` block. Cons: every check is an assertion resource, so 24 steps
-would pass CloudFormation's output and template limits, as the control
-plane's test nearly does with 18. Waits are polling custom resources with
+would pass CloudFormation's output limit, as the control plane's test
+nearly does with 18. Waits are polling custom resources with
 a 2-minute provider timeout. A stack update that must fail, an update of
 a stack under test between steps, and an ordered teardown with API calls
 between stack deletes do not fit a deploy-then-destroy runner. Deploy

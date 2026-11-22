@@ -32,11 +32,15 @@ Two non-production accounts:
   Region and in `us-east-1`. It also holds the `tenant-identity`
   `shared-pool` deployment (and `shared-pool-multi-tenant` for a `single`
   run), whose published parameters the test reads and which it never
-  changes or removes. Deploy `shared-pool-multi-tenant` beside the other with
-  `npx cdk deploy TenantIdentity-shared-pool-multi-tenant --context
-  topology=shared-pool-multi-tenant --context publishSharedParameters=false`
-  (in `samples/tenant-identity`), because one stack owns the fixed-name
-  parameters. It must hold no other front door in your Region
+  changes or removes. Deploy `shared-pool-multi-tenant` beside the other
+  with this command, run in `samples/tenant-identity`, because one stack
+  owns the fixed-name parameters:
+
+  ```bash
+  npx cdk deploy TenantIdentity-shared-pool-multi-tenant --context topology=shared-pool-multi-tenant --context publishSharedParameters=false
+  ```
+
+  The account must hold no other front door in your Region
   (the edge parameter's name is fixed, spec §6.4), and API Gateway must
   have its CloudWatch Logs role set there, naming a role that exists. For
   an account without one, `test/integ/api-gateway-account.app.ts` sets it
@@ -149,13 +153,13 @@ including the control plane's script and hook builds, which run one at a time.
 The driver prints each stack's deploy and destroy time at the end
 (`.integ/<run id>/times.tsv`). The cost is a few dollars: CloudFront, a
 few dozen short CodeBuild builds, one ACM certificate for `<dd>` and one or
-two probe certificates for `probe.<dd>`, Lambda,
-DynamoDB and API Gateway requests, all removed at the end.
+two probe certificates for `probe.<dd>`, Lambda, DynamoDB and API Gateway
+requests, all removed at the end.
 
 Last green run: 2026-11-21, `host` mode, control plane in `eu-west-1`
 (steps 1, 2, 3, 4, 11, 15, 17, 18, 23 and 24; the status block of
-[`architecture.md`](./architecture.md) holds the coverage).
-103 checks passed, 0 failed, 3 skipped. Stack deploys took 1,289 s in all
+[`architecture.md`](./architecture.md) holds the coverage and the driver
+changes made after the run). 103 checks passed, 0 failed, 3 skipped. Stack deploys took 1,289 s in all
 (the front door's main stack 375 s, the control plane 116 s; stacks of one
 phase overlap), the teardown 633 s of stack destroys, and the whole run 64
 minutes including the leftover check, which found 0. The cost was not
