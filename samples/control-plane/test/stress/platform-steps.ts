@@ -184,4 +184,3 @@ export async function warmUp(
   f.log(`warm-up: tenant ${tenant} ACTIVE in cell ${cell.cellId} (${cell.status}) ${Math.round((deps.now() - started) / 1000)} s after CreateDeployment${cell.createdAt !== undefined && cell.updatedAt !== undefined ? `; cell CREATING to ACTIVE ${Math.round((Date.parse(cell.updatedAt) - Date.parse(cell.createdAt)) / 1000)} s` : ''}`);
   return warm;
 }
-

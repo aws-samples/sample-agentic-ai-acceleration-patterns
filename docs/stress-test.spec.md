@@ -197,7 +197,8 @@ and the records in
    for the warm-up tenant (after front-door phase two, §3.5) and for the
    `large` fleet's seed; a churn create (PS-5) gets identity calls only
    where PS-1 is timed on it (`large`), because PS-5's own probes need no
-   token (§5.1). The driver then polls through the edge with the admin's
+   token (§5.1). The `large` parts are not built yet (stress ADR-0017;
+   tiers above `small` wait for Q-7). The driver then polls through the edge with the admin's
    token until `GET /api/whoami` is served: the cell API answers with the
    verified tenant and the route hint, which is the isolation assertion of
    §5.3 (stress ADR-0020; the agent path is the load scenarios'). The identity
@@ -255,7 +256,7 @@ a declaration, `scripts/stress/slice.json`.
 | `budget` | prints the slice's draw on each account-wide quota at the tier, as JSON | run without credentials |
 | `deploy` | deploys the slice's stacks, or reuses them | publish what the next slice needs through the sample's published parameters (P-2); the runner times it (P-6) |
 | `seed` | creates the slice's data for the tier, or reuses the manifest | be safe to rerun; never write a token or a password to disk |
-| `step <name>` | platform mode only: one named part of the slice's set-up or teardown that must run between another slice's verbs (§3.5) | be safe to rerun; counted in the slice's deploy seconds |
+| `step <name>` | platform mode only: one named part of the slice's set-up or teardown that must run between another slice's verbs (§3.5) | be safe to rerun; a set-up step counts in the slice's deploy seconds, a step run before another slice's teardown in that slice's destroy seconds |
 | `run <scenario>` | runs one scenario | write one result record per scenario (§4.3); exit non-zero on a pass-criterion failure |
 | `collect` | reads logs and metrics for the run window | wait for late log delivery (runtime-isolation finding F-6); write the late fields (`refusals`, `cost`) into its own slice's records, only those nobody else changed since `run`; any other change after `run` fails the run |
 | `teardown` | removes what the slice deployed | keep fixtures unless `--fixtures` is passed; verify nothing it owned is left; the runner times it (P-6) |
@@ -319,8 +320,9 @@ is stopped when it exits.
    `PS-<n>` scenario to run.
 2. Sums `budget` per account and refuses to start when a sum is over its
    quota or another run holds the lock for the prefix.
-3. Runs `deploy` and then `seed` for one slice at a time, in the order of
-   the needs (§3.4), then the scenarios in the order of §5, then `collect`,
+3. In slice mode runs `deploy` and then `seed` for one slice at a time, in
+   the order of the needs (§3.4); a platform run follows the set-up table
+   below instead (stress ADR-0018). Then the scenarios in the order of §5, then `collect`,
    then `teardown` in reverse order. Without `--scenarios`, a platform
    run (several slices) runs only the `PS-<n>` scenarios, and a slice-mode
    run runs the slice's scenarios except its `platformOnly` ones. Teardown
@@ -334,18 +336,20 @@ them, it is the platform run.
 Teardown has one ordering rule that the reverse order alone does not
 give. In the reverse order the front door goes before the control plane,
 and the control plane's cell delete runs the front door's `PRE` hook
-(`CELL_DELETE`, `DEPLOYMENT_DELETE`) against the route registrar. The
-`tenant-front-door` `teardown` therefore unregisters its two global hooks
-from the control plane (`register-hooks.sh --delete`, front-door spec §5.2)
-before it removes the registrar, so the control plane deletes deployments
-and cells with no call to a registrar that is gone. The control plane is
-still deployed at that point. Front-door spec §6.2 removes the routes
-through the hooks first and unregisters the hooks last; here the registrar
-and the route table are destroyed in the same teardown, so no route needs
-removing. The rest of front-door spec §6.2's order follows: the policy out
-of `globalHookManagedPolicyArns` with a control-plane update, then
-`RouteHookAccess` and its parameter, then the stacks; the slice's
-`teardown` verifies that none is left (§3.4).
+(`CELL_DELETE`, `DEPLOYMENT_DELETE`) against the route registrar. In the
+platform run the control plane's step `unhook` therefore runs before the
+`tenant-front-door` `teardown`: it unregisters the front door's two global
+hooks (`register-hooks.sh --delete`, front-door spec §5.2) and takes the
+hook policy out of `globalHookManagedPolicyArns` with a control-plane
+update, so the control plane deletes deployments and cells with no call to
+a registrar that is gone. The front door's `teardown` then refuses to
+start while the policy is still attached, and removes `RouteHookAccess`
+and its parameter, then the stacks; it verifies that none is left (§3.4).
+In slice mode, where a control plane is present, the front door's
+`teardown` runs `register-hooks.sh --delete` itself before it destroys any
+stack. Front-door spec §6.2 removes the routes through the hooks first and
+unregisters the hooks last; here the registrar and the route table are
+destroyed in the same teardown, so no route needs removing.
 
 In the platform run the front door deploys in two phases, because its
 `agentIngress` input is the first cell's ingress, which exists only
@@ -600,7 +604,7 @@ Each platform scenario has one owner slice, which declares it in its
 | PS-1 | `control-plane` and `tenant-identity`, each with its own record | no |
 | PS-2, PS-3, PS-4, PS-6, PS-8 | `agentic-runtime-isolation`: its S1, S2, S3, S5 and S6 load shapes sent to `<edgeUrl>/agents/<agent>/invocations` | yes |
 | PS-5 | `control-plane` | yes |
-| PS-7 | `tenant-front-door` (W-7) | yes |
+| PS-7 | `tenant-front-door` (W-7) | no (it also runs in slice mode, on the smoke stack) |
 
 ### 5.2 Slice scenarios
 
@@ -741,7 +745,7 @@ Q-5, answered by the first platform run at `small` (`stress/results/2026-11-21-s
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | yes, after W-1 |
 | W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | done |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part yes; front-door part after its merge |
-| W-9 first platform run at `small`: also the control-plane driver's identity calls (§3.3 step 4) and the record of them that the runtime-isolation slice reads (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | done (`stress/results/2026-11-21-small.md`) |
+| W-9 first platform run at `small`: also the control-plane driver's identity calls (§3.3 step 4) and the record of them that the runtime-isolation slice reads (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), and a check that the front door's hooks are unregistered (the control plane's step `unhook`, before the front door's teardown) before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | done (`stress/results/2026-11-21-small.md`) |
 
 ## 10. Open questions
 

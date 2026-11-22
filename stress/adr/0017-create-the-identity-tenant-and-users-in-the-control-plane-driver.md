@@ -196,3 +196,8 @@ cleanup is needed because the control plane's `DeleteDeployment` no longer
 removes them and the `tenant-identity` `teardown` knows only the tenants it
 seeded. Revisit if the tenant-identity sample gains a control-plane hook, or
 if the platform API admits cell-account roles.
+
+Not built yet: the `large` path. The `large` fleet's seed makes no identity
+calls, and PS-1 in a platform run at a fixture tier stops with a finding, so
+the churn creates PS-1 would be timed on get none either. Tiers above `small`
+wait for Q-7 (spec §10).
