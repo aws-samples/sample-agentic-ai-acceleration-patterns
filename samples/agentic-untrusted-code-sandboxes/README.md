@@ -163,9 +163,9 @@ two Lambda network interfaces.
 Measured times in a non-production test account (from the backend smoke
 deploys, the integration runs and the demo run, 2026-11-19 to 2026-11-22):
 
-| Deployment | Deploy | Destroy with sandboxes live |
+| Deployment | Deploy | Destroy |
 |---|---|---|
-| `microvm` only (smoke deploy) | 641 s | 1371 s |
+| `microvm` only (smoke deploy, MicroVMs live) | 641 s | 1371 s |
 | `microvm` only (the demo stack, tenants offboarded before the delete) | 635 to 645 s | 1374 to 1459 s |
 | `nitro` only | about 450 s (CloudFormation; image build not timed) | 1618 s |
 | `agentcore` (two instances, one with `sessionFiles`) | 924 to 989 s | 1895 s |
@@ -223,8 +223,8 @@ A parameter only names resources. A consumer in another app still needs the
 grants made in the app that owns the construct: `grantInvokeRunCode` for the
 standalone entry, or a `RunCodeToolTarget` and the tenants' tool grants for
 the gateway entry. The name is fixed, so an account and Region hold one
-demo stack; a vendor's own app that deploys more names its parameters
-itself.
+demo stack; a vendor's own app that needs more than one stack names each
+parameter itself.
 
 ## Deployment integration test
 
@@ -268,14 +268,22 @@ outcome codes only, and offboards both tenants on exit, also on failure.
 
 A `sandbox_starting` or `sandbox_failed` answer is retried after its
 `retryAfterSeconds`, as a caller should, and the retry is printed with its
-outcome code. A MicroVM start can fail with a platform error
-(`Internal service error.` in the run line's `stoppedReason`); the tool
-returns `sandbox_failed` and the next start after the back-off succeeds.
+outcome code. After a `sandbox_starting` wait the retried call may report
+`reused` for the sandbox it waited on; steps 1 and 3 accept that. A
+MicroVM start can fail with a platform error, which the tool returns as
+`sandbox_failed`; the next start after the 30 s back-off succeeded each
+time.
 
-Last run: 2026-11-22, a non-production test account, `eu-west-1`, a demo
-stack with `backends=microvm` and `standalone=true`: all seven steps
-passed in 72 s, one first start retried after a `sandbox_failed`.
-The stack deployed in 645 s and deleted cleanly (`DELETE_COMPLETE`) in 1459 s; a read-only check afterwards found no network interface, log group, MicroVM or parameter of the stack.
+Runs on 2026-11-22, in a non-production test account, `eu-west-1`, on a
+demo stack with `backends=microvm` and `standalone=true`. On the first
+stack the demo passed all seven steps with no failed start. On the
+second stack, one first start failed with a platform error in each of
+the last two runs. The first of those runs predates the retry and
+failed. The last run passed all seven steps in 72 s, after tenant B's
+first start was retried once after a `sandbox_failed`. The second stack
+deployed in 645 s and deleted cleanly (`DELETE_COMPLETE`) in 1459 s. A
+read-only check afterwards found no network interface, log group or
+parameter of the stack.
 
 ## Tool API
 

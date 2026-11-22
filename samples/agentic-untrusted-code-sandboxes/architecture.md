@@ -40,8 +40,9 @@ stack took 1123 to 1328 s across runs 5 to 14.
 The demo stack (`src/main.ts`, `backends=microvm`, `standalone=true`) was
 deployed twice on 2026-11-22 in `eu-west-1` (635 s and 645 s);
 `scripts/demo.sh` passed its seven steps and the published parameter read
-back with every field. The first delete was clean in 1374 s;
-the second in 1459 s, with no network interface, log group, MicroVM or parameter left.
+back with every field. The first delete was clean in 1374 s and the
+second in 1459 s, with no network interface, log group or parameter
+left.
 
 ## Purpose
 
