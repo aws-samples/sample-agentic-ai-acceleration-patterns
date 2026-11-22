@@ -114,7 +114,11 @@ export interface SandboxSummary {
   readonly tenantId?: string;
   /** Epoch ms, when the platform reports it. */
   readonly startedAt?: number;
-  /** True while the sandbox can still serve or bill: running, suspended, pending, or stopping (a task that is stopping counts as live while the platform lists it; a stopped task that stays listed is not live). */
+  /**
+   * True from the start until the platform reports the sandbox ended (`STOPPED` for a task, `TERMINATED` for a
+   * MicroVM): running, suspended, pending or stopping counts as live, because a stopping task keeps running and
+   * billing and blocks the capacity provider delete (ADR-0049).
+   */
   readonly live: boolean;
 }
 

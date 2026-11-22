@@ -141,24 +141,22 @@ is recorded as a failure with the error's class and message.
 
 ## Runtime and cost
 
-Not yet run. The test is written and its app synthesises offline; the first
-run in a non-production account follows. What to expect from the spikes: the
-`agentcore` runtime alone takes 200 to 550 s to create, and the whole stack
-more than 20 minutes; the waits are `sandboxIdle` (2 min, three times, partly
-overlapped), the `nitro` scale-in before `cold-from-zero` (about 3 to 6
-minutes), and the destroy. With sandboxes live, the stack delete took 23 to
-32 minutes in the three single-backend runs of spec §7 S-21. In the `nitro`
-and `agentcore` runs most of it was the release of the network interfaces
-of the VPC-attached drain and reaper functions; the `microvm` run's cause
-was not isolated. Plan 30 to 40 minutes for the integration stack. The
-driver waits up to 60 minutes for one delete and retries a failed one once.
-Plan the run budget from those parts: deploy 15 to 25 minutes;
-`cold-from-zero` at most 15 minutes (the driver's wait for scale-in);
-destroy 30 to 40 minutes. Cost is dominated by the NAT gateway, the
-endpoints, `nitro` instance time and the DNS Firewall queries; the run
-record carries the timings. This section records the last green run
-(number, date, Region, steps passed) with a link to the `architecture.md`
-status block, once there is one.
+One run takes about 20 minutes to deploy (1132 to 1328 s), about 35
+minutes of steps, and 40 to 60 minutes to delete (2422 s in the clean
+delete, about 3700 s in the deletes that stopped on the leftover network
+interfaces). The waits in the steps are `sandboxIdle` (2 min, three times,
+partly overlapped) and the `nitro` scale-in before `cold-from-zero` (at
+most 15 minutes, the driver's wait). Most of the delete is the release of
+the network interfaces of the functions in the tool subnets. The driver
+waits up to 60 minutes for one delete and retries a failed one once. Cost
+is dominated by the NAT gateway, the endpoints, `nitro` instance time and
+the DNS Firewall queries; the run record carries the timings.
+
+Last run: run 14, 2026-11-21, eu-central-1, on commit `5e8c213`: every
+step before the teardown passed on all three backends; the teardown ended `DELETE_FAILED` on two leftover Lambda
+network interfaces, the [README's known limitation](README.md#known-limitations).
+See the [`architecture.md` status block](architecture.md) for the coverage
+and the runs in the other Regions.
 
 If a stack of an earlier run still exists (an interrupted run), delete it
 first (see below) or use a new `INTEG_PREFIX`. A leftover `nitro` task makes

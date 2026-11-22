@@ -28,6 +28,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
   - [Per-Tenant Encrypted Ingestion for Agentic Applications](#per-tenant-encrypted-ingestion-for-agentic-applications)
   - [Tenant Memory Isolation through AgentCore Gateway](#tenant-memory-isolation-through-agentcore-gateway)
   - [Tenant usage metering for agentic applications](#tenant-usage-metering-for-agentic-applications)
+  - [Untrusted code sandboxes for agentic applications](#untrusted-code-sandboxes-for-agentic-applications)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -44,6 +45,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 | [Per-Tenant Encrypted Ingestion for Agentic Applications](./samples/tenant-encrypted-ingestion/) | One drop zone and pipeline for every tenant's documents, each tenant's encrypted with its own AWS KMS key, kept apart by key policy and identity-policy ABAC rather than code, validated by a deployer-extensible chain before it lands, in a vendor-owned or tenant-owned key tier, with cryptographic offboarding. |
 | [Tenant Memory Isolation through AgentCore Gateway](./samples/tenant-memory-isolation/) | One pooled AgentCore Memory that tenants reach only through an AgentCore Gateway with the native Memory connector: Cedar in `ENFORCE` binds every write and recall to the token's `tenant_id`, each tenant's facts live in the namespace equal to its tenant id, and a resource policy denies every data operation outside the Gateway's role. |
 | [Tenant usage metering for agentic applications](./samples/tenant-usage-metering/) | One metering service the vendor owns: emitters admitted by their SigV4 role and the control plane's placement of tenants in cells, a replayable raw store, hourly recounts under a run-time meter catalog with `ADJUSTMENT` records for late events, configured sinks and a usage bus with a subscriber construct. |
+| [Untrusted code sandboxes for agentic applications](./samples/agentic-untrusted-code-sandboxes/) | One `run_code` tool that runs model-written Python for one tenant at a time in that tenant's own sandbox (Lambda MicroVMs, Nitro Sandboxes on ECS Managed Instances, or AgentCore Runtime), with no internet, no tenant credentials in the sandbox, and every job bound to the sandbox it was started for. |
 
 ## The Cell-Based Control Plane
 
@@ -189,6 +191,27 @@ a changed one. Records go to HTTP or export sinks and to a usage bus that
 readers attach to through the `UsageSubscriber` construct.
 
 [Tenant usage metering for agentic applications](./samples/tenant-usage-metering/)
+
+## Untrusted code sandboxes for agentic applications
+
+Agents write code, and an agent that serves many tenants runs that code on
+their data. Run in the agent's own process or a shared container, one
+tenant's script can read another tenant's files, call out to the internet,
+or use the credentials the agent holds.
+
+This sample is one `run_code` tool that runs Python for one tenant at a time
+in a virtual machine of that tenant's own: a Lambda MicroVM, a Nitro Sandbox
+on ECS Managed Instances, or an AgentCore Runtime session, chosen at deploy
+time. The tool picks the tenant from a verified source, reads the tenant's
+input with tenant-scoped credentials, and hands the sandbox only bytes. The
+sandbox has no route to the internet and no tenant credentials, and every
+job is bound to the sandbox it was started for, so a recycled address or a
+replaced session refuses it. An optional DNS Firewall closes the one path
+out that remains. It ships as the `UntrustedCodeSandboxes` construct, with a
+`RunCodeToolTarget` that puts it behind `agentic-runtime-isolation`'s tools
+gateway.
+
+[Untrusted code sandboxes for agentic applications](./samples/agentic-untrusted-code-sandboxes/)
 
 ## Contributing a sample
 
