@@ -21,14 +21,14 @@ import { createMeter, deleteMeter, getMeter, listMeters, meterOut, updateMeter }
 import { getHour, listHours, readUsage, recordOut } from './reads';
 import {
   bindingOut,
-  deleteCellEmitter,
+  deleteEmitter,
   deleteTenantBinding,
   emitterOut,
-  getCellEmitter,
+  getEmitter,
   getTenantBinding,
-  listCellEmitters,
+  listEmitters,
   listTenantBindings,
-  putCellEmitter,
+  putEmitter,
   putTenantBinding,
 } from './registry';
 import { type CallerClass, callersOf } from './routes';
@@ -155,37 +155,37 @@ export function createAdminService(deps: AdminDeps, lists: CallerLists): TenantU
         return { sinks: out.sinks.map(sinkOut), nextToken: out.nextToken };
       }),
 
-    PutCellEmitter: async (input, ctx) =>
-      g('PutCellEmitter', ctx, async () => ({
+    PutEmitter: async (input, ctx) =>
+      g('PutEmitter', ctx, async () => ({
         emitter: emitterOut(
-          await putCellEmitter(deps, ctx, {
-            cellId: input.cellId!,
+          await putEmitter(deps, ctx, {
+            emitterId: input.emitterId!,
             applicationId: input.applicationId!,
             accountId: input.accountId!,
             trace: { executionId: input.controlPlaneExecutionId, operatorId: input.controlPlaneOperatorId },
           }),
         ),
       })),
-    GetCellEmitter: async (input, ctx) =>
-      g('GetCellEmitter', ctx, async () => ({ emitter: emitterOut(await getCellEmitter(deps, input.cellId!)) })),
-    DeleteCellEmitter: async (input, ctx) =>
-      g('DeleteCellEmitter', ctx, async () => {
-        const emitter = await deleteCellEmitter(deps, input.cellId!, {
+    GetEmitter: async (input, ctx) =>
+      g('GetEmitter', ctx, async () => ({ emitter: emitterOut(await getEmitter(deps, input.emitterId!)) })),
+    DeleteEmitter: async (input, ctx) =>
+      g('DeleteEmitter', ctx, async () => {
+        const emitter = await deleteEmitter(deps, input.emitterId!, {
           executionId: input.controlPlaneExecutionId,
           operatorId: input.controlPlaneOperatorId,
         });
         return { emitter: emitter === undefined ? undefined : emitterOut(emitter) };
       }),
-    ListCellEmitters: async (input, ctx) =>
-      g('ListCellEmitters', ctx, async () => {
-        const out = await listCellEmitters(deps, input.nextToken, input.maxResults);
+    ListEmitters: async (input, ctx) =>
+      g('ListEmitters', ctx, async () => {
+        const out = await listEmitters(deps, input.nextToken, input.maxResults);
         return { emitters: out.emitters.map(emitterOut), nextToken: out.nextToken };
       }),
 
     PutTenantBinding: async (input, ctx) =>
       g('PutTenantBinding', ctx, async () => {
         const out = await putTenantBinding(deps, ctx, {
-          cellId: input.cellId!,
+          emitterId: input.emitterId!,
           tenantId: input.tenantId!,
           applicationId: input.applicationId!,
           billingAccount: input.billingAccount,
@@ -194,10 +194,10 @@ export function createAdminService(deps: AdminDeps, lists: CallerLists): TenantU
         return { binding: bindingOut(out.binding), resendJobId: out.resendJobId };
       }),
     GetTenantBinding: async (input, ctx) =>
-      g('GetTenantBinding', ctx, async () => ({ binding: bindingOut(await getTenantBinding(deps, input.cellId!, input.tenantId!)) })),
+      g('GetTenantBinding', ctx, async () => ({ binding: bindingOut(await getTenantBinding(deps, input.emitterId!, input.tenantId!)) })),
     DeleteTenantBinding: async (input, ctx) =>
       g('DeleteTenantBinding', ctx, async () => {
-        const binding = await deleteTenantBinding(deps, input.cellId!, input.tenantId!, {
+        const binding = await deleteTenantBinding(deps, input.emitterId!, input.tenantId!, {
           executionId: input.controlPlaneExecutionId,
           operatorId: input.controlPlaneOperatorId,
         });
@@ -205,7 +205,7 @@ export function createAdminService(deps: AdminDeps, lists: CallerLists): TenantU
       }),
     ListTenantBindings: async (input, ctx) =>
       g('ListTenantBindings', ctx, async () => {
-        const out = await listTenantBindings(deps, input.cellId!, input.nextToken, input.maxResults);
+        const out = await listTenantBindings(deps, input.emitterId!, input.nextToken, input.maxResults);
         return { bindings: out.bindings.map(bindingOut), nextToken: out.nextToken };
       }),
 

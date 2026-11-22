@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-13
-- Amended by: ADR-0017 (Proposed, takes effect on acceptance)
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -73,3 +73,8 @@ account that also hosts cells. The route hook,
 one pair of global hooks for every front door on the control plane,
 will act only for an application that has that parameter and exits 0 for
 every other, so one front door per application will still hold.
+
+Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
+effect. The hook parameter is one JSON document, `registrarUrl` with
+`appDomain` and `addressing`, which the route hook needs to poll a
+tenant host in `host` mode (ADR-0027).

@@ -56,7 +56,7 @@ export async function meterVersions(
   });
 }
 
-/** A tenant's bindings for one application, every cell (spec §4.3 lookup item). */
+/** A tenant's bindings for one application, every emitter (spec §4.3 lookup item). */
 export async function tenantBindings(
   db: DynamoDBDocumentClient,
   tableName: string,

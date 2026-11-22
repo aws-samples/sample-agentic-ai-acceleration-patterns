@@ -2,9 +2,10 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0013: Register routes through a registrar that checks the control plane
 
-- Status: Accepted
+- Status: Superseded by ADR-0017
 - Date: 2026-11-17
 - Deciders: Dave Roberts (PSA)
+- Amended by: ADR-0025
 
 ## Context
 
@@ -90,3 +91,12 @@ cleanup works after the control plane has removed the record.
 Note 2026-11-18: ADR-0017 (Proposed) will supersede this record once
 control-plane ADR-0044 is accepted. The specification describes the
 ADR-0017 design.
+
+Note 2026-11-19: ADR-0025 amends this record. `UpdateTenantRouteStatus`
+skips the control-plane read, like the edge operator role's deletes, so
+a suspension works while the control plane cannot be read.
+
+Note 2026-11-20: superseded by ADR-0017, accepted with control-plane
+ADR-0044. No role of a cell account reaches the registrar; the route
+hook writes every route from the control plane's account. The explicit
+`Deny` of this record stays.

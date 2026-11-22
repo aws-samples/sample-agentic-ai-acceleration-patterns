@@ -10,7 +10,7 @@ import { isValue } from './decimal';
  */
 
 export type RefusalReason =
-  | 'TENANT_NOT_IN_CELL'
+  | 'TENANT_NOT_BOUND'
   | 'REGISTRATION_CLOSED'
   | 'UNKNOWN_METER'
   | 'METER_NOT_ALLOWED'
@@ -20,7 +20,7 @@ export type RefusalReason =
 
 /** Refusals that could still count, always stored (spec P-8). */
 export const READMITTABLE: ReadonlySet<RefusalReason> = new Set<RefusalReason>([
-  'TENANT_NOT_IN_CELL',
+  'TENANT_NOT_BOUND',
   'REGISTRATION_CLOSED',
   'UNKNOWN_METER',
   'METER_NOT_ALLOWED',
@@ -39,7 +39,7 @@ export interface UsageEvent {
 /** The event as the raw store holds it: the body plus the verified caller. */
 export interface EnrichedUsageEvent extends UsageEvent {
   readonly applicationId: string;
-  readonly cellId: string;
+  readonly emitterId: string;
   readonly emitterAccountId: string;
   readonly emitterRole: string;
   readonly receivedAt: string;
@@ -154,7 +154,7 @@ export interface AdmissionContext {
   readonly applicationId: string;
   /** The caller's emitter registration (spec §4.2). */
   readonly emitter: Registration;
-  /** The binding of `tenantId` to the caller's cell, if any. */
+  /** The binding of `tenantId` to the calling emitter, if any. */
   binding(tenantId: string): Registration | undefined;
   /** The meter version in effect at `hour`, if any. */
   meterAt(meterId: string, hour: string): MeterAtHour | undefined;
@@ -177,7 +177,7 @@ export function checkEvent(event: unknown, ctx: AdmissionContext): RefusalReason
   }
   const binding = ctx.binding(event.tenantId);
   if (binding === undefined) {
-    return 'TENANT_NOT_IN_CELL';
+    return 'TENANT_NOT_BOUND';
   }
   if (!registrationAdmits(binding, event.time, ctx.nowMs)) {
     return 'REGISTRATION_CLOSED';

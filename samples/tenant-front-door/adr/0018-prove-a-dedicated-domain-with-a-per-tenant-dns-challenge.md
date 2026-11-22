@@ -300,3 +300,40 @@ writes the domain's `host#` key.
   the tenant zone's negative-caching TTL, S-10), when CloudFront or ACM
   offer a per-tenant domain proof of their own, or when a vendor needs
   the multi-perspective check.
+
+Note 2026-11-20: the dedicated-domain run (design/spikes.md) found that
+ACM refuses a tagged `RequestCertificate` under an IAM `Null` condition
+on `aws:ResourceTag/tenant-front-door:distribution`. The registrar's tag
+grants instead require that tag to equal the distribution's id, which a
+create's own tags satisfy (spec §3.4, threat model AR-33).
+
+Note 2026-11-20: CloudFront added an `OnDomainTakeover` option for
+distribution tenants
+([What's New](https://aws.amazon.com/about-aws/whats-new/2026/11/cloudfront-domain-moves-distribution-tenants)).
+CloudFront checks domain ownership through DNS records and then moves a
+domain that another distribution or distribution tenant already serves,
+in the same account or another one, in one request with no downtime.
+Today the registrar answers such a domain with 409 when
+`CreateDistributionTenant` fails with `CNAMEAlreadyExists` (spec §3.4
+step 5), so a tenant that already serves its domain from CloudFront must
+remove it there first and take an outage. With the option, the
+registrar could move the domain instead. It changes nothing in this
+record's decision:
+
+- The takeover check does not replace the per-tenant challenge.
+  CloudFront's DNS record proves that the edge account may move the
+  domain, not which tenant asked for it, for the same reason a validated
+  certificate does not (Context). The order stays: the challenge passes,
+  the certificate validates, and only then does the registrar create the
+  distribution tenant, with the takeover option when the domain is in
+  use elsewhere.
+- The same launch lets CloudFront serve a domain over HTTP before its
+  certificate is attached. The front door does not use that: the
+  registrar creates the distribution tenant only once the certificate is
+  `ISSUED`, so a dedicated domain never carries tokens or the sign-in
+  flow over plain HTTP.
+- Not built. The registrar still answers 409 for a domain in use.
+  Adding the takeover needs a spike first: the request field, the DNS
+  record CloudFront checks, the IAM action the registrar's role then
+  needs, and what the source distribution's owner sees. The 409 path
+  stays as the fallback for a domain whose move fails.

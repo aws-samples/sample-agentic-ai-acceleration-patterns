@@ -18,7 +18,7 @@ import type { EventPublisher } from './publish';
 import { TtlCache } from '../shared/cache';
 import { getItem, meterVersions } from '../shared/db';
 import { emitterFromCallerArn, type EmitterCaller, roleFromCallerArn } from '../shared/identity';
-import { type BindingItem, type EmitterItem, versionAt, type MeterVersionItem } from '../shared/items';
+import { type BindingItem, type EmitterRoleItem, versionAt, type MeterVersionItem } from '../shared/items';
 import { keys } from '../shared/keys';
 import { log } from '../shared/logger';
 import { METRIC, Metrics } from '../shared/metrics';
@@ -59,12 +59,12 @@ export type EventOutcome = { result: 'ACCEPTED' } | { result: 'RETRY' } | { resu
 
 export interface AdmittedEmitter {
   readonly caller: EmitterCaller;
-  readonly emitter: EmitterItem;
+  readonly emitter: EmitterRoleItem;
 }
 
 /** The error object of one batch (spec §4.8). */
 export interface ErrorObject {
-  readonly caller: { accountId: string; roleName: string; cellId: string; applicationId: string };
+  readonly caller: { accountId: string; roleName: string; emitterId: string; applicationId: string };
   readonly receivedAt: string;
   readonly requestId: string;
   readonly events: Array<{ index: number; reason: RefusalReason; event: unknown }>;
@@ -77,7 +77,7 @@ export function errorObjectKey(receivedAtMs: number, requestId: string): string 
 }
 
 export class Ingest {
-  private readonly emitters = new TtlCache<EmitterItem | undefined>(REGISTRY_CACHE_MS);
+  private readonly emitters = new TtlCache<EmitterRoleItem | undefined>(REGISTRY_CACHE_MS);
   private readonly bindings = new TtlCache<BindingItem | undefined>(REGISTRY_CACHE_MS);
   private readonly meters = new TtlCache<MeterVersionItem[]>(REGISTRY_CACHE_MS);
   private readonly logged = new Map<string, number>();
@@ -100,7 +100,7 @@ export class Ingest {
     const nowMs = this.now();
     const closed =
       emitter !== undefined && emitter.status === 'CLOSING' && emitter.closesAt !== undefined && nowMs > Date.parse(emitter.closesAt);
-    if (caller === undefined || emitter === undefined || closed || emitter.cellId !== caller.cellId) {
+    if (caller === undefined || emitter === undefined || closed || emitter.emitterId !== caller.emitterId) {
       metrics.add(METRIC.unregisteredCaller);
       // One line a minute per role, whatever the session name.
       const key = roleFromCallerArn(userArn)?.roleArn ?? 'not-an-assumed-role';
@@ -117,14 +117,14 @@ export class Ingest {
     return { caller, emitter };
   }
 
-  private emitter(caller: EmitterCaller, fresh = false): Promise<EmitterItem | undefined> {
-    const key = keys.emitter(caller.accountId, caller.roleName);
-    const load = () => getItem<EmitterItem>(this.deps.db, this.deps.config.tableName, key, fresh);
+  private emitter(caller: EmitterCaller, fresh = false): Promise<EmitterRoleItem | undefined> {
+    const key = keys.emitterRole(caller.accountId, caller.roleName);
+    const load = () => getItem<EmitterRoleItem>(this.deps.db, this.deps.config.tableName, key, fresh);
     return this.mayRefresh(key.PK, fresh) ? this.emitters.refresh(key.PK, load) : this.emitters.get(key.PK, load);
   }
 
-  private binding(cellId: string, tenantId: string, fresh = false): Promise<BindingItem | undefined> {
-    const key = keys.binding(cellId, tenantId);
+  private binding(emitterId: string, tenantId: string, fresh = false): Promise<BindingItem | undefined> {
+    const key = keys.binding(emitterId, tenantId);
     const load = () => getItem<BindingItem>(this.deps.db, this.deps.config.tableName, key, fresh);
     const cacheKey = `${key.PK}|${key.SK}`;
     return this.mayRefresh(cacheKey, fresh) ? this.bindings.refresh(cacheKey, load) : this.bindings.get(cacheKey, load);
@@ -200,7 +200,7 @@ export class Ingest {
     const bindingByTenant = new Map<string, BindingItem | undefined>();
     const versionsByMeter = new Map<string, MeterVersionItem[]>();
     await Promise.all([
-      ...[...tenants].map(async (tenantId) => bindingByTenant.set(tenantId, await this.binding(caller.cellId, tenantId))),
+      ...[...tenants].map(async (tenantId) => bindingByTenant.set(tenantId, await this.binding(caller.emitterId, tenantId))),
       ...[...meterIds].map(async (meterId) => versionsByMeter.set(meterId, await this.meterVersions(meterId))),
     ]);
 
@@ -222,13 +222,13 @@ export class Ingest {
     // A placement refusal may come from a cached miss or a cached CLOSING
     // item that a hook has just changed: re-read those registrations
     // uncached once, so a fresh (re)activation counts at once.
-    const placement = new Set<RefusalReason>(['TENANT_NOT_IN_CELL', 'REGISTRATION_CLOSED']);
+    const placement = new Set<RefusalReason>(['TENANT_NOT_BOUND', 'REGISTRATION_CLOSED']);
     const stale = reasons.flatMap((reason, index) => (reason !== undefined && placement.has(reason) ? [index] : []));
     if (stale.length > 0) {
       current = (await this.emitter(caller, true)) ?? current;
       const refreshed = new Set(stale.map((index) => (checked[index] as UsageEvent).tenantId));
       await Promise.all(
-        [...refreshed].map(async (tenantId) => bindingByTenant.set(tenantId, await this.binding(caller.cellId, tenantId, true))),
+        [...refreshed].map(async (tenantId) => bindingByTenant.set(tenantId, await this.binding(caller.emitterId, tenantId, true))),
       );
       for (const index of stale) {
         reasons[index] = judge(checked[index]);
@@ -251,7 +251,7 @@ export class Ingest {
             time: body.time,
             ...(body.dimensions !== undefined ? { dimensions: body.dimensions } : {}),
             applicationId: current.applicationId,
-            cellId: current.cellId,
+            emitterId: current.emitterId,
             emitterAccountId: caller.accountId,
             emitterRole: caller.roleName,
             receivedAt,
@@ -276,7 +276,7 @@ export class Ingest {
     let errorObjectWritten = true;
     if (stored.length > 0) {
       const body: ErrorObject = {
-        caller: { accountId: caller.accountId, roleName: caller.roleName, cellId: emitter.cellId, applicationId: emitter.applicationId },
+        caller: { accountId: caller.accountId, roleName: caller.roleName, emitterId: emitter.emitterId, applicationId: emitter.applicationId },
         receivedAt,
         requestId,
         events: stored.map((item) => ({ index: item.index, reason: item.reason, event: checked[item.index] })),
@@ -309,7 +309,7 @@ export class Ingest {
     metrics.add(METRIC.retried, retryCount);
     log.info('batch handled', {
       requestId,
-      cellId: emitter.cellId,
+      emitterId: emitter.emitterId,
       applicationId: emitter.applicationId,
       count: events.length,
       accepted: acceptedCount,

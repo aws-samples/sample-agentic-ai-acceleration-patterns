@@ -21,17 +21,17 @@ export const keys = {
 
   sink: (sinkId: string): Key => ({ PK: `SINK#${sinkId}`, SK: 'META' }),
 
-  emitter: (accountId: string, roleName: string): Key => ({ PK: `EMITTER#${accountId}#${roleName}`, SK: 'META' }),
-  cell: (cellId: string): Key => ({ PK: `CELL#${cellId}`, SK: 'META' }),
+  emitterRole: (accountId: string, roleName: string): Key => ({ PK: `ROLE#${accountId}#${roleName}`, SK: 'META' }),
+  emitterId: (emitterId: string): Key => ({ PK: `EMITTER#${emitterId}`, SK: 'META' }),
 
-  binding: (cellId: string, tenantId: string): Key => ({ PK: `CELL#${cellId}`, SK: `TENANT#${tenantId}` }),
-  bindingLookup: (tenantId: string, applicationId: string, cellId: string): Key => ({
+  binding: (emitterId: string, tenantId: string): Key => ({ PK: `EMITTER#${emitterId}`, SK: `TENANT#${tenantId}` }),
+  bindingLookup: (tenantId: string, applicationId: string, emitterId: string): Key => ({
     PK: `TENANT#${tenantId}`,
-    SK: `APP#${applicationId}#CELL#${cellId}`,
+    SK: `APP#${applicationId}#EMITTER#${emitterId}`,
   }),
-  bindingLookupPrefix: (applicationId: string): string => `APP#${applicationId}#CELL#`,
+  bindingLookupPrefix: (applicationId: string): string => `APP#${applicationId}#EMITTER#`,
   tenantPk: (tenantId: string): string => `TENANT#${tenantId}`,
-  cellPk: (cellId: string): string => `CELL#${cellId}`,
+  emitterPk: (emitterId: string): string => `EMITTER#${emitterId}`,
 
   hour: (hour: string): Key => ({ PK: `HOUR#${hour}`, SK: 'META' }),
   hourGeneration: (hour: string): Key => ({ PK: `HOUR#${hour}`, SK: 'GEN' }),

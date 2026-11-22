@@ -1,0 +1,72 @@
+{
+  "_comment": "Golden route table entries (spec §4.1). The registrar's codec (src/shared/route-table.ts) and the router's own parser are both tested against these. Dedicated domains in their three states: ...b3e routed (d, dk, a host# entry), ...b3g challenge passed but not routed (d, dk, no host# entry), ...b3f challenge open (d, dk, dx). Reserved example names only.",
+  "valid": [
+    {
+      "kind": "tenant",
+      "key": "tenant#01hzx8k9p0qrst7vwxyz1a2b3c",
+      "value": "{\"v\":1,\"c\":\"01hzx8k9p0qrst7vwxyz1a2b3d\",\"ac\":\"111111111111\",\"dt\":1795080000000,\"s\":\"active\",\"n\":\"Acme Corp\"}"
+    },
+    {
+      "kind": "tenant",
+      "key": "tenant#01hzx8k9p0qrst7vwxyz1a2b3e",
+      "value": "{\"v\":1,\"c\":\"01hzx8k9p0qrst7vwxyz1a2b3d\",\"ac\":\"111111111111\",\"dt\":1795080000123,\"s\":\"active\",\"n\":\"Example 'Two' / Ltd\",\"d\":\"portal.example.com\",\"dk\":\"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\"}"
+    },
+    {
+      "kind": "tenant",
+      "key": "tenant#01hzx8k9p0qrst7vwxyz1a2b3f",
+      "value": "{\"v\":1,\"c\":\"01hzx8k9p0qrst7vwxyz1a2b3d\",\"ac\":\"111111111111\",\"dt\":1795080000000,\"s\":\"suspended\",\"n\":\"Example Three\",\"d\":\"shop.example.net\",\"dk\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"dx\":1795684800}"
+    },
+    {
+      "kind": "tenant",
+      "key": "tenant#01hzx8k9p0qrst7vwxyz1a2b3g",
+      "value": "{\"v\":1,\"c\":\"01hzx8k9p0qrst7vwxyz1a2b3d\",\"ac\":\"111111111111\",\"dt\":1795080000000,\"s\":\"active\",\"n\":\"Example Four\",\"d\":\"four.example.org\",\"dk\":\"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD\"}"
+    },
+    {
+      "kind": "host",
+      "key": "host#01hzx8k9p0qrst7vwxyz1a2b3c.tenants.example.com",
+      "value": "{\"v\":1,\"t\":\"01hzx8k9p0qrst7vwxyz1a2b3c\",\"ac\":\"111111111111\"}"
+    },
+    {
+      "kind": "host",
+      "key": "host#01hzx8k9p0qrst7vwxyz1a2b3e.tenants.example.com",
+      "value": "{\"v\":1,\"t\":\"01hzx8k9p0qrst7vwxyz1a2b3e\",\"ac\":\"111111111111\"}"
+    },
+    {
+      "kind": "host",
+      "key": "host#portal.example.com",
+      "value": "{\"v\":1,\"t\":\"01hzx8k9p0qrst7vwxyz1a2b3e\",\"ac\":\"111111111111\"}"
+    },
+    {
+      "kind": "cell",
+      "key": "cell#01hzx8k9p0qrst7vwxyz1a2b3d",
+      "value": "{\"v\":1,\"ac\":\"111111111111\",\"o\":\"abcdefghijklmnopqrstuvwxyz012345.lambda-url.eu-central-1.on.aws\"}"
+    },
+    {
+      "kind": "app",
+      "key": "app",
+      "value": "{\"v\":1,\"az\":\"https://auth.example.com/oauth2/authorize\",\"tk\":\"https://auth.example.com/oauth2/token\",\"cid\":\"exampleclientid\",\"sc\":\"openid sample/read\",\"lo\":\"https://auth.example.com/logout\",\"ex\":\"https://api.example.com/prod/oauth2/token\"}"
+    },
+    {
+      "kind": "signin",
+      "key": "signin",
+      "value": "{\"v\":1,\"cur\":\"k2\",\"k\":{\"k1\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"k2\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=\"}}"
+    }
+  ],
+  "invalid": [
+    { "kind": "tenant", "why": "unknown version", "value": "{\"v\":2,\"c\":\"x\",\"ac\":\"1\",\"dt\":1,\"s\":\"active\",\"n\":\"\"}" },
+    { "kind": "tenant", "why": "bad status", "value": "{\"v\":1,\"c\":\"x\",\"ac\":\"1\",\"dt\":1,\"s\":\"deleted\",\"n\":\"\"}" },
+    { "kind": "tenant", "why": "dt not an integer", "value": "{\"v\":1,\"c\":\"x\",\"ac\":\"1\",\"dt\":\"1\",\"s\":\"active\",\"n\":\"\"}" },
+    { "kind": "tenant", "why": "missing c", "value": "{\"v\":1,\"ac\":\"1\",\"dt\":1,\"s\":\"active\",\"n\":\"\"}" },
+    { "kind": "tenant", "why": "missing n", "value": "{\"v\":1,\"c\":\"x\",\"ac\":\"1\",\"dt\":1,\"s\":\"active\"}" },
+    { "kind": "tenant", "why": "negative dt", "value": "{\"v\":1,\"c\":\"x\",\"ac\":\"1\",\"dt\":-1,\"s\":\"active\",\"n\":\"\"}" },
+    { "kind": "tenant", "why": "fractional dt", "value": "{\"v\":1,\"c\":\"x\",\"ac\":\"1\",\"dt\":1.5,\"s\":\"active\",\"n\":\"\"}" },
+    { "kind": "tenant", "why": "dk without d", "value": "{\"v\":1,\"c\":\"x\",\"ac\":\"1\",\"dt\":1,\"s\":\"active\",\"n\":\"\",\"dk\":\"k\"}" },
+    { "kind": "tenant", "why": "d without dk", "value": "{\"v\":1,\"c\":\"x\",\"ac\":\"1\",\"dt\":1,\"s\":\"active\",\"n\":\"\",\"d\":\"portal.example.com\"}" },
+    { "kind": "tenant", "why": "an array", "value": "[1]" },
+    { "kind": "host", "why": "missing t", "value": "{\"v\":1,\"ac\":\"1\"}" },
+    { "kind": "cell", "why": "missing o", "value": "{\"v\":1,\"ac\":\"1\"}" },
+    { "kind": "cell", "why": "not JSON", "value": "{\"v\":1," },
+    { "kind": "app", "why": "missing cid", "value": "{\"v\":1,\"az\":\"a\",\"tk\":\"t\",\"sc\":\"s\",\"lo\":\"l\"}" },
+    { "kind": "signin", "why": "cur names no key", "value": "{\"v\":1,\"cur\":\"k3\",\"k\":{\"k1\":\"AA==\"}}" }
+  ]
+}

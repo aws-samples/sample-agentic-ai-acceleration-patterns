@@ -53,7 +53,7 @@ export class TenantUsageMetering extends Construct {
   public readonly usageBusArn: string;
   /** The `aws:PrincipalArn` pattern of emitter roles (spec §3.2). */
   public readonly emitterRoleNamePattern: string;
-  /** What an emitter role in a cell account needs: `POST /usage-events` (spec §6.1). */
+  /** What an emitter role needs: `POST /usage-events` (spec §6.1). */
   public readonly ingestStatement: iam.PolicyStatement;
   /** What `<fleet>-global-hook` needs: the four registration routes (spec §6.1). */
   public readonly registrarStatement: iam.PolicyStatement;
@@ -109,7 +109,7 @@ export class TenantUsageMetering extends Construct {
       metricNamespace: namespace,
     });
     // The admin function's block list is updated before the guard reads the
-    // registry, so no new cell lands in a listed account after the read.
+    // registry, so no new emitter lands in a listed account after the read.
     guard?.node.addDependency(this.compute.adminFn);
     denyConfigurationChanges(this, storage);
 

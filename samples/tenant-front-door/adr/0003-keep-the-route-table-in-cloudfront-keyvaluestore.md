@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-13
-- Amended by: ADR-0017 (Proposed, takes effect on acceptance)
+- Amended by: ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -103,3 +103,11 @@ cell and deployment events, waits the same 45 s bound, polls the same way in `ho
 0 past it, so a cell or deployment reaches `ACTIVE` once its route is
 live. The integration test waits 60 s only after a change it makes
 without the hook.
+
+Note 2026-11-19: the smoke run (design/spikes.md) saw requests miss a
+change up to about 60 s after the write, after the first routed request.
+The integration test waits 90 s after a change it makes without the hook
+(spec §4.2, §10), where this record says 60 s.
+
+Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
+effect.
