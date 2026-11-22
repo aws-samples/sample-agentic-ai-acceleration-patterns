@@ -567,7 +567,7 @@ Each slice's `budget` fills its column; the runner sums per account.
 | KMS `Sign` | - | - | - | mint, tool contexts |
 | API Gateway control plane | deploy | deploy | deploy | deploy, tenant keys |
 | AgentCore Runtime sessions and TPS | - | - | - | agents |
-| Cognito (stress pool) | groups (2 per tenant) and users of the identity tenants it creates (§3.3 step 4, W-9) | groups (2 per tenant, 10,000 cap), auth | - | - |
+| Cognito (stress pool) | groups (2 per tenant) and users of the identity tenants it creates (§3.3 step 4, W-9), budgeted in the `tenant-identity` column | groups (2 per tenant, 10,000 cap), auth; in a platform run its budget counts the control plane's tenants too | - | - |
 | CloudFront Functions compute, KVS size | - | - | router, route table | - |
 
 ## 5. Scenarios

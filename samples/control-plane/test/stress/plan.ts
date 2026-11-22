@@ -127,7 +127,7 @@ export const scalingLimitsFor = (buildLimit: number): number[] => SCALING_LIMITS
 
 export interface Draw {
   readonly account: string;
-  readonly quota: 'codebuild-linux-small' | 'lambda-concurrency' | 'sts-assume-role-rps' | 'cognito-groups';
+  readonly quota: 'codebuild-linux-small' | 'lambda-concurrency' | 'sts-assume-role-rps';
   readonly amount: number;
 }
 
@@ -147,11 +147,9 @@ export function drawsOf(t: TierSizes, buildLimit: number, platform = true): Draw
     { account: 'platform', quota: 'lambda-concurrency', amount: 2 * t.steadyRps + builds },
     { account: 'platform', quota: 'sts-assume-role-rps', amount: Math.ceil(builds / 60) + 1 },
   ];
-  // A platform run gives each onboarded tenant an identity tenant (stress ADR-0017): two Cognito
-  // groups each in the stress pool, for the seeded set and, at a fixture tier, the churn creates PS-1 is timed on.
-  if (platform) {
-    draws.push({ account: 'platform', quota: 'cognito-groups', amount: 2 * (t.onboarding === 'fixture' ? t.tenantsSeeded + t.churnPerRun : t.tenantsSeeded) });
-  }
+  // The identity tenants this driver creates in a platform run (stress ADR-0017) draw on the stress
+  // pool's Cognito groups, but the tenant-identity slice's budget already counts the control plane's
+  // tenants in that pool (its `peakPoolTenants`), so this slice declares no draw of its own there.
   for (let n = 1; n <= t.cellAccounts; n += 1) {
     draws.push({ account: `cell-account-${n}`, quota: 'sts-assume-role-rps', amount: 1 });
   }

@@ -201,3 +201,8 @@ Not built yet: the `large` path. The `large` fleet's seed makes no identity
 calls, and PS-1 in a platform run at a fixture tier stops with a finding, so
 the churn creates PS-1 would be timed on get none either. Tiers above `small`
 wait for Q-7 (spec §10).
+
+One change to the W-9 list above: the Cognito draw is not in the
+`control-plane` slice's `budget`. In a platform run the `tenant-identity`
+slice's budget already counts the control plane's tenants in the stress pool,
+so a second draw would count the same groups twice (spec §4.4).

@@ -66,6 +66,21 @@ describe('PS-1 in a platform run', () => {
     expect(findings).toEqual([expect.stringMatching(/fixture tier is not built: nothing creates the identity tenants/)]);
     expect(api.call).not.toHaveBeenCalled();
   });
+  it('stops with a finding when the warm-up record is missing, instead of running the slice-mode PS-1', async () => {
+    const findings: string[] = [];
+    const api = { call: jest.fn() };
+    const s = {
+      api,
+      rec: { finding: (t: string) => findings.push(t) },
+      log: () => undefined,
+      tier: { onboarding: 'per-run' },
+      manifest: { seeded: ['01KAF5M0000000000000000T01'], churn: [], extra: [] },
+      platform: { identity: {}, users: 1, existing: () => undefined, save: () => undefined },
+    } as unknown as ScenarioEnv;
+    await ps1(s);
+    expect(findings).toEqual([expect.stringMatching(/needs the warm-up record in control-plane.json/)]);
+    expect(api.call).not.toHaveBeenCalled();
+  });
 });
 
 describe('the hook policy file and the hook commit', () => {

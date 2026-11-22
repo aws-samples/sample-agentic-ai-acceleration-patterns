@@ -63,19 +63,17 @@ describe('the tier', () => {
 });
 
 describe('the budget (spec §4.4)', () => {
-  it('draws the build limit on the three projects that run builds, two Cognito groups for each tenant, and a little STS in every cell account', () => {
+  it('draws the build limit on the three projects that run builds and a little STS in every cell account, and no Cognito groups (the tenant-identity budget counts them)', () => {
     expect(drawsOf(SMALL, 50)).toEqual([
       { account: 'platform', quota: 'codebuild-linux-small', amount: 150 },
       { account: 'platform', quota: 'lambda-concurrency', amount: 170 },
       { account: 'platform', quota: 'sts-assume-role-rps', amount: 4 },
-      { account: 'platform', quota: 'cognito-groups', amount: 40 },
       { account: 'cell-account-1', quota: 'sts-assume-role-rps', amount: 1 },
     ]);
-    expect(drawsOf(MEDIUM, 5).map((d) => d.account)).toEqual(['platform', 'platform', 'platform', 'platform', 'cell-account-1', 'cell-account-2']);
-    expect(drawsOf(LARGE, 5).find((d) => d.quota === 'cognito-groups')?.amount).toBe(2 * (4000 + 100));
+    expect(drawsOf(MEDIUM, 5).map((d) => d.account)).toEqual(['platform', 'platform', 'platform', 'cell-account-1', 'cell-account-2']);
   });
 
-  it('slice mode draws on two projects and no Cognito groups: no global hook builds, no identity tenants', () => {
+  it('slice mode draws on two projects: no global hook builds', () => {
     expect(drawsOf(SMALL, 50, false)).toEqual([
       { account: 'platform', quota: 'codebuild-linux-small', amount: 100 },
       { account: 'platform', quota: 'lambda-concurrency', amount: 120 },

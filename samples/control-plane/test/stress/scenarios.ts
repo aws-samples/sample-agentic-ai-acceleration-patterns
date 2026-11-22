@@ -367,7 +367,12 @@ async function ps1Platform(s: ScenarioEnv, p: PlatformEnv): Promise<void> {
  * polled until the edge serves it (`ps1Platform`).
  */
 export async function ps1(s: ScenarioEnv): Promise<void> {
-  if (s.platform !== undefined && s.manifest.warmUp !== undefined) return ps1Platform(s, s.platform);
+  if (s.platform !== undefined) {
+    if (s.manifest.warmUp !== undefined) return ps1Platform(s, s.platform);
+    // Slice-mode PS-1 here would onboard tenants with no identity and read like a pass.
+    s.rec.finding('PS-1 in a platform run needs the warm-up record in control-plane.json: run the warm-up step first');
+    return;
+  }
   const existing = await deploymentsOf(s);
   let tenants = s.manifest.seeded.filter((t) => existing.get(t)?.status !== 'ACTIVE');
   const fixture = tenants.length === 0 && s.tier.onboarding === 'fixture';
