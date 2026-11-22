@@ -2446,10 +2446,11 @@ It runs in one Region, `AWS_REGION`, the control plane's (for example
 `eu-central-1`), with the edge stacks in `us-east-1` (ADR-0010),
 in two accounts. The `tenant-identity` deployments it reads may be in
 another Region, `TFD_IDENTITY_REGION` (default `AWS_REGION`); the last
-run used `eu-central-1` for them and `eu-west-1` for the rest. The edge account is the one the driver's credentials
-point at, because the test's hosted zone is there. The control plane's
-account, `TFD_INTEG_ACCOUNT_B`, is CDK-bootstrapped to trust it, so the
-driver deploys into both accounts with the edge account's credentials.
+run used `eu-central-1` for them and `eu-west-1` for the rest. The edge
+account is the one the driver's credentials point at, because the test's
+hosted zone is there. The control plane's account, `TFD_INTEG_ACCOUNT_B`,
+is CDK-bootstrapped to trust it, so the driver deploys into both
+accounts with the edge account's credentials.
 The control plane's account hosts the test's own control plane and cell
 A, and is registered vendor-owned, as the control plane registers its
 home account (control-plane §1.1). The edge account hosts the front door
@@ -2790,9 +2791,9 @@ The credentials the driver starts with must last the whole run.
     `host` mode `x-host-header` agrees with it, and an `/assets/*` load
     on `a.<appDomain>` names `a` (host). The registrar's API access
     log, in the control plane's Region, names the edge account on the
-    refused calls of steps 11 and 13 and the control plane's account on those of step
-    12; in `host` mode, which skips steps 12 and 13, it names the edge
-    account on step 11's. The registrar log names the global hook role on
+    refused calls of steps 11 and 13 and the control plane's account on
+    those of step 12; in `host` mode, which skips steps 12 and 13, it
+    names the edge account on step 11's. The registrar log names the global hook role on
     the writes of step 2 and of step 13 (single), each counted within that
     step's own time window.
 16. Delete `b`'s deployment: `front-door-pre` removes `b`'s route before

@@ -54,7 +54,7 @@ state; bash is unit tested only through stubs.
 Option 2. The test's shape, long waits, mid-run updates, one expected
 failure and an ordered teardown with API calls, is what a driver script
 handles and an assertion stack does not, and Option 1 would not fit
-CloudFormation's limits. The CDK apps keep the stacks in code a reader
+CloudFormation's output limit. The CDK apps keep the stacks in code a reader
 can copy, and synthesise under cdk-nag in the build.
 
 ## Consequences

@@ -505,10 +505,11 @@ The demo takes about three minutes (137 to 199 s in three runs on
 the run's synthetic tenants and prints no token. The test ends with `b`
 suspended (step 18), so the demo first sets both tenants active, and it
 suspends `b` once more for step 5. It undoes that suspension when the
-script exits, also after a failure. The tenants and stacks belong to the integration test run, so the
-teardown above removes them. The test's deployment limits one client IP to
-50 requests per tenant host in five minutes on `/api/*`, so the demo polls
-`/api/whoami` once every six seconds, and a second run needs a five-minute gap.
+script exits, also after a failure. The tenants and stacks belong to the
+integration test run, so the teardown above removes them. The test's
+deployment limits one client IP to 50 requests per tenant host in five
+minutes on `/api/*`, so the demo polls `/api/whoami` once every six
+seconds, and a second run needs a five-minute gap.
 
 | Step | Call | Expect |
 |---|---|---|

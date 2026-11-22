@@ -288,7 +288,7 @@ live. The nonce and PKCE binding still stop it from yielding a token (T-34).
 
 **Principals that can read the CloudFront log group in `us-east-1`:** any
 principal in the edge account with CloudWatch Logs read actions on it. The
-stack grants none. The integration test role reads it in step 15. The log
+stack grants none. The integration test role reads it in steps 15 and 18. The log
 names the tenant of every routed request, and shows each request to the
 sign-in host, but holds no query string, referrer or cookie (M-21). The
 registrar's log group is in the deployment Region, and the sweeper's own log
