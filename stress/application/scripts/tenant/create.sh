@@ -13,10 +13,11 @@
 #
 # It subscribes the tenant to the cell's agents and tools on the cell's Entitlements API
 # (PutTenantSubscription, SigV4) and records the deployment under
-# /application-plane/tenants/<tenant id>/<application id>/state (a child of the tenant namespace, which the front door cell API origin reads for its hosts check): the cell and the subscription
-# version, which the control-plane slice reads back as an isolation assertion. TENANT_NAME is
-# never used. The tenant-identity tenant is the control-plane driver's (stress ADR-0017) and the front-door route
-# the route hook's (spec §3.3).
+# /application-plane/tenants/<tenant id>/<application id>/state, a child of the tenant
+# namespace, which the front door cell API origin reads for its hosts check: the cell and the
+# subscription version, which the control-plane slice reads back as an isolation assertion.
+# TENANT_NAME is never used. The tenant-identity tenant is the control-plane driver's (stress
+# ADR-0017) and the front-door route the route hook's (spec §3.3).
 set -euo pipefail
 
 : "${TENANT_ID:?TENANT_ID env var is required}"

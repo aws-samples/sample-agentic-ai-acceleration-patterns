@@ -118,7 +118,7 @@ describe('the agentIngress input of front-door phase two', () => {
 
   it('refuses what the front door would refuse', () => {
     expect(() => agentIngressOf('http://i.example.com/prod')).toThrow('https');
-    expect(() => agentIngressOf('https://user:pw@i.example.com/prod')).toThrow('credentials');
+    expect(() => agentIngressOf('https://user:pw@i.example.com/prod')).toThrow('credentials'); // pragma: allowlist secret (a made-up URL the parser must refuse)
     expect(() => agentIngressOf('https://i.example.com/prod?x=1')).toThrow('query');
     expect(() => agentIngressOf('https://i.example.com:8443/prod')).toThrow('port');
     expect(() => agentIngressOf('https://i.example.com/a b/c')).toThrow('plain path');

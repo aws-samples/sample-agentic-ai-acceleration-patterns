@@ -46,6 +46,8 @@ echo "account=${account} region=${AWS_REGION}"
 start=$SECONDS
 npx cdk --app "npx ts-node --transpile-only application/owner-app.ts" deploy "${stacks[@]}" \
   --output cdk.application.out/owner --exclusively --require-approval never >&2
+# IFS is set inside the command substitution's subshell only, to join the stack names with commas.
+# nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
 echo "stacks=$(IFS=,; echo "${stacks[*]}") deploy_seconds=$((SECONDS - start))"
 if [[ -n "${PLATFORM_ACCOUNT_ID:-}" ]]; then
   echo "IngressReaderRoleArn=$(aws cloudformation describe-stacks --stack-name CellAccountBase --query 'Stacks[0].Outputs[?OutputKey==`IngressReaderRoleArn`].OutputValue' --output text)"

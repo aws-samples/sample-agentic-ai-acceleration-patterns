@@ -55,8 +55,6 @@ if [ -n "$DISTRIBUTION_ARN" ]; then
   IDENTITY_APP_CLIENT_ID="$(get_param /application-plane/shared/identity/appClientId)"
   echo "Read /application-plane/shared/identity/userPoolId and appClientId; the cell gets a cell API for the distribution"
   export DISTRIBUTION_ARN IDENTITY_USER_POOL_ID IDENTITY_APP_CLIENT_ID
-else
-  DISTRIBUTION_ARN=""
 fi
 
 ensure_node
