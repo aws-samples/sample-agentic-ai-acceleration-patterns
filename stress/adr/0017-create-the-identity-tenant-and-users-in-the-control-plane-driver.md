@@ -202,7 +202,10 @@ calls, and PS-1 in a platform run at a fixture tier stops with a finding, so
 the churn creates PS-1 would be timed on get none either. Tiers above `small`
 wait for Q-7 (spec §10).
 
-One change to the W-9 list above: the Cognito draw is not in the
-`control-plane` slice's `budget`. In a platform run the `tenant-identity`
-slice's budget already counts the control plane's tenants in the stress pool,
-so a second draw would count the same groups twice (spec §4.4).
+One change to two statements above, "Spec §4.4 lists the draw in the
+`control-plane` column" and "the Cognito draw in the slice's `budget`" in the
+W-9 list: the `control-plane` slice's `budget` has no Cognito draw. In a
+platform run the `tenant-identity` slice's budget already counts the control
+plane's tenants in the stress pool, so a second draw would count the same
+groups twice. Spec §4.4 names the groups in the `control-plane` column and
+budgets them in the `tenant-identity` column.
