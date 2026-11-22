@@ -36,25 +36,29 @@ npx projen build
 ## Known limitations
 
 **A stack delete can stop on two Lambda network interfaces.** In 8 of 9
-integration stacks (three Regions, 2026-11-21; only one deleted cleanly) the delete ended
+integration stacks, across three Regions, the delete ended
 `DELETE_FAILED` on the tool subnets and the tool security group. Two
 Lambda-managed network interfaces (description
 `AWS Lambda VPC ENI-<stack>-...Reaper...` or `...Offboard...`, status
-`available`) stayed after every function was gone. CloudTrail shows them
-created by the reaper role when the functions were created, and no delete
-attempt on them; another role's interfaces in the same delete were
-deleted by Lambda with that role. The cause is not proven: four smaller
-stacks (one shared role, or three roles sharing one security group, each
-with and without a wait before the roles are deleted, invoked before the
-delete) and one deploy of this construct with the `microvm` backend only,
-40 minutes old, its tool, reaper and offboard functions invoked in three
-rounds and a MicroVM live at the delete, all deleted cleanly (the last in
-1449 s, no network interface left). To finish a stuck delete, delete the
-`available` interfaces of the stack, then the stack again:
+`available`) stayed after every function was gone. In the one run traced
+with CloudTrail, the reaper role created both interfaces when the
+functions were created, and nothing ever tried to delete them; another
+role's interfaces in the same delete were deleted by Lambda with that role.
+
+The cause is not proven. Four smaller stacks deleted cleanly: one shared
+role, or three roles sharing one security group, each with and without a
+wait before the roles are deleted, invoked or not. One deploy of this
+construct with the `microvm` backend only also deleted cleanly, in 1449 s
+with no network interface left. It was deleted about 30 minutes after it
+was created, after three rounds of calls to its tool, reaper and offboard
+functions, with a MicroVM live.
+
+To finish a stuck delete, delete the `available` interfaces of the stack,
+then the stack again:
 
 ```bash
 export AWS_PROFILE=<profile> AWS_REGION=<region>
-aws ec2 describe-network-interfaces --filters 'Name=description,Values=AWS Lambda VPC ENI-<stack>-*' --query 'NetworkInterfaces[].[NetworkInterfaceId,Status]' --output text
+aws ec2 describe-network-interfaces --filters 'Name=description,Values=AWS Lambda VPC ENI-<stack>-*' 'Name=status,Values=available' --query 'NetworkInterfaces[].[NetworkInterfaceId,Status]' --output text
 aws ec2 delete-network-interface --network-interface-id <id>
 aws cloudformation delete-stack --stack-name <stack>
 aws cloudformation wait stack-delete-complete --stack-name <stack>
