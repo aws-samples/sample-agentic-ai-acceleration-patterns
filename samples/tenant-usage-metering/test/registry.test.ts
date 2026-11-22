@@ -5,12 +5,12 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 import type { AdminDeps } from '../src/api/deps';
-import { putCellEmitter, putTenantBinding } from '../src/api/registry';
+import { putEmitter, putTenantBinding } from '../src/api/registry';
 import { Metrics } from '../src/shared/metrics';
 
 const NOW = Date.parse('2026-11-18T12:00:00Z');
-const CELL = '01JD00000000000000000000C1';
-const ROLE = `demo-ue-${CELL}`;
+const EMITTER_ID = '01JD00000000000000000000E1';
+const ROLE = `demo-ue-${EMITTER_ID}`;
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'eu-central-1' }));
 const ddb = mockClient(db);
 const ctx = { caller: { accountId: '111122223333', roleName: 'registrar', roleArn: 'arn:aws:iam::111122223333:role/registrar' }, requestId: 'r' };
@@ -33,41 +33,41 @@ function items(byKey: Record<string, Record<string, unknown>>) {
 const transactions = () => ddb.commandCalls(TransactWriteCommand).map((call) => call.args[0].input.TransactItems!);
 
 describe('registrations under TTL', () => {
-  test('a first PutCellEmitter guards the cell item against another account', async () => {
+  test('a first PutEmitter guards the id item against another account', async () => {
     items({});
-    await putCellEmitter(deps, ctx, { cellId: CELL, applicationId: 'demo-app', accountId: '111122223333', trace: {} });
+    await putEmitter(deps, ctx, { emitterId: EMITTER_ID, applicationId: 'demo-app', accountId: '111122223333', trace: {} });
     const [writes] = transactions();
     expect(writes[0].Put?.ConditionExpression).toBe('attribute_not_exists(PK) OR expiresAt <= :now OR (accountId = :a AND applicationId = :app)');
     expect(writes[1].Put?.ConditionExpression).toBe('attribute_not_exists(PK) OR expiresAt <= :now');
   });
 
-  test('an expired cell item of another account does not block a new registration', async () => {
-    items({ [`CELL#${CELL}|META`]: { cellId: CELL, accountId: '444455556666', roleName: ROLE, applicationId: 'other', expiresAt: expired } });
-    const emitter = await putCellEmitter(deps, ctx, { cellId: CELL, applicationId: 'demo-app', accountId: '111122223333', trace: {} });
+  test('an expired id item of another account does not block a new registration', async () => {
+    items({ [`EMITTER#${EMITTER_ID}|META`]: { emitterId: EMITTER_ID, accountId: '444455556666', roleName: ROLE, applicationId: 'other', expiresAt: expired } });
+    const emitter = await putEmitter(deps, ctx, { emitterId: EMITTER_ID, applicationId: 'demo-app', accountId: '111122223333', trace: {} });
     expect(emitter.status).toBe('ACTIVE');
   });
 
-  test('an ACTIVE emitter whose cell item TTL removed gets its cell item back', async () => {
-    items({ [`EMITTER#111122223333#${ROLE}|META`]: { cellId: CELL, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z' } });
-    await putCellEmitter(deps, ctx, { cellId: CELL, applicationId: 'demo-app', accountId: '111122223333', trace: {} });
+  test('an ACTIVE emitter whose id item TTL removed gets its id item back', async () => {
+    items({ [`ROLE#111122223333#${ROLE}|META`]: { emitterId: EMITTER_ID, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z' } });
+    await putEmitter(deps, ctx, { emitterId: EMITTER_ID, applicationId: 'demo-app', accountId: '111122223333', trace: {} });
     const [writes] = transactions();
     expect(writes).toHaveLength(1);
-    expect(writes[0].Put?.Item).toMatchObject({ PK: `CELL#${CELL}`, accountId: '111122223333' });
+    expect(writes[0].Put?.Item).toMatchObject({ PK: `EMITTER#${EMITTER_ID}`, accountId: '111122223333' });
   });
 
   test('a binding rewrites its tenant copy and starts the resend a new billing account needs', async () => {
     jobs.length = 0;
     items({
-      [`CELL#${CELL}|META`]: { cellId: CELL, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app' },
-      [`EMITTER#111122223333#${ROLE}|META`]: { cellId: CELL, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z' },
-      [`CELL#${CELL}|TENANT#t1`]: { cellId: CELL, tenantId: 't1', applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z' },
+      [`EMITTER#${EMITTER_ID}|META`]: { emitterId: EMITTER_ID, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app' },
+      [`ROLE#111122223333#${ROLE}|META`]: { emitterId: EMITTER_ID, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z' },
+      [`EMITTER#${EMITTER_ID}|TENANT#t1`]: { emitterId: EMITTER_ID, tenantId: 't1', applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z' },
     });
-    const out = await putTenantBinding(deps, ctx, { cellId: CELL, tenantId: 't1', applicationId: 'demo-app', billingAccount: 'acct-1', trace: {} });
+    const out = await putTenantBinding(deps, ctx, { emitterId: EMITTER_ID, tenantId: 't1', applicationId: 'demo-app', billingAccount: 'acct-1', trace: {} });
     expect(jobs).toEqual(['RESEND_BLOCKED']);
     expect(out.resendJobId).toBeDefined();
     const [first] = transactions();
-    expect(first[0].Put?.Item).toMatchObject({ PK: `CELL#${CELL}`, billingAccount: 'acct-1', resendPending: true });
-    expect(first[1].Put?.Item).toMatchObject({ PK: 'TENANT#t1', SK: `APP#demo-app#CELL#${CELL}`, billingAccount: 'acct-1' });
+    expect(first[0].Put?.Item).toMatchObject({ PK: `EMITTER#${EMITTER_ID}`, billingAccount: 'acct-1', resendPending: true });
+    expect(first[1].Put?.Item).toMatchObject({ PK: 'TENANT#t1', SK: `APP#demo-app#EMITTER#${EMITTER_ID}`, billingAccount: 'acct-1' });
     expect(first[1].Put?.ConditionExpression).toBeUndefined();
     // The flag is cleared alone, on a condition that it is still set.
     const clears = ddb.commandCalls(UpdateCommand).map((call) => call.args[0].input);
@@ -81,11 +81,11 @@ describe('registrations under TTL', () => {
   test('a binding left with resendPending starts its resend on the next Put', async () => {
     jobs.length = 0;
     items({
-      [`CELL#${CELL}|META`]: { cellId: CELL, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app' },
-      [`EMITTER#111122223333#${ROLE}|META`]: { cellId: CELL, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z' },
-      [`CELL#${CELL}|TENANT#t1`]: { cellId: CELL, tenantId: 't1', applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z', billingAccount: 'acct-1', resendPending: true },
+      [`EMITTER#${EMITTER_ID}|META`]: { emitterId: EMITTER_ID, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app' },
+      [`ROLE#111122223333#${ROLE}|META`]: { emitterId: EMITTER_ID, accountId: '111122223333', roleName: ROLE, applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z' },
+      [`EMITTER#${EMITTER_ID}|TENANT#t1`]: { emitterId: EMITTER_ID, tenantId: 't1', applicationId: 'demo-app', status: 'ACTIVE', activeFrom: '2026-11-01T00:00:00Z', billingAccount: 'acct-1', resendPending: true },
     });
-    await putTenantBinding(deps, ctx, { cellId: CELL, tenantId: 't1', applicationId: 'demo-app', billingAccount: 'acct-1', trace: {} });
+    await putTenantBinding(deps, ctx, { emitterId: EMITTER_ID, tenantId: 't1', applicationId: 'demo-app', billingAccount: 'acct-1', trace: {} });
     expect(jobs).toEqual(['RESEND_BLOCKED']);
   });
 });

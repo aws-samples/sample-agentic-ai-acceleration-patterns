@@ -6,8 +6,8 @@ Conventions for the scripts in this directory: `integ.sh` deploys the demo
 stack and drives the deployment integration test
 ([`../integration-test.md`](../integration-test.md)); `demo.sh` walks the
 primary flow against a deployed stack; `control-plane/metering-hook.sh` is
-the control plane's global hook; `emit-usage.ts` is the emitter snippet a
-cell's workload runs. What they print lands in a terminal, a CI job log or
+the control plane's global hook; `emit-usage.ts` is the emitter snippet
+a workload runs. What they print lands in a terminal, a CI job log or
 the control plane's hook log; all three are an audience.
 
 ## Log hygiene
@@ -34,7 +34,7 @@ the control plane's hook log; all three are an audience.
   session token into a `mktemp` curl config file (`user` and the
   `x-amz-security-token` header), passes it with `--config`, and removes
   it from its exit trap.
-- `emit-usage.ts` signs with the credential provider chain of the cell's
+- `emit-usage.ts` signs with the credential provider chain of the emitter's
   emitter role; it never reads or logs a key itself.
 - Every value from the hook environment is checked against its charset
   first and reaches a request body only through `jq --arg`, never inside a

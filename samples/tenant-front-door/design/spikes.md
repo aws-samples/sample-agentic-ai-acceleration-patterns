@@ -256,3 +256,94 @@ and 181 s after `INSYNC` at TTL 300, and the deleted record was last served
 631 s after `INSYNC` (661 s after the deletion), within the one-day bound of
 the daily re-check (§3.4 step 5). Deploy 67 s plus 7 s for the function
 code; destroy 32 s for the stack and 35 s for the DNS records.
+
+## Smoke run, 2026-11-19
+
+`scripts/smoke.sh`: the built sample in `single` mode with one demo cell,
+with no control plane and no hooks. Routes are seeded straight into the
+route table (the §10 step 2 shortcut); the control plane the front door
+names does not exist.
+
+**Found and fixed.** (1) CloudFront refuses `x-amz-content-sha256` in an
+origin request policy (`InvalidRequest`), so the `/api/*` policy forwards
+three headers; a `POST` with the body's SHA-256 in that header was served by
+the cell and one without it got Lambda's 403, so origin access control reads
+the viewer's header itself (§3.2). (2) `cloudfront-js-2.0` refuses `await`
+inside call arguments at load (`SyntaxError: await in arguments not
+supported`), which made every request 503 with `FunctionExecutionError`;
+the router reads the value first, and a source test refuses the pattern.
+
+**Result.** 39 of 39 checks passed: the SPA, `/config.json`, `/logout` and
+`/signin-state` with the §7.1 headers; `/api/whoami` for two tenants through
+origin access control; 401 with no token and with an `Authorization` header
+over 8,192 bytes; 403 for an unrouted tenant, `Sec-Fetch-Site: same-site`, a
+forged payload (refused by the cell) and a direct function URL call; a
+client `x-tenant-route` ignored; registrar 403 unsigned and 503 for
+`PutCellRoute` with the control plane unreadable; and `UpdateTenantRouteStatus`
+suspending and resuming a tenant with no control plane (ADR-0025), with the
+other tenant still served, and 409 for a tenant with no route.
+
+**Propagation.** From one client, polling once a second from the end of
+the write, a seeded route was first served 16 to 37 s after it, and the
+last request that missed it came 36 to 59 s after it (three runs). In
+earlier runs, timed from the start of the seed tool (about 2 s before
+the write ended), requests still missed the route up to 65 s after the
+start, and 200 of 200 were routed after 3 minutes. Spike S-2 measured
+the first routed request at one location; the smoke also measured the
+last miss, which comes later. Spec §4.2 and §10 therefore wait
+90 s where every request has to see a change. A suspension gave five
+503 answers in a row 15 to 53 s after the call.
+
+**Tags.** On a distribution tenant that carried a tag,
+`GetDistributionTenantByDomain` and `GetDistributionTenant` both returned
+`Tags: null`, and `ListDistributionTenants` returned no tags either; only
+`cloudfront:ListTagsForResource` on the distribution tenant's ARN returned
+them. The registrar, the sweeper and the teardown therefore read a
+distribution tenant's tags with `ListTagsForResource` (spec §3.4 step 5).
+
+**Deploy.** Front door stacks 384 s (a fresh main stack after a failed
+first attempt; the edge stack had deployed), demo cell 66 s, support 59 s.
+
+## Dedicated-domain run, 2026-11-20
+
+`scripts/smoke-domains.sh` against the smoke deployment with
+`dedicatedDomains` on and a stand-in control plane (`test/smoke/smoke.app.ts`:
+API Gateway with a Cognito authorizer, the registrar's client-credentials
+reader token, fixture records). The registrar read the stand-in for every
+hook and operator write.
+
+**Found and fixed.** With an IAM `Null` condition on
+`aws:ResourceTag/tenant-front-door:distribution`, `RequestCertificate` was
+refused: ACM authorises the request's tags as `acm:AddTagsToCertificate` on
+`certificate/*`, and CloudTrail named that action. With the condition
+written as `aws:ResourceTag/tenant-front-door:distribution` equal to the
+distribution's id, both `RequestCertificate` and `CreateDistributionTenant`
+with tags passed, so both services present a create's tags as the
+resource's (spec §3.4, threat model AR-33).
+
+**Result.** 38 of 38 checks passed: the hook role's cell and tenant puts
+while the records were `UPDATING` (200, `dt` equal to the record's
+`createdAt`), its `customDomain` 403 and its put on an `ACTIVE` record 409;
+the challenge (202 `domain-challenge` with the record and `expiresAt`,
+`missing` or `mismatch` before publishing, a pass 68 to 111 s after the
+record's stack update); the certificate with its three tags, issued and
+routed 4 to 5 s after the validation record; the distribution tenant on the
+distribution, in the stack's connection group, with the certificate, a
+36-character name and both tags; the SPA, `/config.json` (tenant id,
+sign-in on the shared host) and the cell API on the domain through the
+routing endpoint 16 to 31 s after the 200; the daily re-check recording a
+pass; the drop disabling the distribution tenant; and the removal job
+deleting the distribution tenant and the certificate within 68 s. The
+whole run took 333 to 391 s. The base smoke run then passed 40 of 40 with
+`dedicatedDomains` on. Deploy with `dedicatedDomains` turned on: front door
+stacks 227 s, stand-in control plane and support 81 s.
+
+**Guard.** With `SMOKE_GUARD=1` the run sets a domain (202, `d` written)
+and deploys with `dedicatedDomains` off: the guard refused, the deploy
+failed after 140 s and the main stack rolled back to
+`UPDATE_ROLLBACK_COMPLETE` with the guard's reason in its events; the
+registrar then still answered the domain flow, and the drop answered 200.
+
+**Not run live.** The guard's pass when nothing is held, the teardown
+(stack delete), the refusal of the tag grants on a resource without this
+distribution's tag, and two front doors in one account.

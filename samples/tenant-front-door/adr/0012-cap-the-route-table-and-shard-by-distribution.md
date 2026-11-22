@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-17
-- Amended by: ADR-0017 (Proposed, takes effect on acceptance), ADR-0018
+- Amended by: ADR-0017, ADR-0018
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -120,3 +120,6 @@ dedicated tenant adds at most 288 bytes to the 20 % headroom (`d` 71,
 `dk` 51, its `host#<d>` entry 166), so the headroom holds
 floor(1,000,000 / 288) = 3,472 dedicated tenants, less what `app` and
 `signin` take. The pooled ceilings do not change.
+
+Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
+effect.

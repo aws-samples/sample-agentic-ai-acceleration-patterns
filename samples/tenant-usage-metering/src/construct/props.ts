@@ -12,9 +12,12 @@ import { Token } from 'aws-cdk-lib';
 export type IngestPath = 'BUS' | 'DIRECT';
 
 export interface TenantUsageMeteringProps {
-  /** The control plane's fleet name, `[a-z0-9][a-z0-9-]{0,31}`. */
+  /**
+   * The prefix of the emitter role names and the sink secrets,
+   * `[a-z0-9][a-z0-9-]{0,31}`; with the control plane, its fleet name.
+   */
   readonly fleetName: string;
-  /** Roles that may register cells and tenants (the control plane's `<fleet>-global-hook`). */
+  /** Roles that may register emitters and tenant bindings (the control plane's `<fleet>-global-hook`). */
   readonly registrarPrincipalArns: string[];
   /** Roles that may manage meters, sinks, recounts, re-admission, redrives and resends. */
   readonly operatorPrincipalArns: string[];
@@ -43,19 +46,19 @@ export interface TenantUsageMeteringProps {
   /**
    * Vendor accounts the ingest bus is shared with through AWS RAM, under the
    * SubscribeOnly permission (ADR-0006). `BUS` only: a non-empty list on
-   * `DIRECT`, which has no ingest bus, fails synth. None of them may hold a
-   * cell: `PutCellEmitter` refuses one there, and a deploy that adds an
-   * account already holding a cell that can still send fails. Neither list
-   * may name the metering account, which reads its buses directly.
+   * `DIRECT`, which has no ingest bus, fails synth. None of them may hold an
+   * emitter: `PutEmitter` refuses one there, and a deploy that adds an
+   * account already holding an emitter that can still send fails. Neither
+   * list may name the metering account, which reads its buses directly.
    * @default []
    */
   readonly rawSubscriberAccountIds?: string[];
   /**
    * Vendor accounts the usage bus is shared with through AWS RAM, under the
-   * SubscribeOnly permission (ADR-0006). None of them may hold a cell:
-   * `PutCellEmitter` refuses one there, and a deploy that adds an account
-   * already holding a cell that can still send fails. It may not name the
-   * metering account, which reads its buses directly. @default []
+   * SubscribeOnly permission (ADR-0006). None of them may hold an emitter:
+   * `PutEmitter` refuses one there, and a deploy that adds an account
+   * already holding an emitter that can still send fails. It may not name
+   * the metering account, which reads its buses directly. @default []
    */
   readonly usageSubscriberAccountIds?: string[];
   /**
@@ -66,17 +69,17 @@ export interface TenantUsageMeteringProps {
   /** SNS topic for every alarm. @default none */
   readonly alarmTopicArn?: string;
   /**
-   * TEST ONLY: let `PutCellEmitter` register a cell in the metering account,
-   * so a one-account integration test can run an emitter. A cell there could
+   * TEST ONLY: let `PutEmitter` register an emitter in the metering account,
+   * so a one-account integration test can run one. An emitter there could
    * read the raw store's account; never set it in a real deployment
    * (spec §3.2). @default false
    */
-  readonly testOnlyAllowCellsInMeteringAccount?: boolean;
+  readonly testOnlyAllowEmittersInMeteringAccount?: boolean;
 }
 
 /** The props with every default applied. */
-export interface ResolvedProps extends Required<Omit<TenantUsageMeteringProps, 'deploymentRoleArn' | 'alarmTopicArn' | 'testOnlyAllowCellsInMeteringAccount'>> {
-  readonly testOnlyAllowCellsInMeteringAccount: boolean;
+export interface ResolvedProps extends Required<Omit<TenantUsageMeteringProps, 'deploymentRoleArn' | 'alarmTopicArn' | 'testOnlyAllowEmittersInMeteringAccount'>> {
+  readonly testOnlyAllowEmittersInMeteringAccount: boolean;
   readonly deploymentRoleArn?: string;
   readonly alarmTopicArn?: string;
 }
@@ -137,7 +140,7 @@ export function resolveProps(props: TenantUsageMeteringProps, meteringAccount?: 
     usageSubscriberAccountIds: props.usageSubscriberAccountIds ?? [],
     deploymentRoleArn: props.deploymentRoleArn,
     alarmTopicArn: props.alarmTopicArn,
-    testOnlyAllowCellsInMeteringAccount: props.testOnlyAllowCellsInMeteringAccount ?? false,
+    testOnlyAllowEmittersInMeteringAccount: props.testOnlyAllowEmittersInMeteringAccount ?? false,
   };
 
   if (!FLEET.test(resolved.fleetName)) {
