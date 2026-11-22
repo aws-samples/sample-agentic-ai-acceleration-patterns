@@ -52,8 +52,9 @@ build and the set-up between the warm-up step and PS-1 (front-door phase two,
 the k6 host, the identity slice's PS-1), and PS-1's p50 and p99 leave it out.
 The warm-up step logs the cell build itself: in the first platform run the
 warm-up tenant was ACTIVE 759 s after `CreateDeployment`, the cell 617 s from
-CREATING to ACTIVE, and `warm-up-ready` was 1,157 s. A tenant that was not placed in this run (a rerun) is timed
-apart as `rerun-ready`: its clock would start at the old `CreateDeployment`.
+CREATING to ACTIVE, and `warm-up-ready` was 1,157 s. A tenant that was not
+placed in this run (a rerun) is timed apart as `rerun-ready`: its clock would
+start at the old `CreateDeployment`.
 
 The identity work starts at the next poll after ACTIVE (up to about ten seconds),
 at most four tenants at a time, with the identity calls paced at four a second,
@@ -61,12 +62,13 @@ so in a wave `ready` includes that queue wait and grows with the wave. A large
 tier's p99 is not the platform's onboarding time alone.
 
 The end of the interval is the driver's clock, the start is the control plane's
-`createdAt`. In W-9's first failed run, API Gateway counted 31 of the tenant-identity
-slice's 40 PS-1 calls in that slice's one-minute window, which points to the driver's clock
-running behind CloudWatch's by up to a minute (inferred from that count, not measured).
-If so, `ready` is understated by that offset; at `small` (p50 about 166 s) a minute is about
-36% of the value, so read `ready` as a lower bound. Measuring the offset once at the start of
-PS-1 would remove the doubt.
+`createdAt`. In W-9's first failed run, API Gateway counted 31 of the
+tenant-identity slice's 40 PS-1 calls in that slice's one-minute window, which
+points to the driver's clock running behind CloudWatch's by up to a minute
+(inferred from that count, not measured). If so, `ready` is understated by that
+offset; at `small` (p50 about 166 s) a minute is about 36% of the value, so read
+`ready` as a lower bound. Measuring the offset once at the start of PS-1 would
+remove the doubt.
 
 Revisit if the first agent call after onboarding is slower than the rest in
 PS-2, which would mean PS-1 hides an onboarding cost.

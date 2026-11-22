@@ -124,8 +124,8 @@ const WARM_UP_TIMEOUT_SECONDS = 3600;
  * route hook writes the cell and tenant routes, and the step waits until the deployment and
  * the cell are ACTIVE. It then reads the cell API's domain from the cell account and records
  * the tenant, the cell and what the front door's phase two needs in the manifest. A rerun
- * with an ACTIVE warm-up deployment records again and places nothing. Returns false (with
- * findings on `f.rec`) on any failure.
+ * with an ACTIVE warm-up deployment records again and places nothing. Returns undefined
+ * (with findings on `f.rec`) on any failure.
  */
 export async function warmUp(
   f: FleetEnv,

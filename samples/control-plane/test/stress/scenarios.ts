@@ -62,7 +62,7 @@ export interface PlatformEnv {
   readonly seedData?: (tenantId: string) => Promise<void>;
 }
 
-/** A cell build plus its first tenant build: Q-1 expects about eight minutes; one hour is the build budget. */
+/** A cell build plus its first tenant build: 759 s in the first platform run (spec Q-1); one hour is the build budget. */
 const CELL_TIMEOUT_SECONDS = 3600;
 /** A wave of tenant builds at a build limit: rounds of about two minutes each, with margin. */
 const waveTimeout = (tenants: number, limit: number): number => 600 + Math.ceil(tenants / limit) * 240;
@@ -273,12 +273,17 @@ function startReadiness(s: ScenarioEnv, p: PlatformEnv, tenants: readonly string
   let running = 0;
   const waiting: (() => void)[] = [];
   const slot = async (): Promise<void> => {
-    if (running >= READY_CONCURRENCY) await new Promise<void>((resolve) => waiting.push(resolve));
-    running += 1;
+    if (running < READY_CONCURRENCY) {
+      running += 1;
+      return;
+    }
+    // The releasing job hands its slot over, so `running` stays counted while the waiter wakes.
+    await new Promise<void>((resolve) => waiting.push(resolve));
   };
   const release = (): void => {
-    running -= 1;
-    waiting.shift()?.();
+    const next = waiting.shift();
+    if (next !== undefined) next();
+    else running -= 1;
   };
   const tick = async (): Promise<void> => {
     const all = await deploymentsOf(s);

@@ -167,6 +167,8 @@ deploy_stack() {
 json_private() {
   local file="$1"
   (umask 077; cat >"${file}.new")
+  # A failed producer upstream leaves nothing on stdin: keep the old file rather than replace it with an empty one.
+  [[ -s "${file}.new" ]] || { rm -f "${file}.new"; return 1; }
   chmod 600 "${file}.new"
   mv "${file}.new" "$file"
 }

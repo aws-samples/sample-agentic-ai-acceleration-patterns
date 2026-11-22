@@ -773,7 +773,7 @@ count of tenants created, suspended, resumed and deleted, each change timed from
 to the first edge answer that shows it (`routable`, `suspended`, `resumed` and `removed`
 in the record), with a suspended and a removed tenant read again after the edge has
 settled. It reads the edge and registrar addresses from the front door's manifest
-(`stress/README.md`, "Platform mode: set-up order and manifests") and stops with a message
+(`stress/README.md`, "Platform mode: manifests") and stops with a message
 when they are missing. A platform run also calls the slice's steps `hooks` (registers the
 front door's global route hooks, which run `route-hook.sh` at `STRESS_HOOK_COMMIT`),
 `register` (the application and the cell accounts), `warm-up` (one tenant that builds the
