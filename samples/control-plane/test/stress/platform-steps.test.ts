@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import type { FleetEnv } from './fleet';
 import { type Manifest, parseManifest } from './manifest';
 import { hookCommitOf, hookPolicyFile, parseFrontDoor, readFrontDoor, setHookPolicy, warmUp } from './platform-steps';
+import { ps1, type ScenarioEnv } from './scenarios';
 
 const DIST = 'arn:aws:cloudfront::123456789012:distribution/E2EXAMPLE12345';
 const POLICY = 'arn:aws:iam::123456789012:policy/tenant-front-door-route-hook-stress';
@@ -44,6 +45,25 @@ describe('the warm-up step', () => {
     const manifest = { seeded: ['01KAF5M0000000000000000T01'], churn: [], extra: [] } as unknown as Manifest;
     expect(await warmUp(env, manifest, () => undefined)).toBeUndefined();
     expect(findings.join()).toMatch(/no ingressReaderRoleArn/);
+    expect(api.call).not.toHaveBeenCalled();
+  });
+});
+
+describe('PS-1 in a platform run', () => {
+  it('stops at a fixture tier with a finding, and calls neither the control plane nor the identity', async () => {
+    const findings: string[] = [];
+    const api = { call: jest.fn() };
+    const identity = new Proxy({}, { get: () => jest.fn(() => { throw new Error('identity called'); }) });
+    const s = {
+      api,
+      rec: { finding: (t: string) => findings.push(t) },
+      log: () => undefined,
+      tier: { onboarding: 'fixture' },
+      manifest: { seeded: ['01KAF5M0000000000000000T01'], churn: [], extra: [], warmUp: { tenantId: '01KAF5M0000000000000000T01' } },
+      platform: { identity, users: 1, existing: () => undefined, save: () => undefined },
+    } as unknown as ScenarioEnv;
+    await ps1(s);
+    expect(findings).toEqual([expect.stringMatching(/fixture tier is not built: nothing creates the identity tenants/)]);
     expect(api.call).not.toHaveBeenCalled();
   });
 });

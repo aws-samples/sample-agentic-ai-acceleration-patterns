@@ -332,7 +332,10 @@ function startReadiness(s: ScenarioEnv, p: PlatformEnv, tenants: readonly string
  */
 async function ps1Platform(s: ScenarioEnv, p: PlatformEnv): Promise<void> {
   const warm = s.manifest.warmUp!;
-  if (s.tier.onboarding === 'fixture') s.rec.finding('PS-1 in a platform run at a fixture tier is not built: nothing creates the identity tenants of a fixture fleet (stress ADR-0017)');
+  if (s.tier.onboarding === 'fixture') {
+    s.rec.finding('PS-1 in a platform run at a fixture tier is not built: nothing creates the identity tenants of a fixture fleet (stress ADR-0017)');
+    return;
+  }
   const existing = await deploymentsOf(s);
   const warmDeployment = existing.get(warm.tenantId);
   if (warmDeployment?.status !== 'ACTIVE') s.rec.finding(`the warm-up tenant ${warm.tenantId} has no ACTIVE deployment: run the warm-up step first`);
