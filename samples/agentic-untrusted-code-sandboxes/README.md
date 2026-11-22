@@ -271,16 +271,15 @@ A `sandbox_starting` or `sandbox_failed` answer is retried after its
 outcome code. After a `sandbox_starting` wait the retried call may report
 `reused` for the sandbox it waited on; steps 1 and 3 accept that. A
 MicroVM start can fail with a platform error, which the tool returns as
-`sandbox_failed`; the next start after the 30 s back-off succeeded each
-time.
+`sandbox_failed`; the retry after the 30 s back-off succeeded. Without
+the retry, one failed first start fails steps 1, 2, 6 and 7.
 
 Runs on 2026-11-22, in a non-production test account, `eu-west-1`, on a
 demo stack with `backends=microvm` and `standalone=true`. On the first
 stack the demo passed all seven steps with no failed start. On the
-second stack, one first start failed with a platform error in each of
-the last two runs. The first of those runs predates the retry and
-failed. The last run passed all seven steps in 72 s, after tenant B's
-first start was retried once after a `sandbox_failed`. The second stack
+second stack, a first start failed in each of the last two runs (a
+platform error in the first). The last run passed all seven steps in
+72 s, after tenant B's first start was retried once. The second stack
 deployed in 645 s and deleted cleanly (`DELETE_COMPLETE`) in 1459 s. A
 read-only check afterwards found no network interface, log group or
 parameter of the stack.
