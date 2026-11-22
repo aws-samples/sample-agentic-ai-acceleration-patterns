@@ -4,7 +4,7 @@
 import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import { readContext } from '../src/demo.cdk';
+import { DemoStack, PUBLISHED_PARAMETER, readContext } from '../src/demo.cdk';
 import { resolveProps } from '../src/props';
 import { UntrustedCodeSandboxes } from '../src/untrusted-code-sandboxes.cdk';
 
@@ -72,6 +72,23 @@ describe('construct shell', () => {
     const stack = new Stack(app, 'S');
     new UntrustedCodeSandboxes(stack, 'Sandboxes', {});
     expect(() => app.synth()).toThrow(/has no entry/);
+  });
+});
+
+describe('demo stack published parameter (spec §6.3)', () => {
+  test('writes one JSON parameter with the construct values; the construct alone writes none', () => {
+    const stack = new DemoStack(new App(), 'Demo', { backends: ['microvm'], standalone: true });
+    const t = Template.fromStack(stack);
+    t.resourceCountIs('AWS::SSM::Parameter', 1);
+    const [param] = Object.values(t.findResources('AWS::SSM::Parameter')) as Array<{ Properties: { Name: string; Value: unknown } }>;
+    expect(param.Properties.Name).toBe(PUBLISHED_PARAMETER);
+    const value = JSON.stringify(param.Properties.Value);
+    for (const key of ['version', 'toolTarget', 'runCodeFunctionArn', 'backends', 'defaultBackend', 'registryTableName', 'inputBucketName', 'offboardFunctionArn', 'imageArn']) {
+      expect(value).toContain(key);
+    }
+    const bare = new Stack(new App(), 'S');
+    new UntrustedCodeSandboxes(bare, 'Sandboxes', { standalone: true });
+    Template.fromStack(bare).resourceCountIs('AWS::SSM::Parameter', 0);
   });
 });
 

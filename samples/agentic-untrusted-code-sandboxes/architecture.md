@@ -2,9 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Implemented architecture
 
-**Status:** Implemented and verified. Last green integration run:
-**2026-11-21, `eu-central-1`, run 14**, on commit `5e8c213` (`npx projen
-integ`). Every step of the spec §8 integration test passed on all three
+**Status:** Implemented; verified except the teardown step. Last
+integration run: **2026-11-21, `eu-central-1`, run 14**, on commit
+`5e8c213` (`npx projen integ`). Every step of the spec §8 integration test passed on all three
 backends except `teardown`. Deploy took 1132 s. The teardown ended
 `DELETE_FAILED` on two leftover Lambda network interfaces in the tool
 subnets, which hold the subnets and the tool security group; the README's
@@ -25,13 +25,22 @@ the delete. The one clean teardown was run 9 (`eu-central-1`, destroy
 | `teardown` | Failed: `DELETE_FAILED` on two Lambda network interfaces (above) |
 
 Runs 12 and 13 cover the other two Regions. Run 12 (`us-east-1`, commit
-`9702bf0`) passed 55 of 61 units; its DNS Firewall steps `dns` and
+`9702bf0`) passed every step except the teardown, a `no-credentials`
+lookup on `microvm` that had no answer and did not repeat in runs 13 and
+14, and `runaway` on `agentcore`, where the session after the `memfd`
+kill was marked dirty by reclaimable slab, which the dirty read at
+`5e8c213` leaves out; its DNS Firewall steps `dns` and
 `dns-platform` passed there. Run 13 (`eu-west-1`, commit `4795e7e`) passed
 every step except one check in `runaway` (the boot id baseline, read in
 the test after the session had idled out); run 14 on the final code commit
 passes that check. Run 13 also ended
 `DELETE_FAILED` on the same two interfaces. Deploys of the integration
 stack took 1123 to 1328 s across runs 5 to 14.
+
+The demo stack (`src/main.ts`, `backends=microvm`, `standalone=true`) was
+deployed on 2026-11-22 in `eu-west-1` in 635 s; `scripts/demo.sh` passed
+its seven steps, the published parameter read back with every field, and
+the stack deleted cleanly in 1374 s.
 
 ## Purpose
 
@@ -112,9 +121,11 @@ ADR-0050).
 The construct's read-only properties are `runCodeFunction` (with
 `standalone`), `registryTable`, `inputBucket`, `runnerRepository`,
 `toolRole`, `toolTenantRole`, `offboardFunction`, `vpc`, `dnsFirewall`,
-`environment`, and per backend the image, cluster, task definition or
-runtime ARN in `backendOutputs`. The construct and the demo stack publish
-no SSM parameter (ADR-0069).
+`environment`, `config`, `backends`, and per backend the image, cluster,
+task definition or runtime ARN in `backendOutputs`. The construct writes no
+SSM parameter; the demo stack writes one JSON parameter,
+`/application-plane/shared/code-sandbox/sandboxes`, from these properties
+(ADR-0069, spec §6.3).
 
 ### Roles
 
@@ -325,9 +336,9 @@ thrown, so the code reaches the caller (ADR-0032).
 | `input_not_found` | No | No such object under the tenant's prefix; S3 answers 403 for a missing key without list rights, so both map here |
 | `input_too_large` | No | The object exceeds `maxInputBytes`, decided from its size before any sandbox starts |
 | `backend_disabled` | No | `backend` names a backend that is not deployed |
-| `sandbox_starting` | After `retryAfterSeconds` (5 s) | The tenant's sandbox is still starting, or the call lost its races |
+| `sandbox_starting` | After `retryAfterSeconds` (5 s, or 1 s when the row just moved) | The tenant's sandbox is still starting, or the call lost its races |
 | `sandbox_busy` | Yes | The sandbox is running another job |
-| `sandbox_failed` | After `retryAfterSeconds` (30 s) | The sandbox ended before it served, or died on two attempts |
+| `sandbox_failed` | After `retryAfterSeconds` (up to 30 s, the time left before `retryAt`) | The sandbox ended before it served, or died on two attempts |
 | `tool_failed` | No | Any other fault |
 
 The runner's `wrong_sandbox` and `dirty` refusals never reach a caller; the
@@ -391,7 +402,7 @@ at its idle timeout; both end at `sandboxMaxLife`. A suspended MicroVM
 resumes on the next request. `nitro` has no task life limit, so the reaper
 stops a `READY` task unused for `sandboxIdle` and any task whose own
 `startedAt` is older than `sandboxMaxLife`. The reaper also deletes rows past
-`expiresAt`, writes the stop line for a MicroVM the platform ended, marks a
+`expiresAt`, writes the stop line for a sandbox the platform ended (`microvm`, `nitro`), marks a
 failed start `FAILED`, and sweeps orphans (ADR-0011, ADR-0034): it lists
 sandboxes first and scans rows second, so a sandbox of a start in flight is
 never taken for an orphan, and it writes each row with the version it saw

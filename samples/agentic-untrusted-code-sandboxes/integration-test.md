@@ -64,9 +64,9 @@ Before it deploys, the driver checks, and fails early naming the cause:
 | Variable | Default | Effect |
 |---|---|---|
 | `AWS_REGION` | none, required | the one Region of the run |
-| `INTEG_PREFIX` | `UntrustedCodeSandboxesInteg` | stack name; letters and digits, 1 to 40 |
+| `INTEG_PREFIX` | `UntrustedCodeSandboxesInteg` | stack name; a letter, then letters and digits, 1 to 40 in all |
 | `INTEG_DEPLOY_CONCURRENCY` | `2` | `cdk deploy --all --concurrency`; 2 keeps API Gateway's control-plane throttle away |
-| `INTEG_STATE_DIR` | the system temp directory | where the driver keeps its state file, logs and run records (outside the repository) |
+| `INTEG_STATE_DIR` | `untrusted-code-sandboxes-integ` under the system temp directory | where the driver keeps its state file, logs and run records (outside the repository) |
 
 The driver prints the table of [Steps](#steps) with a result per unit and the
 deploy and destroy times, and exits 1 when any step failed. It prints no
@@ -141,8 +141,8 @@ is recorded as a failure with the error's class and message.
 
 ## Runtime and cost
 
-One run takes about 20 minutes to deploy (1132 to 1328 s), about 35
-minutes of steps, and 40 to 60 minutes to delete (2422 s in the clean
+One run takes about 20 minutes to deploy (1123 to 1328 s), about 35
+minutes of steps, and 40 to 65 minutes to delete (2422 s in the clean
 delete, about 3700 s in the deletes that stopped on the leftover network
 interfaces). The waits in the steps are `sandboxIdle` (2 min, three times,
 partly overlapped) and the `nitro` scale-in before `cold-from-zero` (at

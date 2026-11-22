@@ -72,7 +72,7 @@ AgentCore session on one shared runtime. The MicroVM image, the task
 definition and the second runtime are shared definitions; only running
 instances are per-tenant.
 
-### 1.2 What this sample does not do yet
+### 1.2 What this sample does not do
 
 - Egress allowlists. Code reaches no internet host on any backend; a sandbox
   that must reach one host is a later option (ADR-0003).
@@ -303,7 +303,8 @@ Read-only properties: `runCodeFunction` (undefined unless `standalone`),
 `registryTable`, `inputBucket`, `runnerRepository` (with `nitro` or
 `agentcore`), `toolRole` (the one tool role every tool function runs as),
 `toolTenantRole`, `offboardFunction`, `vpc`, `dnsFirewall` (with
-`dnsFirewall` on), `environment`, and `backendOutputs`: per backend
+`dnsFirewall` on), `environment`, `config` (the resolved props),
+`backends` (each enabled backend's CDK side), and `backendOutputs`: per backend
 `imageArn`, `clusterArn` and `taskDefinitionArn`, or `runtimeArn`.
 Methods: `bindRunCode(fn)` and `grantInvokeRunCode(principal)`.
 
@@ -689,7 +690,7 @@ to its own stdout through the runner.
 | Role | May | May not |
 |---|---|---|
 | Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image (every MicroVM action authorizes against the image ARN; there is no MicroVM ARN), `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only, so a start without the connector, which would get `INTERNET_EGRESS`, is refused; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime and its endpoints; `ecs:DescribeTasks` on the cluster. One role, shared: `runCodeFunction` and the `RunCodeToolTarget` function run as it; a function with its own role gets the same statements through `bindRunCode`; `ToolTarget` adds `kms:GetPublicKey` on the context key when a gateway function is bound | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
-| Standalone invokers (with `standalone`) | `lambda:InvokeFunction` on `runCodeFunction`, through `grantInvokeRunCode(principal)`, or an identity policy on `runCodeFunction.functionArn`, in the same app | the gateway path; see T-82 for same-account identity policies |
+| Standalone invokers (with `standalone`) | `lambda:InvokeFunction` on `runCodeFunction`, through `grantInvokeRunCode(principal)` in the app, or an identity policy on the published `runCodeFunctionArn` in another app | the gateway path; see T-82 for same-account identity policies |
 | Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only, with the request tag condition and `ecs:cluster` = the sample's cluster; `ecs:TagResource` on `task/<cluster>/*` with the request tag condition and `ecs:CreateAction` = `RunTask` (the action has no `ecs:cluster` key, and this stops the role retagging existing tasks); `ecs:StopTask` with the resource tag condition and `ecs:cluster`; `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
 | Task execution role | trust `ecs-tasks.amazonaws.com` with `aws:SourceAccount`; `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
 | AgentCore runtime role | trust `bedrock-agentcore.amazonaws.com` with `aws:SourceAccount` and `aws:SourceArn` = this account's runtimes named `<runtimeName>-*`; `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime; code can create extra groups under the prefix, which the cleanup resource removes); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
@@ -1266,13 +1267,24 @@ Consumes:
 | `agentic-runtime-isolation` | construct `ToolTarget` from its package entry and `toolHandler` from its `./tools` subpath (local `file:../agentic-runtime-isolation`, dev and optional peer dependency; the gateway entry supports only a `file:` install of the producer, ADR-0017), parameter `/application-plane/shared/agent-runtime/ingress` | the tools gateway, the signed tenant context; used only by the gateway entry |
 | `tenant-identity` `shared-pool` | its parameters, through `agentic-runtime-isolation` only | users and tenants for the integration test |
 
-Publishes: no parameter (ADR-0069). The demo stack deploys the construct
-and writes nothing to Parameter Store; a consumer reads the construct's
-read-only properties (§3.3) in the same app and makes its grants through
-`grantInvokeRunCode` or `RunCodeToolTarget`.
+Publishes (ADR-0069):
+
+| Parameter | Value |
+|---|---|
+| `/application-plane/shared/code-sandbox/sandboxes` | one JSON document: `version` (1), `toolTarget` (the `RunCodeToolTarget` name, or `none`; `none` in the demo stack, which has no gateway entry), `runCodeFunctionArn` (with `standalone`, or `none`), `backends`, `defaultBackend`, `registryTableName`, `inputBucketName`, `offboardFunctionArn`, and per backend `imageArn` (`microvm`), `clusterArn` and `taskDefinitionArn` (`nitro`), or `runtimeArn` (`agentcore`) |
+
+The demo stack (`src/demo.cdk.ts`) writes the parameter from the
+construct's read-only properties; the construct writes no parameter
+(standard §4.5), and the integration stack publishes nothing
+(agentic-runtime-isolation ADR-0042), so its two construct instances cannot
+collide on it. A parameter only names resources: a consumer in another app
+still makes its grants through `grantInvokeRunCode` or `RunCodeToolTarget`
+in the app that owns the construct.
 
 Constructs: `UntrustedCodeSandboxes` from the package root and `RunCodeToolTarget` from the `gateway` subpath, with their props, plus the exports in §3.3.
-The sample has a row in the `ARCHITECTURE.md` samples map.
+The sample has a row in the `ARCHITECTURE.md` samples map and its
+parameter namespace, `/application-plane/shared/code-sandbox/*`, in §5.1
+there.
 
 ## 7. Spikes
 
@@ -1287,7 +1299,7 @@ deploy and destroy time, and cleans up on exit.
 | S-4 | Cold `RunMicrovm` to first `/run`, and resume after suspend: P50 and P90 over 20 runs. Does the runner as root and code as uid 1001 work on the AL2023 base image? | `startWait`, runner model |
 | S-5 | In an `ISOLATED_SANDBOX` task with no task role, can code read the execution role's credentials, the ECS task metadata endpoint, or IMDS? Does the container start as root and may the runner drop code to uid 1001? | C-2 on `nitro`, runner model |
 | S-6 | Does the task pull its image through its own ENI or the instance's? With sandbox subnets and a task group open only to the Logs endpoint, can code reach the internet or another task? Do `awslogs` logs arrive? | C-3 on `nitro`, endpoint set |
-| S-7 | `RunTask` to `RUNNING` on a warm instance, and from zero instances; idle instance cost; is a stopped task's private IP reused within an hour? | a warm-instance option (dropped, ADR-0020), ADR-0010 |
+| S-7 | `RunTask` to `RUNNING` on a warm instance, and from zero instances; idle instance cost; is a stopped task's private IP reused within an hour? | a warm-instance option (dropped, ADR-0070), ADR-0010 |
 | S-8 | Does `InvokeAgentRuntime` support a condition on the session id, so the tool role can be limited per tenant? | enforced or filtered call (§3.4) |
 | S-9 | Does a V2 runtime in VPC mode with the §3.7 endpoints and policies start, pull, refresh and log? Can its code reach the internet or PUT to another bucket through the S3 endpoint? Does deleting the runtime end its live sessions, and how long does the delete take? | C-3 on `agentcore`, drain |
 | S-10 | With the §3.6 runtime role, what can code do with the metadata endpoint's credentials, and does `aws:AgentCoreRuntimeSourceSid` scope the `sessionFiles` grant to one session? Does the container start as root and may the runner drop code to uid 1001? | C-2 on `agentcore`, ADR-0007, runner model |

@@ -24,8 +24,11 @@ What this sample is NOT: an egress allowlist for sandboxed code, a
 confidential-computing setup, a runtime for languages other than Python 3,
 a GPU or EKS sandbox, or a way to give one tenant a larger sandbox than
 another. Offboarding stops a tenant's sandboxes; it does not delete the
-tenant's input, output or session objects. The full list is in the
-[specification §1.2 and §1.3](design/agentic-untrusted-code-sandboxes.spec.md#12-what-this-sample-does-not-do-yet).
+tenant's input, output or session objects. It does not build the cheaper
+option either: code that may hold what the agent holds can run in the
+agent's own AgentCore session with `InvokeAgentRuntimeCommand`, and then
+needs no second machine. The full list is in the
+[specification §1.2 and §1.3](design/agentic-untrusted-code-sandboxes.spec.md#12-what-this-sample-does-not-do).
 
 ## Contents
 
@@ -33,6 +36,7 @@ tenant's input, output or session objects. The full list is in the
 - [How it works](#how-it-works)
 - [Deploy](#deploy)
 - [Deployment integration test](#deployment-integration-test)
+- [End-to-end demo](#end-to-end-demo)
 - [Tool API](#tool-api)
 - [Observability and costs](#observability-and-costs)
 - [Security notes](#security-notes)
@@ -118,9 +122,15 @@ teardown) are in [architecture.md, Workflows](architecture.md#workflows).
 - For `nitro`: an instance type of a Nitro Enclaves-capable family in the
   Region (default `m7i.xlarge`, ADR-0045).
 - For `agentcore`: Amazon Bedrock AgentCore Runtime in the Region.
-- For the gateway entry only: a deployed or same-app
-  [`agentic-runtime-isolation`](../agentic-runtime-isolation/) `SharedIngress`
-  with a tools gateway. The core entry needs no other sample.
+- For the gateway entry only:
+  [`agentic-runtime-isolation`](../agentic-runtime-isolation/), installed as
+  `file:../agentic-runtime-isolation` (the only supported install,
+  ADR-0017), with a `SharedIngress` and a tools gateway (named `default`
+  unless you pass `gateway`), deployed as its README describes. Tenants'
+  tokens come from an issuer that meets its token contract, for example
+  [`tenant-identity`](../tenant-identity/)'s `shared-pool`
+  (`npx cdk deploy TenantIdentity-shared-pool --context topology=shared-pool`,
+  from `samples/tenant-identity`). The core entry needs no other sample.
 
 ### Build and deploy the demo stack
 
@@ -151,17 +161,18 @@ The delete runs the drain first, so it stops every live sandbox itself. See
 two Lambda network interfaces.
 
 Measured times in a non-production test account (from the backend smoke
-deploys and the integration runs, 2026-11-19 to 2026-11-21):
+deploys, the integration runs and the demo run, 2026-11-19 to 2026-11-22):
 
 | Deployment | Deploy | Destroy with sandboxes live |
 |---|---|---|
-| `microvm` only | 641 s | 1371 s |
+| `microvm` only (the demo stack) | 635 to 641 s | 1371 to 1374 s |
 | `nitro` only | about 450 s (CloudFormation; image build not timed) | 1618 s |
 | `agentcore` (two instances, one with `sessionFiles`) | 924 to 989 s | 1895 s |
-| All three backends, two instances, gateway entry (integration stack) | 1132 to 1328 s | 2422 s in the one clean delete |
+| All three backends, two instances, gateway entry (integration stack) | 1123 to 1328 s | 2422 s in the one clean delete |
 
-Most of a destroy is the release of the network interfaces of the
-functions in the tool subnets, not the sandboxes.
+In the `nitro` and `agentcore` deletes most of the time was the late
+release of the network interfaces of the functions in the tool subnets;
+in the `microvm` delete the cause was not isolated.
 
 ### Use the construct in your own app
 
@@ -195,9 +206,22 @@ The props, their defaults and their checks are in
 The construct's read-only properties are `runCodeFunction` (with
 `standalone`), `registryTable`, `inputBucket`, `runnerRepository`,
 `toolRole`, `toolTenantRole`, `offboardFunction`, `vpc`, `dnsFirewall`,
-`environment` and `backendOutputs`; its methods are `bindRunCode` and
-`grantInvokeRunCode`. The sample publishes no SSM parameter: a consumer
-wires the construct's properties in its own app (ADR-0069).
+`environment`, `config` (the resolved props), `backends` (each enabled
+backend's CDK side) and `backendOutputs`; its methods are `bindRunCode` and
+`grantInvokeRunCode`.
+
+### Published interface
+
+The demo stack, not the construct, writes one JSON parameter (ADR-0069):
+
+| Parameter | Value |
+|---|---|
+| `/application-plane/shared/code-sandbox/sandboxes` | `version`, `toolTarget` (`none` in the demo stack), `runCodeFunctionArn` (`none` without `standalone`), `backends`, `defaultBackend`, `registryTableName`, `inputBucketName`, `offboardFunctionArn`, and per backend `imageArn`, `clusterArn` and `taskDefinitionArn`, or `runtimeArn` |
+
+A parameter only names resources. A consumer in another app still needs the
+grants made in the app that owns the construct: `grantInvokeRunCode` for the
+standalone entry, or a `RunCodeToolTarget` and the tenants' tool grants for
+the gateway entry.
 
 ## Deployment integration test
 
@@ -206,9 +230,41 @@ construct twice in one stack with all three backends behind
 `agentic-runtime-isolation`'s tools gateway, runs every step of
 [specification §8](design/agentic-untrusted-code-sandboxes.spec.md#8-integration-test-outline)
 as tenants would, and deletes the stack with sandboxes still running. A run
-takes about 20 minutes to deploy, 35 minutes of steps, and 40 to 60
-minutes to delete. What it stands up, its steps, its knobs, its cost drivers
+takes about 20 minutes to deploy, 35 minutes of steps, and 40 to 65
+minutes to delete; its cost was not measured, and the drivers are the NAT
+gateway, the endpoints, `nitro` instance time and the DNS Firewall
+queries. What it stands up, its steps, its knobs, its cost drivers
 and its test-only shortcuts are in [integration-test.md](integration-test.md).
+
+## End-to-end demo
+
+Against a demo stack deployed with `--context standalone=true`, from
+`samples/agentic-untrusted-code-sandboxes`:
+
+```bash
+export AWS_PROFILE=<profile> AWS_REGION=<region>
+scripts/demo.sh
+```
+
+It reads the published parameter, then on each deployed backend calls
+`runCodeFunction` with IAM as the vendor's own API would, for two synthetic
+tenants named per run. It checks each answer, prints step names and
+outcome codes only, and offboards both tenants on exit, also on failure.
+
+| Step | Call | Expected result |
+|---|---|---|
+| 1 | tenant A runs `print(6 * 7)` | `exitCode` 0, output `42`, `sandbox` `started` |
+| 2 | A writes and reads `/work/marker` | the marker, `sandbox` `reused` |
+| 3 | tenant B checks for `/work/marker` | `False`, `sandbox` `started` (its own sandbox) |
+| 4 | A names the input `../<B>/invoice.csv` | `invalid_argument` |
+| 5 | A names a missing input | `input_not_found` |
+| 6 | A runs `while True: pass` | `timedOut` true, at `runTimeout` |
+| 7 | `offboardTenant` for A | one stopped sandbox per backend |
+
+Last run: 2026-11-22, a non-production test account, `eu-west-1`, a demo
+stack with `backends=microvm` and `standalone=true`: all seven steps
+passed in 44 s. The stack deployed in 635 s and deleted cleanly in 1374 s,
+with no network interface, log group or parameter left.
 
 ## Tool API
 
@@ -317,15 +373,16 @@ send and receive data in DNS lookups on every backend (T-29, T-91).
   (T-29, T-32, T-91).
 - On the core entry, limit who may invoke `runCodeFunction` and verify the
   tenant id in your own API before the call (T-82).
-- Remove a tenant's `run_code` grant before calling `offboardTenant`, and
-  delete the tenant's `inputs/`, `outputs/` and `sessions/` objects in your
-  own offboarding (ADR-0035).
+- Remove a tenant's `run_code` grant before calling `offboardTenant` (T-71),
+  and delete the tenant's `inputs/`, `outputs/` and `sessions/` objects in
+  your own offboarding (T-72).
 - Activate `TenantId` as a cost allocation tag and ECS split cost allocation
-  data, so `nitro` task cost splits by tenant (ADR-0013).
+  data, so `nitro` task cost splits by tenant (T-75).
 - Alarm on `sandbox_failed` and `tool_failed` counts in the run lines, and
-  on drain or reaper errors (ADR-0033).
-- Size the MicroVM memory quota and the `nitro` instance types for your peak
-  number of live tenants (ADR-0045).
+  on drain or reaper errors, so a stop that failed or a sandbox left running
+  is seen (T-64, ADR-0033).
+- Size the MicroVM memory quota and the `nitro` capacity for your peak
+  number of live tenants (T-56, T-58).
 - Review the accepted threats in [threat-model.md](threat-model.md) against
   your own risk appetite, in particular T-6 (code, not IAM, keeps the tenant
   on `microvm` and `agentcore`).

@@ -3,14 +3,18 @@
 
 /**
  * The demo stack: a thin wrapper that wires the construct (standard §4.5).
- * It publishes no parameter; a consumer reads the construct's properties
- * in its own app (spec §6.3, ADR-0069).
+ * It publishes the construct's properties as the sample's one JSON parameter
+ * (spec §6.3, ADR-0069); the construct writes no parameter.
  */
 
 import { Stack, type StackProps } from 'aws-cdk-lib';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 import { BACKEND_NAMES, type BackendName } from './backend';
 import { UntrustedCodeSandboxes } from './untrusted-code-sandboxes.cdk';
+
+/** The sample's published parameter (ARCHITECTURE.md §5.1, spec §6.3). */
+export const PUBLISHED_PARAMETER = '/application-plane/shared/code-sandbox/sandboxes';
 
 export interface DemoStackProps extends StackProps {
   readonly backends: BackendName[];
@@ -22,9 +26,28 @@ export class DemoStack extends Stack {
 
   public constructor(scope: Construct, id: string, props: DemoStackProps) {
     super(scope, id, props);
-    this.sandboxes = new UntrustedCodeSandboxes(this, 'Sandboxes', {
+    const sandboxes = new UntrustedCodeSandboxes(this, 'Sandboxes', {
       backends: props.backends,
       standalone: props.standalone,
+    });
+    this.sandboxes = sandboxes;
+    // One JSON document, not one parameter per value: Parameter Store allows 3 writes per second per account.
+    const published = {
+      version: 1,
+      // The demo stack has no gateway entry; a vendor's app that adds a RunCodeToolTarget publishes its name here.
+      toolTarget: 'none',
+      runCodeFunctionArn: sandboxes.runCodeFunction?.functionArn ?? 'none',
+      backends: [...sandboxes.config.backends],
+      defaultBackend: sandboxes.config.defaultBackend,
+      registryTableName: sandboxes.registryTable.tableName,
+      inputBucketName: sandboxes.inputBucket.bucketName,
+      offboardFunctionArn: sandboxes.offboardFunction.functionArn,
+      ...sandboxes.backendOutputs,
+    };
+    new ssm.StringParameter(this, 'Published', {
+      parameterName: PUBLISHED_PARAMETER,
+      description: 'agentic-untrusted-code-sandboxes published interface (spec §6.3)',
+      stringValue: this.toJsonString(published),
     });
   }
 }
