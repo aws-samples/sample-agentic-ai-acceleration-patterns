@@ -174,14 +174,14 @@ Scope and assumptions:
 
 ## Security review
 
-Run on 2026-11-22 on the built tree of commit `2c1d9c8` (a clean export with
+Run on 2026-11-22 on the built tree of commit `7319447` (a clean export with
 the synthesised `cdk.out`, its cdk-nag validation report included); later
 commits on the branch change documents only:
 
 | Scanner | Critical | High | Medium | Low | Result |
 |---|---|---|---|---|---|
 | ASH 3.1.2 (bandit, cdk-nag, checkov, detect-secrets, npm-audit, semgrep), `.ash/.ash.yaml` | 0 | 0 | 0 | 16 (bandit, below threshold) | passed, 0 actionable at the medium threshold; 54 suppressed |
-| ProtoShield 0.18.0 (`.protoshield/config.yaml`) | 0 | 22 | 15 | 17 | full coverage; every high dispositioned below |
+| ProtoShield 0.18.0 (`.protoshield/config.yaml`) | 0 | 22 | 17 | 17 | full coverage; every high dispositioned below |
 
 ASH's cfn-nag, grype, opengrep and syft did not run (their dependencies are
 not installed); cdk-nag at synth and ProtoShield's checkov, CVE and IAM

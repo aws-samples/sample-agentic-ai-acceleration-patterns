@@ -556,7 +556,7 @@ sandboxes still running. The 28 steps, the step by backend matrix, the
 tenants, the test-only shortcuts and the run budget are in
 `integration-test.md`.
 
-On 2026-11-22 the build ran 1063 tests, all passing.
+On 2026-11-22 the build ran 1064 tests, all passing.
 
 **Scans.** The threat model's Security review section records the scan
 tools, their findings and the suppressions: on 2026-11-22, ASH with no
