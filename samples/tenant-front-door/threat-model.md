@@ -664,36 +664,37 @@ None. Spec §11 has no open question.
 
 ## Security review
 
-ProtoShield scanned the sample on 2026-11-21, with the integration test, the
+ProtoShield scanned the sample on 2026-11-22, with the integration test, the
 demo script and the registrar read retry in the tree (semgrep, cdk-nag on the
 synthesized templates, checkov, gitleaks, CVE, IAM least privilege, licence
 headers; bandit and cfn-nag had no Python or `.template` file to run on). The
-scan found 0 critical, 4 high, 6 medium and 2 low. The IAM least privilege
+scan found 0 critical, 5 high, 7 medium and 0 low. The IAM least privilege
 check is model-based and groups and grades the same statements differently
-from one run to the next, so the table also holds findings of earlier scans of
-the same code. The count in brackets is the number of findings of the
-2026-11-21 scan the row covers; a row marked "earlier scan only" was not
-reported by it. The counts of the other rows sum to 4 high, 6
-medium and 2 low. Each finding:
+from one run to the next, so the table also holds findings of earlier scans
+of the same code. The count in brackets is the number of findings of the
+last scan the row covers; a row marked "earlier scan only" was not reported
+by it. The counts of the other rows sum to 5 high, 7 medium and 0 low. Each
+finding:
 
 | Finding | Severity | Outcome |
 |---|---|---|
-| IAM: `cloudfront:ListDistributionTenants` on `*` (sweeper, teardown, guard) and `acm:ListCertificates` on `*` (in `us-east-1` only) | high (2) | Accepted. Neither action supports a resource type or a condition key in the service authorisation reference, so `*` is the only resource. Both actions only read; every update and delete these roles make is scoped by the distribution tag (AR-33). |
-| IAM: `logs:DescribeLogGroups` and `cloudwatch:GetMetricData` on `*` in the integration test's access role, and `cloudwatch:GetMetricData` also in its test role (`test/integ/stacks.ts`) | high (2) | Accepted. Neither action takes a resource ARN. Both are reads; both roles trust only the driver's principal and exist for one run (`integration-test.md`). |
-| IAM: `acm:RequestCertificate` and `cloudfront:CreateDistributionTenant` on `*` | medium (earlier scan only) | Accepted. Neither action supports a resource type. Both require the request tags to name this distribution and allow only the front door's tag keys (spec §3.4, AR-33), so a created resource is always one this front door's scoped delete reaches. |
-| IAM: `s3:GetBucketLocation` and `s3:GetBucketAcl` beside the object reads in the integration test's source bucket policy (`test/integ/stacks.ts`) | medium (1) | Accepted. The bucket holds one zip for the run. The policy names the three control-plane build roles by ARN and the control plane's account, and CodeBuild calls both bucket-level actions when it downloads an S3 source. |
-| IAM: `acm:ListCertificates` on `*` in the integration test's test role (`test/integ/stacks.ts`) | medium (1) | Accepted. The action takes no resource ARN and is limited to `us-east-1`; the role trusts only the driver's principal and exists for one run. |
+| IAM: `cloudfront:ListDistributionTenants` on `*` (sweeper, teardown, guard) and `acm:ListCertificates` on `*` (in `us-east-1` only) | high (3) | Accepted. Neither action supports a resource type or a condition key in the service authorisation reference, so `*` is the only resource. Both actions only read; every update and delete these roles make is scoped by the distribution tag (AR-33). |
+| IAM: `logs:DescribeLogGroups` and `cloudwatch:GetMetricData` on `*` in the integration test's access role, and `cloudwatch:GetMetricData` also in its test role (`test/integ/stacks.ts`) | medium (2) | Accepted. Neither action takes a resource ARN. Both are reads; both roles trust only the driver's principal and exist for one run (`integration-test.md`). |
+| IAM: `acm:RequestCertificate` and `cloudfront:CreateDistributionTenant` on `*` | high (2) | Accepted. Neither action supports a resource type. Both require the request tags to name this distribution and allow only the front door's tag keys (spec §3.4, AR-33), so a created resource is always one this front door's scoped delete reaches. |
+| IAM: `s3:GetBucketLocation` and `s3:GetBucketAcl` beside the object reads in the integration test's source bucket policy (`test/integ/stacks.ts`) | medium (earlier scan only) | Accepted. The bucket holds one zip for the run. The policy names the three control-plane build roles by ARN and the control plane's account, and CodeBuild calls both bucket-level actions when it downloads an S3 source. |
+| IAM: `acm:ListCertificates` on `*` in the integration test's test role (`test/integ/stacks.ts`) | medium (earlier scan only) | Accepted. The action takes no resource ARN and is limited to `us-east-1`; the role trusts only the driver's principal and exists for one run. |
+| IAM: `s3:GetObject` on the SPA bucket's objects, with the distribution's ARN as the source condition (`src/edge/main.cdk.ts`) | medium (1) | Accepted. Scoped to one bucket and one distribution by the `AWS:SourceArn` condition, and a deny statement leaves writes to the two deployment roles (ADR-0011, ADR-0013). |
 | IAM: `ssm:GetParametersByPath` on `/application-plane/tenants/*/<applicationId>` in the demo cell | medium (earlier scan only) | Accepted. Tenant ids are minted at run time, so the path names the application and leaves the tenant open; the cell reads only its own application's namespaces and builds the path from the verified claim (M-2). |
 | IAM: the integration test's access role reads `/application-plane/tenants/*/<applicationId>` and describes the stacks named `<prefix>-*` and `<fleet>-*` | medium (earlier scan only) | Accepted. The run's tenant ids are minted during the run, and the prefix and fleet carry the run id, so these are the run's own namespaces and stacks; the role exists for one run. |
 | semgrep `unknown-value-with-script-tag` in `spa/build.ts` | medium (2) | False positive. The build fills its own `index.html` with constants and digests at build time; no request value reaches it. |
 | CVE: `minimatch` 10.2.6 in `aws-cdk-lib`, `glob` 10.5.0 in `ts-jest` | medium (2) | Accepted. Build and test time only; neither is in a Lambda bundle or the SPA. They clear with the next `aws-cdk-lib` and Jest upgrades. |
-| IAM: the CDK-generated policy of the `BucketDeployment` that stages the integration test's source zip (`s3:GetObject*`, `s3:List*`, `s3:DeleteObject*`, `s3:Abort*`; `test/integ/stacks.ts`) | low (1) | Accepted. The wildcards are CDK's own for a bucket deployment, scoped to the run's one source bucket and the CDK asset bucket; the role exists for one run and the finding is acknowledged in the code. |
-| IAM: the sweeper's table actions (`BatchWriteItem` among them); its fan-out Lambda invoke of itself and the scheduler role's invoke on the sweeper's versions (the last two reported by an earlier scan only) | low (1) | Accepted. One table and one function each, and the re-check uses each of the four table actions (`src/sweeper/recheck.ts`); the schedules invoke the unqualified function only (M-16, M-24). |
+| IAM: the CDK-generated policy of the `BucketDeployment` that stages the integration test's source zip (`s3:GetObject*`, `s3:List*`, `s3:DeleteObject*`, `s3:Abort*`; `test/integ/stacks.ts`) | low (earlier scan only) | Accepted. The wildcards are CDK's own for a bucket deployment, scoped to the run's one source bucket and the CDK asset bucket; the role exists for one run and the finding is acknowledged in the code. |
+| IAM: the sweeper's table actions (`BatchWriteItem` among them); its fan-out Lambda invoke of itself and the scheduler role's invoke on the sweeper's versions | low (earlier scan only) | Accepted. One table and one function each, and the re-check uses each of the four table actions (`src/sweeper/recheck.ts`); the schedules invoke the unqualified function only (M-16, M-24). |
 
 The cdk-nag suppressions were all reviewed as info; each cites its reason
 in the code. The `control-plane` files this sample's integration test needs
 (`src/main.ts`, `src/shared/context.ts`, `test/shared/context.test.ts`) were
-scanned at the same commit with that sample's configuration: no finding.
+scanned on the same day with that sample's configuration: no finding.
 
 ## Links
 
