@@ -673,8 +673,9 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
   scans of the sample, the integration test's stacks included, and the
   outcome of each finding. Rescan after your own changes.
 - **The integration driver needs bash 4.4, GNU coreutils, curl 7.75, jq 1.6
-  and AWS CLI v2** or later, and a unit test of the driver needs `npm ci` in
-  `../control-plane`.
+  and AWS CLI v2** or later, and the Smithy CLI (the preflight builds the
+  control plane's model when `../control-plane/src/smithy` is missing). A
+  unit test of the driver needs `npm ci` in `../control-plane`.
 
 ## Design trail
 

@@ -22,7 +22,7 @@
 #   TFD_DEDICATED_DOMAIN    step 14's name: in the zone, outside TFD_APP_DOMAIN
 #   TFD_INTEG_RUN_ID        optional, [a-z0-9]{1,10} without aws, amazon or cognito; default a new one per run
 #   TFD_IDENTITY_REGION     optional, the tenant-identity shared pool's Region; default AWS_REGION
-#   TFD_ISSUER_DOMAIN       optional, a Cognito domain for the front door's issuer input
+#   TFD_ISSUER_DOMAIN       optional, the https:// origin of a Cognito domain for the front door's issuer input
 #   TFD_INTEG_KEEP=1        optional, skip the teardown (debugging; run `teardown` after)
 #
 # Both accounts use CDK's default bootstrap qualifier: the test apps use the
@@ -90,7 +90,7 @@ plan() {
   local steps=("${STEPS_SINGLE[@]}")
   [[ "$MODE" == host ]] && steps=("${STEPS_HOST[@]}")
   echo "steps ${steps[*]} 24"
-  echo "teardown fixture deployments-and-cells register-hooks-delete control-plane-policy routeHookAccess hook-parameter testRole,cellA,cellB,edgeLogging,main,edge,agentIngress records identity controlPlane,cellAccount controlPlaneSetup,support"
+  echo "teardown hook-parameter-restore probe-hook txt fixture deployments-and-cells register-hooks-delete control-plane-policy routeHookAccess hook-parameter testRole,cellA,cellB,edgeLogging,main,edge,agentIngress records identity controlPlane,cellAccount leftovers-cp controlPlaneSetup,support leftovers-edge leftovers-identity"
 }
 if [[ "$COMMAND" == plan ]]; then plan; exit 0; fi
 

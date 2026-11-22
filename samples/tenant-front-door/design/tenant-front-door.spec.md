@@ -2576,10 +2576,10 @@ event runs one route hook build. The route changes of steps 2, 11 to 13,
 which waits its 45 s bound (§4.2) before the operation ends. Step 20
 adds one probe build per event, and step 22 waits through two skipped
 delete hooks, each three builds of at least one 60 s poll with 60 s and
-120 s between them, so at least 6 minutes each. The step 2 fixture and
-the suspensions of steps 13, 18 and 22 are writes the test makes without the
-hook, so after each the test waits 90 s for propagation (§4.2) before
-its next call. The rotation check after the list is a separate run with
+120 s between them, so at least 6 minutes each. The suspensions of steps 13, 18 and 22
+are writes the test makes without the hook, so after each the test waits
+90 s for propagation (§4.2) before its next call; after the step 2
+fixture it polls `cloudfront:TestFunction` for at most 120 s. The rotation check after the list is a separate run with
 its own time. The dedicated-domain checks (steps 3, 11 and 18) use a
 fixture `host#` entry and `cloudfront:TestFunction`, so they deploy no
 distribution tenant and no certificate. Step 14 runs the domain
@@ -2639,7 +2639,7 @@ whole run.
    `host#dedicated-a.example.com` naming `a`, with the control plane's
    account as `ac`, a dedicated domain with no DNS, certificate or distribution
    tenant. It writes with the store's ETag, as every other writer does,
-   then waits 90 s, or polls `cloudfront:TestFunction` until
+   then polls `cloudfront:TestFunction` every 10 s, for at most 120 s, until
    `/config.json` for that host answers 200, before step 3.
 3. `/` serves the SPA with every §7.1 header, and so does every answer
    the router generates itself: the 302 of `/logout`, `/config.json`,
@@ -2928,7 +2928,7 @@ whole run.
     streamed call below. Then one streamed `POST
     https://<appDomain>/agents/support-bot/invocations` with `a`'s
     token goes through the real distribution to the stand-in, which
-    writes ten events 500 ms apart: 200, the first byte at the client
+    writes ten events 500 ms apart: all ten arrive, the first byte at the client
     within 1 s of the stand-in's first write, one event per read with
     client gaps near 500 ms, so nothing was buffered. The stand-in saw
     `<stage>/support-bot/invocations` with no `/agents`, the viewer's
