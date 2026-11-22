@@ -969,6 +969,23 @@ describe('known wildcards (ADR-0030)', () => {
     expect(found.some((p) => p.startsWith('S/R/'))).toBe(false);
     expect(found.some((p) => p.startsWith('S/Wide/'))).toBe(true);
   });
+
+  test('statements that share the `*` wildcard get one acknowledgement with every matching reason', () => {
+    const stack = new Stack(new App(), 'S');
+    const role = new iam.Role(stack, 'R', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
+    role.addToPolicy(new iam.PolicyStatement({ actions: ['ec2:CreateNetworkInterface', 'ec2:DeleteNetworkInterface'], resources: ['*'] }));
+    role.addToPolicy(new iam.PolicyStatement({ actions: ['lambda:ListMicrovms'], resources: ['*'] }));
+    role.addToPolicy(new iam.PolicyStatement({ actions: ['ec2:DescribeSubnets'], resources: ['*'] }));
+    acknowledgeKnownFindings(stack, { inputBucket: '<Bucket.Arn>', logGroups: [], logGroupPrefixes: [], invokable: [] });
+    const policy = stack.node.findAll().find((n) => n instanceof iam.CfnPolicy) as iam.CfnPolicy;
+    const iam5 = policy.node.metadata
+      .map((m) => (m.data as Record<string, string>)['AwsSolutions-IAM5[Resource::*]'])
+      .filter((r): r is string => r !== undefined);
+    expect(iam5).toHaveLength(1);
+    expect(iam5[0]).toMatch(/network interfaces/);
+    expect(iam5[0]).toMatch(/take no resource/);
+    expect(iam5[0].match(/manages its own network interfaces/g)).toHaveLength(1);
+  });
 });
 
 describe('least privilege and teardown details', () => {
