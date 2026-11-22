@@ -27,7 +27,7 @@ import { RUNNER_PORTS } from '../protocol';
 /**
  * `ScaleInAfter` of the capacity provider, in seconds (S-7, S-16): instances
  * go about two minutes after the last task. The capacity provider has no
- * minimum-instances setting, so the sample keeps no warm instance (ADR-0020).
+ * minimum-instances setting, so the sample keeps no warm instance (ADR-0070).
  */
 export const SCALE_IN_AFTER_SECONDS = 120;
 

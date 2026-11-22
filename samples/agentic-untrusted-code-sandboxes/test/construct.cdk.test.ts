@@ -4,7 +4,8 @@
 import { App, Duration, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import { readContext } from '../src/demo.cdk';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import { DemoStack, PUBLISHED_PARAMETER, readContext } from '../src/demo.cdk';
 import { resolveProps } from '../src/props';
 import { UntrustedCodeSandboxes } from '../src/untrusted-code-sandboxes.cdk';
 
@@ -72,6 +73,35 @@ describe('construct shell', () => {
     const stack = new Stack(app, 'S');
     new UntrustedCodeSandboxes(stack, 'Sandboxes', {});
     expect(() => app.synth()).toThrow(/has no entry/);
+  });
+});
+
+describe('demo stack published parameter (spec §6.3)', () => {
+  test('writes one JSON parameter with the construct values; the construct alone writes none', () => {
+    const stack = new DemoStack(new App(), 'Demo', { backends: ['microvm'], standalone: true });
+    const t = Template.fromStack(stack);
+    t.resourceCountIs('AWS::SSM::Parameter', 1);
+    const [param] = Object.values(t.findResources('AWS::SSM::Parameter')) as Array<{ Properties: { Name: string; Value: unknown } }>;
+    expect(param.Properties.Name).toBe(PUBLISHED_PARAMETER);
+    const value = JSON.stringify(param.Properties.Value);
+    for (const key of ['version', 'toolTarget', 'runCodeFunctionArn', 'backends', 'defaultBackend', 'registryTableName', 'inputBucketName', 'offboardFunctionArn', 'imageArn']) {
+      expect(value).toContain(key);
+    }
+    const bare = new Stack(new App(), 'S');
+    new UntrustedCodeSandboxes(bare, 'Sandboxes', { standalone: true });
+    Template.fromStack(bare).resourceCountIs('AWS::SSM::Parameter', 0);
+  });
+
+  test('carries every backend key, and none for runCodeFunctionArn without standalone', () => {
+    const stack = new DemoStack(new App(), 'Demo', { backends: ['microvm', 'nitro', 'agentcore'], standalone: false });
+    // The bare construct needs an entry, so bind a function the way a gateway target would.
+    stack.sandboxes.bindRunCode(new lambda.Function(stack, 'Bound', {
+      runtime: lambda.Runtime.NODEJS_24_X, handler: 'index.handler', code: lambda.Code.fromInline('exports.handler = async () => ({})'), role: stack.sandboxes.toolRole,
+    }));
+    const [param] = Object.values(Template.fromStack(stack).findResources('AWS::SSM::Parameter')) as Array<{ Properties: { Value: unknown } }>;
+    const value = JSON.stringify(param.Properties.Value);
+    for (const key of ['imageArn', 'clusterArn', 'taskDefinitionArn', 'runtimeArn']) expect(value).toContain(key);
+    expect(value).toContain('\\"runCodeFunctionArn\\":\\"none\\"');
   });
 });
 
