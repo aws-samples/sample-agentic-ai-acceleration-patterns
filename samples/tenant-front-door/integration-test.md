@@ -40,10 +40,10 @@ Two non-production accounts:
   npx cdk deploy TenantIdentity-shared-pool-multi-tenant --context topology=shared-pool-multi-tenant --context publishSharedParameters=false
   ```
 
-  The account must hold no other front door in your Region
-  (the edge parameter's name is fixed, spec §6.4), and API Gateway must
-  have its CloudWatch Logs role set there, naming a role that exists. For
-  an account without one, `test/integ/api-gateway-account.app.ts` sets it
+  The account must hold no other front door in your Region (the edge
+  parameter's name is fixed, spec §6.4), and API Gateway must have its
+  CloudWatch Logs role set there, naming a role that exists. For an
+  account without one, `test/integ/api-gateway-account.app.ts` sets it
   (deploy command in its header); it keeps the role when its stack is
   removed, because other API Gateway stages in the Region log through it.
   The driver checks the hosted zone, that no other front door is there,

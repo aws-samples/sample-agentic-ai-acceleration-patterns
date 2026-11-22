@@ -381,9 +381,9 @@ policy is attached.
    distribution that still has distribution tenants.
 
 Then remove the cells' own stacks in their accounts, the issuer client's
-callback URLs, and the registrar's secret. A parameter left behind in step 5
-names a registrar that step 6 removes, so the application's next create or
-update fails.
+callback URLs, and the registrar's secret. A hook parameter that step 5 did
+not delete names a registrar that step 6 removes, so the application's next
+create or update fails.
 
 ### Use the constructs
 
@@ -501,15 +501,15 @@ the same role: it reads the run's ids from `.integ/<run id>/`. The
 teardown needs the same inputs as the test.
 
 The demo takes about three minutes (137 to 199 s in three runs on
-2026-11-21 against a kept `host` mode deployment), uses only
-the run's synthetic tenants and prints no token. The test ends with `b`
-suspended (step 18), so the demo first sets both tenants active, and it
-suspends `b` once more for step 5. It undoes that suspension when the
-script exits, also after a failure. The tenants and stacks belong to the
-integration test run, so the teardown above removes them. The test's
-deployment limits one client IP to 50 requests per tenant host in five
-minutes on `/api/*`, so the demo polls `/api/whoami` once every six
-seconds, and a second run needs a five-minute gap.
+2026-11-21 against a kept `host` mode deployment), uses only the run's
+synthetic tenants and prints no token. The test ends with `b` suspended
+(step 18), so the demo first sets both tenants active, and it suspends `b`
+once more for step 5. It undoes that suspension when the script exits,
+also after a failure. The tenants and stacks belong to the integration
+test run, so the teardown above removes them. The test's deployment
+limits one client IP to 50 requests per tenant host in five minutes on
+`/api/*`, so the demo polls `/api/whoami` once every six seconds, and a
+second run needs a five-minute gap.
 
 | Step | Call | Expect |
 |---|---|---|
@@ -627,8 +627,8 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
 - **The demo needs the integration test's deployment.** `scripts/demo.sh`
   runs against a kept `host` mode run. The test takes about an hour (64
   minutes measured, teardown included), and there is no lighter deploy
-  for it. It signs in with the `IssueToken` test aid,
-  not through a browser, and it does not run in `single` mode.
+  for it. It signs in with the `IssueToken` test aid, not through a
+  browser, and it does not run in `single` mode.
 - **The registrar retries a control-plane read once, inside 10 s.** A read
   that still fails answers 503 "control plane cannot be read" and writes
   nothing (spec §3.4 step 2). The caller retries; the integration driver does,

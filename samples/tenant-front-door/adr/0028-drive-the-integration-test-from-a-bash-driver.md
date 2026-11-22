@@ -31,11 +31,11 @@ the test uses the CDK CLI from `scripts/integ.sh`.
 Pros: the standard's default; the runner destroys its stacks in a
 `finally` block. Cons: every check is an assertion resource, so 24 steps
 would pass CloudFormation's output limit, as the control plane's test
-nearly does with 18. Waits are polling custom resources with
-a 2-minute provider timeout. A stack update that must fail, an update of
-a stack under test between steps, and an ordered teardown with API calls
-between stack deletes do not fit a deploy-then-destroy runner. Deploy
-times per stack are not reported.
+nearly does with 18. Waits are polling custom resources with a 2-minute
+provider timeout. A stack update that must fail, an update of a stack
+under test between steps, and an ordered teardown with API calls between
+stack deletes do not fit a deploy-then-destroy runner. Deploy times per
+stack are not reported.
 
 ### Option 2: a bash driver over CDK apps
 `scripts/integ.sh` deploys the stacks of `test/integ.single.ts` or
@@ -75,7 +75,7 @@ can copy, and synthesise under cdk-nag in the build.
   teardown of a run that made nothing, a teardown whose AWS calls fail,
   a teardown and a run whose credentials are gone, a run whose first
   deploy fails, a control plane already in its account, and the demo
-  application's scripts and the probe hook against stubs.
-  The steps themselves are checked only by a live run.
+  application's scripts and the probe hook against stubs. The steps
+  themselves are checked only by a live run.
 - Revisit if integ-runner gains ordered multi-stack teardown and checks
   that are not CloudFormation resources.

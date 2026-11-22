@@ -2450,10 +2450,9 @@ run used `eu-central-1` for them and `eu-west-1` for the rest. The edge
 account is the one the driver's credentials point at, because the test's
 hosted zone is there. The control plane's account, `TFD_INTEG_ACCOUNT_B`,
 is CDK-bootstrapped to trust it, so the driver deploys into both
-accounts with the edge account's credentials.
-The control plane's account hosts the test's own control plane and cell
-A, and is registered vendor-owned, as the control plane registers its
-home account (control-plane §1.1). The edge account hosts the front door
+accounts with the edge account's credentials. The control plane's
+account hosts the test's own control plane and cell A, and is registered
+vendor-owned, as the control plane registers its home account (control-plane §1.1). The edge account hosts the front door
 and cell B, and is registered tenant-owned, a test-only shortcut that
 spares a third account (step 1): the test deploys the control plane's
 standalone account role pair there with an `externalId`, because
@@ -2474,10 +2473,10 @@ parameter of its own, so its account holds no other control plane in
 that Region either: before it deploys, the driver reads that account
 through its CDK bootstrap lookup role, read only, and refuses to start
 when that parameter exists or when a stack of the run's id is in either
-account. The test reuses the `tenant-identity` shared pool in
-both topologies it needs: `shared-pool` and `shared-pool-multi-tenant`,
-whose users hold the `tenants` token of step 5. It never changes or
-removes either. Its tenants carry the control plane's tenant ids, which
+account. The test reuses the `tenant-identity` shared pool in both
+topologies it needs: `shared-pool` and `shared-pool-multi-tenant`, whose
+users hold the `tenants` token of step 5. It never changes or removes
+either. Its tenants carry the control plane's tenant ids, which
 `tenant-identity`'s `CreateTenant` accepts (`tenant-identity` ADR-0029).
 It needs a public hosted zone for a test domain. Its test inputs, none
 of them committed, are `TFD_APP_DOMAIN`, the `appDomain`, which must be
@@ -2583,8 +2582,8 @@ steps 13, 18 and 22 are writes the test makes without the hook, so after
 each the test waits 90 s for propagation (§4.2) before its next call;
 after the step 2 fixture it polls `cloudfront:TestFunction` for at most
 120 s. The rotation check after the list is a separate run with its own
-time. The dedicated-domain checks (steps 3, 11 and 18) use a
-fixture `host#` entry and `cloudfront:TestFunction`, so they deploy no
+time. The dedicated-domain checks (steps 3, 11 and 18) use a fixture
+`host#` entry and `cloudfront:TestFunction`, so they deploy no
 distribution tenant and no certificate. Step 14 runs the domain
 challenge against the real `TFD_DEDICATED_DOMAIN`: it requests one
 certificate, creates no distribution tenant, and adds five waits of a
@@ -2823,10 +2822,9 @@ The credentials the driver starts with must last the whole run.
     the last. Each check allows up to 5 minutes of sending, and each
     retry follows a 5-minute wait, so the step can take about 35 minutes
     at worst. It reports the stack update's time and the time from the
-    end of the update to the passing check. It then asserts
-    `b` is served. Through
-    `cloudfront:TestFunction` with
-    `Host: <appDomain>`, the router answers 404.
+    end of the update to the passing check. It then asserts `b` is
+    served. Through `cloudfront:TestFunction` with `Host: <appDomain>`,
+    the router answers 404.
 18. (host) Sign-in host (ADR-0016). `/signin-state` on `a`'s host with
     `Sec-Fetch-Site: same-origin` returns a `state`; cross-site it gets
     403, and with a malformed nonce 400. A real sign-in through the issuer
@@ -2957,11 +2955,11 @@ The credentials the driver starts with must last the whole run.
     teardown. While any part in or for the control plane's account has
     failed, the setup and support stacks stay, because they hold the
     driver's access role and the vendor IdP a rerun needs. The leftover
-    check also finds no registrar certificate for `<dd>` or
-    `probe.<dd>` (step 14), no
-    hook parameter, no stand-in stack (step 1) and, through `GetTenant`,
-    none of the run's tenants in either `tenant-identity` deployment; a
-    read that fails with anything but a not-found error fails the check.
+    check also finds no registrar certificate for `<dd>` or `probe.<dd>`
+    (step 14), no hook parameter, no stand-in stack (step 1) and, through
+    `GetTenant`, none of the run's tenants in either `tenant-identity`
+    deployment; a read that fails with anything but a not-found error
+    fails the check.
 
 Rotation check, optional and run on its own against a `host` mode front
 door: run the three rotation updates of §4.1 and check that a `state`
