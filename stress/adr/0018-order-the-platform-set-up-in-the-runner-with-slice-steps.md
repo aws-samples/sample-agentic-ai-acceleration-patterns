@@ -38,8 +38,9 @@ that each need the other half-way.
 action. The runner refuses a table entry for a step the slice does not list.
 Pros: the order is one reviewable table; a sample declares what it can do and
 nothing about when; a platform run with fewer slices skips the entries of the
-slices that are not in it. Cons: the runner names samples (`control-plane`,
-`tenant-front-door`), which the contract has avoided so far.
+slices that are not in it. Cons: the runner's table names all four samples,
+two of which (`control-plane`, `tenant-front-door`) also name steps, which the
+contract has avoided so far.
 
 ### Option 3: A shell script outside the runner that calls the slices
 Pros: no runner change. Cons: no budget check, no result records, no teardown
@@ -52,15 +53,17 @@ plane, front-door phase one, the control plane's `hooks`, `register` and
 slice. A step runs in platform mode only. A step before a teardown (the control
 plane's `unhook`, before the front door's `teardown`) is a second table. A
 slice's deploy seconds are the time of its `deploy` and its steps, which is the
-time it needs to be ready to run (P-6); its `seed` is not part of it.
+time it needs to be ready to run (P-6); its `seed` is not part of it. A step
+run before another slice's teardown counts in that slice's destroy seconds.
 
 ## Consequences
 Easier: the order that took a paragraph and a table in the spec is code with a
 test; the control plane and the front door each implement steps that read like
 the spec's table.
 
-Harder: the runner knows the names of two samples. A fifth slice that joins the
-platform run adds its entries to the table. A slice-mode run is unchanged.
+Harder: the runner knows the names of the four samples. A fifth slice that
+joins the platform run adds its entries to the table. A slice-mode run is
+unchanged.
 
 Revisit if more than two slices need steps, or if the order has to differ per
 tier.

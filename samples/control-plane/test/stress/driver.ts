@@ -8,7 +8,8 @@
  *
  *   budget                   the slice's quota draws, no credentials
  *   check-accounts           the cell account check (spec §3.7), before every run
- *   register [--front-door]  PutApplication (the stress application; with --front-door its DISTRIBUTION_ARN cell parameter from the front door) and PutAccount (each cell account)
+ *   register                 PutApplication (the stress application) and PutAccount (each cell account); the platform
+ *                            run's `step register` adds the DISTRIBUTION_ARN cell parameter from the front door
  *   connection               write control-plane-connection.json, the manifest the front-door slice reads (platform mode)
  *   step <name>              a platform step (spec §3.5): hooks, register, warm-up or unhook
  *   seed                     the tier's tenant records, from the manifest when it exists
@@ -710,7 +711,7 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'check-accounts':
       return checkAccounts();
     case 'register':
-      return register(arg === '--front-door');
+      return register();
     case 'connection':
       return connection();
     case 'step':
