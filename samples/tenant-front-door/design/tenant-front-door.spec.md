@@ -2434,14 +2434,13 @@ criteria and measurements are in [spikes.md](./spikes.md).
 
 `scripts/integ.sh` drives the test (ADR-0028). It deploys the stacks of
 two CDK apps, `test/integ.single.ts` for the default mode and
-`test/integ.host.ts`, which deploys with `addressing: 'host'`, one stack per
-CDK call so each stack's deploy and destroy time is reported. In the default
-mode it runs the steps below; in `host` mode it runs steps 1 to 4, 11, 15,
-17, 18, 23 and 24 (steps 17 and 18, marked (host), run only there). It runs
-step 24's
-ordered teardown from an `EXIT` trap, so a run that fails or stops still
-removes what it made. `npx projen integ` and `npx projen integ:host`
-start it.
+`test/integ.host.ts`, which deploys with `addressing: 'host'`, one stack
+per CDK call so each stack's deploy and destroy time is reported. In the
+default mode it runs the steps below; in `host` mode it runs steps 1 to 4,
+11, 15, 17, 18, 23 and 24 (steps 17 and 18, marked (host), run only
+there). It runs step 24's ordered teardown from an `EXIT` trap, so a run
+that fails or stops still removes what it made. `npx projen integ` and
+`npx projen integ:host` start it.
 
 It runs in one Region, `AWS_REGION`, the control plane's (for example
 `eu-central-1`), with the edge stacks in `us-east-1` (ADR-0010),
@@ -2576,34 +2575,33 @@ event runs one route hook build. The route changes of steps 2, 11 to 13,
 which waits its 45 s bound (§4.2) before the operation ends. Step 20
 adds one probe build per event, and step 22 waits through two skipped
 delete hooks, each three builds of at least one 60 s poll with 60 s and
-120 s between them, so at least 6 minutes each. The suspensions of steps 13, 18 and 22
-are writes the test makes without the hook, so after each the test waits
-90 s for propagation (§4.2) before its next call; after the step 2
-fixture it polls `cloudfront:TestFunction` for at most 120 s. The rotation check after the list is a separate run with
-its own time. The dedicated-domain checks (steps 3, 11 and 18) use a
+120 s between them, so at least 6 minutes each. The suspensions of
+steps 13, 18 and 22 are writes the test makes without the hook, so after
+each the test waits 90 s for propagation (§4.2) before its next call;
+after the step 2 fixture it polls `cloudfront:TestFunction` for at most
+120 s. The rotation check after the list is a separate run with its own
+time. The dedicated-domain checks (steps 3, 11 and 18) use a
 fixture `host#` entry and `cloudfront:TestFunction`, so they deploy no
 distribution tenant and no certificate. Step 14 runs the domain
 challenge against the real `TFD_DEDICATED_DOMAIN`: it requests one
 certificate, creates no distribution tenant, and adds five waits of a
-little over 60 s for the TXT record's TTL (one after each TXT change), two
-daily sweeper runs started by hand, each followed by a wait for its page (a
-few seconds for one entry, then a fixed 15 s; the check fails after 120 s),
-two stack updates of the main stack and a wait for the sweeper to delete
-the certificate (expected within 15 minutes; the check fails after 20).
-Step 23 adds the
-stand-in's deploy and destroy (67 s and 33 s in S-5), two 90 s waits
-around the suspended-tenant check, and a streamed call of a few seconds.
-The control plane the test deploys has its own deploy and destroy time,
-which the test reports with the rest. A `host` run, which skips steps
-5 to 10, 12 to 14, 16 and 19 to 22, was measured at 64 minutes in all:
-stack deploy times of about 21 minutes in all and stack destroys of about
-11 minutes (stacks of one phase overlap; integration-test.md, "Runtime and
-cost"). A `single` run is an
-estimate, not a measurement: about four and a half hours, of which
-about three hours are steps (each control-plane operation runs its
-scripts and hook builds one at a time, and steps 14 and 22 take about
-40 minutes each). The credentials the driver starts with must last the
-whole run.
+little over 60 s for the TXT record's TTL (one after each TXT change),
+two daily sweeper runs started by hand, each followed by a wait for its
+page (a few seconds for one entry, then a fixed 15 s; the check fails
+after 120 s), two stack updates of the main stack and a wait for the
+sweeper to delete the certificate (expected within 15 minutes; the check
+fails after 20). Step 23 adds the stand-in's deploy and destroy (67 s
+and 33 s in S-5), two 90 s waits around the suspended-tenant check, and
+a streamed call of a few seconds. The control plane the test deploys has
+its own deploy and destroy time, which the test reports with the rest.
+A `host` run, which skips steps 5 to 10, 12 to 14, 16 and 19 to 22, was
+measured at 64 minutes in all: stack deploy times of about 21 minutes in
+all and stack destroys of about 11 minutes (stacks of one phase overlap;
+integration-test.md, "Runtime and cost"). A `single` run is an estimate,
+not a measurement: about four and a half hours, of which about three
+hours are steps (each control-plane operation runs its scripts and hook
+builds one at a time, and steps 14 and 22 take about 40 minutes each).
+The credentials the driver starts with must last the whole run.
 
 1. Deploy the control plane in the control plane's account, which
    installs that account's role pair, and deploy the account role pair in
@@ -2637,10 +2635,11 @@ whole run.
    The test role then writes one fixture straight to the route table,
    the only write that bypasses the registrar (P-3):
    `host#dedicated-a.example.com` naming `a`, with the control plane's
-   account as `ac`, a dedicated domain with no DNS, certificate or distribution
-   tenant. It writes with the store's ETag, as every other writer does,
-   then polls `cloudfront:TestFunction` every 10 s, for at most 120 s, until
-   `/config.json` for that host answers 200, before step 3.
+   account as `ac`, a dedicated domain with no DNS, certificate or
+   distribution tenant. It writes with the store's ETag, as every other
+   writer does, then polls `cloudfront:TestFunction` every 10 s, for at
+   most 120 s, until `/config.json` for that host answers 200, before
+   step 3.
 3. `/` serves the SPA with every §7.1 header, and so does every answer
    the router generates itself: the 302 of `/logout`, `/config.json`,
    and the 401, 403, 404 and 503 answers of steps 5, 6, 9, 13 and 17.
@@ -2928,9 +2927,9 @@ whole run.
     streamed call below. Then one streamed `POST
     https://<appDomain>/agents/support-bot/invocations` with `a`'s
     token goes through the real distribution to the stand-in, which
-    writes ten events 500 ms apart: all ten arrive, the first byte at the client
-    within 1 s of the stand-in's first write, one event per read with
-    client gaps near 500 ms, so nothing was buffered. The stand-in saw
+    writes ten events 500 ms apart: all ten arrive, the first byte at the
+    client within 1 s of the stand-in's first write, one event per read
+    with client gaps near 500 ms, so nothing was buffered. The stand-in saw
     `<stage>/support-bot/invocations` with no `/agents`, the viewer's
     bearer in `Authorization` and `x-tenant-route: a`. `POST /agents`
     gets CloudFront's own 403, `/agents/` the router's 404, and the

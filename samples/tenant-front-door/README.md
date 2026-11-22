@@ -495,7 +495,7 @@ scripts/integ.sh teardown demo1 host
 ```
 
 Each tenant's host is `<tenant id in lower case>.<appDomain>`. The demo
-needs bash 4.4 or later, the AWS CLI v2, curl 7.75 or later and `jq`. Run it
+needs bash 4.4 or later, the AWS CLI v2.9 or later, curl 7.75 or later and `jq`. Run it
 from the checkout that ran the test, with credentials of the same role: it
 reads the run's ids from `.integ/<run id>/`. The teardown needs the same
 inputs as the test.
@@ -601,8 +601,8 @@ The full threat model, with every threat, mitigation and accepted risk, is in
       straight to it skips the edge's refusals, a suspension included (AR-3).
 - [ ] **Stop issuing tokens to a suspended tenant at the issuer.** A
       suspension holds at the edge only (spec §6.2).
-- [ ] **Raise the ACM certificate quota** before routing more than a few
-      hundred dedicated domains (spec §4.1; AR-18).
+- [ ] **Raise the ACM certificate quota** before routing more than about
+      2,500 dedicated domains (ACM's default quota; spec §4.1; AR-18).
 - [ ] **Add an edge rate rule in `single` mode, and size `ipRequestsPer5Min`**
       in `host` mode. The default is chosen, not measured (AR-8, AR-9).
 - [ ] **Rotate the sign-in key** in `host` mode on a schedule (spec §4.1).
@@ -673,7 +673,7 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
   scans of the sample, the integration test's stacks included, and the
   outcome of each finding. Rescan after your own changes.
 - **The integration driver needs bash 4.4, GNU coreutils, curl 7.75, jq 1.6
-  and AWS CLI v2** or later, and the Smithy CLI (the preflight builds the
+  and AWS CLI v2.9** or later, and the Smithy CLI (the preflight builds the
   control plane's model when `../control-plane/src/smithy` is missing). A
   unit test of the driver needs `npm ci` in `../control-plane`.
 

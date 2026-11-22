@@ -32,7 +32,11 @@ Two non-production accounts:
   Region and in `us-east-1`. It also holds the `tenant-identity`
   `shared-pool` deployment (and `shared-pool-multi-tenant` for a `single`
   run), whose published parameters the test reads and which it never
-  changes or removes. It must hold no other front door in your Region
+  changes or removes. Deploy `shared-pool-multi-tenant` beside the other with
+  `npx cdk deploy TenantIdentity-shared-pool-multi-tenant --context
+  topology=shared-pool-multi-tenant --context publishSharedParameters=false`
+  (in `samples/tenant-identity`), because one stack owns the fixed-name
+  parameters. It must hold no other front door in your Region
   (the edge parameter's name is fixed, spec §6.4), and API Gateway must
   have its CloudWatch Logs role set there, naming a role that exists. For
   an account without one, `test/integ/api-gateway-account.app.ts` sets it
@@ -71,8 +75,8 @@ npx projen integ
 start it from a shell that outlives it (`nohup`, `tmux`). The driver
 needs bash 4.4 or later, GNU coreutils (`date +%s%3N` for millisecond
 log windows), curl 7.75 or later (`--aws-sigv4`), jq 1.6 or later, the
-Smithy CLI (the preflight builds the control plane's model) and AWS CLI v2
-(`aws configure export-credentials`); on macOS, install them and put
+Smithy CLI (the preflight builds the control plane's model) and AWS CLI v2.9
+or later (`aws configure export-credentials`); on macOS, install them and put
 them first on `PATH`.
 
 | Knob | Default | Effect |
@@ -199,5 +203,5 @@ id>` are expected leftovers of the CDK custom resources.
 | A driver access role in the control plane's account writes the hook parameter, and reads the run's stacks, tenant namespaces and cell probe parameters | Nothing: only `RouteHookAccess` writes it |
 | The driver reads stack outputs the sample does not publish: the main stack's `Integ*` outputs, which the test app adds from the construct's properties and its construct tree (route table, routing endpoint, router function, registrar and sweeper log groups, sweeper function and table), the edge logging stack's `IntegEdgeLog*`, `RouteHookAccess`'s `IntegHookPolicyArn` and `IntegHookParameterName`, and `TenantIdentity-shared-pool-multi-tenant`'s `ApiUrl` | Reads the edge parameter `/application-plane/shared/front-door/edge` for the registrar URL and the distribution, takes `routeTableArn`, `routingEndpoint` and `distributionId` from the `TenantFrontDoor` construct in its own CDK app, adds the `RouteHookAccess` policy through its own control-plane deploy, and reads `tenant-identity`'s published parameters (`/application-plane/shared/identity/*`), which only the `shared-pool` deployment publishes |
 | The preflight reads the control plane's account through its CDK bootstrap lookup role | Nothing: a deployer knows what its own accounts hold |
-| The driver retries an operator call to the registrar that answers 503 "control plane cannot be read", up to three times 5 s apart, notes each retry and counts them in the run summary | Retries the call by hand; the registrar already retries each control-plane read once (spec §3.4 step 2), so a 503 that reaches the driver is two failed reads |
+| The driver retries an operator call to the registrar that answers 503 "control plane cannot be read", up to three times 5 s apart, notes each retry and counts them in the run summary | Retries the call by hand; the registrar already retries each control-plane read once (spec §3.4 step 2), so a 503 that reaches the driver is a read that failed twice, or failed in a way the registrar does not retry |
 | Browser and issuer sign-in checks of steps 3 and 18 are run by hand | Runs them as part of its release checks |
