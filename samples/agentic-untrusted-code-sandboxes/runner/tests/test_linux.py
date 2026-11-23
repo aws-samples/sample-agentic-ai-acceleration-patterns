@@ -58,7 +58,7 @@ def run_json(executor, code, **kw):
 
 PROBE = r"""
 import json, os, resource
-limits = {n: resource.getrlimit(getattr(resource, "RLIMIT_" + n)) for n in ("CPU", "AS", "NPROC", "FSIZE", "NOFILE")}
+limits = {n: resource.getrlimit(getattr(resource, "RLIMIT_" + n)) for n in ("CPU", "AS", "NPROC", "FSIZE", "NOFILE", "MEMLOCK")}
 status = dict(l.split(":", 1) for l in open("/proc/self/status").read().splitlines() if ":" in l)
 print(json.dumps({"uid": os.getuid(), "gid": os.getgid(), "groups": os.getgroups(), "pgid": os.getpgid(0),
                   "pid": os.getpid(), "sid": os.getsid(0), "limits": limits, "cwd": os.getcwd(),
@@ -133,7 +133,7 @@ class MicrovmLinux(Base):
         self.assertEqual((p["uid"], p["gid"], p["groups"]), (TEST_UID, TEST_UID, []))
         self.assertEqual((p["pgid"], p["sid"]), (p["pid"], p["pid"]))
         self.assertEqual(p["limits"], {"CPU": [3, 3], "AS": [256 * MIB] * 2, "NPROC": [9, 9],
-                                       "FSIZE": [100 * MIB] * 2, "NOFILE": [64, 64]})
+                                       "FSIZE": [100 * MIB] * 2, "NOFILE": [64, 64], "MEMLOCK": [0, 0]})
         self.assertEqual((p["cwd"], p["seccomp"], p["nnp"], p["oom"]), ("/work", "2", "1", "1000"))
         self.assertEqual(p["env"], {"PATH": jb.JOB_PATH, "HOME": "/work", "TMPDIR": "/work/tmp",
                                     "LANG": "C.UTF-8", "MALLOC_ARENA_MAX": "2"})
@@ -200,6 +200,7 @@ class NitroLinux(Base):
         p = run_json(self.executor(), PROBE)
         self.assertEqual(p["limits"]["AS"], [(2048 - 256 - 64) * MIB] * 2)
         self.assertEqual((p["limits"]["NPROC"], p["limits"]["NOFILE"]), ([64, 64], [256, 256]))
+        self.assertEqual(p["limits"]["MEMLOCK"], [0, 0])  # the runner may lock its pages; the job may not (ADR-0074)
         self.assertNotIn("MALLOC_ARENA_MAX", p["env"])
 
     def test_watchdog_marks_then_kills(self):
@@ -216,45 +217,86 @@ class NitroLinux(Base):
         self.assertFalse(r["timedOut"])
         self.assertEqual(r["exitCode"], -9)
 
-    def test_runner_entry_tls_hello_and_job(self):
-        nonce = os.urandom(32)
+    def start_runner(self, nonce):
+        """The nitro runner entry on 8443, as the task runs it. Returns the process once it accepts connections."""
         env = {"PATH": jb.JOB_PATH, wire.NONCE_HASH_ENV: wire.nonce_hash(nonce), "RUNNER_BACKEND": "nitro"}
         proc = subprocess.Popen([sys.executable, "-I", os.environ.get("RUNNER_ENTRY", "/opt/runner/runner.py")],
                                 env=env, stderr=subprocess.PIPE)
         self.addCleanup(proc.wait)
         self.addCleanup(proc.terminate)
-        client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        client.check_hostname = False
-        client.verify_mode = ssl.CERT_NONE
         deadline = time.monotonic() + 15
         while True:
             try:
                 socket.create_connection(("127.0.0.1", 8443), timeout=1).close()
-                break
+                return proc
             except OSError:
                 if time.monotonic() > deadline:
                     raise
                 time.sleep(0.1)
-        conn = http.client.HTTPSConnection("127.0.0.1", 8443, timeout=20, context=client)
+
+    @staticmethod
+    def connect(timeout=20):
+        client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        client.check_hostname = False
+        client.verify_mode = ssl.CERT_NONE
+        return http.client.HTTPSConnection("127.0.0.1", 8443, timeout=timeout, context=client)
+
+    @staticmethod
+    def hello(conn, nonce):
         challenge = os.urandom(32)
         conn.request("POST", "/hello", json.dumps({"v": 1, "nonce": wire.b64url(nonce), "challenge": wire.b64url(challenge)}),
                      {"Content-Type": "application/json"})
-        hello = json.loads(conn.getresponse().read())
+        return challenge, json.loads(conn.getresponse().read())
+
+    @staticmethod
+    def post_run(conn, nonce, run_id, code, timeout_ms=5000):
+        body = {"v": 1, "runId": run_id, "tenantId": "tenant-a", "nonce": wire.b64url(nonce), "code": code,
+                "timeoutMs": timeout_ms, "maxOutputBytes": 4096,
+                "jobAuth": wire.job_auth(nonce, run_id, "tenant-a", code.encode(), b"")}
+        conn.request("POST", "/run", json.dumps(body), {"Content-Type": "application/json"})
+        return json.loads(conn.getresponse().read())
+
+    def test_runner_entry_tls_hello_and_job(self):
+        nonce = os.urandom(32)
+        self.start_runner(nonce)
+        conn = self.connect()
+        challenge, hello = self.hello(conn, nonce)
         peer = hashlib.sha256(conn.sock.getpeercert(binary_form=True)).digest()
         self.assertEqual(hello["certFingerprint"], peer.hex())
         self.assertEqual(hello["proof"], wire.hello_proof(nonce, challenge, peer))
         self.assertEqual(conn.sock.version(), "TLSv1.3")
-        code = "import os, json; print(json.dumps(sorted(os.environ)))"
-        body = {"v": 1, "runId": "r1", "tenantId": "tenant-a", "nonce": wire.b64url(nonce), "code": code,
-                "timeoutMs": 5000, "maxOutputBytes": 4096,
-                "jobAuth": wire.job_auth(nonce, "r1", "tenant-a", code.encode(), b"")}
-        conn.request("POST", "/run", json.dumps(body), {"Content-Type": "application/json"})
-        result = json.loads(conn.getresponse().read())
+        result = self.post_run(conn, nonce, "r1", "import os, json; print(json.dumps(sorted(os.environ)))")
         self.assertEqual(result["exitCode"], 0, result)
         self.assertNotIn(wire.NONCE_HASH_ENV, json.loads(result["stdout"]))
         self.assertNotIn("RUNNER_BACKEND", json.loads(result["stdout"]))
         self.assertEqual(result["proof"], wire.result_proof(nonce, "r1"))
         self.assertEqual(result["bootId"], hello["bootId"])
+        conn.close()
+
+    def test_runner_entry_fill_from_every_slot(self):
+        # Issue 144: the job and every child it can fork (RLIMIT_NPROC 64) allocate to their own limit at once, far
+        # past the task group's. The runner answers memoryExceeded, keeps /work and its bootId, and holds its own
+        # pages locked, so the fill cannot evict them (ADR-0074).
+        nonce = os.urandom(32)
+        proc = self.start_runner(nonce)
+        conn = self.connect(timeout=30)
+        _, hello = self.hello(conn, nonce)
+        self.assertEqual(self.post_run(conn, nonce, "r1", "open('/work/keep', 'w').write('kept')")["exitCode"], 0)
+        fill = ("import os, sys, time\n"
+                "def hog():\n    held = []\n    try:\n        while True:\n            held.append(bytearray(b'x') * (16 << 20))\n"
+                "    except MemoryError:\n        time.sleep(0.5)\n"
+                "kids = 0\nwhile True:\n    try:\n        pid = os.fork()\n    except OSError:\n        break\n"
+                "    if pid == 0:\n        hog()\n        os._exit(1)\n    kids += 1\n"
+                "sys.stderr.write('forked %d\\n' % kids)\nhog()\ntime.sleep(20)\n")
+        result = self.post_run(conn, nonce, "r2", fill, timeout_ms=20000)
+        self.assertTrue(result["memoryExceeded"], result)
+        self.assertFalse(result["timedOut"], result)
+        after = self.post_run(conn, nonce, "r3", "print(open('/work/keep').read())")
+        self.assertEqual((after["exitCode"], after["stdout"].strip()), (0, "kept"), after)
+        self.assertEqual(after["bootId"], hello["bootId"])
+        with open("/proc/%d/status" % proc.pid, encoding="ascii") as f:
+            locked = [int(line.split()[1]) for line in f if line.startswith("VmLck:")]
+        self.assertGreater(locked[0], 0, "the runner's pages are not locked")
         conn.close()
 
 

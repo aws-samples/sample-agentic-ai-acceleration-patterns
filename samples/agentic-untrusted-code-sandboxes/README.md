@@ -390,15 +390,17 @@ aws cloudformation delete-stack --stack-name <stack>
 aws cloudformation wait stack-delete-complete --stack-name <stack>
 ```
 
-**A `nitro` memory fill can stall the runner.** When code fills memory
-from all 64 process slots at once, the runner sometimes does not answer
-within `runTimeout` + 5 s (2 of 6 integration runs of the `runaway`
-step). The tool then stops the tenant's task and returns `timedOut` with
-`memoryExceeded` false, and the next call starts a fresh task without the
-tenant's `/work` files. The overrun cap still contains the job, and
-nothing reaches another tenant. The cause inside the task is not known;
-locking the runner's memory is an untested fix (spec §3.5, threat model
-T-89).
+**A `nitro` memory fill from every process slot is slow to end.** When
+code fills memory from all 64 process slots at once, the job holds the
+task group at its limit until the watchdog or the kernel ends it. The
+runner locks its own pages, so the fill cannot evict them, and it
+answers `memoryExceeded` on the same sandbox with the tenant's `/work`
+files kept (ADR-0074; 0 of 44 such fills overran in a test account,
+against 5 of 8 before the lock). Such a fill still takes up to about
+7 s at the default task size, because the runner's own allocations wait
+while the group is full. With a `runTimeout` below that, the time cap
+may end the job first (spec §3.5, threat model T-89). The fix was measured in one Region at the default task
+size only.
 
 **The AgentCore usage record is not checked.** The cost join for
 `agentcore` reads the AgentCore usage logs in the log group the construct

@@ -31,6 +31,29 @@ class ConstantsTest(unittest.TestCase):
     def test_job_uid_is_1001(self):
         self.assertEqual(jb.UID, 1001)
 
+    def test_the_job_locks_no_memory(self):
+        ex = jb.Executor("nitro", sz.Sizing("nitro", 1024 * MIB), FakeFilter())
+        self.assertIn((jb.resource.RLIMIT_MEMLOCK, 0), ex._limits(1000))
+
+    def test_lock_memory_locks_current_then_future_on_fault(self):
+        calls = []
+
+        class Libc:
+            def mlockall(self, flags):
+                calls.append(flags)
+                return 0
+
+        jb.lock_memory(Libc())
+        self.assertEqual(calls, [jb.MCL_CURRENT, jb.MCL_FUTURE | jb.MCL_ONFAULT])
+
+    def test_lock_memory_raises_when_refused(self):
+        class Libc:
+            def mlockall(self, flags):
+                return -1
+
+        with self.assertRaises(OSError):
+            jb.lock_memory(Libc())
+
     def test_cpu_seconds_round_up(self):
         self.assertEqual([jb.cpu_seconds(t) for t in (1, 1000, 1001, 30000, 60000)], [1, 1, 2, 30, 60])
 
@@ -62,6 +85,31 @@ class MonitorTest(unittest.TestCase):
         self.assertFalse(ex._above_l())  # 510 MiB counted, L = 768 MiB
         write(os.path.join(self.group, "memory.stat"), "file %d\nshmem %d\n" % (1500 * MIB, 300 * MIB))
         self.assertTrue(ex._above_l())  # 800 MiB counted
+
+    def test_nitro_watchdog_opens_the_group_files_once(self):
+        # Every poll reads the same open files (ADR-0074): no open, so no new allocation, while the group is full.
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))
+        write(os.path.join(self.group, "memory.stat"), "file 0\nshmem 0\n")
+        real_open = os.open
+        with mock.patch.object(jb.os, "open", side_effect=real_open) as opened:
+            self.assertFalse(ex._above_l())
+            write(os.path.join(self.group, "memory.current"), str(800 * MIB))
+            self.assertTrue(ex._above_l())  # the new value, read through the same descriptor
+        self.assertEqual(opened.call_count, 2)
+        for fd in ex._group_fds:
+            os.close(fd)
+
+    def test_nitro_watchdog_closes_a_half_open_pair(self):
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))  # no memory.stat
+        closed = []
+        real_close = os.close
+        with mock.patch.object(jb.os, "close", side_effect=lambda fd: (closed.append(fd), real_close(fd))):
+            with self.assertRaises(FileNotFoundError):
+                ex._above_l()
+        self.assertEqual(len(closed), 1)
+        self.assertIsNone(ex._group_fds)
 
     def test_microvm_floor(self):
         ex = self.executor("microvm")

@@ -472,8 +472,9 @@ with `busy`. The runner:
 2. Starts `python3 -I -S` on the code as uid 1001 (`sandbox`), in a new
    session and process group, with `/work` as the working directory and
    these limits, each with soft = hard so code cannot raise them (S-15):
-   `RLIMIT_CPU` = `runTimeout`, `RLIMIT_NPROC` = N and `RLIMIT_FSIZE` =
-   100 MiB, set before the drop to uid 1001; and `RLIMIT_NOFILE` = 256 (64
+   `RLIMIT_CPU` = `runTimeout`, `RLIMIT_NPROC` = N, `RLIMIT_FSIZE` =
+   100 MiB and `RLIMIT_MEMLOCK` = 0 (ADR-0074), set before the drop to
+   uid 1001; and `RLIMIT_NOFILE` = 256 (64
    on `microvm`, which bounds the Unix socket buffers each process can hold)
    and `RLIMIT_AS` = A, set last, after the drop and the filter install,
    because the child is a fork of the runner and may hold more descriptors
@@ -577,18 +578,23 @@ It did not kill a 64-process job that held 176 MiB. `memoryExceeded`
 was right in all 85 fills. It costs about 0.06 % of one CPU at idle.
 
 A job that fills memory from every process slot at once (64 processes,
-each to A) can also stall the runner. In two of six integration runs
-of the `runaway` step on `nitro` the runner wrote no `job_done` line
-within `runTimeout` + 5 s, so no `memoryExceeded` reached the tool. The
-tool stopped the tenant's task as an overrun (§4.1 step 5) and returned
-`timedOut` with exit -9 and `memoryExceeded` false.
-The next call started a fresh task. The stall's cause inside the task is
-not known: the runner logged nothing between the last job and the stop.
-The overrun cap still contains the job: the damage stays in the
-tenant's own sandbox, and the tenant loses its `/work` files. Locking
-the runner's memory (`mlockall`, with a `memlock` ulimit in the task
-definition) would keep the watchdog thread resident under that
-pressure; it is untested.
+each to A) holds the task group at its limit. With no swap, the kernel
+can then reclaim only file pages, the runner's code among them. Before
+ADR-0074 those pages were evicted and read back over and over: the
+runner wrote no `job_done` line within `runTimeout` + 5 s in 5 of 8
+such fills on a `nitro`-only stack (and in 2 of 6 integration runs of
+`runaway`), the tool stopped the task as an overrun (§4.1 step 5), and
+the tenant lost `/work`. So on `nitro` the runner locks its pages once
+it is claimed (`mlockall(MCL_CURRENT)`, then `MCL_FUTURE | MCL_ONFAULT`),
+the task definition sets the container's `memlock` ulimit to unlimited
+(a ulimit, not a capability), each job child sets `RLIMIT_MEMLOCK` to 0
+on every backend, and the watchdog keeps `memory.current` and
+`memory.stat` open and reads them with `pread`, because an open per poll
+allocates and an allocation in the full group waited 6 to 19 s. A runner
+whose lock the kernel refuses ends at start. With both, 0 of 44 such
+fills overran; the 12 fills of the final runner answered
+`memoryExceeded` in 0.65 to 7.4 s with the same `bootId` and `/work`
+kept (ADR-0074).
 
 Mounts (S-16). On every backend `/dev/shm` is the only tmpfs uid 1001
 can write: 64 MiB on `microvm` and `agentcore`, 576 MiB on `nitro`
@@ -1599,7 +1605,7 @@ touched.
 | limits | an input one byte over `maxInputBytes` returns `input_too_large`; an input of exactly `maxInputBytes` is read back whole (size and SHA-256 match); a print of `maxOutputBytes` `0x01` bytes (six bytes each in JSON) returns `truncated` = true with a result under the 6 MB Lambda response limit; `multiprocessing.Lock()` raises `PermissionError` on `microvm` and works on `nitro` and `agentcore`, where a file the job leaves in `/dev/shm` is gone at its next call; on `microvm` `os.memfd_create`, `semget`, `setsockopt(SO_SNDBUF)`, `socket(AF_UNIX)` and `listen(128)` raise `PermissionError`, `socketpair` and `listen(5)` work, and the job's `/proc/self/status` shows `Seccomp: 2`; on `nitro` `semget` raises `PermissionError` |
 | no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no TCP connection within the script's own 2 s), and the `GetObject` makes no connection. `agentcore`: credentials load, and every call outside C-2 is denied; the `GetObject` on B's invoice reaches S3 and is refused with 403. The `GetItem` on B's row makes no connection on any backend |
 | no-egress | A's script first sends a positive control with the same request code and deadline to the sandbox's own allowed address (the metadata service on `microvm` and `agentcore`, the ECS credentials path on `nitro`), which must answer with a status; it proves the request code and its deadline, not a name lookup or a route. It then tries HTTPS to `example.com`, a TCP connect to a public IP address on port 443 with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy. Every request fails before its TCP connect completes (a name that does not exist, or a connect that fails or takes over 2 s on each of up to four addresses of the name, IPv4 first; the driver checks 14 s, a 5 s lookup included), except the presigned PUT on `agentcore`, which reaches the S3 gateway endpoint and must be refused with 403. A request whose connect completes counts as open, however slow or broken its answer, and so does a lookup with no answer in 5 s or a resolver failure, so a slow but open path cannot pass. For the IP-literal probe the TCP connect itself must not complete |
-| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and the job plus N − 1 children that each allocate up to their `RLIMIT_AS` (on `nitro` and `agentcore` a total far above the sandbox memory), whose N-th fork fails with `EAGAIN`: each returns `timedOut`, `memoryExceeded` (the memory fill on `nitro` and `agentcore`) or a non-zero exit (on `microvm` with `MemoryError` in `stderr`); on `nitro` the memory fill may instead be a tool overrun (exit -9, `timedOut`, §3.5) when the next call starts a fresh task with a new `bootId`, and the later checks then compare against that runner; one process filled past its own `RLIMIT_AS` returns `memoryExceeded` false and `MemoryError` in `stderr` on every backend; on `nitro` a job that writes 900 MiB of files to `/work` is not killed; on `microvm` a job of four threads that each allocate 32 MiB completes; on `nitro` and `agentcore` a `memfd` fill aimed at 1.5 × L (100 MiB per `memfd`; about 1.2 GiB on `nitro`, 11 GiB on `agentcore`) returns `memoryExceeded` true with the same `bootId`, and the next call works; on `agentcore` a SysV semaphore array a job creates is gone at the next call; after a job that forked N − 1 children was killed, the next job can fork N − 1 children again (no zombies left); the runner is still the one that answers (same `bootId`), nothing of the job survives into A's next call, and A's next call works |
+| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and the job plus N − 1 children that each allocate up to their `RLIMIT_AS` (on `nitro` and `agentcore` a total far above the sandbox memory), whose N-th fork fails with `EAGAIN`: each returns `timedOut`, `memoryExceeded` (the memory fill on `nitro` and `agentcore`) or a non-zero exit (on `microvm` with `MemoryError` in `stderr`); on `nitro` and `agentcore` the memory fill must return `memoryExceeded` (on `nitro` a tool overrun fails the step, §3.5), and the next call, on the same sandbox, still reads the `/work/child.pid` that the earlier `setsid` job wrote; one process filled past its own `RLIMIT_AS` returns `memoryExceeded` false and `MemoryError` in `stderr` on every backend; on `nitro` a job that writes 900 MiB of files to `/work` is not killed; on `microvm` a job of four threads that each allocate 32 MiB completes; on `nitro` and `agentcore` a `memfd` fill aimed at 1.5 × L (100 MiB per `memfd`; about 1.2 GiB on `nitro`, 11 GiB on `agentcore`) returns `memoryExceeded` true with the same `bootId`, and the next call works; on `agentcore` a SysV semaphore array a job creates is gone at the next call; after a job that forked N − 1 children was killed, the next job can fork N − 1 children again (no zombies left); the runner is still the one that answers (same `bootId`), nothing of the job survives into A's next call, and A's next call works |
 | dead-handle | stop A's sandbox out of band (on `microvm` wait until 4 s past the MicroVM's `terminatedAt`, beyond the 2 s clock margin of ADR-0044); A's next call returns `sandbox` = `started` |
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
 | idle | after `sandboxIdle` (2 min) idle the driver invokes the reaper; A's `nitro` task is stopped, and the stop line carries `sandboxSeconds` |

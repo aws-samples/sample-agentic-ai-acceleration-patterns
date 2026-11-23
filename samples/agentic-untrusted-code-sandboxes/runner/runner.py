@@ -115,6 +115,9 @@ def main() -> int:
         try:
             sandbox.claim()
             context, sandbox.fingerprint = tls_context()
+            # Last, so the TLS libraries are mapped too. The task definition raises memlock; a task without it
+            # does not start, rather than run a runner a memory fill can stall (ADR-0074).
+            job.lock_memory()
         except Exception as e:  # a nitro task that cannot claim itself ends, and the start fails
             job.log("start_failed", error=type(e).__name__)
             return 1
