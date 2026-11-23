@@ -115,6 +115,24 @@ cdk-nag, cfn_nag, and checkov suppressions in `src/tenant/tenant.cdk.ts` and
 - Lambda reserved concurrency is not partitioned; API Gateway stage
   throttling bounds the invoke rate (cfn_nag W92, checkov CKV_AWS_115).
 
+### Security scan (2026-11-23)
+
+ProtoShield v0.18.0 (licence headers, Semgrep, CDK NAG, CVE, Checkov,
+Secrets, IAM least privilege) ran on a clean export of this sample and the
+stress application code at the session tag change (ADR-0051), with the
+synthesised control plane and cell account templates. ProtoShield: 0
+critical, 3 high, 4 medium, 1 low. The licence headers (151 of 151 MIT-0),
+Semgrep, CDK NAG, Checkov and Secrets report nothing open. No finding is in
+the session tag trust, grants, buildspec or integration test. Dispositions:
+
+| Finding | Tool | Disposition |
+|---|---|---|
+| `cloudwatch:PutMetricData` on `*` for the skipped-hook count (high) | IAM least privilege | Accepted: the action has no resource-level permission; the statement is limited to the fleet's own metric namespace by `cloudwatch:namespace` (M31) |
+| Service-wide actions on `*` in the stress cell execution policy and cell permissions boundary (2 high) | IAM least privilege | Accepted in the stress application's own security scan (`stress/application/README.md`, Security scan): the account holds nothing but cells, and the boundaries are the backstop (stress ADR-0006) |
+| `lambda:InvokeFunction` on `function:*` and `iam:ListAttachedRolePolicies` on B's cell role in `test/integ.tenant.ts` (2 medium) | IAM least privilege | Accepted: test-only policies, explained beside them and in the 2026-11-16 dispositions below |
+| Two CVEs in build tooling (2 medium) | CVE | As below: build toolchain only, none in a Lambda bundle |
+| `cognito-idp:DescribeUserPoolClient` on the test user pool (low) | IAM least privilege | Accepted: the action's resource is the user pool, the narrowest it takes |
+
 ### Security scan (2026-11-16)
 
 ProtoShield v0.18.0 (Semgrep, Bandit, CDK NAG, cfn-nag, CVE, Checkov,
