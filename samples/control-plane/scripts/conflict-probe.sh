@@ -72,26 +72,28 @@ output() {
 # An operator ID token from the setup stack's vendor IdP. The password goes to the CLI, and the
 # token to curl, in files readable by this user alone (never on a command line), removed on exit.
 AUTH_HEADER=""
-cleanup() { [ -z "$AUTH_HEADER" ] || rm -f "$AUTH_HEADER"; }
+INPUT=""
+cleanup() { rm -f ${AUTH_HEADER:+"$AUTH_HEADER"} ${INPUT:+"$INPUT"}; }
 trap cleanup EXIT
 sign_in() {
-  local pool client secret input token
+  local pool client secret token
   pool="$(output "$SETUP_STACK" UserPoolId)"
   client="$(output "$SETUP_STACK" OperatorClientId)"
   aws cognito-idp admin-create-user --user-pool-id "$pool" --username probe-operator \
     --message-action SUPPRESS > /dev/null 2>&1 || true
   secret="Aa1!$(openssl rand -hex 12)"
-  input="$(mktemp)"
-  chmod 600 "$input"
+  INPUT="$(mktemp)"
+  chmod 600 "$INPUT"
   jq -n --arg p "$pool" --arg u probe-operator --arg s "$secret" \
-    '{UserPoolId: $p, Username: $u, Password: $s, Permanent: true}' > "$input"
-  aws cognito-idp admin-set-user-password --cli-input-json "file://${input}" > /dev/null
+    '{UserPoolId: $p, Username: $u, Password: $s, Permanent: true}' > "$INPUT"
+  aws cognito-idp admin-set-user-password --cli-input-json "file://${INPUT}" > /dev/null
   jq -n --arg p "$pool" --arg c "$client" --arg u probe-operator --arg s "$secret" \
-    '{UserPoolId: $p, ClientId: $c, AuthFlow: "ADMIN_USER_PASSWORD_AUTH", AuthParameters: {USERNAME: $u, PASSWORD: $s}}' > "$input"
-  token="$(aws cognito-idp admin-initiate-auth --cli-input-json "file://${input}" \
+    '{UserPoolId: $p, ClientId: $c, AuthFlow: "ADMIN_USER_PASSWORD_AUTH", AuthParameters: {USERNAME: $u, PASSWORD: $s}}' > "$INPUT"
+  token="$(aws cognito-idp admin-initiate-auth --cli-input-json "file://${INPUT}" \
     --query AuthenticationResult.IdToken --output text)"
-  rm -f "$input"
-  AUTH_HEADER="$(mktemp)"
+  rm -f "$INPUT"
+  INPUT=""
+  [ -n "$AUTH_HEADER" ] || AUTH_HEADER="$(mktemp)"
   chmod 600 "$AUTH_HEADER"
   printf 'Authorization: Bearer %s\nContent-Type: application/json\n' "$token" > "$AUTH_HEADER"
   API_URL="$(output "$CP_STACK" ApiUrl)"
@@ -126,6 +128,11 @@ wait_for() {
   local path="$1" field="$2" want="$3" until=$((SECONDS + $4)) status
   while [ "$SECONDS" -lt "$until" ]; do
     call GET "$path"
+    if [ "$STATUS" = 401 ]; then
+      # The ID token outlived its hour: sign in again and poll on.
+      sign_in
+      continue
+    fi
     if [ "$STATUS" = 404 ] && [[ gone =~ ^(${want})$ ]]; then
       echo gone
       return 0
@@ -140,6 +147,35 @@ wait_for() {
   done
   echo "timeout"
   return 1
+}
+
+# delete_deployments TENANT...: deletes each tenant's probe deployment, five at a time, and
+# deletes again (at most three times) one that ends DELETE_FAILED: concurrent deletes on one
+# cell can meet in the workflow's terminal write (README, Known limitations). Fails when any
+# is left.
+delete_deployments() {
+  local tenants=("$@") wave t s attempt left=0 i
+  for ((i = 0; i < ${#tenants[@]}; i += 5)); do
+    wave=("${tenants[@]:i:5}")
+    for t in "${wave[@]}"; do
+      call DELETE "/tenants/${t}/deployments/${APP_ID}"
+      [ "$STATUS" = 202 ] || [ "$STATUS" = 404 ] || log "DeleteDeployment ${t}: ${STATUS}"
+    done
+    for t in "${wave[@]}"; do
+      for attempt in 1 2 3; do
+        s="$(wait_for "/tenants/${t}/deployments/${APP_ID}" deployment 'gone|DELETE_FAILED' 900 || true)"
+        [ "$s" != gone ] || break
+        log "deployment of ${t}: ${s}, deleting again (${attempt})"
+        call DELETE "/tenants/${t}/deployments/${APP_ID}"
+      done
+    done
+  done
+  for t in "${tenants[@]}"; do
+    call GET "/tenants/${t}/deployments/${APP_ID}"
+    [ "$STATUS" = 404 ] || left=$((left + 1))
+  done
+  log "deployments left: ${left}"
+  [ "$left" -eq 0 ]
 }
 
 case "$verb" in
@@ -187,7 +223,7 @@ case "$verb" in
       jq -r .tenant.tenantId <<< "$BODY" >> "$TENANTS_FILE"
     done
     while read -r t; do
-      s="$(wait_for "/tenants/${t}" tenant 'ACTIVE|[A-Z]+_FAILED' 300)"
+      s="$(wait_for "/tenants/${t}" tenant 'ACTIVE|[A-Z]+_FAILED' 300 || true)"
       [ "$s" = ACTIVE ] || { log "tenant ${t}: ${s}"; exit 1; }
     done < "$TENANTS_FILE"
     log "tenants: ${TENANTS} ACTIVE"
@@ -221,7 +257,7 @@ case "$verb" in
     other=0
     while read -r t; do
       if [ "$(cat "${run}/${t}.code")" = 409 ]; then
-        if jq -er '.message' "${run}/${t}.body" 2> /dev/null | grep -q 'retry the request'; then
+        if jq -e '.message | test("retry the request")' "${run}/${t}.body" > /dev/null 2>&1; then
           hint=$((hint + 1))
         else
           other=$((other + 1))
@@ -253,35 +289,19 @@ case "$verb" in
     done <<< "$racers"
     echo "refused calls that left a deployment: ${stray}"
     echo "results: ${run}"
+    failed_500="$(grep -lx 500 "${run}"/*.code 2> /dev/null | wc -l || true)"
+    left_creating="$(grep -cvx -e ACTIVE -e CREATE_FAILED "${run}/end" || true)"
+    if [ "$failed_500" -ne 0 ] || [ "$other" -ne 0 ] || [ "$stray" -ne 0 ] || [ "$left_creating" -ne 0 ]; then
+      log "burst: FAILED (${failed_500} answered 500, ${other} 409s without the hint, ${stray} strays, ${left_creating} not settled)"
+      exit 1
+    fi
+    log "burst: passed"
     ;;
 
   reset)
     sign_in
     mapfile -t racers < <(tail -n +2 "$TENANTS_FILE")
-    for ((i = 0; i < ${#racers[@]}; i += 5)); do
-      wave=("${racers[@]:i:5}")
-      for t in "${wave[@]}"; do
-        call DELETE "/tenants/${t}/deployments/${APP_ID}"
-        [ "$STATUS" = 202 ] || [ "$STATUS" = 404 ] || log "DeleteDeployment ${t}: ${STATUS}"
-      done
-      for t in "${wave[@]}"; do
-        for attempt in 1 2 3; do
-          s="$(wait_for "/tenants/${t}/deployments/${APP_ID}" deployment 'gone|DELETE_FAILED' 900 || true)"
-          [ "$s" != gone ] || break
-          call GET "/tenants/${t}/deployments/${APP_ID}"
-          [ "$STATUS" != 404 ] || break
-          log "deployment ${t}: $(jq -r .deployment.status <<< "$BODY"), deleting again (${attempt})"
-          call DELETE "/tenants/${t}/deployments/${APP_ID}"
-        done
-      done
-    done
-    left=0
-    for t in "${racers[@]}"; do
-      call GET "/tenants/${t}/deployments/${APP_ID}"
-      [ "$STATUS" = 404 ] || left=$((left + 1))
-    done
-    log "reset: ${left} burst deployments left"
-    [ "$left" -eq 0 ]
+    delete_deployments "${racers[@]}"
     ;;
 
   clean)
@@ -289,15 +309,8 @@ case "$verb" in
     account="$(aws sts get-caller-identity --query Account --output text)"
     status=0
     if [ -s "$TENANTS_FILE" ]; then
-      while read -r t; do
-        call DELETE "/tenants/${t}/deployments/${APP_ID}"
-      done < "$TENANTS_FILE"
-      while read -r t; do
-        [ "$(wait_for "/tenants/${t}/deployments/${APP_ID}" deployment 'gone|DELETE_FAILED' 900 || true)" = gone ] || {
-          log "deployment of ${t} is still there"
-          status=1
-        }
-      done < "$TENANTS_FILE"
+      mapfile -t all < "$TENANTS_FILE"
+      delete_deployments "${all[@]}" || status=1
     fi
     call GET "/cells?applicationId=${APP_ID}"
     for c in $(jq -r '.cells[]?.cellId' <<< "$BODY"); do

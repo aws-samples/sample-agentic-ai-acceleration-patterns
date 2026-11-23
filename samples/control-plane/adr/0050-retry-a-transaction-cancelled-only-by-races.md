@@ -25,7 +25,7 @@ its deployment `CREATING` with no execution to move them.
 DynamoDB cancels a member for capacity too: `ThrottlingError` and
 `ProvisionedThroughputExceeded`. Those also applied nothing. A transaction
 with a member that failed its condition (`ConditionalCheckFailed`) is
-classified as before. Two neighbouring errors are not cancellations:
+classified by position, as ADR-0013 decides. Two neighbouring errors are not cancellations:
 `TransactionConflictException` is thrown by a single-item write that meets a
 transaction in flight, which these five callers never send; and
 `TransactionInProgressException` is thrown when the same
@@ -47,8 +47,8 @@ window. When every attempt races, the repository throws
 `TransactionRaceError` and the service answers `ConflictError` with the retry
 hint of R-14: nothing was written, so the caller's retry can succeed. One
 classifier and one retry helper serve all five callers. Pros: a race costs a
-few hundred milliseconds instead of a failed request; the compensation no
-longer strands records on a race; no cell is created for a race. Cons: a hot
+few hundred milliseconds instead of a failed request; the compensation does
+not strand records on a single race; no cell is created for a race. Cons: a hot
 cell item adds up to 350 ms of waiting to a request, and a placement under a
 sustained burst can still answer the 409.
 
@@ -94,4 +94,6 @@ if a placement burst larger than the stress test's waves answers the 409 often.
 `scripts/conflict-probe.sh` shows the decision on a live control plane: it
 sends one `CreateDeployment` per tenant at once onto one cell and counts each
 call's first answer (no 500; any 409 carries the retry hint), the end state
-of every accepted deployment, and any record a refused call left behind.
+of every accepted deployment, and any record a refused call left behind. Its
+header lists the verbs (`deploy`, `setup`, `burst`, `reset`, `clean`) and the
+environment they read; run it with no verb for the usage line.
