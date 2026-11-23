@@ -23,7 +23,7 @@ picture:
 
 | Place | Holds | Region |
 |---|---|---|
-| Platform account | control plane, CodeBuild, front-door registrar and route table, stress identity, the driver host | the run's Region |
+| Platform account | control plane, CodeBuild, front-door registrar and route table, stress identity | the run's Region |
 | Platform account, edge | CloudFront distribution and the router function | `us-east-1` |
 | Cell account 1 (and 2 at `medium` and `large`) | the ingress, authoriser, agents, tools, the cell API origin | the run's Region |
 | A process on the driver host (in the platform account) | what k6 counts: requests, isolation mismatches, refusals | the run's Region |
@@ -41,7 +41,7 @@ and the platform account holds one sink in the run's Region. The dashboard
 reads cell metrics by account id, the edge metrics by Region (`us-east-1`,
 same account), and the driver's counts from a `StressRun` namespace the
 driver host and the runner publish in the platform account.
-Pros: one place to look; no data points copied (only metric names and dimensions); no charge for the sharing; the link
+Pros: one place to look; no data points are copied; no charge for the sharing; the link
 shares only the namespaces it names; a cell build cannot change it, because
 the cell execution policy grants no `oam:*` action. Cons: a link and a sink
 are one more owner step in every cell account (spec §3.7); links and sinks
