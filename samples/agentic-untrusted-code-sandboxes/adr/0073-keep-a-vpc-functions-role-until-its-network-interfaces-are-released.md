@@ -75,9 +75,11 @@ same way.
 
 Note 2026-11-23: integration run 21 (`eu-west-1`) deleted the integration
 stack cleanly in 2398 s, with no network interface, log group or DNS
-resource left.
-In run 21's CloudTrail the run function was deleted at 17:09:02 UTC and
-the first `DeleteNetworkInterface` calls by service principals came at
-17:34:18, before the roles went with the log drain at about 17:42. Which
-of those calls were Lambda's was not resolved, so the release time of a
+resource left. In run 21's CloudTrail the run function was deleted at
+17:09:02 UTC and the first `DeleteNetworkInterface` calls by service
+principals came at 17:34:18, before the roles went with the log drain at
+about 17:42. In that delete the roles outlived the function by about 33
+minutes, far more than the 90 s wait, so this run does not show that
+90 s alone is enough; that still rests on the run 14 observation. Which
+of the calls were Lambda's was not resolved, so the release time of a
 single interface is not measured.

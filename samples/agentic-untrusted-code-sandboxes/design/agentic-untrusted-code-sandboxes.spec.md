@@ -585,9 +585,10 @@ tool stopped the tenant's task as an overrun (§4.1 step 5) and returned
 The next call started a fresh task. The stall's cause inside the task is
 not known: the runner logged nothing between the last job and the stop.
 The overrun cap still contains the job: the damage stays in the
-tenant's own sandbox, and the tenant loses its `/work` files. Locking the runner's memory (`mlockall`, with a
-`memlock` ulimit in the task definition) would keep the watchdog thread
-resident under that pressure; it is untested.
+tenant's own sandbox, and the tenant loses its `/work` files. Locking
+the runner's memory (`mlockall`, with a `memlock` ulimit in the task
+definition) would keep the watchdog thread resident under that
+pressure; it is untested.
 
 Mounts (S-16). On every backend `/dev/shm` is the only tmpfs uid 1001
 can write: 64 MiB on `microvm` and `agentcore`, 576 MiB on `nitro`

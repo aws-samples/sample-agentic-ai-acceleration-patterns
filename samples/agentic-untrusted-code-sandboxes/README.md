@@ -246,7 +246,7 @@ construct twice in one stack with all three backends behind
 `agentic-runtime-isolation`'s tools gateway, runs every step of
 [specification §8](design/agentic-untrusted-code-sandboxes.spec.md#8-integration-test-outline)
 as tenants would, and deletes the stack with sandboxes still running. A run
-takes about 20 minutes to deploy, 35 minutes of steps, and 40 to 65
+takes about 20 minutes to deploy, 35 minutes of steps, and about 40
 minutes to delete; its cost was not measured, and the drivers are the NAT
 gateway, the endpoints, `nitro` instance time and the DNS Firewall
 queries. What it stands up, its steps, its knobs, its cost drivers
@@ -370,9 +370,10 @@ deletes a VPC function's network interfaces with the function's role,
 some time after the function is gone. The construct keeps each such role,
 and its network interface policy, until the log drain's 90 s wait has
 passed (ADR-0073), and the integration stack then deleted cleanly. The
-90 s rests on one observation (ADR-0073). Three cases fall outside that order: a
-stack update that removes a bound function or replaces its role, a
-function an app builds in the tool subnets without `bindRunCode`, and a
+90 s rests on one observation (ADR-0073). Three cases fall outside that
+order: a stack update that removes a bound function or replaces its
+role, a function an app builds in the tool subnets without
+`bindRunCode`, and a
 release slower than the wait. Each shows as `DELETE_FAILED` on the tool
 subnets and the tool security group, with `available` interfaces whose
 description starts `AWS Lambda VPC ENI-<stack>-`.
