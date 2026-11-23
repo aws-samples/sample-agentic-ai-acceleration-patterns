@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0068: Trust the connector operator role without a source account condition
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0042
 - Deciders: Dave Roberts (Partner Solutions Architect)
