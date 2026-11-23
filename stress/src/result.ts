@@ -142,7 +142,11 @@ function fmt(n: number | undefined, digits = 0): string {
  * the run's verdict and lists them. `report` re-renders from the records
  * alone and leaves the verdict out.
  */
-export function renderResults(records: readonly ResultRecord[], runFailures?: readonly string[], dashboard?: { readonly name: string; readonly region: string }): string {
+export function renderResults(
+  records: readonly ResultRecord[],
+  runFailures?: readonly string[],
+  dashboard?: { readonly name: string; readonly region: string },
+): string {
   if (records.length === 0) throw new Error('no result records to render');
   const first = records[0];
   for (const k of ['runId', 'tier', 'mode'] as const) {

@@ -78,7 +78,9 @@ const metric = (ns: string, name: string, dims: readonly (readonly [string, stri
 const sanitize = (s: string): string => s.replace(/[^A-Za-z0-9]/g, '_').toLowerCase();
 
 /** A metric math expression row. */
-const expr = (id: string, expression: string, label: string, options: Record<string, unknown> = {}): Metric => [{ expression, id, label, ...options }];
+const expr = (id: string, expression: string, label: string, options: Record<string, unknown> = {}): Metric => [
+  { expression, id, label, ...options },
+];
 
 const common = (title: string, region: string, stat: string, period = 60): Record<string, unknown> => ({ title, region, stat, period, view: 'timeSeries', stacked: false });
 
@@ -95,7 +97,15 @@ const has = (plan: DashboardPlan, scenario: string): boolean => plan.runs.some((
  * `label`. CloudWatch does not aggregate over the dimensions of a custom metric, so a total over
  * scenarios is a sum of the series named (design §3.1).
  */
-function summed(plan: DashboardPlan, scenarios: readonly string[], name: string, dims: (s: string) => readonly (readonly [string, string])[], id: string, label: string, exprOptions: Record<string, unknown> = {}): Metric[] {
+function summed(
+  plan: DashboardPlan,
+  scenarios: readonly string[],
+  name: string,
+  dims: (s: string) => readonly (readonly [string, string])[],
+  id: string,
+  label: string,
+  exprOptions: Record<string, unknown> = {},
+): Metric[] {
   const rows = scenarios.map((s, i): Metric => metric(NS, name, [['RunId', plan.runId], ...dims(s)], { id: `${id}_${i}`, stat: 'Sum', visible: false }));
   return [...rows, expr(id, `SUM([${scenarios.map((_, i) => `${id}_${i}`).join(',')}])`, label, exprOptions)];
 }
@@ -355,9 +365,9 @@ function sectionB(plan: DashboardPlan): Widget[] {
       properties: {
         ...common('B3 Distribution requests and error rates', edge, 'Sum'),
         metrics: [
-          expr('rq', `SUM(SEARCH('{AWS/CloudFront,DistributionId,Region} MetricName="Requests"', 'Sum', 60))`, 'requests'),
-          expr('e4', `AVG(SEARCH('{AWS/CloudFront,DistributionId,Region} MetricName="4xxErrorRate"', 'Average', 60))`, '4xx %', { yAxis: 'right' }),
-          expr('e5', `AVG(SEARCH('{AWS/CloudFront,DistributionId,Region} MetricName="5xxErrorRate"', 'Average', 60))`, '5xx %', { yAxis: 'right', color: '#FF2800' }),
+          expr('rq', 'SUM(SEARCH(\'{AWS/CloudFront,DistributionId,Region} MetricName="Requests"\', \'Sum\', 60))', 'requests'),
+          expr('e4', 'AVG(SEARCH(\'{AWS/CloudFront,DistributionId,Region} MetricName="4xxErrorRate"\', \'Average\', 60))', '4xx %', { yAxis: 'right' }),
+          expr('e5', 'AVG(SEARCH(\'{AWS/CloudFront,DistributionId,Region} MetricName="5xxErrorRate"\', \'Average\', 60))', '5xx %', { yAxis: 'right', color: '#FF2800' }),
         ],
       },
     },
@@ -447,7 +457,13 @@ function sectionC(plan: DashboardPlan): Widget[] {
 }
 
 /** A cell metric of one cell account, read through the observability link. */
-const cell = (account: string, ns: string, name: string, dims: readonly (readonly [string, string])[], options: Record<string, unknown> = {}): Metric =>
+const cell = (
+  account: string,
+  ns: string,
+  name: string,
+  dims: readonly (readonly [string, string])[],
+  options: Record<string, unknown> = {},
+): Metric =>
   metric(ns, name, dims, { accountId: account, ...options });
 
 function sectionD(plan: DashboardPlan): Widget[] {
@@ -547,7 +563,7 @@ function sectionD(plan: DashboardPlan): Widget[] {
           cell(account, 'AWS/Bedrock-AgentCore', 'Invocations', [['AggregateOperation', 'InvokeAgentRuntime']], { label: 'invocations' }),
           cell(account, 'AWS/Bedrock-AgentCore', 'Sessions', [['AggregateOperation', 'InvokeAgentRuntime']], { label: 'new sessions' }),
           cell(account, 'AWS/Bedrock-AgentCore', 'ActiveSessionCount', [['Service', 'AgentCore.Runtime']], { label: 'active sessions (max)', stat: 'Maximum', yAxis: 'right' }),
-          expr(`thr${n}`, `SUM(SEARCH('{AWS/Bedrock-AgentCore,Operation,Protocol} MetricName="Throttles"', 'Sum', 60))`, 'throttles', { accountId: account, color: '#FF2800' }),
+          expr(`thr${n}`, 'SUM(SEARCH(\'{AWS/Bedrock-AgentCore,Operation,Protocol} MetricName="Throttles"\', \'Sum\', 60))', 'throttles', { accountId: account, color: '#FF2800' }),
         ],
       },
     });
@@ -577,7 +593,11 @@ function sectionD(plan: DashboardPlan): Widget[] {
 /** The signal each budgeted quota has on the dashboard (design §6); a quota not here has none. */
 function quotaSignal(plan: DashboardPlan, account: string, quota: string, extra: Record<string, unknown> = {}): Metric | undefined {
   const accountId = account === 'platform' ? undefined : plan.cellAccounts[Number(account.slice('cell-account-'.length)) - 1];
-  const scoped = (options: Record<string, unknown>): Record<string, unknown> => ({ ...(accountId === undefined ? {} : { accountId }), ...options, ...extra });
+  const scoped = (options: Record<string, unknown>): Record<string, unknown> => ({
+    ...(accountId === undefined ? {} : { accountId }),
+    ...options,
+    ...extra,
+  });
   const named = (label: string): string => `${account} ${label}`;
   switch (quota) {
     case 'lambda-concurrency':

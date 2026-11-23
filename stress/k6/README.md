@@ -14,6 +14,16 @@ this library by its repository-relative path.
 | `lib.js` | the tier (`loadTier`) and seed manifest (`loadManifest`, `selectTenants`, `plan`, `tokenMode`); identity tokens (`setupTokens`, `refreshIfNeeded`, `ensureToken`, per-VU ownership with `adopt`, pacing); the correlation header (`correlate`); the counters and `isolationCheck`; the per-tenant ledger lines; `buildOptions`; `summarize` (summary files and the result record) |
 | `record.js` | `buildRecord`: the result record from k6's end-of-test data, with no k6 import so the contract's tests run it (`stress/test/record.test.ts` checks that `parseRecord` accepts it) |
 | `smoke.js` | five requests to one public endpoint and a record: proves that k6 runs on the driver host and that the library loads from its mirrored path |
+| `relay.sh` | the run dashboard's relay (stress ADR-0022): `driver/k6.sh` starts it on the host before `k6 run` in a platform run of a scenario (`STRESS_MODE=platform`, and `RECORD_SCENARIO=<PS-n>` as a `NAME=value` argument) and stops it after. It reads k6's output file, sums the `minute` lines of all VUs and the `edge_refusal` and `body_refusal` lines by minute, and publishes each minute to the `StressRun` metrics, 5 to 13 seconds after it ends in the spike. It prints counts only |
+
+## The minute line
+
+`lib.js` counts, in each VU and for each epoch minute, the responses by status class, the isolation assertions and
+mismatches, the refusals seen and a latency histogram (log-spaced buckets about 12 % wide, at most 104), and prints one
+`{"kind":"minute", "epochMinute":..., "vu":...}` line for it when the minute ends, and for the last minute in the last 1 %
+of the scenario, as the `tenant_minute` ledger does. The line holds counts only: no tenant, token or header. A slice
+needs no code for it: `countStatus`, `timed`, `isolationCheck` and `countRefusal` add to it. It was checked live
+on a driver host (stress/spikes/dashboard/README.md, SD-2): the relay's totals equalled k6's own counters.
 
 ## The result record
 

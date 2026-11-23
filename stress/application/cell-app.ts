@@ -24,8 +24,8 @@
 import * as path from 'node:path';
 import { App, CfnOutput, Tags } from 'aws-cdk-lib';
 import type { ILogGroup } from 'aws-cdk-lib/aws-logs';
-import { applyCellRolePath, cellSynthContext } from './cell-path';
 import { addCellMetricFilters } from './cell-metrics';
+import { applyCellRolePath, cellSynthContext } from './cell-path';
 import { cellPolicyNames } from './cell-policies';
 import { CELL_TAG, cellAppContext, cellStackName } from './cell-stack';
 

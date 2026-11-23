@@ -146,7 +146,14 @@ async function main(argv: string[]): Promise<number> {
       if (!fs.existsSync(planFile)) throw new Error(`${planFile} does not exist: only a run made with the dashboard on has a plan`);
       const r = spawnSync('bash', [dashboardScript, verb], {
         stdio: 'inherit',
-        env: { ...process.env, STRESS_PREFIX: prefix, STRESS_HOME: home, STRESS_RUN_ID: runId, STRESS_RUN_DIR: runDir, STRESS_DASHBOARD_PLAN_FILE: planFile },
+        env: {
+          ...process.env,
+          STRESS_PREFIX: prefix,
+          STRESS_HOME: home,
+          STRESS_RUN_ID: runId,
+          STRESS_RUN_DIR: runDir,
+          STRESS_DASHBOARD_PLAN_FILE: planFile,
+        },
       });
       return r.status ?? 1;
     }

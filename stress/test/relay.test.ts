@@ -95,7 +95,7 @@ describe('the host relay (stress/k6/relay.sh, design §5)', () => {
   it('counts refusals by reason, folding an unlisted reason into other', () => {
     const first = relay(lines).calls[0]!;
     const byReason = Object.fromEntries(named(first, 'RefusalsByReason').map((d) => [dim(d, 'Reason'), d.Value]));
-    expect(byReason).toEqual({ 'http-429': 3, other: 2 });
+    expect(byReason).toEqual({ 'http-429': 3, 'other': 2 });
   });
 
   it('publishes the latency of a minute as a histogram, merged over the VUs, at most 150 buckets', () => {

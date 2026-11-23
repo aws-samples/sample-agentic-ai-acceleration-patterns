@@ -19,7 +19,13 @@ function synth(interceptors = 2): { template: Template; ids: Record<string, stri
   return { template, ids };
 }
 
-type Filter = { Properties: { LogGroupName: { Ref: string }; FilterPattern: string; MetricTransformations: { MetricNamespace: string; MetricName: string; MetricValue: string; Dimensions?: { Key: string; Value: string }[] }[] } };
+interface Transformation {
+  MetricNamespace: string;
+  MetricName: string;
+  MetricValue: string;
+  Dimensions?: { Key: string; Value: string }[];
+}
+type Filter = { Properties: { LogGroupName: { Ref: string }; FilterPattern: string; MetricTransformations: Transformation[] } };
 
 function filters(template: Template): Filter[] {
   return Object.values(template.findResources('AWS::Logs::MetricFilter')) as unknown as Filter[];
@@ -46,7 +52,8 @@ describe('the cell metric filters of the run dashboard (stress ADR-0022, design 
 
   it('puts the sdk retried filter on the ingress, the authoriser and both interceptor log groups', () => {
     const retried = all.filter((f) => transform(f).MetricName === 'SdkRetryLines' && (transform(f).Dimensions ?? []).length > 0);
-    expect(retried.map((f) => f.Properties.LogGroupName.Ref).sort()).toEqual([ids.ingress, ids.authorizer, ids.interceptor0, ids.interceptor1].sort());
+    const expected = [ids.ingress, ids.authorizer, ids.interceptor0, ids.interceptor1];
+    expect(retried.map((f) => f.Properties.LogGroupName.Ref).sort()).toEqual(expected.sort());
     for (const f of retried) {
       expect(f.Properties.FilterPattern).toBe('{ $.message = "sdk retried" }');
       expect(transform(f).Dimensions).toEqual([{ Key: 'Service', Value: '$.service' }]);

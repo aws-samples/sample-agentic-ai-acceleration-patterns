@@ -180,7 +180,6 @@ export interface DashboardOptions {
 }
 
 
-
 export interface RunSummary {
   readonly runId: string;
   readonly mode: 'slice' | 'platform';
@@ -637,7 +636,8 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   let resultsFile: string | undefined;
   if (records.length > 0) {
     resultsFile = path.join(runDir, 'results.md');
-    fs.writeFileSync(resultsFile, renderResults(records, failures, dashboard === undefined ? undefined : { name: dashboardName(opts.prefix), region: dashboard.region }));
+    const link = dashboard === undefined ? undefined : { name: dashboardName(opts.prefix), region: dashboard.region };
+    fs.writeFileSync(resultsFile, renderResults(records, failures, link));
   }
   return { runId: opts.runId, mode, order: slices.map((s) => s.name), failures, ...(signal === undefined ? {} : { signal }), resultsFile };
 

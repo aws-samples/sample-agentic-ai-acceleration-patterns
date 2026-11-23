@@ -10,8 +10,8 @@
 import { Stack, type StackProps } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import type { Construct } from 'constructs';
-import { dashboardName } from '../src/metrics';
 import { type DashboardPlan, dashboardBody } from './widgets';
+import { dashboardName } from '../src/metrics';
 
 export interface RunDashboardStackProps extends StackProps {
   readonly prefix: string;

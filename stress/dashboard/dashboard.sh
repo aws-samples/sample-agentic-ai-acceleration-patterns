@@ -55,7 +55,7 @@ case "$verb" in
     : "${STRESS_DASHBOARD_PLAN_FILE:?Set STRESS_DASHBOARD_PLAN_FILE to the plan the runner wrote}"
     start=$SECONDS
     npx cdk --app "npx ts-node --transpile-only dashboard/app.ts" deploy "$STACK" \
-      --output "$OUT" --exclusively --require-approval never >&2
+      --output "$OUT" --exclusively --require-approval never --no-version-reporting >&2
     echo "stack=${STACK} deploy_seconds=$((SECONDS - start))"
     ;;
   snapshot)
