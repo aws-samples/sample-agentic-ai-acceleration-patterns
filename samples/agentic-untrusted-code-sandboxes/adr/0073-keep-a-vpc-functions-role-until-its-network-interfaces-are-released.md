@@ -82,4 +82,6 @@ about 17:42. In that delete the roles outlived the function by about 33
 minutes, far more than the 90 s wait, so this run does not show that
 90 s alone is enough; that still rests on the run 14 observation. Which
 of the calls were Lambda's was not resolved, so the release time of a
-single interface is not measured.
+single interface is not measured. The `teardown` step named under
+Consequences checks the order and that nothing is left, not the length
+of the wait.

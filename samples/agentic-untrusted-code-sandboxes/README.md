@@ -176,9 +176,10 @@ deploys, the integration runs and the demo run, 2026-11-19 to 2026-11-23):
 | `agentcore` (two instances, one with `sessionFiles`) | 924 to 989 s | 1895 s |
 | All three backends, two instances, gateway entry (integration stack) | 1123 to 1328 s | 2398 s (run 21) |
 
-In the `nitro` and `agentcore` deletes most of the time was the late
-release of the network interfaces of the functions in the tool subnets;
-in the `microvm` delete the cause was not isolated.
+In the `nitro` and `agentcore` deletes most of the time appeared to be
+the late release of the network interfaces of the functions in the tool
+subnets, though the share was not measured; in the `microvm` delete the
+cause was not isolated.
 
 ### Use the construct in your own app
 
@@ -373,10 +374,10 @@ passed (ADR-0073), and the integration stack then deleted cleanly. The
 90 s rests on one observation (ADR-0073). Three cases fall outside that
 order: a stack update that removes a bound function or replaces its
 role, a function an app builds in the tool subnets without
-`bindRunCode`, and a
-release slower than the wait. Each shows as `DELETE_FAILED` on the tool
-subnets and the tool security group, with `available` interfaces whose
-description starts `AWS Lambda VPC ENI-<stack>-`.
+`bindRunCode`, and a release slower than the wait. Each shows as
+`DELETE_FAILED` on the tool subnets and the tool security group, with
+`available` interfaces whose description starts
+`AWS Lambda VPC ENI-<stack>-`.
 
 To finish a stuck delete, delete the `available` interfaces of the stack,
 then the stack again:
