@@ -8,8 +8,15 @@
 #
 #   slice.sh budget                 draws on the account-wide quotas, no credentials
 #   slice.sh deploy                 the cell account check, then the control plane and the
-#                                   stress application, reused when they are there
+#                                   stress application, reused when they are there; in a platform
+#                                   run the application is registered by `step register`, and the
+#                                   connection manifest the front door reads is written
 #   slice.sh seed                   the tier's tenant records, from the manifest when it exists
+#   slice.sh step <name>            platform mode only (spec §3.5): hooks (the front door's hook
+#                                   policy on the control plane, its two global hooks registered),
+#                                   register (the stress application with the distribution ARN, the
+#                                   cell accounts), warm-up (one tenant alone builds the first cell)
+#                                   and unhook (the hooks unregistered, the policy taken off)
 #   slice.sh run <scenario>         PS-1, placement-race, read-rate or build-limit-scaling;
 #                                   PS-5, churn through the edge (platform mode only)
 #   slice.sh collect                server-side 5xx of this run's records (P-7)
@@ -22,7 +29,9 @@
 # suffix of the cell accounts, default none), STRESS_REGIONS (comma-separated Regions the
 # account check lists stacks in, default AWS_REGION; spec §3.7 asks for every Region the run
 # uses) and AWS_REGION, with credentials for the platform account and the cell accounts
-# file's read profiles. It needs bash, git, jq, node, zip, the AWS CLI and the Smithy CLI
+# file's read profiles; in a platform run also STRESS_HOOK_COMMIT (the full SHA of the commit,
+# in the public repository, whose `samples/tenant-front-door/hooks/route-hook.sh` the hooks run).
+# It needs bash, git, jq, node, zip, the AWS CLI and the Smithy CLI
 # (the source zip builds runtime-isolation's generated code), and runs the sample's
 # `npm ci` and `smithy build` when they are missing. It prints ids and counts only, never a
 # token, a password or a key, and never runs `set -x` (scripts/CONVENTIONS.md).
@@ -102,7 +111,9 @@ need_cell_accounts() {
 
 # The script source: the repository at the commit the run is built from, as one zip. Only
 # what the cell and tenant scripts run: the stress application and the runtime-isolation
-# sample (spec §8, decision 7: the cell deploys from a pinned commit), plus that sample's
+# sample (spec §8, decision 7: the cell deploys from a pinned commit), plus the front door's cell
+# API origin source (`samples/tenant-front-door/src/demo-cell`, what it imports from `src/shared` and the lock file the bundler roots at,
+# which the cell app deploys in a platform run), plus the runtime-isolation sample's
 # generated Smithy code, built here from the commit's own model: the build image has no
 # Smithy CLI, and the code is generated output the repository does not commit.
 source_zip() {
@@ -114,7 +125,7 @@ source_zip() {
     # source_zip runs in a command substitution, where bash does not apply set -e, so each
     # step is chained: a failed archive, build or zip leaves no tree and no partial zip, and
     # the function fails, which fails the caller's assignment.
-    if ! { git -C "$REPO" archive --format=tar "$commit" stress/application stress/tsconfig.json samples/agentic-runtime-isolation | tar -x -C "$tree" &&
+    if ! { git -C "$REPO" archive --format=tar "$commit" stress/application stress/tsconfig.json samples/agentic-runtime-isolation samples/tenant-front-door/package-lock.json samples/tenant-front-door/src/demo-cell samples/tenant-front-door/src/shared | tar -x -C "$tree" &&
       (cd "${tree}/samples/agentic-runtime-isolation" && smithy build > /dev/null) &&
       rm -rf "${tree}/samples/agentic-runtime-isolation/build" &&
       (cd "$tree" && zip -q -r -X "${zip}.tmp" stress samples) &&
@@ -129,10 +140,20 @@ source_zip() {
   printf '%s' "$zip"
 }
 
+# The hook policies the platform run's `hooks` step put on the control plane's hook role, until
+# `unhook` takes them off: every deploy of the control plane in between keeps them.
+hook_policies() {
+  local file="${RUN_HOME}/hook-policy-arns"
+  if [ -s "$file" ]; then
+    tr '\n' ',' < "$file" | sed 's/,$//'
+  fi
+}
+
 cdk_deploy() {
-  local zip
+  local zip policies
   zip="$(source_zip)"
-  (cd "$SAMPLE_DIR" && STRESS_SOURCE_ZIP="$zip" node_modules/.bin/cdk \
+  policies="$(hook_policies)"
+  (cd "$SAMPLE_DIR" && STRESS_HOOK_POLICY_ARNS="$policies" STRESS_SOURCE_ZIP="$zip" node_modules/.bin/cdk \
     --app "node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/stress-app.ts" \
     --output "$CDK_OUT" deploy "$@" --require-approval never --progress events)
 }
@@ -162,7 +183,12 @@ case "$verb" in
     driver check-accounts
     echo "deploy: ${SETUP_STACK} and ${CP_STACK} (fleet ${FLEET}, build limit ${STRESS_BUILD_LIMIT:-50}) in ${AWS_REGION}"
     cdk_deploy "$SETUP_STACK" "$CP_STACK"
-    driver register
+    if [ "$STRESS_MODE" = platform ]; then
+      # The front door's distribution is not there yet: `step register` registers the application.
+      driver connection
+    else
+      driver register
+    fi
     ;;
 
   set-build-limit)
@@ -171,6 +197,26 @@ case "$verb" in
     limit="${1:?slice.sh set-build-limit: a limit}"
     echo "set-build-limit: ${CP_STACK} at ${limit}"
     STRESS_BUILD_LIMIT="$limit" cdk_deploy "$CP_STACK" --exclusively > /dev/null
+    ;;
+
+  set-hook-policy)
+    # Internal: the `hooks` and `unhook` steps redeploy the control plane with the hook policy file as it is.
+    need_region
+    ensure_built
+    echo "set-hook-policy: ${CP_STACK} with hook policies '$(hook_policies)'"
+    cdk_deploy "$CP_STACK" --exclusively > /dev/null
+    ;;
+
+  step)
+    if [ "$STRESS_MODE" != platform ]; then
+      echo "slice.sh step: STRESS_MODE=${STRESS_MODE}: steps run in platform mode only" >&2
+      exit 2
+    fi
+    need_region
+    need_cell_accounts
+    ensure_installed
+    mkdir -p -m 700 "$RUN_HOME"
+    driver step "${1:?slice.sh step: a step name (hooks, register, warm-up, unhook)}"
     ;;
 
   seed)
@@ -251,7 +297,7 @@ case "$verb" in
             status=1
           fi
         done
-        [ "$status" -ne 0 ] || rm -f "${RUN_HOME}/control-plane.json" "${RUN_HOME}"/source-*.zip
+        [ "$status" -ne 0 ] || rm -f "${RUN_HOME}/control-plane.json" "${RUN_HOME}/control-plane-connection.json" "${RUN_HOME}/hook-policy-arns" "${RUN_HOME}"/source-*.zip
       fi
       # What of the fleet is left in the platform account: roles, projects, the workflow
       # and log groups named after it (the stacks own them). The REST API's CloudWatch roles
@@ -294,7 +340,7 @@ case "$verb" in
     ;;
 
   *)
-    echo "usage: slice.sh budget | deploy | seed | run <scenario> | collect | teardown [--fixtures]" >&2
+    echo "usage: slice.sh budget | deploy | seed | step <name> | run <scenario> | collect | teardown [--fixtures]" >&2
     exit 2
     ;;
 esac

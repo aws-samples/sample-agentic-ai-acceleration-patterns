@@ -323,7 +323,7 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
 });
 
 describe('CellAccountBaseStack (spec §3.7, CP-4)', () => {
-  function base(props: { userPoolId?: string; appClientId?: string } = {}): any {
+  function base(props: { userPoolId?: string; appClientId?: string; platformAccountId?: string } = {}): any {
     const app = new App();
     Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
     return render(Template.fromStack(new CellAccountBaseStack(app, 'CellAccountBase', props)).toJSON());
@@ -354,6 +354,39 @@ describe('CellAccountBaseStack (spec §3.7, CP-4)', () => {
   it('refuses one identity input without the other', () => {
     expect(() => new CellAccountBaseStack(new App(), 'B', { userPoolId: 'x' })).toThrow(/both/);
     expect(() => new CellAccountBaseStack(new App(), 'C', { appClientId: 'x' })).toThrow(/both/);
+  });
+
+  describe('the ingress reader role (spec §3.5)', () => {
+    const PLATFORM = '123456789012';
+    const PARAMETERS = 'arn:<AWS::Partition>:ssm:<AWS::Region>:<AWS::AccountId>:parameter/application-plane/shared/agent-runtime/StressCell-*/ingress';
+    const readers = (json: any): any[] =>
+      (Object.values(json.Resources) as any[]).filter((r) => r.Type === 'AWS::IAM::Role' && r.Properties.AssumeRolePolicyDocument.Statement[0].Principal.Service === undefined);
+
+    it('exists only for a platform account', () => {
+      expect(readers(base())).toHaveLength(0);
+      expect(base().Outputs).toBeUndefined();
+    });
+
+    it('is trusted by the platform account only, on / with no boundary, and reads one parameter pattern', () => {
+      const json = base({ platformAccountId: PLATFORM });
+      const [role] = readers(json);
+      expect(readers(json)).toHaveLength(1);
+      expect(role.Properties.Path).toBeUndefined();
+      expect(role.Properties.PermissionsBoundary).toBeUndefined();
+      expect(role.Properties.AssumeRolePolicyDocument.Statement).toEqual([
+        { Action: 'sts:AssumeRole', Effect: 'Allow', Principal: { AWS: `arn:<AWS::Partition>:iam::${PLATFORM}:root` } },
+      ]);
+      const policies = (Object.values(json.Resources) as any[]).filter((r) => r.Type === 'AWS::IAM::Policy');
+      expect(policies).toHaveLength(1);
+      expect(policies[0].Properties.PolicyDocument.Statement).toEqual([
+        { Sid: 'ReadCellIngressParameters', Action: 'ssm:GetParameter', Effect: 'Allow', Resource: PARAMETERS },
+      ]);
+      expect(Object.keys(json.Outputs)).toEqual(['IngressReaderRoleArn']);
+    });
+
+    it('refuses a platform account that is not 12 digits', () => {
+      expect(() => new CellAccountBaseStack(new App(), 'D', { platformAccountId: 'platform' })).toThrow(/12-digit/);
+    });
   });
 });
 

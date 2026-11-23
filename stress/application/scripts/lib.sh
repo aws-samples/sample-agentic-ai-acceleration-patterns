@@ -35,6 +35,21 @@ install_sample() {
   echo "cell_install_seconds=$((SECONDS - start))"
 }
 
+# The demo cell API (tenant-front-door) is bundled by the CDK with `npx --no-install esbuild`
+# in that sample's folder (cell-app.ts), where nothing is installed: link its `node_modules`
+# to the runtime-isolation sample's, so esbuild and every import of the bundle (jose, the SDK
+# clients) resolve in the one install. A cell build checks the source out fresh, so there is
+# nothing there yet; any other `node_modules` there is refused.
+link_front_door_modules() {
+  local link="${REPO_ROOT}/samples/tenant-front-door/node_modules"
+  if [ -e "$link" ]; then
+    [ "$(realpath "$link")" = "$(realpath "${SAMPLE_DIR}/node_modules")" ] && return 0
+    echo "${link} exists and is not the runtime-isolation install: refusing" >&2
+    return 1
+  fi
+  ln -s "${SAMPLE_DIR}/node_modules" "$link"
+}
+
 get_param() {
   aws ssm get-parameter --name "$1" --query Parameter.Value --output text
 }

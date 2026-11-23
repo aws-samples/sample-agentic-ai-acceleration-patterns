@@ -46,7 +46,7 @@ if api="$(get_param "$(cell_param entitlements-api-url)" 2> /dev/null)"; then
 else
   echo "No $(cell_param entitlements-api-url): the cell has no Entitlements API to clean"
 fi
-delete_param "/application-plane/tenants/${TENANT_ID}/${APPLICATION_ID}"
+delete_param "/application-plane/tenants/${TENANT_ID}/${APPLICATION_ID}/state"
 if [ -n "${OUTPUTS_FILE:-}" ]; then
   printf '{}\n' > "$OUTPUTS_FILE"
 fi

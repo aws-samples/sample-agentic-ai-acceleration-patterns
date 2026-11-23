@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0016: Send agent traffic to the one cell's ingress at `small`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0006, ADR-0012, ADR-0014
 - Deciders: Dave Roberts (PSA)

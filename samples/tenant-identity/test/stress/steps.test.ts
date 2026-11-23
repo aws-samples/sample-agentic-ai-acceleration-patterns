@@ -141,8 +141,19 @@ describe('collect arithmetic', () => {
     const c = await collectFiveXx(gapped, undefined, { ...clock(), apiSum });
     expect(c).toMatchObject({ caughtUp: true, api5xx: 0, extra: 0 });
     expect(c.windows).toHaveLength(2);
-    // One call per window and metric, never one over 10:00..10:07.
-    expect(apiSum.mock.calls.every(([, s, e]) => e.getTime() - s.getTime() <= 2 * MINUTE)).toBe(true);
+    // One call per window and metric, never one over 10:00..10:07; each read runs one minute past its window.
+    expect(apiSum.mock.calls.every(([, s, e]) => e.getTime() - s.getTime() <= 3 * MINUTE)).toBe(true);
+  });
+
+  test('both metrics are read one minute past the window, so a 5XX stamped in that minute is found', async () => {
+    const [w0] = windowsOf(docs);
+    const late = w0.end.getTime(); // the minute after the window
+    const apiSum = jest.fn(async (metric: 'Count' | '5XXError', start: Date, end: Date) => {
+      const inside = start.getTime() <= late && late < end.getTime();
+      return metric === 'Count' ? 100 : inside ? 6 : 0;
+    });
+    const c = await collectFiveXx(docs, undefined, { ...clock(), apiSum });
+    expect(c).toMatchObject({ caughtUp: true, api5xx: 6, extra: 2 });
   });
 
   test('seed 5xx in a shared minute are not unattributed refusals', async () => {

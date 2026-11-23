@@ -16,7 +16,7 @@ PLATFORM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 platform_producer() {
   case "$1" in
     tenant-front-door.json) echo tenant-front-door ;;
-    identity.json | tenant-identity.json) echo tenant-identity ;;
+    identity.json) echo tenant-identity ;;
     control-plane.json) echo control-plane ;;
   esac
 }
@@ -26,7 +26,7 @@ platform_producer() {
 # and IDENTITY_REGION.
 need_platform_inputs() {
   local verb="$1" f bad=0 d="$PLATFORM_MANIFEST_DIR"
-  for f in tenant-front-door.json identity.json control-plane.json tenant-identity.json; do
+  for f in tenant-front-door.json identity.json control-plane.json; do
     if [[ ! -s "${d}/${f}" ]]; then
       echo "slice.sh ${verb}: platform mode reads ${d}/${f}, which the $(platform_producer "$f") slice writes; it is missing" >&2
       bad=1
@@ -58,10 +58,11 @@ need_platform_inputs() {
   [[ -z "${AWS_REGION:-}" || "$IDENTITY_REGION" == "$AWS_REGION" ]] \
     || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): region ${IDENTITY_REGION} is not this run's Region ${AWS_REGION}" >&2; exit 1; }
 
-  for f in control-plane.json tenant-identity.json; do
-    jq -e '.seeded | type == "array"' "${d}/${f}" >/dev/null 2>&1 \
-      || { echo "slice.sh ${verb}: ${d}/${f} (written by the $(platform_producer "$f") slice): \"seeded\" must be an array" >&2; exit 1; }
-  done
+  jq -e '.seeded | type == "array"' "${d}/control-plane.json" >/dev/null 2>&1 \
+    || { echo "slice.sh ${verb}: ${d}/control-plane.json (written by the control-plane slice): \"seeded\" must be an array" >&2; exit 1; }
+  # identity[] is the control-plane driver's record of the identity tenants it made (stress ADR-0017); absent until PS-1 has run.
+  jq -e '(.identity // []) | type == "array"' "${d}/control-plane.json" >/dev/null 2>&1 \
+    || { echo "slice.sh ${verb}: ${d}/control-plane.json (written by the control-plane slice): \"identity\" must be an array" >&2; exit 1; }
 }
 
 # build_platform_manifest TIER_JSON FILE -> writes the manifest of the tenants this run drives
@@ -71,9 +72,9 @@ need_platform_inputs() {
 build_platform_manifest() {
   local tier="$1" out="$2" active built usable total d="$PLATFORM_MANIFEST_DIR"
   active="$(jq -er .tenantsActive <<<"$tier")" || { echo "slice.sh run: the tier has no tenantsActive" >&2; exit 1; }
-  built="$(jq -n --slurpfile cp "${d}/control-plane.json" --slurpfile ti "${d}/tenant-identity.json" \
+  built="$(jq -n --slurpfile cp "${d}/control-plane.json" \
     --argjson active "$active" --arg scale "${STRESS_TIER:-}" -f "${PLATFORM_DIR}/platform-tenants.jq")" \
-    || { echo "slice.sh run: could not read ${d}/control-plane.json and ${d}/tenant-identity.json" >&2; exit 1; }
+    || { echo "slice.sh run: could not read ${d}/control-plane.json" >&2; exit 1; }
   mkdir -p -m 700 "$STRESS_STATE_DIR" "$(dirname "$out")"
   ( umask 077; jq .manifest <<<"$built" >"$out" )
   ( umask 077; jq '{refused, ignored}' <<<"$built" >"${STRESS_STATE_DIR}/platform-tenants.json" )
@@ -82,7 +83,7 @@ build_platform_manifest() {
   echo "platform tenants: ${usable} of ${total} steady tenants usable, $(jq '.ignored | length' <<<"$built") identity tenants outside the control plane ignored"
   jq -r '.refused[] | "  refused \(.tenantId): \(.reason)"' <<<"$built"
   if (( usable < 2 )); then
-    echo "slice.sh run: platform mode needs at least two usable tenants, ${usable} found: onboard the control plane's tenants (PS-1) and give them users in tenant-identity.json first" >&2
+    echo "slice.sh run: platform mode needs at least two usable tenants, ${usable} found: onboard the control plane's tenants (PS-1) and give them identity tenants and users (the control-plane slice's identity[]) first" >&2
     exit 1
   fi
 }

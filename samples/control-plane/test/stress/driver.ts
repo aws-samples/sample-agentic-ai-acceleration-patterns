@@ -8,7 +8,10 @@
  *
  *   budget                   the slice's quota draws, no credentials
  *   check-accounts           the cell account check (spec §3.7), before every run
- *   register                 PutApplication (the stress application) and PutAccount (each cell account)
+ *   register                 PutApplication (the stress application) and PutAccount (each cell account); the platform
+ *                            run's `step register` adds the DISTRIBUTION_ARN cell parameter from the front door
+ *   connection               write control-plane-connection.json, the manifest the front-door slice reads (platform mode)
+ *   step <name>              a platform step (spec §3.5): hooks, register, warm-up or unhook
  *   seed                     the tier's tenant records, from the manifest when it exists
  *   run <scenario>           PS-1, placement-race, read-rate or build-limit-scaling; PS-5, churn through the edge (platform mode only)
  *   collect                  server-side 5xx in each record's window (P-7)
@@ -28,7 +31,8 @@ import { ControlPlaneApi, operatorToken } from './api';
 import { aws, AwsError, sleep } from './aws';
 import { type Edge, liveEdge, readEdgeInputs } from './edge';
 import { cellsOf, deploymentsOf, type FleetEnv, removeAll } from './fleet';
-import { allTenants, emptyManifest, type Manifest, manifestPath, readManifest, writeManifest } from './manifest';
+import { IdentityApi, curlSend, identityTenantsToDelete } from './identity';
+import { allTenants, emptyManifest, type IdentityEntry, type Manifest, manifestPath, readManifest, writeManifest } from './manifest';
 import {
   APPLICATION_ID,
   applicationDefinition,
@@ -43,8 +47,9 @@ import {
   tenantSetsOf,
   type TierSizes,
 } from './plan';
+import { hookCommitOf, hookPolicyFile, readFrontDoor, registerHooks, setHookPolicy, warmUp } from './platform-steps';
 import { type Identity, Recorder, type ResultRecordJson } from './recorder';
-import { SCENARIOS, type ScenarioEnv } from './scenarios';
+import { type PlatformEnv, SCENARIOS, type ScenarioEnv } from './scenarios';
 import { awaitTenantsActive, deleteTenants, existingTenants, pollRecord } from './seed';
 
 const SLICE = 'control-plane';
@@ -86,6 +91,9 @@ function cellAccounts(t: TierSizes, platform: string): CellAccountInput[] {
 
 interface Connected {
   readonly api: (rec: Recorder) => ControlPlaneApi;
+  /** The operator token (memory only) and the API it is for, for the front door's `register-hooks.sh`. */
+  readonly token: string;
+  readonly apiUrl: string;
   readonly platform: string;
   readonly accounts: CellAccountInput[];
   readonly outputs: { readonly setup: Record<string, string>; readonly controlPlane: Record<string, string> };
@@ -100,6 +108,8 @@ async function connect(): Promise<Connected> {
   const token = await operatorToken(setup.UserPoolId, setup.OperatorClientId);
   return {
     api: (rec) => new ControlPlaneApi(controlPlane.ApiUrl, token, rec.observe.bind(rec)),
+    token,
+    apiUrl: controlPlane.ApiUrl,
     platform,
     accounts: cellAccounts(tier(), platform),
     outputs: { setup, controlPlane },
@@ -198,12 +208,19 @@ async function checkAccounts(): Promise<number> {
 
 // --- register / unregister ------------------------------------------------------------------
 
-async function register(): Promise<number> {
+/**
+ * PutApplication and PutAccount. `withFrontDoor` is a platform run's step (spec §3.5 step 4): the
+ * application declares the `DISTRIBUTION_ARN` cell parameter, whose default is the distribution
+ * the front door's first phase published, when the front-door slice is in the run.
+ */
+async function register(withFrontDoor = false): Promise<number> {
   const c = await connect();
   const t = tier();
   const rec = new Recorder();
   const api = c.api(rec);
-  const definition = applicationDefinition(t, c.outputs.setup.SourceLocation, process.env.STRESS_CELL_POLICY_SUFFIX ?? '');
+  const frontDoor = withFrontDoor ? readFrontDoor(need('STRESS_HOME'), need('STRESS_PREFIX')) : undefined;
+  if (frontDoor !== undefined && frontDoor.distributionArn === undefined) throw new Error('tenant-front-door.json (written by the tenant-front-door slice) names no distributionArn');
+  const definition = applicationDefinition(t, c.outputs.setup.SourceLocation, process.env.STRESS_CELL_POLICY_SUFFIX ?? '', frontDoor?.distributionArn);
   const app = `/applications/${APPLICATION_ID}`;
   const put = await api.call('put-application', 'PUT', app, '-', definition);
   if (put.status !== 202) {
@@ -253,6 +270,167 @@ async function unregister(): Promise<number> {
   await gone(`/applications/${APPLICATION_ID}`, 'application');
   log(status === 0 ? 'unregister: no account or application left' : 'unregister: something is left');
   return status;
+}
+
+// --- platform run: connection, steps ---------------------------------------------------------
+
+/** The slice's published connection (platform mode): what the front door needs of the control plane, ids and names only. */
+async function connection(): Promise<number> {
+  const n = names();
+  const [setup, controlPlane, platform] = await Promise.all([outputsOf(n.setup), outputsOf(n.controlPlane), platformAccount()]);
+  for (const [k, o] of [['RegistrarTokenUrl', setup], ['RegistrarClientId', setup], ['RegistrarSecretArn', setup], ['ApiUrl', controlPlane]] as const) {
+    if (o[k] === undefined) throw new Error(`stack output ${k} is missing: run deploy first`);
+  }
+  const doc = {
+    region: region(),
+    accountId: platform,
+    fleet: n.fleet,
+    applicationId: APPLICATION_ID,
+    apiUrl: controlPlane.ApiUrl,
+    vendorIdp: { tokenUrl: setup.RegistrarTokenUrl, clientId: setup.RegistrarClientId, clientSecretArn: setup.RegistrarSecretArn },
+  };
+  const file = path.join(need('STRESS_HOME'), need('STRESS_PREFIX'), 'control-plane-connection.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
+  log(`connection: ${file}`);
+  return 0;
+}
+
+/** Runs `slice.sh <verb> <arg>` (the control plane's own redeploys), its output on stderr. */
+function sliceCommand(args: readonly string[]): Promise<number> {
+  const script = need('STRESS_SLICE_SCRIPT');
+  return new Promise((resolve) => {
+    const child = execFile('bash', [script, ...args], { env: process.env, maxBuffer: 64 * 1024 * 1024 }, (error) => resolve(error === null ? 0 : 1));
+    child.stdout?.pipe(process.stderr);
+    child.stderr?.pipe(process.stderr);
+  });
+}
+
+/** Spec §3.5 step 3 (second half): the hook policy goes on the control plane's hook role, then the hooks are registered. */
+async function hooksStep(): Promise<number> {
+  const home = need('STRESS_HOME');
+  const prefix = need('STRESS_PREFIX');
+  const fd = readFrontDoor(home, prefix);
+  if (fd?.hookPolicyArn === undefined) throw new Error('tenant-front-door.json (written by the tenant-front-door slice) names no hookPolicyArn: its deploy has to run first');
+  const commit = hookCommitOf(process.env.STRESS_HOOK_COMMIT);
+  setHookPolicy(home, prefix, fd.hookPolicyArn);
+  log('hooks: redeploying the control plane with the hook policy on its global hook role');
+  if ((await sliceCommand(['set-hook-policy'])) !== 0) return 1;
+  const c = await connect();
+  const code = await registerHooks(need('STRESS_REPO'), c.apiUrl, c.token, { commit });
+  log(code === 0 ? 'hooks: the front door route hooks are registered' : `hooks: register-hooks.sh exited ${code}`);
+  return code === 0 ? 0 : 1;
+}
+
+/**
+ * Before the front door goes (spec §3.5): unregister its two hooks, so the control plane can
+ * delete cells with no call to a registrar that is gone, then take the hook policy off the
+ * hook role so `RouteHookAccess` can be deleted. Nothing to do when the control plane is gone.
+ */
+async function unhookStep(): Promise<number> {
+  const home = need('STRESS_HOME');
+  const prefix = need('STRESS_PREFIX');
+  const n = names();
+  let c: Connected;
+  try {
+    c = await connect();
+  } catch (e) {
+    if (fs.existsSync(hookPolicyFile(home, prefix))) {
+      log(`unhook: the control plane is not reachable (${errorText(e)}) and the hook policy is still on ${n.fleet}-global-hook; the front door cannot be deleted until it is taken off`);
+      return 1;
+    }
+    log(`unhook: the control plane is not reachable (${errorText(e)}); nothing to unregister`);
+    return 0;
+  }
+  const code = await registerHooks(need('STRESS_REPO'), c.apiUrl, c.token, { delete: true });
+  if (code !== 0) {
+    log(`unhook: register-hooks.sh --delete exited ${code}; the hook policy stays on ${n.fleet}-global-hook`);
+    return 1;
+  }
+  const policyFile = hookPolicyFile(home, prefix);
+  if (fs.existsSync(policyFile)) {
+    const text = fs.readFileSync(policyFile, 'utf8');
+    setHookPolicy(home, prefix, undefined);
+    log('unhook: redeploying the control plane without the hook policy');
+    if ((await sliceCommand(['set-hook-policy'])) !== 0) {
+      // The policy is still on the role: put the file back as it was, so a rerun redeploys instead of reporting success.
+      fs.writeFileSync(policyFile, text, { mode: 0o600 });
+      return 1;
+    }
+  }
+  return 0;
+}
+
+async function warmUpStep(): Promise<number> {
+  const c = await connect();
+  const rec = new Recorder();
+  const f = fleetEnv(c, rec);
+  const warm = await warmUp(f, loadManifest(), (m) => writeManifest(manifestFile(), m));
+  for (const finding of rec.findings.slice(0, 50)) log(`  finding: ${finding}`);
+  return warm !== undefined && rec.findings.length === 0 ? 0 : 1;
+}
+
+async function step(name: string | undefined): Promise<number> {
+  switch (name) {
+    case 'hooks': return hooksStep();
+    case 'register': return register(true);
+    case 'warm-up': return warmUpStep();
+    case 'unhook': return unhookStep();
+    default: throw new Error(`unknown step ${String(name)} (hooks, register, warm-up, unhook)`);
+  }
+}
+
+/** The stress identity published by the tenant-identity slice's deploy (`identity.json`): where the identity calls go. */
+function identityApiOf(observe: (...a: any[]) => void): IdentityApi {
+  const file = path.join(need('STRESS_HOME'), need('STRESS_PREFIX'), 'identity.json');
+  if (!fs.existsSync(file)) throw new Error(`${file} is missing: the tenant-identity slice writes it when it deploys`);
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8')) as { apiUrl?: unknown; region?: unknown };
+  if (typeof doc.apiUrl !== 'string' || !/^https:\/\/[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com\//.test(doc.apiUrl)) throw new Error(`${file} (written by the tenant-identity slice): apiUrl must be an execute-api URL`);
+  const identityRegion = typeof doc.region === 'string' ? doc.region : region();
+  return new IdentityApi(doc.apiUrl, curlSend(identityRegion), observe);
+}
+
+/** What PS-1 needs beyond the control plane in a platform run; undefined in slice mode. */
+function platformEnvOf(rec: Recorder): PlatformEnv | undefined {
+  if (parseMode(process.env.STRESS_MODE) !== 'platform') return undefined;
+  const file = manifestFile();
+  const fd = readFrontDoor(need('STRESS_HOME'), need('STRESS_PREFIX'));
+  // shortcut: the demo row goes into the warm-up cell's table with the cell account owner's profile, because the tenant
+  // role holds entitlement methods only (stress ADR-0012); with one cell, which is `small`, that is every tenant's cell.
+  // Upgrade to the deployment's own cell when a tier has several.
+  let table: Promise<{ profile: string; name: string }> | undefined;
+  const demoTable = (): Promise<{ profile: string; name: string }> => {
+    table ??= (async () => {
+      const warm = readManifest(file)?.warmUp;
+      if (warm === undefined) throw new Error('no warm-up record');
+      const platform = await platformAccount();
+      const account = cellAccounts(tier(), platform).find((a) => a.accountId === warm.accountId);
+      if (account === undefined) throw new Error('the warm-up cell is in an account the run does not list');
+      const out = await aws(['cloudformation', 'describe-stack-resources', '--stack-name', `StressCell-${warm.cellId}`], { profile: account.profile, region: region() });
+      const demo = ((out.StackResources ?? []) as any[]).find((r) => r.ResourceType === 'AWS::DynamoDB::GlobalTable' && String(r.LogicalResourceId).startsWith('DemoTable'));
+      if (demo === undefined) throw new Error('the cell has no demo table');
+      return { profile: account.profile, name: String(demo.PhysicalResourceId) };
+    })();
+    return table;
+  };
+  return {
+    identity: identityApiOf(rec.observe.bind(rec)),
+    users: tier().usersPerActiveTenant,
+    ...(fd === undefined ? {} : { edgeUrl: fd.edgeUrl }),
+    existing: (tenantId) => readManifest(file)?.identity?.find((e) => e.tenantId === tenantId),
+    save: (entry: IdentityEntry) => {
+      const m = readManifest(file);
+      if (m === undefined) throw new Error('no manifest: run seed first');
+      writeManifest(file, { ...m, identity: [...(m.identity ?? []).filter((e) => e.tenantId !== entry.tenantId), entry] });
+    },
+    seedData: async (tenantId) => {
+      const t = await demoTable();
+      await aws(
+        ['dynamodb', 'put-item', '--table-name', t.name, '--item', JSON.stringify({ PK: { S: `TENANT#${tenantId}` }, label: { S: `st-${tenantId.slice(-12).toLowerCase()}` } })],
+        { profile: t.profile, region: region() },
+      );
+    },
+  };
 }
 
 // --- seed --------------------------------------------------------------------------------------
@@ -318,6 +496,7 @@ async function run(scenario: string): Promise<number> {
   const edge = scenario === 'PS-5' ? edgeOf() : undefined;
   const c = await connect();
   const rec = new Recorder();
+  const platformEnv = scenario === 'PS-1' ? platformEnvOf(rec) : undefined;
   const s: ScenarioEnv = {
     ...fleetEnv(c, rec),
     tier: tier(),
@@ -325,6 +504,7 @@ async function run(scenario: string): Promise<number> {
     buildLimit: buildLimit(),
     setBuildLimit: setBuildLimitCommand,
     ...(edge === undefined ? {} : { edge }),
+    ...(scenario === 'PS-1' && platformEnv !== undefined ? { platform: platformEnv } : {}),
   };
   try {
     await fn(s);
@@ -448,8 +628,41 @@ async function sweep(seeded: boolean): Promise<number> {
     const after = await deploymentsOf(f);
     const tenants = (seeded ? allTenants(m) : transient).filter((t) => !after.has(t));
     const { gone, kept } = await deleteTenants(f.api, tenants);
+    // The identity tenants of the tenants just deleted go next (stress ADR-0017): the control plane's
+    // DeleteDeployment does not remove them, and they carry the control-plane tenant id. A fixture
+    // tier keeps the seeded fleet's, and `identity[]` keeps the entry of one that could not be deleted.
+    // A platform run asks for every deleted tenant, with or without an entry: an
+    // identity made part way has none yet, and DeleteTenant answers 404 for a tenant that has no identity.
+    let identities = m.identity ?? [];
+    const doomed = identityTenantsToDelete(parseMode(process.env.STRESS_MODE) === 'platform', gone, identities, allTenants(m));
+    if (doomed.length > 0) {
+      try {
+        const api = identityApiOf(() => undefined);
+        const removed: string[] = [];
+        for (const id of doomed) {
+          if (await api.deleteTenant(id)) removed.push(id);
+          else log(`sweep: the identity tenant of ${id} could not be deleted; it stays in identity[]`);
+        }
+        identities = identities.filter((e) => !removed.includes(e.tenantId));
+        log(`sweep: ${removed.length} of ${doomed.length} identity tenants removed`);
+        if (removed.length < doomed.length) status = 1;
+      } catch (e) {
+        log(`sweep: the identity tenants could not be deleted (${errorText(e)}); they stay in identity[]`);
+        status = 1;
+      }
+    }
     const keep = (ids: readonly string[]): string[] => ids.filter((t) => !gone.includes(t));
-    writeManifest(manifestFile(), { ...m, seeded: keep(m.seeded), churn: keep(m.churn), extra: keep(m.extra) });
+    // The warm-up record goes with its tenant: the cell it names is deleted with the seeded fleet.
+    const { warmUp: warm, ...rest } = m;
+    const warmUpKept = warm !== undefined && !gone.includes(warm.tenantId);
+    writeManifest(manifestFile(), {
+      ...rest,
+      ...(warmUpKept ? { warmUp: warm } : {}),
+      seeded: keep(m.seeded),
+      churn: keep(m.churn),
+      extra: keep(m.extra),
+      ...(m.identity === undefined ? {} : { identity: identities }),
+    });
     for (const k of kept) log(`sweep: tenant ${k.id} stays in the manifest: ${k.reason}`);
     if (kept.length > 0) status = 1;
     log(`sweep: ${targets.length} deployments and ${gone.length} tenants removed`);
@@ -493,12 +706,16 @@ async function main(argv: readonly string[]): Promise<number> {
   const [command, arg] = argv;
   switch (command) {
     case 'budget':
-      process.stdout.write(`${JSON.stringify({ draws: drawsOf(tier(), buildLimit()) })}\n`);
+      process.stdout.write(`${JSON.stringify({ draws: drawsOf(tier(), buildLimit(), parseMode(process.env.STRESS_MODE) === 'platform') })}\n`);
       return 0;
     case 'check-accounts':
       return checkAccounts();
     case 'register':
       return register();
+    case 'connection':
+      return connection();
+    case 'step':
+      return step(arg);
     case 'unregister':
       return unregister();
     case 'seed':

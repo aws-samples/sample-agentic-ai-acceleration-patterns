@@ -33,7 +33,12 @@ export type RequestKind =
   | 'client-route-header'
   | 'client-token-header'
   | 'tenants-list'
-  | 'direct-origin';
+  | 'direct-origin'
+  | 'ingress-forged-payload'
+  | 'ingress-own-token';
+
+/** The two direct calls to the runtime-isolation ingress (platform PS-7), whose answers come from API Gateway and its authoriser, not the router. */
+export const INGRESS_KINDS: readonly RequestKind[] = ['ingress-forged-payload', 'ingress-own-token'];
 
 export interface Observed {
   readonly status: number;
@@ -69,6 +74,7 @@ const CELL_REASONS: Readonly<Record<string, string>> = {
 };
 
 export function classify(kind: RequestKind, o: Observed): Classified {
+  if (INGRESS_KINDS.includes(kind)) return classifyIngress(o);
   if (o.status === 200) return { served: true, known: true };
   if (o.status === 0) return { served: false, known: false };
   if (o.status === 494) return { served: false, reason: 'cloudfront-header-too-large', known: true };
@@ -83,6 +89,23 @@ export function classify(kind: RequestKind, o: Observed): Classified {
   }
   if (doc !== undefined && doc.status === o.status) return { served: false, reason: edgeReason(kind, o), known: true };
   return { served: false, known: false };
+}
+
+/**
+ * A direct call to the ingress: any 2xx is served, 401 and 403 are its authoriser's refusals, 429 its rate limit, other 4xx a
+ * refusal it makes for a request it does not accept, and anything else (a 5xx, no answer) no hop owns.
+ */
+function classifyIngress(o: Observed): Classified {
+  if (o.status >= 200 && o.status < 300) return { served: true, known: true };
+  const reason = ingressReason(o.status);
+  return reason === undefined ? { served: false, known: false } : { served: false, reason, known: true };
+}
+
+function ingressReason(status: number): string | undefined {
+  if (status === 401) return 'ingress-unauthorized';
+  if (status === 403) return 'ingress-forbidden';
+  if (status === 429) return 'ingress-rate-limited';
+  return status >= 400 && status < 500 ? 'ingress-refused' : undefined;
 }
 
 function edgeReason(kind: RequestKind, o: Observed): string {
@@ -134,6 +157,10 @@ export const EXPECT: Readonly<Record<RequestKind, Expectation>> = {
   'client-token-header': { served: true, reasons: ['cell-rate-limited'] },
   'tenants-list': { served: false, reasons: ['edge-tenants-list'] },
   'direct-origin': { served: false, reasons: ['origin-iam-denied'] },
+  // The ingress is public by design (front-door spec §1.2) and checks the token itself: a token whose payload names another tenant is never served.
+  'ingress-forged-payload': { served: false, reasons: ['ingress-unauthorized', 'ingress-forbidden'] },
+  // A tenant's own token is served; the ingress's per-tenant limit may refuse it, which is a result, not a fault.
+  'ingress-own-token': { served: true, reasons: ['ingress-rate-limited'] },
 };
 
 /** True when `c` is an answer the kind allows. */

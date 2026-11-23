@@ -8,8 +8,8 @@ import * as path from 'node:path';
 
 /**
  * The guards `slice.sh` applies before it deploys or destroys anything: the
- * prefix names the stacks that `teardown` destroys, and platform mode is not
- * this slice's. None of these runs reach AWS.
+ * prefix names the stacks that `teardown` destroys, and a scenario that only
+ * slice mode runs is refused in platform mode. None of these runs reach AWS.
  */
 
 const SLICE = path.join(__dirname, '..', '..', 'scripts', 'stress', 'slice.sh');
@@ -44,10 +44,10 @@ describe('slice.sh guards', () => {
     expect(r.stderr).toMatch(/STRESS_PREFIX (must be 1 to 28 lower-case letters|is not set)/);
   });
 
-  (hasJq ? it : it.skip)('lets a good prefix through to the platform-mode refusal, which touches nothing', () => {
-    const r = slice('goodprefix', 'platform', 'teardown');
+  (hasJq ? it : it.skip)('lets a good prefix through to the mode check, which touches nothing', () => {
+    const r = slice('goodprefix', 'platform', 'run', 'route-write');
     expect(r.status).toBe(2);
-    expect(r.stderr).toContain('platform mode');
+    expect(r.stderr).toContain('this verb runs in slice mode only');
   });
 
   describe('the host record of a prefix (lib.sh check_record)', () => {

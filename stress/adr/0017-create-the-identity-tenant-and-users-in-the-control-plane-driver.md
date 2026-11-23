@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0017: Create each control-plane tenant's identity tenant and users in the control-plane driver
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0012
 - Deciders: Dave Roberts (PSA)
@@ -229,3 +229,18 @@ control plane's `DeleteDeployment` does not remove them and the
 `tenant-identity` `teardown` knows only the tenants it seeded. Revisit
 if the tenant-identity sample gains a control-plane hook, or if the
 platform API admits cell-account roles.
+
+Not built yet: the `large` path. The Decision's identity calls "for the
+`large` fleet's seed" and the W-9 list's cleanup of "the churn tenants PS-1 is
+timed on" at `large` are planned, not built. The `large` fleet's seed makes no
+identity calls, and PS-1 in a platform run at a fixture tier stops with a
+finding, so the churn creates PS-1 would be timed on get none either. Tiers above `small`
+wait for Q-7 (spec §10).
+
+One change to two statements above, "Spec §4.4 lists the draw in the
+`control-plane` column" and "the Cognito draw in the slice's `budget`" in the
+W-9 list: the `control-plane` slice's `budget` has no Cognito draw. In a
+platform run the `tenant-identity` slice's budget already counts the control
+plane's tenants in the stress pool, so a second draw would count the same
+groups twice. Spec §4.4 names the groups in the `control-plane` column and
+budgets them in the `tenant-identity` column.

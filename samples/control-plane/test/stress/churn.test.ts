@@ -120,7 +120,7 @@ class World {
       cellAccounts: [],
       region: 'eu-central-1',
       log: () => undefined,
-      tier: { name: 'small', cellAccounts: 1, cells: 1, maxTenants: 25, tenantsSeeded: 20, onboarding: 'every-run', churnPerRun: over.manifest?.churn.length ?? 3, steadyRps: 10, scenarioSeconds: 60 },
+      tier: { name: 'small', cellAccounts: 1, cells: 1, maxTenants: 25, tenantsSeeded: 20, onboarding: 'every-run', churnPerRun: over.manifest?.churn.length ?? 3, steadyRps: 10, usersPerActiveTenant: 2, scenarioSeconds: 60 },
       manifest: { version: 1, prefix: 'p', tier: 'small', commit: 'c', seeded: [], churn: TENANTS, extra: [] },
       buildLimit: 1,
       setBuildLimit: async () => 0,
@@ -318,6 +318,9 @@ describe('the front door\'s manifest (stress/README.md, "Platform mode: manifest
   it('takes the edge and the registrar and defaults the agent backend', () => {
     expect(parseEdgeInputs(JSON.stringify(valid), 'f')).toEqual({ edgeUrl: 'https://stress.example.com', registrarUrl: 'https://abc123.execute-api.us-east-1.amazonaws.com/prod', agentBackend: 'default' });
     expect(parseEdgeInputs(JSON.stringify({ ...valid, agentBackend: 'a001' }), 'f').agentBackend).toBe('a001');
+    const role = 'arn:aws:iam::123456789012:role/StressW9-support-EdgeOperatorAB12';
+    expect(parseEdgeInputs(JSON.stringify({ ...valid, operatorRoleArn: role }), 'f').operatorRoleArn).toBe(role);
+    expect(() => parseEdgeInputs(JSON.stringify({ ...valid, operatorRoleArn: 'x' }), 'f')).toThrow(/operatorRoleArn must be an IAM role ARN/);
   });
 
   it('names the slice that writes it when it is missing', () => {

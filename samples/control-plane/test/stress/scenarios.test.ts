@@ -19,6 +19,7 @@ const TIER: TierSizes = {
   onboarding: 'every-run',
   churnPerRun: 0,
   steadyRps: 100,
+  usersPerActiveTenant: 2,
   scenarioSeconds: 0.1,
 };
 const DEPLOYMENT = { tenantId: 'T1', applicationId: 'stress', cellId: 'C1', status: 'ACTIVE' };

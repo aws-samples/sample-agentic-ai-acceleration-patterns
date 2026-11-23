@@ -5,7 +5,8 @@
 # Stress slice, `deploy`: the front door in `single` mode on the smoke stack
 # (test/smoke/smoke.app.ts): a stand-in control plane, the edge operator and
 # global hook roles, the three front door stacks and one demo cell. Slice mode
-# only; the platform run deploys the control plane and the cell itself.
+# only; the platform run uses deploy-platform.sh, which composes the real control
+# plane and the cell scripts' cell.
 #
 # Inputs (environment): AWS_REGION, STRESS_PREFIX, STRESS_HOME from the runner,
 # and STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME: a public hosted zone in this
@@ -60,23 +61,7 @@ APP_CLIENT_ID="$(param "$IDENTITY_PREFIX/appClientId" "$IDENTITY_REGION")"
 USER_POOL_ID="$(param "$IDENTITY_PREFIX/userPoolId" "$IDENTITY_REGION")"
 ISSUER="https://cognito-idp.${IDENTITY_REGION}.amazonaws.com/${USER_POOL_ID}"
 
-# deploy STACK APP_KIND (smoke|fd): one CDK deploy of one stack, timed.
-deploy_stack() {
-  local stack="$1" kind="$2" start=$SECONDS secs
-  echo "== deploy ${stack}"
-  if [[ "$kind" == smoke ]]; then
-    smoke_context_args
-    npx cdk deploy "$stack" --exclusively --app "$SMOKE_APP" --output "${STATE_DIR}/cdk.out.smoke" "${SMOKE_CONTEXT[@]}" \
-      --require-approval never >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
-  else
-    fd_context_args
-    npx cdk deploy "$(fd_selector "$stack")" --exclusively --output "${STATE_DIR}/cdk.out.fd" "${FD_CONTEXT[@]}" \
-      --require-approval never >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
-  fi
-  secs=$((SECONDS - start))
-  echo "stack=${stack} deploy_seconds=${secs}"
-  echo "$(date -u +%F) stack=${stack} deploy_seconds=${secs}" >>"$TIMINGS"
-}
+# deploy_stack STACK APP_KIND (smoke|fd): one timed CDK deploy of one stack, in lib.sh.
 
 # A deploy that no check refused starts the list of what teardown must check afresh.
 rm -f "$RESOURCES"

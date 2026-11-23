@@ -48,7 +48,17 @@ conditions, and the names.
 `CellAccountBase` holds the API Gateway account's CloudWatch Logs role and
 setting (every runtime-isolation stage logs), and, when given, the identity
 parameters a cell reads: `/application-plane/shared/identity/userPoolId` and
-`appClientId`, naming the stress identity (stress ADR-0002).
+`appClientId`, naming the stress identity (stress ADR-0002). For a platform
+run it also holds the ingress reader role (spec §3.5), when given the
+platform account id (`PLATFORM_ACCOUNT_ID`): a role on `/` that the platform
+account's root may assume, with one allow, `ssm:GetParameter` on
+`parameter/application-plane/shared/agent-runtime/StressCell-*/ingress` in the
+stack's Region, and the output `IngressReaderRoleArn`. That is the parameter
+each cell's ingress publishes (`publishParameters` off puts it under the
+stack's own name, `StressCell-<cell id>`); its value is one JSON document with
+`baseUrl`. The account check lists roles on `/cell/` only, so it takes this
+role without a change; it still wants the stack's ARN on the list of
+account-base stacks.
 
 Both owner stacks use the CDK's legacy synthesizer: the CLI deploys their
 asset-free templates inline with your credentials, so the account never needs
@@ -76,11 +86,17 @@ export AWS_PROFILE=<cell account profile> AWS_REGION=eu-central-1
 
 1. Deploy the owner stacks. Give the stress identity's user pool and app
    client to write the identity parameters a cell reads, or leave both
-   variables out and run the step again with them later:
+   variables out and run the step again with them later. For a platform run
+   also give the platform account id, which adds the ingress reader role (the
+   script then prints its ARN as `IngressReaderRoleArn=`):
 
    ```bash
-   CELL_USER_POOL_ID=<stress identity pool id> CELL_APP_CLIENT_ID=<its app client id> application/deploy-owner.sh
+   CELL_USER_POOL_ID=<stress identity pool id> CELL_APP_CLIENT_ID=<its app client id> PLATFORM_ACCOUNT_ID=<platform account id> application/deploy-owner.sh
    ```
+
+   `CELL_OWNER_STACKS=base` deploys `CellAccountBase` alone and leaves
+   `CellPolicies` out of the app: use it to add the identity or the reader
+   role to an account whose policies are in place, without touching them.
 
 2. Bootstrap the cell qualifier against the policies:
 
@@ -149,6 +165,55 @@ The import applies no other change in the template, so run step 1 again
 afterwards (`application/deploy-owner.sh` with the same suffix) to bring the
 rest of `CellPolicies` up to date.
 
+## Add a second Region to a cell account
+
+The cell policies and the role pair are not Region-free. `cell-policies.ts`
+names the Region's cell asset bucket (`cdk-cell-assets-<account>-<Region>`) in
+the execution policy and both boundaries, and the cell build policy names that
+Region's bootstrap roles (`cdk-cell-deploy-role-<account>-<Region>` and the two
+publishing roles). IAM names are account-wide, so a second `CellPolicies`
+under the same names fails, and one set serves one Region. The role pair has
+fixed role names too (`<fleet>-cell-provisioning`, `<fleet>-tenant-provisioning`),
+so a fleet's pair exists once per account. A cell account therefore takes a
+second Region as a second, complete set: a policy suffix and a fleet name that
+the account does not hold yet, which is what the W-10 run did for the
+policies (`-w10r`, below). Run each step in the second Region, in the cell
+account owner's shell, from `stress/`:
+
+```bash
+export AWS_PROFILE=<cell account profile> AWS_REGION=<second Region> CELL_POLICY_SUFFIX=<new suffix>
+```
+
+1. The owner stacks with the new suffix, the identity of that Region (SSM
+   parameters are per Region, and the stress identity's user pool must be in
+   the Region of the cells that trust it) and the platform account id:
+
+   ```bash
+   CELL_USER_POOL_ID=<pool id in this Region> CELL_APP_CLIENT_ID=<its app client id> PLATFORM_ACCOUNT_ID=<platform account id> application/deploy-owner.sh
+   ```
+
+   Stacks are per Region, so `CellPolicies` and `CellAccountBase` are new
+   stacks here; only the policy names need the new suffix.
+2. `application/bootstrap-cell.sh`, which bootstraps `CDKToolkit-cell` in this
+   Region against the suffixed policies.
+3. The role pair of the run's fleet name, with a fleet name the account holds
+   no pair for (`STRESS_FLEET_NAME=<fleet> CONTROL_PLANE_ACCOUNT_ID=<platform account id> application/deploy-role-pair.sh`). The run's `STRESS_CELL_POLICY_SUFFIX` is the new suffix.
+4. Give the run the reader role of this Region: the `IngressReaderRoleArn` step 1
+   printed (each Region's base stack has its own role, and its policy names only
+   that Region's parameters), as `ingressReaderRoleArn` of the account in the
+   cell accounts file.
+5. Add the stack ARNs of this Region to that account's `accountBaseStackArns`:
+   the account check lists the stacks of every Region, and refuses a stack
+   tagged account-base that is not on the list. The base stack ARN of each
+   Region used goes there, with the `CellPolicies` ARN of each set.
+
+`CELL_OWNER_STACKS=base` is not a way round the suffix: it leaves the policies
+out, and the policies of the first Region name that Region's bucket and roles.
+Widening them to every Region (a wildcard Region in `assetStatement` and
+`cellBuildBootstrapRoleArns`) would let one set and one pair serve all
+Regions of a cell account, at the price of a wider grant in each, and it is not
+done here.
+
 ## Probe the policies
 
 `probe-deploy.sh` deploys `CellBoundaryProbe`, an owner stack with one role,
@@ -212,9 +277,9 @@ account's role pair, and logs ids and timings only.
 
 | Script | Runs as | Does |
 |---|---|---|
-| `scripts/cell/create.sh` (and `update.sh`) | the role pair cell role | installs the runtime-isolation sample, synthesises `cell-app.ts` (every role on `/cell/` under the workload boundary, qualifier `cell`) and deploys `StressCell-<cell id>` through `CDKToolkit-cell`; publishes the stack name and the Entitlements API base URL under `/application-plane/cells/<cell id>/` |
-| `scripts/cell/delete.sh` | the role pair cell role, then the cell bootstrap's deploy role | deletes the cell stack under the bootstrap's execution role, the role that created it, with no install or synth; removes the cell's parameters |
-| `scripts/tenant/create.sh` (and `update.sh`) | the role pair tenant role | `PutTenantSubscription` for the tenant on its cell's Entitlements API, SigV4, with the agents and tools of the tenant parameters `AGENTS` and `TOOLS` (default `default` and none); records the tenant, cell and subscription version under `/application-plane/tenants/<tenant id>/stress` (ADR-0012) |
+| `scripts/cell/create.sh` (and `update.sh`) | the role pair cell role | installs the runtime-isolation sample, synthesises `cell-app.ts` (every role on `/cell/` under the workload boundary, qualifier `cell`) and deploys `StressCell-<cell id>` through `CDKToolkit-cell`; publishes the stack name and the Entitlements API base URL under `/application-plane/cells/<cell id>/`; with the cell parameter `DISTRIBUTION_ARN` also deploys the cell API origin and publishes its host as `api-domain` there, and writes `{"stackName", "frontDoorApiDomain"}` to `OUTPUTS_FILE` |
+| `scripts/cell/delete.sh` | the role pair cell role, then the cell bootstrap's deploy role | deletes the cell stack under the bootstrap's execution role, the role that created it, with no install or synth; removes the cell's parameters (`stack`, `entitlements-api-url`, `api-domain`) |
+| `scripts/tenant/create.sh` (and `update.sh`) | the role pair tenant role | `PutTenantSubscription` for the tenant on its cell's Entitlements API, SigV4, with the agents and tools of the tenant parameters `AGENTS` and `TOOLS` (default `default` and none); records the tenant, cell and subscription version under `/application-plane/tenants/<tenant id>/stress/state`, a child of the tenant namespace, which the front door cell API's hosts check reads (ADR-0012) |
 | `scripts/tenant/delete.sh` | the role pair tenant role | `DeleteTenantSubscription` and the record |
 
 The cell is the runtime-isolation demo stack with the `api-gateway` ingress
@@ -225,6 +290,28 @@ slice). `cell-app.ts` loads one copy of the CDK: the cell script installs
 only the runtime-isolation sample and runs the app with `NODE_PATH` set to its
 `node_modules`, and the app refuses to run when this package's `aws-cdk-lib`
 would load too.
+
+### The cell API origin (platform mode)
+
+With the cell parameter `DISTRIBUTION_ARN` (the tenant front door's edge
+distribution; empty is slice mode, and the cell is as above) the cell app adds
+a `DemoCellApi` from `samples/tenant-front-door/src/demo-cell/` to the cell
+stack (spec §3.3, step 2): a Lambda function with an `AWS_IAM` function URL,
+the permissions that let that distribution, and only it, invoke the URL, and
+the per-tenant counter table. It trusts the stress identity: the cell script
+reads `/application-plane/shared/identity/userPoolId` and `appClientId`, which
+the account base writes, and passes them to the app with the distribution ARN.
+The stack's output `FrontDoorApiDomain` is the URL's host. The cell script
+checks it against `^[a-z0-9]{32}\.lambda-url\.<Region>\.on\.aws$` before it
+publishes `/application-plane/cells/<cell id>/api-domain` and writes it to the
+outputs file.
+
+The cell API's function is bundled by the CDK from tenant-front-door's folder.
+The cell build still installs only the runtime-isolation sample:
+`link_front_door_modules` in `scripts/lib.sh` links tenant-front-door's
+`node_modules` to the sample's, so `esbuild`, `jose` and the SDK clients
+resolve in that one install. The bundle uses the sample's `jose` 5.10.0, not
+tenant-front-door's 6.2.10.
 
 ## Results
 
@@ -373,12 +460,10 @@ publishes and reads assets, and it holds only cell assets.
 
 - The stress cell is the runtime-isolation demo stack: its agents and tool
   targets are the demo's, not the tier's `agentsPerCell` and tool counts.
-  The tier-sized cell is W-3's stress ingress, which W-9 composes.
-- The tenant scripts subscribe a tenant on its cell only. The tenant-identity
-  tenant of spec §3.3 step 4 is created by the `control-plane` slice's
-  driver, not by the script (stress ADR-0017, built in W-9). The tenant's
-  front-door route is written by the front door's route hook, not by the
-  script (stress ADR-0016).
+  The tier-sized cell is W-3's stress ingress.
+- The tenant scripts subscribe a tenant on its cell only. A platform run adds
+  the tenant's identity (the control-plane driver, stress ADR-0017) and the
+  front-door route (the route hook); this folder's scripts do neither.
 - `cell-tenant-build-policy` reaches the tenant subscription methods of every
   API in the cell account, so a compromised tenant build can change any
   tenant's subscription on any cell there. The control plane's API role can
@@ -393,9 +478,10 @@ publishes and reads assets, and it holds only cell assets.
 - A cell is stamped with its source when it is created: a fixed cell or
   tenant script reaches an existing cell only after it is deleted and created
   again (ADR-0014).
-- The request path under the workload boundary (authoriser, TVM, model
-  call, tools) has not run in a cell account; the first platform run at
-  `small` is the check (spec Q-5).
+- The request path under the workload boundary (authoriser, TVM, streamed
+  answers) was served in a cell account by the first platform run at `small`
+  (spec Q-5, `stress/results/2026-11-21-small.md`). Tool calls and model
+  usage events are not counted apart in the record.
 - The policies allow the cell's services on `*`. That is safe only in a
   standalone cell account that holds nothing but cells, the cell bootstrap,
   the role pair and these stacks (spec §3.7, ADR-0006); never deploy them in

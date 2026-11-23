@@ -30,7 +30,8 @@ import {
   removeAll,
   waitDeployments,
 } from './fleet';
-import type { Manifest } from './manifest';
+import type { IdentityApi } from './identity';
+import type { IdentityEntry, Manifest } from './manifest';
 import { scalingLimitsFor, type TierSizes } from './plan';
 import { NO_TENANT } from './recorder';
 
@@ -42,9 +43,26 @@ export interface ScenarioEnv extends FleetEnv {
   readonly setBuildLimit: (limit: number) => Promise<number>;
   /** The front door's edge and route registrar, for PS-5 (platform mode only; `edge.ts`). */
   readonly edge?: Edge;
+  /** The stress identity and the edge, for PS-1 in a platform run (stress ADR-0017). */
+  readonly platform?: PlatformEnv;
 }
 
-/** A cell build plus its first tenant build: Q-1 expects about eight minutes; one hour is the build budget. */
+/** What PS-1 needs in a platform run, beside the control plane: the stress identity and, with the front door in the run, the edge. */
+export interface PlatformEnv {
+  readonly identity: IdentityApi;
+  /** Users per tenant, the admin counted (spec §4.1). */
+  readonly users: number;
+  /** The front door's https origin; absent when the run has no front door (the identity is created, nothing is polled). */
+  readonly edgeUrl?: string;
+  /** The identity tenant the manifest already holds for a control-plane tenant. */
+  readonly existing: (tenantId: string) => IdentityEntry | undefined;
+  /** Records a created identity tenant in the manifest, at once, so teardown finds it after any failure. */
+  readonly save: (entry: IdentityEntry) => void;
+  /** Writes the tenant's row in the cell's demo table, which the agent's `read <tenant>` probe reads (spec §5.3, credential check). */
+  readonly seedData?: (tenantId: string) => Promise<void>;
+}
+
+/** A cell build plus its first tenant build: 759 s in the first platform run (spec Q-1); one hour is the build budget. */
 const CELL_TIMEOUT_SECONDS = 3600;
 /** A wave of tenant builds at a build limit: rounds of about two minutes each, with margin. */
 const waveTimeout = (tenants: number, limit: number): number => 600 + Math.ceil(tenants / limit) * 240;
@@ -155,14 +173,206 @@ async function offboard(s: ScenarioEnv, tenants: readonly string[]): Promise<voi
   if (stuck.length > 0) s.rec.finding(`${stuck.length} deployments still there after three deletes`);
 }
 
+/** How many tenants get their identity and first served request at once; the identity calls are paced anyway (`IDENTITY_CALLS_PER_SECOND`). */
+const READY_CONCURRENCY = 4;
+/** A tenant's route reaches the edge within about a minute (front-door spec §3.4); five minutes is the budget. */
+const READY_TIMEOUT_SECONDS = 300;
+/** The stress identity's access tokens live five minutes (tenant-identity); a poll that runs longer asks for a new one. */
+const TOKEN_REUSE_MS = 200_000;
+
+interface Whoami {
+  readonly status: number;
+  readonly body: any;
+  readonly seconds: number;
+}
+
+/** One `GET /api/whoami` through the edge. Never throws; status 0 is no answer. */
+async function whoamiOnce(edgeUrl: string, token: string): Promise<Whoami> {
+  const started = process.hrtime.bigint();
+  try {
+    const res = await fetch(`${edgeUrl}/api/whoami`, { headers: { authorization: `Bearer ${token}` }, redirect: 'manual', signal: AbortSignal.timeout(15_000) });
+    const text = await res.text();
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = undefined;
+    }
+    return { status: res.status, body, seconds: Number(process.hrtime.bigint() - started) / 1e9 };
+  } catch {
+    return { status: 0, body: undefined, seconds: Number(process.hrtime.bigint() - started) / 1e9 };
+  }
+}
+
+/**
+ * A control-plane tenant that is ACTIVE gets its identity (stress ADR-0017) and then asks the
+ * edge for `/api/whoami` until it is served (spec §3.3 step 4): the time from `CreateDeployment`
+ * to that answer is the tenant's PS-1 time (`ready`). The answer is an isolation assertion
+ * at the edge and the cell (spec §5.3): the verified tenant is this tenant and the route hint
+ * the router sent names it. A tenant whose identity could not be made, or that is never
+ * served, is a finding.
+ */
+async function becomeReady(s: ScenarioEnv, p: PlatformEnv, tenant: string, createdAtMs: number, hop: 'ready' | 'warm-up-ready' | 'rerun-ready'): Promise<void> {
+  const identityStarted = Date.now();
+  const further = Math.max(0, p.users - 1);
+  let entry = p.existing(tenant);
+  // An entry with fewer users than the tier asks for is one an earlier run left part way: the same calls finish it.
+  if (entry === undefined || entry.users.length < further) {
+    entry = await p.identity.createIdentity(tenant, `st-${tenant.slice(-12).toLowerCase()}`, further, p.save);
+    if (entry === undefined) {
+      s.rec.finding(`tenant ${tenant}: its identity tenant could not be made`);
+      return;
+    }
+  }
+  // The demo row the agent's credential check reads: made with the identity, before the first served call.
+  if (p.seedData !== undefined) {
+    try {
+      await p.seedData(tenant);
+    } catch (e) {
+      s.rec.finding(`tenant ${tenant}: its demo data could not be written (${e instanceof Error ? e.name : 'error'})`);
+    }
+  }
+  s.rec.sample('identity', (Date.now() - identityStarted) / 1000);
+  if (p.edgeUrl === undefined) return;
+  let token: string | undefined;
+  let issuedAt = 0;
+  const deadline = Date.now() + READY_TIMEOUT_SECONDS * 1000;
+  for (;;) {
+    if (token === undefined || Date.now() - issuedAt > TOKEN_REUSE_MS) {
+      token = await p.identity.issueToken(tenant, entry.admin.username);
+      issuedAt = Date.now();
+      if (token === undefined) {
+        s.rec.finding(`tenant ${tenant}: no token for ${hop}`);
+        return;
+      }
+    }
+    const r = await whoamiOnce(p.edgeUrl, token);
+    s.rec.observe('edge-whoami', { status: r.status, body: r.body, seconds: r.seconds }, tenant, false);
+    if (r.status === 200) {
+      s.rec.assertIsolation(String(r.body?.tenantId ?? '').toUpperCase() === tenant, `the cell answered for tenant ${String(r.body?.tenantId)}`, tenant);
+      s.rec.assertIsolation(String(r.body?.routeHint ?? '') === tenant.toLowerCase(), 'the route hint the router sent does not name the token\'s tenant', tenant);
+      s.rec.sample(hop, (Date.now() - createdAtMs) / 1000);
+      return;
+    }
+    if (Date.now() > deadline) {
+      s.rec.finding(`tenant ${tenant}: not served through the edge within ${READY_TIMEOUT_SECONDS} s (last HTTP ${r.status})`);
+      return;
+    }
+    await sleep(2000);
+  }
+}
+
+/**
+ * Starts the identity and readiness work of each tenant as its deployment turns ACTIVE, so a
+ * tenant's `ready` time does not wait for the rest of the wave. `finish` stops looking, reads
+ * once more and waits for every started tenant.
+ */
+function startReadiness(s: ScenarioEnv, p: PlatformEnv, tenants: readonly string[], placedNow: ReadonlySet<string>): { finish: () => Promise<void> } {
+  const queued = new Set<string>();
+  const jobs: Promise<void>[] = [];
+  let running = 0;
+  const waiting: (() => void)[] = [];
+  const slot = async (): Promise<void> => {
+    if (running < READY_CONCURRENCY) {
+      running += 1;
+      return;
+    }
+    // The releasing job hands its slot over, so `running` stays counted while the waiter wakes.
+    await new Promise<void>((resolve) => waiting.push(resolve));
+  };
+  const release = (): void => {
+    const next = waiting.shift();
+    if (next !== undefined) next();
+    else running -= 1;
+  };
+  const tick = async (): Promise<void> => {
+    const all = await deploymentsOf(s);
+    for (const t of tenants) {
+      const d = all.get(t);
+      if (d?.status !== 'ACTIVE' || queued.has(t)) continue;
+      queued.add(t);
+      jobs.push((async () => {
+        await slot();
+        try {
+          // A tenant placed in an earlier run is timed apart: its clock starts at the old CreateDeployment.
+          await becomeReady(s, p, t, Date.parse(d.createdAt), placedNow.has(t) ? 'ready' : 'rerun-ready');
+        } catch (e) {
+          // An unhandled rejection would end the driver before it writes the PS-1 record.
+          s.rec.finding(`tenant ${t}: readiness failed (${e instanceof Error ? e.message : 'error'})`);
+        } finally {
+          release();
+        }
+      })());
+    }
+  };
+  let stopped = false;
+  const loop = (async () => {
+    while (!stopped) {
+      await tick().catch((e: unknown) => s.rec.finding(`reading the deployments for readiness failed: ${(e as Error).message}`));
+      for (let i = 0; i < 10 && !stopped; i += 1) await sleep(1000);
+    }
+  })();
+  return {
+    async finish() {
+      stopped = true;
+      await loop;
+      await tick().catch((e: unknown) => s.rec.finding(`reading the deployments for readiness failed: ${(e as Error).message}`));
+      await Promise.all(jobs);
+    },
+  };
+}
+
+/**
+ * PS-1 in a platform run (spec §3.5 steps 5 to 7, §5.1): the warm-up tenant, which the `warm-up`
+ * step placed alone to build the cell, gets its identity first and is not part of the timed
+ * wave; the other seeded tenants are onboarded at the build limit, each gets its identity as
+ * its deployment turns ACTIVE, and the time from `CreateDeployment` to the first served
+ * `/api/whoami` through the edge is the `ready` hop. The front door's phase two ran before
+ * this scenario, so the agent path is open for the tenants that follow (PS-2 and the rest).
+ */
+async function ps1Platform(s: ScenarioEnv, p: PlatformEnv): Promise<void> {
+  const warm = s.manifest.warmUp!;
+  if (s.tier.onboarding === 'fixture') {
+    s.rec.finding('PS-1 in a platform run at a fixture tier is not built: nothing creates the identity tenants of a fixture fleet (stress ADR-0017)');
+    return;
+  }
+  const existing = await deploymentsOf(s);
+  const warmDeployment = existing.get(warm.tenantId);
+  if (warmDeployment?.status !== 'ACTIVE') s.rec.finding(`the warm-up tenant ${warm.tenantId} has no ACTIVE deployment: run the warm-up step first`);
+  else await becomeReady(s, p, warm.tenantId, Date.parse(warmDeployment.createdAt), 'warm-up-ready');
+  const others = s.manifest.seeded.filter((t) => t !== warm.tenantId);
+  // A tenant that is ACTIVE already (a rerun) is not placed again but still gets its identity and its first served call.
+  const tenants = others.filter((t) => existing.get(t)?.status !== 'ACTIVE');
+  // Placed in this run: no deployment before it. One left CREATING by an aborted run keeps its old clock.
+  const watcher = startReadiness(s, p, others, new Set(tenants.filter((t) => existing.get(t) === undefined)));
+  let r: Onboarded;
+  try {
+    r = await onboard(s, tenants, 'onboard');
+  } finally {
+    await watcher.finish();
+  }
+  s.rec.sample('wave', r.waveSeconds);
+  if (r.full.length > 0) s.rec.finding(`${r.full.length} tenants found the fleet full during onboarding`);
+  s.log(`PS-1: ${r.placed.length} of ${tenants.length} placed in ${Math.round(r.waveSeconds)} s (${(r.placed.length / Math.max(r.waveSeconds / 60, 1 / 60)).toFixed(1)} deployments a minute), warm-up tenant apart`);
+  await assertFleet(s, s.manifest.seeded);
+}
+
 /**
  * PS-1 onboarding (spec §5.1), the control plane's share: the seeded tenants onboarded at
  * the build limit. Hops: `create-deployment` (the API call), `onboard` (CreateDeployment to
  * ACTIVE, from the record's own timestamps), `cell-create` (a new cell's CREATING to ACTIVE,
  * spec Q-1) and `wave` (the whole batch). At a fixture tier whose seeded fleet is already
- * there, the churn tenants are onboarded and removed instead (spec §5.1).
+ * there, the churn tenants are onboarded and removed instead (spec §5.1). In a platform run
+ * (`s.platform` and a warm-up tenant in the manifest) each tenant also gets its identity and is
+ * polled until the edge serves it (`ps1Platform`).
  */
 export async function ps1(s: ScenarioEnv): Promise<void> {
+  if (s.platform !== undefined) {
+    if (s.manifest.warmUp !== undefined) return ps1Platform(s, s.platform);
+    // Slice-mode PS-1 here would onboard tenants with no identity and read like a pass.
+    s.rec.finding('PS-1 in a platform run needs the warm-up record in control-plane.json: run the warm-up step first');
+    return;
+  }
   const existing = await deploymentsOf(s);
   let tenants = s.manifest.seeded.filter((t) => existing.get(t)?.status !== 'ACTIVE');
   const fixture = tenants.length === 0 && s.tier.onboarding === 'fixture';

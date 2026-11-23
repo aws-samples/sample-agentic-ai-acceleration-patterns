@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0006: Deploy cells in standalone accounts through a scoped cell bootstrap
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0011, ADR-0016
 - Deciders: Dave Roberts (PSA)
@@ -81,9 +81,9 @@ and the bootstrap roles, a role on `/`, a role without the boundary,
 another service-linked role, removing or swapping a boundary, new
 versions of the cell policies, overwriting the owner's identity and
 bootstrap parameters, and repointing the API Gateway account's logs
-role) while a write to another `/cell/` role worked. Still to
-prove before this record is accepted (spec Q-5): the request path in a
-cell account.
+role) while a write to another `/cell/` role worked. The request path in a
+cell account was served by the first platform run at `small` (spec Q-5,
+`stress/results/2026-11-21-small.md`).
 
 Easier: a cell build cannot create, change, pass or assume a role outside
 the cell, apart from the two service-linked roles above, whose trust IAM
@@ -96,8 +96,8 @@ a new service in a cell needs both policies updated before its first
 deploy, and an integration run under the boundary is the check; one
 boundary caps both the execution role and every role a cell creates, so
 a workload role holds IAM write, `iam:PassRole` and `sts:AssumeRole`
-headroom on `role/cell/*` it never uses, and W-10 decides whether cell
-roles get a second boundary without IAM writes (TVM roles still need
+headroom on `role/cell/*` it never uses, and ADR-0011 gives cell
+roles a second boundary without IAM writes (TVM roles still need
 `sts:AssumeRole` on `/cell/` tenant roles). Unchanged:
 a compromised cell build can change any cell in its account, which is the
 role pair's scope. Revisit if the CDK bootstrap gains per-stack execution

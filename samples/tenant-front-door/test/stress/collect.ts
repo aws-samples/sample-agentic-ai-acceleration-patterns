@@ -108,6 +108,12 @@ export interface CollectResult {
   readonly notes: string[];
 }
 
+/**
+ * What `collect` reads of the deployment. Slice mode has the demo cell's log group; platform mode has none (the cell is in another
+ * account, and its log group is not this slice's to read), so the cell's count is not compared there.
+ */
+export type CollectOutputs = Pick<Outputs, 'region' | 'edgeRegion' | 'edgeLogGroup' | 'routerFunction'> & { readonly cellLogGroup?: string };
+
 /** The scenarios of this slice that have a record in the results folder. */
 function recordsOf(env: Env): { scenario: string; file: string; record: ResultRecordJson }[] {
   if (!fs.existsSync(env.results)) return [];
@@ -118,7 +124,7 @@ function recordsOf(env: Env): { scenario: string; file: string; record: ResultRe
     .map((f) => ({ scenario: f.slice('tenant-front-door.'.length, -'.json'.length), file: path.join(env.results, f), record: JSON.parse(fs.readFileSync(path.join(env.results, f), 'utf8')) as ResultRecordJson }));
 }
 
-export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
+export async function collect(env: Env, out: CollectOutputs): Promise<CollectResult> {
   const routerName = out.routerFunction.split('/').pop() as string;
   const failures: string[] = [];
   const notes: string[] = [];
@@ -166,31 +172,35 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
     if (join.generatedByFunction !== join.routerRefusals) failures.push(`${scenario}: ${join.routerRefusals - join.generatedByFunction} router refusals are not marked FunctionGeneratedResponse in the edge log`);
 
     // The cell's own count, once its log is complete: the expected total, or for no expected request, quiet for a minute.
+    // Platform mode skips it: the cell's log group is in another account (the control plane builds the cell there), and the
+    // slice has no read access to it. Every other check above and below runs.
     const want = expectedAtCell(lines);
     let diff: string[] = [];
-    let quietSince = Date.now();
-    let previous = '';
-    // The cell check has a deadline of its own, after the edge wait.
-    const cellDeadline = Date.now() + DEADLINE_MS;
-    for (;;) {
-      const got = await cellCounts(cellLogs, out.cellLogGroup, fromMs - 2000, toMs + 2000);
-      diff = compareCell(want, got);
-      const key = JSON.stringify([...got]);
-      if (key !== previous) quietSince = Date.now();
-      previous = key;
-      const total = [...want.values()].reduce((a, b) => a + b, 0);
-      // The counts agree: wait until they stop changing, so a line for a request that must not have reached the cell is not missed
-      // because it arrives after the poll that found them equal. A minute when nothing is expected, half of that when something is.
-      const quiet = Date.now() - quietSince > (total > 0 ? 30_000 : 60_000);
-      if (diff.length === 0 && quiet) break;
-      if (Date.now() > cellDeadline) {
-        // The counts agree but the log never stayed quiet: the check did not run to its end.
-        if (diff.length === 0) failures.push(`${scenario}: the cell log was still changing at the deadline; a request that should not have reached the origin may not be shown yet`);
-        break;
+    if (out.cellLogGroup !== undefined) {
+      let quietSince = Date.now();
+      let previous = '';
+      // The cell check has a deadline of its own, after the edge wait.
+      const cellDeadline = Date.now() + DEADLINE_MS;
+      for (;;) {
+        const got = await cellCounts(cellLogs, out.cellLogGroup, fromMs - 2000, toMs + 2000);
+        diff = compareCell(want, got);
+        const key = JSON.stringify([...got]);
+        if (key !== previous) quietSince = Date.now();
+        previous = key;
+        const total = [...want.values()].reduce((a, b) => a + b, 0);
+        // The counts agree: wait until they stop changing, so a line for a request that must not have reached the cell is not missed
+        // because it arrives after the poll that found them equal. A minute when nothing is expected, half of that when something is.
+        const quiet = Date.now() - quietSince > (total > 0 ? 30_000 : 60_000);
+        if (diff.length === 0 && quiet) break;
+        if (Date.now() > cellDeadline) {
+          // The counts agree but the log never stayed quiet: the check did not run to its end.
+          if (diff.length === 0) failures.push(`${scenario}: the cell log was still changing at the deadline; a request that should not have reached the origin may not be shown yet`);
+          break;
+        }
+        await sleep(10_000);
       }
-      await sleep(10_000);
+      for (const d of diff) failures.push(`${scenario}: ${d}`);
     }
-    for (const d of diff) failures.push(`${scenario}: ${d}`);
 
     const hops = { ...record.latency, edge: percentiles(join.edgeSeconds) };
     const compute = await routerMetric(metrics, routerName, 'FunctionComputeUtilization', 'Maximum', fromMs, toMs);
@@ -215,7 +225,7 @@ export async function collect(env: Env, out: Outputs): Promise<CollectResult> {
     fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
     notes.push(
       `${scenario}: edge log ${join.matched}/${join.expected} joined on x-amz-cf-id = x-edge-request-id; router refusals marked FunctionGeneratedResponse ${join.generatedByFunction}/${join.routerRefusals}; ` +
-        `cell log ${diff.length === 0 ? 'agrees with the driver' : 'DISAGREES'} (reached the cell: ${[...want].map(([s, n]) => `${s}=${n}`).join(' ') || 'none'}); ` +
+        `cell log ${out.cellLogGroup === undefined ? 'not compared (platform mode: the cell\'s log group is in another account)' : `${diff.length === 0 ? 'agrees with the driver' : 'DISAGREES'} (reached the cell: ${[...want].map(([s, n]) => `${s}=${n}`).join(' ') || 'none'})`}; ` +
         `router compute max ${compute.points > 0 ? `${compute.max.toFixed(1)} %` : 'no datapoint yet'}`,
     );
   }

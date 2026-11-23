@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0015: Check the cell accounts with the owner's read access
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Deciders: Dave Roberts (PSA)
 
