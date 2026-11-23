@@ -84,7 +84,8 @@ describe('the build-slot wait (ADR-0049, issue #95)', () => {
     expect(pass).toMatchObject({ Type: 'Pass', ResultPath: '$.failureReason', Next: writer });
     expect(pass.Result).toBe(buildStartRefusedReason(prefix));
     expect(pass.Result).toBe(
-      `${prefix} provisioning failed: the build never started, CodeBuild refused it at the concurrent build limit `
+      `${prefix} provisioning failed: the build never started, CodeBuild refused it at a concurrent build limit `
+      + '(the project\'s or the account\'s) '
       + 'after 40 retries over at most 20 minutes (CodeBuild.AccountLimitExceededException)',
     );
   });

@@ -2533,10 +2533,13 @@ the first try), 126 s of waits); a failed condition is never retried. A
 cancelled transaction (`TransactionCanceledException`) is retried 5
 times from 1 second, backoff rate 2, full jitter, at most 31 s of waits
 (ADR-0049): a cancellation by a concurrent transaction on the same item
-(`TransactionConflict`) applied nothing and succeeds on a later try, and
-a `Retry` matches the error name only, so a cancellation by a failed
-condition is retried too and reaches the Catch up to 31 s later. The
-stable token and the item-state conditions make each try safe. Retry
+(`TransactionConflict`) applied nothing and is expected to succeed on a
+later try, and a `Retry` matches the error name only, so a cancellation
+by a failed condition is retried too and reaches the Catch up to 31 s
+later. The stable token and the item-state conditions make each try
+safe. That a try resent under the token of a cancelled call runs again
+is unverified (H-13); if DynamoDB repeats the cancellation instead, the
+record ends `*_FAILED` as before, 31 s later. Retry
 exhaustion is caught and routed through the same conditional `*_FAILED`
 transition when the record still exists. This shrinks — but does not
 eliminate — the stranding window, because the failure write is itself a
@@ -3175,15 +3178,17 @@ integration test (§10) and the README's examples included, polls.
 
 ### 9.1 Service behaviour the hook design relies on
 
-Spike results the hook design relies on, and one stress-run result the
-script build's slot wait relies on (H-12). Every row is verified or not
-needed; a later result that differs changes the requirement the row
-names. Two cases stay to verify, each in its row: in H-8, a `Retry`
-after a 5xx or a task timeout; and in H-9, one case, the account
-quota's error name together with whether a repeat under a bound token
-returns its build at that quota. H-3, H-4 and H-6 asked how a `.sync`
-hook task behaves; the poll loop of R-46 relies on none of them, and
-the rows stay so that their ids stay stable.
+Spike results the hook design relies on, one stress-run result the
+script build's slot wait relies on (H-12), and one documented behaviour
+the terminal-transaction retry relies on (H-13). Every row is verified,
+documented or not needed; a later result that differs changes the
+requirement the row names. Three cases stay to verify, each in its row:
+in H-8, a `Retry` after a 5xx or a task timeout; in H-9, one case, the
+account quota's error name together with whether a repeat under a bound
+token returns its build at that quota; and in H-13, whether a cancelled
+transaction resent under its token runs again. H-3, H-4 and H-6 asked
+how a `.sync` hook task behaves; the poll loop of R-46 relies on none of
+them, and the rows stay so that their ids stay stable.
 
 | # | Behaviour | Status | Relied on by |
 |---|---|---|---|
@@ -3199,6 +3204,7 @@ the rows stay so that their ids stay stable.
 | H-10 | A 4,096-byte compact outputs value of only `\"` and `\\` escapes, written by `jq -c .` and exported alone as `SCRIPT_OUTPUTS`, comes back byte for byte (equal SHA-256 in the origin log, the execution output, a `$hash` in state and the hook build's environment) through `startBuild.sync`, a JSONata `Output` into state and a hook build's override. JSON-encoded in state it is 8,190 characters; the execution output is 8,758 bytes, and the script task's `Output` took 23 ms. The R-43 guard in a Step Functions JSONata `Pass` state gives the expected verdict in 18 cases (the largest valid value, the largest valid value of `\"` only, the §10 near miss, a mixed near miss, 4,095 and 4,098 characters, empty and absent, a tab, DEL and non-ASCII, `{}`, two keys, a repeated key admitted, a space after `:`, a `\u` escape, keys of 64 and 65 characters), each in under 1 ms, with no evaluation error | Verified: spike H-10, 2026-11-17, eu-central-1 | R-43, §8.1 |
 | H-11 | In an inline Map (`MaxConcurrency` 40, no `Retry`), one burst of 200 request-response calls at 42 to 45 calls a second. `codebuild:startBuild` on a project at its cap returned 98 `CodeBuild.AccountLimitExceededException` and 102 throttled calls; `codebuild:stopBuild` on unknown build ids of the project returned 37 `CodeBuild.ResourceNotFoundException` and 163 throttled calls. A throttled call fails with the generic name `CodeBuild.AWSCodeBuildException`, and only its cause says "Rate exceeded: StartBuild ... Error Code: ThrottlingException" (or `StopBuild`). No burst call created a build, which the cap alone also explains (the 98 refusals were calls that passed the throttle), so whether a throttled call binds its token was not tested. 10 runs of `startBuild` with `TimeoutSeconds` 1 and the R-46 `Retry` fired no `States.Timeout`: each returned within a second, one build per seed. 40 `PARAM_` values of exactly 1,024 bytes of 2-, 3- and 4-byte UTF-8, with R-42's 13 fixed variables and a test label, 54 in all, arrive with the byte length and SHA-256 sent for each through a JSONata `EnvironmentVariablesOverride` and `startBuild.sync`. A value of 1,024 characters and 2,560 bytes arrives intact too, so CodeBuild enforces no byte cap there and the 1,024-byte cap is the control plane's (R-33). `$states.context.State.EnteredTime` is an ISO 8601 string with millisecond resolution. In one `Assign`, a `FIRST_TRY_AT` from it and a deadline from `$toMillis` of it share one instant; the next `Pass` state had the same `EnteredTime` to the millisecond, and a state after a 1-second `Wait` was 1,040 ms later. A second `Assign` field that reads `$FIRST_TRY_AT` reads its earlier value when one was assigned, and fails with `States.QueryEvaluationError` ("returned nothing (undefined)") when none was and the read is unguarded. Not provoked: the account's concurrent build quota, a task timeout | Verified: spike H-11, 2026-11-18, eu-central-1; the task timeout and the account quota stay to verify (H-8, H-9) | R-33, R-42, R-46 |
 | H-12 | A `codebuild:startBuild.sync` script build task refused at the project's `concurrentBuildLimit` fails with `CodeBuild.AccountLimitExceededException` and writes `TaskScheduled`, `TaskStarted` and `TaskFailed`: three history events per try. Each retry of its `Retry` writes its own `TaskScheduled`, carrying the task's `timeoutInSeconds` (3600), and its own `TaskStarted`; Step Functions counts a task timeout from `TaskStarted`, so the timeout runs per attempt. With waves of up to 20 operations at a limit of 5 sent at once, 361 refused starts in 104 executions were retried, at most 11 in one, and no operation ended `*_FAILED` | Verified: the control-plane stress slice, 2026-11-23, eu-central-1, from the execution histories; the per-attempt count from the Step Functions Task state documentation. No start waited long enough to show the timeout itself | R-23 |
+| H-13 | A `TransactWriteItems` resent with the same `ClientRequestToken` within the token's 10-minute window returns success without changing anything when the first call succeeded, and fails with `IdempotentParameterMismatch` when another parameter differs. A `TransactionConflict` cancellation applies nothing. The documentation does not say whether a call resent under the token of a cancelled call runs again or repeats the cancellation | Documented: [DynamoDB transactions, Idempotency](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html#transaction-apis-txwriteitems-idempotency), read 2026-11-23. Unverified: a retry after a cancellation under the same token; no conflict happened in the stress slice | R-22 |
 
 ---
 

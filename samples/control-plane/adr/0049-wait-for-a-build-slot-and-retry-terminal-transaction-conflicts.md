@@ -20,10 +20,11 @@ Concurrent operations on one cell meet in DynamoDB. Each terminal write of a
 deployment or a cell is a `TransactWriteItems` that also updates the cell,
 account, application or tenant item. Two of them at once can cancel one
 with `TransactionCanceledException` and a `TransactionConflict` reason. A
-cancelled transaction applies nothing, and the same transaction succeeds a
-moment later. The workflow never retried a cancellation, so the record
-ended `*_FAILED` although its build succeeded (issue #96, the workflow
-side).
+cancelled transaction applies nothing, and the same transaction is
+expected to succeed a moment later. The workflow never retried a
+cancellation, so the record ended `*_FAILED` although its build
+succeeded (issue #96, the workflow side). That a retry under the same
+`ClientRequestToken` runs again is unverified (spec H-13).
 
 A Step Functions `Retry` matches the error name only. The name of a
 cancellation is the same whatever its reasons: a conflict, or a failed
@@ -100,6 +101,17 @@ Such a client keeps its waves near the limit.
   same retry list. They raise no `TransactionCanceledException`, so the new
   entry never matches there; a write that meets a transaction in flight
   raises `TransactionConflictException` and gets the transient retry.
+- Each retry resends the execution's `ClientRequestToken`. The
+  [DynamoDB idempotency documentation](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html#transaction-apis-txwriteitems-idempotency)
+  says a resend after a successful call returns success and changes
+  nothing; it does not say whether a resend after a cancelled call runs
+  again. That case is unverified (spec H-13), and the stress slice saw no
+  conflict. If DynamoDB repeats the cancellation for the token's
+  10-minute window, the retry does nothing and the record ends
+  `*_FAILED` as before, 31 seconds later. A fresh token per try
+  (`$$.State.RetryCount` in the token) would remove the doubt but give up
+  the replay protection of ADR-013 on the transient retry; revisit once
+  H-13 is settled.
 - The API side of issue #96 (a cancelled placement answered as an
   ambiguous 500) is not covered here.
 - Revisit if waves need an order (a queue in front of `StartExecution`), or

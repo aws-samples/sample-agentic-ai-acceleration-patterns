@@ -1357,7 +1357,8 @@ function attrReason(prefix: string): tasks.DynamoAttributeValue {
 /** The statusReason of a build whose start was refused for its whole wait (ADR-0049). */
 export function buildStartRefusedReason(prefix: string): string {
   const minutes = (BUILD_SLOT_WAIT.intervalSeconds * BUILD_SLOT_WAIT.maxAttempts) / 60;
-  return `${prefix} provisioning failed: the build never started, CodeBuild refused it at the concurrent build limit `
+  return `${prefix} provisioning failed: the build never started, CodeBuild refused it at a concurrent build limit `
+    + '(the project\'s or the account\'s) '
     + `after ${BUILD_SLOT_WAIT.maxAttempts} retries over at most ${minutes} minutes (${BUILD_SLOT_WAIT.error})`;
 }
 
