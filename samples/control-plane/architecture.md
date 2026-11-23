@@ -1111,7 +1111,8 @@ Design points:
   cap; a script build's start is retried every 30 seconds or less (full
   jitter) for about 10 minutes, at most 20, then the operation fails with a
   reason that names the refusal (ADR-0049). The projects log to explicit
-  one-month-retention log groups. Every build receives `OPERATOR_ID` (the verified JWT `sub`) so
+  one-month-retention log groups. Every build receives `OPERATOR_ID` (the
+  verified JWT `sub`) so
   application-plane changes attribute to the initiating operator, not just
   the shared fleet role. A stamped `sourceVersion` commit SHA pins what the
   build fetches. Action-less CloudWatch alarms watch execution-start rate
@@ -1172,7 +1173,8 @@ Design points:
   attempts, and a script build that waits 20 minutes for its slot runs
   about 25.3 hours); it is a final safety net, not the normal
   timeout path, and costs nothing on a Standard workflow. Terminal writes
-  retry transient failures and transaction conflicts, and retry exhaustion is caught so records do not
+  retry transient failures and transaction conflicts, and retry exhaustion
+  is caught so records do not
   remain indefinitely in an in-flight state. `StartExecution` rejection is
   compensated as in §6.
 - The **account role pair** (`CellAccountRoles`, installed per account) carries

@@ -41,8 +41,9 @@ from 1 second, backoff rate 2, full jitter: at most 31 seconds of waits.
 Pros: no loop; the Catch stays as it is, and the failure path gains one
 `Choice` rule and one `Pass` state per build (tenant and cell) that set
 the reason; the history grows by about three events per try (about 120
-for a start refused for its whole wait). Cons: a cancellation by a failed condition is retried
-too and fails the same way, so it reaches the Catch up to 31 seconds later.
+for a start refused for its whole wait). Cons: a cancellation by a
+failed condition is retried too and fails the same way, so it reaches the
+Catch up to 31 seconds later.
 Waiting executions are served in no order, so a deployment started early
 can wait while a later one starts.
 
@@ -52,8 +53,8 @@ hook runner does (R-46). The transactions catch the cancellation, parse its
 `Cause` for `TransactionConflict` and loop only then. Pros: a failed
 condition is never retried; the build wait can be cut by a deadline, not a
 count. Cons: three or four new states per task and per transaction, nine
-places in all (four build states, five transactions); the `Cause` parse must never fail itself, or no failure
-write runs (P-9).
+places in all (four build states, five transactions); the `Cause` parse
+must never fail itself, or no failure write runs (P-9).
 
 ### Option 3: No wait in the workflow
 Document that a client keeps its in-flight creates, updates and deletes at

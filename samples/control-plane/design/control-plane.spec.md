@@ -2536,9 +2536,9 @@ a `Retry` matches the error name only, so a cancellation by a failed
 condition is retried too and reaches the Catch up to 31 s later. The
 stable token and the item-state conditions make each try safe. Retry
 exhaustion is caught and routed through the same conditional `*_FAILED`
-transition when the record still exists. This shrinks — but does not eliminate — the
-stranding window, because the failure write is itself a write that can
-exhaust retries (documented residual, §7.4).
+transition when the record still exists. This shrinks — but does not
+eliminate — the stranding window, because the failure write is itself a
+write that can exhaust retries (documented residual, §7.4).
 
 **R-23 (timeouts):** each script build task MUST have a catchable
 task-level timeout routed to the failure path. Its `StartBuild`, refused
