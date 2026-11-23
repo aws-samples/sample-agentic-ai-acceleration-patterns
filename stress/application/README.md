@@ -475,8 +475,9 @@ publishes and reads assets, and it holds only cell assets.
   (control-plane ADR-0049), and `STRESS_UNPACED=1` sends a wave at once. A
   transaction conflict between concurrent operations on one cell surfaced
   as a 500 or a `*_FAILED` record, which the driver retries and counts.
-  The workflow now retries a cancelled terminal write (ADR-0049); the 500
-  from the API is in the control-plane README, Known issues.
+  The workflow now retries a cancelled terminal write (ADR-0049), and the
+  API sends a race-only cancellation again and then answers a retryable
+  409 (control-plane ADR-0050).
 - A cell is stamped with its source when it is created: a fixed cell or
   tenant script reaches an existing cell only after it is deleted and created
   again (ADR-0014).

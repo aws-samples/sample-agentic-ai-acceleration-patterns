@@ -804,14 +804,27 @@ seeded tenant left `CREATE_FAILED` stops every later seed with that status: run
 The driver keeps every wave of creates and deletes at the build limit, unless
 `STRESS_UNPACED=1`: the workflow then holds the excess in its build-slot wait
 (ADR-0049). Concurrent placements and deletes on one cell also meet each other
-in DynamoDB: the control plane answers a cancelled placement transaction with a
-500 "Deployment placement failed ambiguously", and the workflow retries a
-cancelled terminal write five times before it leaves `CREATE_FAILED` or
-`DELETE_FAILED`. The driver retries what is left, a placement with its client
-token, and the records show them as `500:internal-server` requests with
-`ambiguous-placement` refusals and as `CREATE_FAILED:retried` and
+in DynamoDB. The control plane sends a placement transaction cancelled only by
+such races again, and answers a 409 with the retry hint when every attempt
+raced
+([ADR-0050](./adr/0050-retry-a-transaction-cancelled-only-by-races.md)). The
+workflow retries a cancelled terminal write five times (ADR-0049) before it
+leaves `CREATE_FAILED` or `DELETE_FAILED`. The driver retries what is left, a
+placement with its client token, and the records show them as `409:conflict`
+requests with `conflict` refusals and as `CREATE_FAILED:retried` and
 `DELETE_FAILED:retried` counts
 ([stress ADR-0013](../../stress/adr/0013-pace-waves-at-the-build-limit-and-retry-conflicts.md)).
+
+To check that race handling without the whole slice, run
+[`scripts/conflict-probe.sh`](./scripts/conflict-probe.sh) after a change to
+the placement or hook transactions. It deploys a small control plane from
+this checkout (`deploy`), builds one cell (`setup`), then sends one
+CreateDeployment per tenant at once onto that cell (`burst`). The burst
+fails if any first answer is other than 202 or 409, a 409 lacks the retry
+hint, a refused call left a deployment, or an accepted deployment did not
+settle to `ACTIVE` or `CREATE_FAILED`. `reset` clears the burst for another
+round and `clean` removes the records; the script lists its two stacks for
+you to remove by hand. Its header names the environment it reads.
 
 ## End-to-end demo
 
@@ -1061,16 +1074,16 @@ curl -s -H "Authorization: Bearer ${TOKEN}" "${API_URL}hooks"
 | GetApplication | `GET /applications/{applicationId}` | 200 — the polling endpoint: the definition (`hooks` included), `placementStrategy`, `parameters`, `cellParameters`, `cellCount`, `status`, `statusReason`, `lastGlobalHooks`, `operationId`, and `pending` while a replace is staged |
 | ListApplications | `GET /applications` | 200 — paginated: `maxTenants`, `placementStrategy`, `cellCount` and `status` per application |
 | DeleteApplication | `DELETE /applications/{applicationId}` | 202 — empty applications only (409 while it has cells or is in flight); `DELETING` until the workflow has run the `APPLICATION_DELETE` hooks and deleted the record, then 404 |
-| PutHook | `PUT /hooks/{hookId}` | 200 — register or replace a global hook (`events`, `phase`, `source`, `script`, `timeoutMinutes`); a replace increments `revision`; 400 on an invalid definition; 409 for a sixth hook (delete one first) or a race with a create or delete of the same hook (retry); applies to operations accepted afterwards |
+| PutHook | `PUT /hooks/{hookId}` | 200 — register or replace a global hook (`events`, `phase`, `source`, `script`, `timeoutMinutes`); a replace increments `revision`; 400 on an invalid definition; 409 for a sixth hook (delete one first), a race with a create or delete of the same hook (retry), or a create transaction that met concurrent writes on every attempt (retry, [ADR-0050](./adr/0050-retry-a-transaction-cancelled-only-by-races.md)); applies to operations accepted afterwards |
 | GetHook | `GET /hooks/{hookId}` | 200 — the definition, `revision`, timestamps |
 | ListHooks | `GET /hooks` | 200 — paginated, in `hookId` order, the order global hooks run in |
-| DeleteHook | `DELETE /hooks/{hookId}` | 200 — deletes the hook and frees its slot; executions already accepted keep the hooks they started with |
+| DeleteHook | `DELETE /hooks/{hookId}` | 200 — deletes the hook and frees its slot; 409 (retry) when the transaction met concurrent writes on every attempt; executions already accepted keep the hooks they started with |
 | CreateTenant | `POST /tenants` | 202 — a customer record (`name`, `description`), `CREATING` until the `TENANT_CREATE` hooks pass; nothing provisioned |
 | GetTenant | `GET /tenants/{tenantId}` | 200 — the polling endpoint: `name`, `description`, `deploymentCount`, `status`, `statusReason`, `lastGlobalHooks`, `operationId`, and `pending` while an update is staged |
 | UpdateTenant | `PUT /tenants/{tenantId}` | 202 — metadata only, no build: `name` and `description` staged in `pending` (`UPDATING`), live once the `TENANT_UPDATE` pre hooks pass; 409 while it is in flight, `CREATE_FAILED`, `DELETING` or `DELETE_FAILED` |
 | DeleteTenant | `DELETE /tenants/{tenantId}` | 202 — empty tenants only (409 while it has deployments or is in flight); `DELETING` until the `TENANT_DELETE` hooks have run and the record is deleted, then 404 |
 | ListTenants | `GET /tenants` | 200 — paginated, with each tenant's `status` |
-| CreateDeployment | `POST /tenants/{tenantId}/deployments` | 202 — placement into a cell of `applicationId` + tenant create build (cell create build first if a new cell is needed); optional `parameters` (400 on an undeclared name, a bad value or a missing required one, before placement); optional `accountId` pins the account (400 if it does not admit the application); optional `clientToken`; 409 when the tenant already has a deployment of the application; 409 `InsufficientCapacityError` when no eligible account has room |
+| CreateDeployment | `POST /tenants/{tenantId}/deployments` | 202 — placement into a cell of `applicationId` + tenant create build (cell create build first if a new cell is needed); optional `parameters` (400 on an undeclared name, a bad value or a missing required one, before placement); optional `accountId` pins the account (400 if it does not admit the application); optional `clientToken`; 409 when the tenant already has a deployment of the application, or (retry) when the placement transaction met concurrent writes on every attempt; 409 `InsufficientCapacityError` when no eligible account has room |
 | GetDeployment | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 — the polling endpoint: status, `cellId`, the account, the effective definition (from the cell, its hooks included), `lastGlobalHooks` and the stored `parameters` (no defaults) |
 | UpdateDeployment | `PUT /tenants/{tenantId}/deployments/{applicationId}` | 202 — optional body `{parameters?, removeParameters?}` merged into the stored values, then runs the tenant update script; 400 on a validation failure, nothing written; 409 when the deployment or its cell is not in a state to re-apply, or the stored values changed during the call (retry) |
 | DeleteDeployment | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | 202 — runs the tenant delete script with the stored values (never validated), frees the slot and the tenant's count |
@@ -1359,12 +1372,30 @@ application's cells (threat T5, the highest-consequence open item).
   keeps it in `$STRESS_HOME/<STRESS_PREFIX>/cloudwatch-roles` across runs,
   then lists it and does not count it. Delete one only when the account
   setting names another role.
-- **A transaction conflict between concurrent operations on one cell
-  surfaces as a failure.** A placement whose `TransactWriteItems` is
-  cancelled with `TransactionConflict` and no failed condition answers 500
-  "Deployment placement failed ambiguously". A workflow's terminal write
-  cancelled the same way is retried five times (ADR-0049) and, when every
-  try is cancelled, leaves the record `CREATE_FAILED` or `DELETE_FAILED`
-  although its build succeeded. A `CreateDeployment` retry with the same
-  `clientToken`, a new create after a delete, or another delete clears it
-  (stress ADR-0013).
+- **A workflow's terminal write cancelled by a transaction conflict on
+  every try fails the record.** A terminal `TransactWriteItems` cancelled
+  with `TransactionConflict` and no failed condition is retried five times
+  (ADR-0049). When every try is cancelled, it leaves the record
+  `CREATE_FAILED` or `DELETE_FAILED` although its build succeeded. A new
+  create after a delete, or another delete, clears it (stress ADR-0013).
+  The API's own transactions send a race-only cancellation again and then
+  answer a retryable 409
+  ([ADR-0050](./adr/0050-retry-a-transaction-cancelled-only-by-races.md)).
+- **A compensation that races on every attempt leaves a new cell stuck in
+  `CREATING`.** When CreateDeployment creates a cell and the workflow then
+  fails to start, the API marks the new cell and its deployment
+  `CREATE_FAILED` in one transaction. That transaction is sent again when it
+  is cancelled only by races, at most four times (ADR-0050). If all four
+  race, the API still answers the start failure, but the cell and the
+  deployment stay `CREATING` with no execution to move them, and
+  `DeleteDeployment` and `DeleteCell` refuse an in-flight record with a 409.
+  Recovering them takes a manual edit of the two items in the table (set
+  `status` to `CREATE_FAILED`). The API logs `cancelled only by races ...
+  attempts spent` for it.
+- **A sustained burst onto one cell can still answer 409.** A placement
+  keeps its candidate cell across its four attempts and answers a 409 with
+  the retry hint once every attempt raced, rather than moving to another
+  cell. A client that sends many creates for one application at once must
+  retry those 409s with the same `clientToken`, as the stress driver does.
+  Each raced attempt logs one `cancelled only by races` line, which shows
+  how close a workload comes to that point.

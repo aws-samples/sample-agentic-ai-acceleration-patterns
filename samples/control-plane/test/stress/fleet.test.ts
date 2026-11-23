@@ -38,6 +38,15 @@ describe('placeDeployment (stress ADR-0013)', () => {
     expect(env.rec.toRecord({ runId: 'r', tier: 'small', mode: 'slice', slice: 'control-plane', commit: '0123456' }, 's').refusals.unattributed).toBe(0);
   });
 
+  it('retries a 409 with the retry hint with the same client token (control-plane ADR-0050)', async () => {
+    let n = 0;
+    const raced = 'Deployment placement on cell C1 met concurrent writes on every attempt and nothing was written; retry the request';
+    const { env, bodies } = fakeEnv(() => (++n === 1 ? ok(409, { message: raced }, 'ConflictError') : ok(202)), () => []);
+    await expect(placeDeployment(env, 'T1')).resolves.toBe('accepted');
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].clientToken).toBe(bodies[1].clientToken);
+  });
+
   it('gives up on a 500 it cannot attribute, and says full on InsufficientCapacityError', async () => {
     const { env } = fakeEnv(() => ok(500, { message: 'boom' }, 'InternalServerError'), () => []);
     await expect(placeDeployment(env, 'T1')).resolves.toBe('failed');

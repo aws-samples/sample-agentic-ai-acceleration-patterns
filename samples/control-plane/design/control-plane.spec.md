@@ -1150,7 +1150,7 @@ to a provisioned tenant applies here.
 
 | Op | HTTP | Code | Contract |
 |---|---|---|---|
-| `CreateDeployment` | `POST /tenants/{tenantId}/deployments` | **202** | Input `{applicationId, adminEmail, accountId?, parameters?, clientToken?}` — **no resource definition** (P-4). `parameters` is a name → value map validated against the application's declarations (R-33); 400 on an undeclared name, an over-long value or a missing required parameter, after the replay read (§7.3) and before placement runs. 404 for an unknown tenant or an unregistered `applicationId`. `accountId` pins the deployment to one registered account (the only way into a tenant-owned account); the account MUST admit the application (400 otherwise, §4.5); absent, placement chooses among vendor-owned accounts that admit it. Runs placement (§7), starts the workflow, returns the deployment including `cellId`. 404 for an unregistered `accountId`; 409 `ConflictError` when the tenant already has a deployment of that application; 409 `InsufficientCapacityError` when no eligible account has capacity. |
+| `CreateDeployment` | `POST /tenants/{tenantId}/deployments` | **202** | Input `{applicationId, adminEmail, accountId?, parameters?, clientToken?}` — **no resource definition** (P-4). `parameters` is a name → value map validated against the application's declarations (R-33); 400 on an undeclared name, an over-long value or a missing required parameter, after the replay read (§7.3) and before placement runs. 404 for an unknown tenant or an unregistered `applicationId`. `accountId` pins the deployment to one registered account (the only way into a tenant-owned account); the account MUST admit the application (400 otherwise, §4.5); absent, placement chooses among vendor-owned accounts that admit it. Runs placement (§7), starts the workflow, returns the deployment including `cellId`. 404 for an unregistered `accountId`; 409 `ConflictError` when the tenant already has a deployment of that application, or, with the retry hint, when the placement transaction met concurrent writes on every attempt and wrote nothing (§7.1, [ADR-0050](../adr/0050-retry-a-transaction-cancelled-only-by-races.md)); 409 `InsufficientCapacityError` when no eligible account has capacity. |
 | `GetDeployment` | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 | The polling endpoint: `status`, `statusReason`, `lastBuildId`, `lastGlobalHooks`, `cellId`, `createdAt`, `updatedAt` (§4), plus the deployment's *effective* definition (resolved from the cell's stamped definition, the application hooks stamped on the cell included), the cell's `accountId` and the stored `parameters` (the supplied values only; defaults are not merged in). 404 if missing. |
 | `UpdateDeployment` | `PUT /tenants/{tenantId}/deployments/{applicationId}` | **202** | Re-apply the deployment, optionally changing parameter values first. Input `{parameters?, removeParameters?}`, both optional: an empty body re-applies with the stored values. Names in `parameters` are set and names in `removeParameters` removed; every other stored value is kept (R-33). Runs the stamped tenant update script with the merged set resolved per R-32. Requires deployment `ACTIVE`/`UPDATE_FAILED` **and** cell `ACTIVE`; 409 otherwise. 400 on a validation failure of R-33, with nothing written. |
 | `DeleteDeployment` | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | **202** | 409 if in-flight. Allowed from `ACTIVE` and all `*_FAILED` states **regardless of cell status** — cleanup must always be reachable (P-9). Runs the tenant delete script with the stored parameters resolved per R-32, never validated against the current declarations; on success the workflow removes the record and releases the cell slot and the tenant's count in one transaction (§8.2). |
@@ -1211,10 +1211,10 @@ the hook operations are synchronous and fire no hooks.
 | `GetApplication` | `GET /applications/{applicationId}` | 200 | The polling endpoint: the definition, `placementStrategy`, both sets of parameter declarations, `cellCount`, `status`, `statusReason`, `lastGlobalHooks`, and `pending` while a replace is staged. 404 if unregistered. |
 | `ListApplications` | `GET /applications` | 200 | Paginated: `applicationId`, `maxTenants`, `placementStrategy`, `cellCount`, `status` per application. |
 | `DeleteApplication` | `DELETE /applications/{applicationId}` | **202** | **Empty applications only** (P-10): one conditional write moves the application to `DELETING` (`attribute_exists AND cellCount = 0` and status `ACTIVE` or a `*_FAILED` status, R-49), the counterpart of the cell-slot claim, which needs a live application (§7.1); condition failure → 409. The workflow runs the `APPLICATION_DELETE` pre hooks (global, then the stored application hooks), deletes the record, then runs the post hooks. Accounts that name the application in `applicationIds` are not touched (§4.5). |
-| `PutHook` | `PUT /hooks/{hookId}` | 200 | Create-or-replace a global hook. Input `{events, phase, source, script, timeoutMinutes?}`, validated per R-39 (400). A create claims a `hookCount` slot in the same transaction; a sixth hook → 409. A replace increments `revision`. Takes effect on operations accepted afterwards; executions in flight keep the snapshot they were accepted with (R-40). Logs a warning naming the hook when the source ref is not a full commit SHA. |
+| `PutHook` | `PUT /hooks/{hookId}` | 200 | Create-or-replace a global hook. Input `{events, phase, source, script, timeoutMinutes?}`, validated per R-39 (400). A create claims a `hookCount` slot in the same transaction; a sixth hook → 409; a create transaction that met concurrent writes on every attempt → 409 with the retry hint ([ADR-0050](../adr/0050-retry-a-transaction-cancelled-only-by-races.md)). A replace increments `revision`. Takes effect on operations accepted afterwards; executions in flight keep the snapshot they were accepted with (R-40). Logs a warning naming the hook when the source ref is not a full commit SHA. |
 | `GetHook` | `GET /hooks/{hookId}` | 200 | The record: the definition, `revision`, timestamps. 404 if unregistered. |
 | `ListHooks` | `GET /hooks` | 200 | Paginated, in `hookId` order, which is the order global hooks run in (R-45). |
-| `DeleteHook` | `DELETE /hooks/{hookId}` | 200 | Deletes the hook and releases its `hookCount` slot in one transaction (R-39); 404 if unregistered. No guard on executions in flight: each runs the snapshot it holds (R-40), and `StopExecution` is the only stop for them (§7.2). |
+| `DeleteHook` | `DELETE /hooks/{hookId}` | 200 | Deletes the hook and releases its `hookCount` slot in one transaction (R-39); 404 if unregistered; 409 with the retry hint when the transaction met concurrent writes on every attempt ([ADR-0050](../adr/0050-retry-a-transaction-cancelled-only-by-races.md)). No guard on executions in flight: each runs the snapshot it holds (R-40), and `StopExecution` is the only stop for them (§7.2). |
 
 **R-30:** There MUST be no application-level provisioning: an application
 owns no deployment of its own, only the definition its cells are built
@@ -1408,7 +1408,7 @@ compare-and-set maps to 409.
 | `ValidationException` | 400 | malformed input, malformed pagination token, two list filters at once; an invalid application definition or parameter declaration on `PutApplication`; a deployment parameter that fails R-33 on `CreateDeployment` or `UpdateDeployment`; a cell parameter that fails R-34 on `UpdateCell`; a targeted `CreateDeployment` into an account that does not admit the application; `PutAccount` handshake refusal (R-26: a half could not be assumed, or admits the call without the supplied external id); an invalid hook definition on `PutHook` or `PutApplication` (R-39) |
 | `UnauthorizedError` | 401/403 | missing/invalid JWT; a role in neither set; a reader calling a non-`GET` operation (R-36); a token without `aud` whose `client_id` is not listed or does not equal `sub`, or that lacks the required scope (R-38) |
 | `ResourceNotFoundError` | 404 | unknown tenant, deployment, cell, account, application or global hook (including an unregistered `CreateDeployment.accountId` or `applicationId`, and an unregistered id in `PutAccount.applicationIds`) |
-| `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; an application, tenant or account in flight (R-48); an application, tenant or account not live for `CreateDeployment` (R-13), with a retry hint only when it is `CREATING`, none when it is `CREATE_FAILED`, `DELETING` or `DELETE_FAILED`; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)); a `PutHook` that raced a create or delete of the same hook — retry; a `PutHook` create with five global hooks registered — no retry hint, delete a hook first (R-39) |
+| `ConflictError` | 409 | in-flight mutation; a second deployment of the same application for one tenant; occupied-tenant delete; occupied-cell delete; occupied-account delete; occupied-application delete; `owner` change on `PutAccount`; cell-not-ACTIVE guard; `clientToken` reuse with different parameters; an application, tenant or account in flight (R-48); an application, tenant or account not live for `CreateDeployment` (R-13), with a retry hint only when it is `CREATING`, none when it is `CREATE_FAILED`, `DELETING` or `DELETE_FAILED`; a parameter merge or a list-keeping `PutApplication` whose read went stale — retry (R-14); `CreateDeployment` lost every bounded claim on candidate cells and no account had a free cell slot — retry ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)); a `PutHook` that raced a create or delete of the same hook — retry; a `CreateDeployment` placement, a `PutHook` create or a `DeleteHook` whose transaction met concurrent writes on every attempt — nothing written, retry ([ADR-0050](../adr/0050-retry-a-transaction-cancelled-only-by-races.md)); a `PutHook` create with five global hooks registered — no retry hint, delete a hook first (R-39) |
 | `InsufficientCapacityError` | 409 | `CreateDeployment` found no eligible cell and no eligible account with cell capacity: every vendor-owned account admitting the application is full (untargeted), or the named account is full (targeted). Nothing was written. The remedy is an operator act — raise `maxCells`, register an account, or admit the application in one — so the error is distinct from `ConflictError`, which a client may simply retry later ([ADR-026](../adr/0026-fleet-full-is-a-modelled-error.md)) |
 | `InternalServerError` | 500 | everything else, including a `PutAccount` whose handshake probe STS could not answer (throttling, network): the handshake is unknown, not refused, and the operator retries |
 
@@ -2137,6 +2137,12 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
                                                  → 404, or no longer
                                                  live → 409; stop
                  capacity/status cond. failed  → lost a race; next candidate
+                 cancelled by races only       → nothing applied; send
+                 (ADR-0050)                      again on the SAME
+                                                 candidate; every attempt
+                                                 raced → 409 Conflict
+                                                 with the retry hint
+                                                 (R-14); stop
                  anything else / ambiguous     → FAIL the request; never
                                                  retarget the same
                                                  deployment after an
@@ -2172,6 +2178,12 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
                  application condition failed   → application deleted
                                                   meanwhile → 404, not
                                                   live → 409; stop
+                 cancelled by races only        → nothing applied; send
+                 (ADR-0050)                       again on the SAME
+                                                  account; every attempt
+                                                  raced → 409 Conflict
+                                                  with the retry hint
+                                                  (R-14); stop
                  anything else / ambiguous      → FAIL the request
                every eligible account refused   → 409 InsufficientCapacity
                                                   (nothing was written),
@@ -2237,6 +2249,21 @@ retry may succeed where a terminal error would be wrong
 ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)).
 The account loop is bounded by the number of eligible accounts, which is
 operator-controlled and small.
+
+**Cancelled by races only** (steps 2 and 3,
+[ADR-0050](../adr/0050-retry-a-transaction-cancelled-only-by-races.md)):
+a transaction whose cancellation reasons are all `None`,
+`TransactionConflict`, `ThrottlingError` or `ProvisionedThroughputExceeded`,
+with at least one of the last three, applied nothing and failed no
+condition. It is not ambiguous and it is not a lost race: the candidate
+lost no slot. The service MUST send it again on the same candidate (or
+account), at most 4 attempts with a full-jitter wait of up to 50, 100 and
+200 ms between them. A placement's later attempts each carry their own
+`ClientRequestToken` (the first one's, suffixed `-r<attempt>`). When every
+attempt raced, the request MUST fail with a `ConflictError` that carries the
+retry hint (R-14), having written nothing. The same send-again rule covers
+the paired compensation of §7.4 and the hook counter transactions (R-39),
+which carry no `ClientRequestToken`.
 
 **R-28 (fleet full is terminal for the request):** when every eligible
 account refuses the claim, `CreateDeployment` MUST fail with

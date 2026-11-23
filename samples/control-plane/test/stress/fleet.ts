@@ -39,12 +39,13 @@ const enc = encodeURIComponent;
 export const adminEmailOf = (tenant: string): string => `success+${tenant.toLowerCase()}@simulator.amazonses.com`;
 
 /**
- * One `CreateDeployment`, retried on a lost claim race (control-plane ADR-0031), an
- * ambiguous placement (a 500 the control plane answers when a placement transaction is
- * cancelled without a failed condition, such as a DynamoDB `TransactionConflict` between
- * concurrent claims on one cell: control-plane spec §7 never retargets it), a throttle or a
- * transport failure. Every attempt carries the same client token, so a retry after an
- * ambiguous outcome replays it instead of placing twice (stress ADR-0013). Returns
+ * One `CreateDeployment`, retried on a lost claim race (control-plane ADR-0031), a 409 with
+ * the retry hint, which the control plane answers when it wrote nothing (such as a
+ * placement transaction cancelled by races on every attempt, control-plane ADR-0050, or a
+ * tenant still `CREATING`), an ambiguous placement (a 500 the control plane answers when a
+ * placement transaction's outcome is unknown: control-plane spec §7 never retargets it), a
+ * throttle or a transport failure. Every attempt carries the same client token, so a retry
+ * after an ambiguous outcome replays it instead of placing twice (stress ADR-0013). Returns
  * `accepted` (202), `exists` (the tenant has one), `full` (`InsufficientCapacityError`,
  * which never clears by waiting) or `failed`.
  */
@@ -63,7 +64,7 @@ export async function placeDeployment(f: FleetEnv, tenant: string, hop = 'create
       r.status === 0 ||
       r.status === 429 ||
       r.status === 503 ||
-      (r.status === 409 && /claim race/i.test(String(r.body?.message ?? ''))) ||
+      (r.status === 409 && /claim race|retry the request/i.test(String(r.body?.message ?? ''))) ||
       (r.status === 500 && AMBIGUOUS_PLACEMENT.test(String(r.body?.message ?? '')));
     if (!retryable) return 'failed';
     await sleep(500 * 2 ** attempt + Math.floor(Math.random() * 250));

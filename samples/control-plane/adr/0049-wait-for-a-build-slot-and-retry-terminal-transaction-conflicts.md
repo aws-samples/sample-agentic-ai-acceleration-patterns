@@ -113,6 +113,7 @@ Such a client keeps its waves near the limit.
   the replay protection of ADR-013 on the transient retry; revisit once
   H-13 is settled.
 - The API side of issue #96 (a cancelled placement answered as an
-  ambiguous 500) is not covered here.
+  ambiguous 500) is not covered here; ADR-0050 retries it and answers a
+  retryable 409.
 - Revisit if waves need an order (a queue in front of `StartExecution`), or
   if the wait must follow a deadline rather than a count.

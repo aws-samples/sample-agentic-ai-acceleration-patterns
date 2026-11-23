@@ -5,13 +5,22 @@ import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBItem } from '../../src/shared/data-model';
 import { HookExistsError, HookGoneError, HookLimitError, HookTransactions } from '../../src/shared/hook-transactions';
-import { AmbiguousTransactionError, DynamoDBRepository, PlacementTransactions, RecordGoneError } from '../../src/shared/repository';
+import {
+  AmbiguousTransactionError,
+  DynamoDBRepository,
+  PlacementTransactions,
+  RecordGoneError,
+  TransactionRaceError,
+} from '../../src/shared/repository';
 import { CallerContext } from '../../src/shared/service-config';
 import {
   ConflictError,
+  CreateDeploymentSerializer,
+  DeleteHookSerializer,
   InternalServerError,
   PutApplicationInput,
   PutHookInput,
+  PutHookSerializer,
   ResourceNotFoundError,
   ValidationException,
 } from '../../src/smithy/source/typescript-ssdk-codegen/src';
@@ -280,6 +289,13 @@ describe('PutHook (§5.5, R-39)', () => {
     await expect(service.PutHook(putInput, context)).rejects.toBeInstanceOf(InternalServerError);
   });
 
+  test('a create cancelled by races alone is a 409 with the retry hint (ADR-0050)', async () => {
+    const service = makeService({ hookTx: { createHook: jest.fn().mockRejectedValue(new TransactionRaceError('races')) } });
+    const error = await service.PutHook(putInput, context).catch((e) => e);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect(error.message).toContain('retry the request');
+  });
+
   test('a ref that is not a full commit SHA is accepted with a warning naming the hook; a SHA is silent (ADR-020)', async () => {
     const warn = jest.fn();
     const service = makeService({ warn, hookTx: { createHook: jest.fn().mockResolvedValue(undefined) } });
@@ -332,6 +348,28 @@ describe('GetHook / ListHooks / DeleteHook (§5.5)', () => {
       hookTx: { deleteHook: jest.fn().mockRejectedValue(new AmbiguousTransactionError('counter')) },
     });
     await expect(drift.DeleteHook({ hookId: 'gate' }, context)).rejects.toBeInstanceOf(InternalServerError);
+  });
+
+  test('DeleteHook cancelled by races alone is a 409 with the retry hint (ADR-0050)', async () => {
+    const service = makeService({
+      hookRepo: { get: jest.fn().mockResolvedValue(globalHook('gate')) },
+      hookTx: { deleteHook: jest.fn().mockRejectedValue(new TransactionRaceError('races')) },
+    });
+    const error = await service.DeleteHook({ hookId: 'gate' }, context).catch((e) => e);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect(error.message).toContain('retry the request');
+  });
+});
+
+describe('the operations that answer the race 409 declare it in the model (ADR-0050)', () => {
+  // An error an operation does not declare reaches the caller as a 500: the generated
+  // handler serialises only the errors of the operation's own list.
+  test.each([
+    ['CreateDeployment', new CreateDeploymentSerializer()],
+    ['PutHook', new PutHookSerializer()],
+    ['DeleteHook', new DeleteHookSerializer()],
+  ])('%s serialises a ConflictError', (_name, serializer) => {
+    expect(serializer.isOperationError(new ConflictError({ message: 'retry the request' }))).toBe(true);
   });
 });
 
