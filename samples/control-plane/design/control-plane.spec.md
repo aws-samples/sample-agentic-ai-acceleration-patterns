@@ -484,9 +484,9 @@ account's owner (the vendor, or the customer for a tenant-owned account),
 and is assumed by the matching build project before the script runs (§6.4).
 The build projects' own roles hold no application-plane permission at all:
 each may only assume its half of the pair and tag that session (R-52). So
-the account owner — not the control plane — decides what provisioning may
-do in their account, and can
-withdraw it. These roles are THE hardening point of the whole design.
+the account owner — not the control plane — decides what provisioning may do
+in their account, and can withdraw it. These roles are THE hardening point
+of the whole design.
 
 Vendor hooks (§6.5) are the second arbitrary-code surface, and they sit
 on the other side of the same line. They run in the control plane
@@ -1602,26 +1602,25 @@ The unit an account owner installs, once per account
 | `<fleet>-tenant-provisioning` | the control plane's **tenant build role** (`…:role/<fleet>-tenant-build`) and its **API role** | the tenant-role column of §6.2, plus any `tenantBuildManagedPolicyArns` |
 
 The trust is expressed as the control plane account plus an
-`aws:PrincipalArn` condition naming those roles, so the pair can be installed
-before the control plane exists and survives the control plane's roles being
-recreated. Each trust policy has three statements
+`aws:PrincipalArn` condition naming those roles, so the pair can be
+installed before the control plane exists and survives the control plane's
+roles being recreated. Each trust policy has three statements
 ([ADR-0051](../adr/0051-tag-every-build-session-with-its-cell-tenant-and-application.md)):
-one admits the API role for `sts:AssumeRole` with no tags (the
-registration probe passes none); one admits the build role for
-`sts:AssumeRole` only when every tag key of R-52 is present and no other
-key is passed (`Null` false on every `aws:RequestTag/<key>`,
-`ForAllValues:StringEquals` on `aws:TagKeys`); one admits the build role
-for `sts:TagSession` only with exactly those keys, at least one of them
-transitive and no other key transitive (`Null` false also on
-`sts:TransitiveTagKeys`, `ForAllValues:StringEquals` on
-`sts:TransitiveTagKeys`). A build request without the tags, with another
-key or with none of the tags transitive MUST be refused. The build passes
-every key transitive (R-52); the trust does not require that of each key.
-The external id condition below is on the two AssumeRole statements only:
-STS does not
-evaluate `sts:ExternalId` on `sts:TagSession`, where it would refuse every
-tagged request. Each build role's own policy allows `sts:TagSession` on its
-half of the pair under the TagSession statement's conditions.
+one admits the API role for `sts:AssumeRole` with no tags (the registration
+probe passes none); one admits the build role for `sts:AssumeRole` only when
+every tag key of R-52 is present and no other key is passed (`Null` false on
+every `aws:RequestTag/<key>`, `ForAllValues:StringEquals` on `aws:TagKeys`);
+one admits the build role for `sts:TagSession` only with exactly those keys,
+at least one of them transitive and no other key transitive (`Null` false
+also on `sts:TransitiveTagKeys`, `ForAllValues:StringEquals` on
+`sts:TransitiveTagKeys`). A build request without the tags, with another key
+or with none of the tags transitive MUST be refused. The build passes every
+key transitive (R-52); the trust does not require that of each key. The
+external id condition below is on the two AssumeRole statements only: STS
+does not evaluate `sts:ExternalId` on `sts:TagSession`, where it would
+refuse every tagged request. Each build role's own policy allows
+`sts:TagSession` on its half of the pair under the TagSession statement's
+conditions.
 
 A pair whose trust admits the build role for `sts:AssumeRole` alone refuses
 the tagged request, and a pair with the three statements refuses an
@@ -1639,28 +1638,27 @@ attached policy cannot grant them the denied actions.
 Both trust policies require `sts:ExternalId` to equal the configured
 `externalId` on every AssumeRole statement when one is set. The control
 plane presents it on every AssumeRole into that account; without it the
-assume MUST be refused by the
-trust policy. This is the standard guard against the confused deputy: a
-third party who learns a customer's role ARN cannot have the control plane
-act in that account by registering it, because they do not hold the
-customer's external id. A tenant-owned account MUST have one: `PutAccount`
-rejects `owner: TENANT` without `externalId` (400) before the handshake
-probe
+assume MUST be refused by the trust policy. This is the standard guard
+against the confused deputy: a third party who learns a customer's role ARN
+cannot have the control plane act in that account by registering it, because
+they do not hold the customer's external id. A tenant-owned account MUST
+have one: `PutAccount` rejects `owner: TENANT` without `externalId` (400)
+before the handshake probe
 ([ADR-029](../adr/0029-require-an-external-id-for-tenant-owned-accounts.md)),
 and the probe MUST prove the pair *enforces* a supplied id — STS accepts an
 `ExternalId` against a trust policy that never conditions on it, so the
 probe assumes each half once more without the id and treats a success as a
-refusal
-([ADR-030](../adr/0030-prove-the-pair-enforces-the-external-id.md)). A pair
-installed without an id is therefore caught at registration whenever an id
-is supplied, and `externalIdConfigured` is true only when the pair requires
-it. Vendor-owned accounts sit inside the vendor's own trust, where the
-`aws:PrincipalArn` condition already names the only callers, and MAY omit
-it. The external id gates registration only: once stored, every operator's
-`CreateDeployment` into that account presents it, and it reaches the build as a
-plaintext environment override (N-10). The wall against cross-account
-reach is the trust policy's principal pin plus the build's credential
-scoping (§6.1, "Credentials"); the external id is the consent check on top.
+refusal ([ADR-030](../adr/0030-prove-the-pair-enforces-the-external-id.md)).
+A pair installed without an id is therefore caught at registration whenever
+an id is supplied, and `externalIdConfigured` is true only when the pair
+requires it. Vendor-owned accounts sit inside the vendor's own trust, where
+the `aws:PrincipalArn` condition already names the only callers, and MAY
+omit it. The external id gates registration only: once stored, every
+operator's `CreateDeployment` into that account presents it, and it reaches
+the build as a plaintext environment override (N-10). The wall against
+cross-account reach is the trust policy's principal pin plus the build's
+credential scoping (§6.1, "Credentials"); the external id is the consent
+check on top.
 
 The build roles' AssumeRole permission names the role *by name across all
 accounts* (`arn:…:iam::*:role/<fleet>-cell-provisioning`), because the
@@ -3359,16 +3357,18 @@ characters), because an application id is at most 32 characters
 (§4.1) and the parameter paths it names
 (`/application-plane/applications/<id>/shared/`,
 `/application-plane/tenants/<tenantId>/<id>`) are per account and
-Region, so two runs with one id would share them. Two runs can then
-share both accounts and a Region. The test's leftover check looks for
-that run's stacks only, and a check that a parameter namespace ends
-empty looks at that run's applications, cells and tenants only. Runs
-in one account and Region still share its quotas, and those limit how
-many fit at once: CodeBuild's concurrent builds per account and
-Region, which every run's builds and hook builds draw on, and the API
-Gateway control plane request rate, which a deploy of several REST
-APIs at once can exceed. They also share state that per-run names do
-not separate: the stack under test's REST API creates the API Gateway
+Region, so two runs with one id would share them. Only one control
+plane stack fits in account A and a Region at a time, because every
+stack creates the fixed `/control-plane/tenant-api-url` parameter, so
+runs there go one after another; runs in other Regions can share
+account B. The test's leftover check looks for that run's stacks only,
+and a check that a parameter namespace ends empty looks at that run's
+applications, cells and tenants only. A run shares account A's quotas
+with every other workload in the account and Region: CodeBuild's
+concurrent builds per account and Region, which every run's builds and
+hook builds draw on, and the API Gateway control plane request rate,
+which a deploy of several REST APIs at once can exceed. Runs one after
+another also share state that per-run names do not separate: the stack under test's REST API creates the API Gateway
 CloudWatch role and the `AWS::ApiGateway::Account` setting that names
 it, which is one per account and Region, goes to whichever run
 deployed last, and is retained when the stack is deleted. That role

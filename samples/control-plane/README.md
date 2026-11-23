@@ -1199,13 +1199,13 @@ generated from it (`smithy build`).
   several cells still keeps each cell's and each deployment's parameters
   apart. The sample scopes both to the demo SSM namespaces; the account
   owner widens them deliberately for real provisioning (this is THE
-  hardening point). The
-  CodeBuild roles themselves hold nothing but `sts:AssumeRole` and
-  `sts:TagSession` (with the build's tag keys only) on those two
-  role names, so the owner's trust policy — not a vendor-side list — decides
-  which accounts the fleet can reach (ADR-025). One pair serves every
-  application an account admits, so the scripts of one application can read
-  another's shared namespaces in that account; they are trusted vendor code.
+  hardening point). The CodeBuild roles themselves hold nothing but
+  `sts:AssumeRole` and `sts:TagSession` (with the build's tag keys only) on
+  those two role names, so the owner's trust policy — not a vendor-side list
+  — decides which accounts the fleet can reach (ADR-025). One pair serves
+  every application an account admits, so the scripts of one application can
+  read another's shared namespaces in that account; they are trusted vendor
+  code.
 - The pair's trust policy names the control plane's build roles and API role
   by ARN; that pin is what keeps every other AWS account out. On top of it a
   tenant-owned account must carry an **external id** on every `AssumeRole`

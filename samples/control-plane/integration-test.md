@@ -104,16 +104,16 @@ fixed `/control-plane/tenant-api-url` parameter (README, Deploy), so a
 second stack under test fails early validation. Runs in other Regions, or
 with another account A, can share account B.
 
-The run's fleet name is in every stack name, the assertion stack's test
-name included, is the `fleetName` of the stack under test and of the role
-pair the account B stack installs, and is in every other name the test
-creates that must be unique in an account or a Region: the probe role in
-B, the test policy on B's cell role (`<fleet>-cell-extra`), the hook test
-paths and policies, and the user pool domain prefix. The stack under test names
-its roles, build projects and workflow after the fleet (spec R-41), so
-those differ per run as well. The application ids carry the run id because
-an application id is at most 32 characters, too short for the fleet name
-plus a suffix, and the parameter paths it names
+The run's fleet name is in every stack name, the assertion stack's test name
+included, is the `fleetName` of the stack under test and of the role pair
+the account B stack installs, and is in every other name the test creates
+that must be unique in an account or a Region: the probe role in B, the test
+policy on B's cell role (`<fleet>-cell-extra`), the hook test paths and
+policies, and the user pool domain prefix. The stack under test names its
+roles, build projects and workflow after the fleet (spec R-41), so those
+differ per run as well. The application ids carry the run id because an
+application id is at most 32 characters, too short for the fleet name plus a
+suffix, and the parameter paths it names
 (`/application-plane/applications/<id>/shared/` from `demoApplicationIds`,
 `/application-plane/tenants/<tenantId>/<id>`) are per account and Region.
 The leftover check looks for that run's stacks only, and a check that a
@@ -121,17 +121,15 @@ parameter namespace ends empty looks at that run's applications, cells and
 tenants only. Each run uses its own checkout or worktree, because
 integ-runner writes its snapshot and `cdk.out` beside the test.
 
-A run shares account A's quotas with every other workload in the account
-and Region: CodeBuild's concurrent builds per account and Region, which
-every run's script builds and hook builds draw on, and the API Gateway
-control plane request rate, which a deploy of several REST APIs at once can
-exceed.
+A run shares account A's quotas with every other workload in the account and
+Region: CodeBuild's concurrent builds per account and Region, which every
+run's script builds and hook builds draw on, and the API Gateway control
+plane request rate, which a deploy of several REST APIs at once can exceed.
 
-Runs one after another also share state that per-run names do not
-separate. The stack under test's REST API creates the API Gateway
-CloudWatch role and the
-`AWS::ApiGateway::Account` setting that names it. That setting is one per
-account and Region, goes to whichever run deployed last, and CDK retains
+Runs one after another also share state that per-run names do not separate.
+The stack under test's REST API creates the API Gateway CloudWatch role and
+the `AWS::ApiGateway::Account` setting that names it. That setting is one
+per account and Region, goes to whichever run deployed last, and CDK retains
 both when the stack is deleted. The role and the setting are expected
 leftovers, outside the per-run leftover check.
 

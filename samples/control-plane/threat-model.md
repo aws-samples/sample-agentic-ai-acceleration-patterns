@@ -123,13 +123,14 @@ stress application code at the session tag change (ADR-0051), with the
 synthesised control plane and cell account templates. ProtoShield: 0
 critical, 3 high, 4 medium, 1 low. The licence headers (151 of 151 MIT-0),
 Semgrep, CDK NAG, Checkov and Secrets report nothing open. No finding is in
-the session tag trust, grants, buildspec or integration test. Dispositions:
+the session tag trust, grants, buildspec or `test/integ.session-tags.ts`.
+Dispositions:
 
 | Finding | Tool | Disposition |
 |---|---|---|
-| `cloudwatch:PutMetricData` on `*` for the skipped-hook count (high) | IAM least privilege | Accepted: the action has no resource-level permission; the statement is limited to the fleet's own metric namespace by `cloudwatch:namespace` (M31) |
+| `cloudwatch:PutMetricData` on `*` for the skipped-hook count (high) | IAM least privilege | Accepted: the action has no resource-level permission; the statement is limited to the fleet's own metric namespace by `cloudwatch:namespace` (`src/tenant/tenant.sfn.ts`, `CountSkippedHooks`; `test/tenant/hook-workflow.test.ts`) |
 | Service-wide actions on `*` in the stress cell execution policy and cell permissions boundary (2 high) | IAM least privilege | Accepted in the stress application's own security scan (`stress/application/README.md`, Security scan): the account holds nothing but cells, and the boundaries are the backstop (stress ADR-0006) |
-| `lambda:InvokeFunction` on `function:*` and `iam:ListAttachedRolePolicies` on B's cell role in `test/integ.tenant.ts` (2 medium) | IAM least privilege | Accepted: test-only policies, explained beside them and in the 2026-11-16 dispositions below |
+| `lambda:InvokeFunction` on `function:*` and `iam:ListAttachedRolePolicies` on B's cell role in `test/integ.tenant.ts` (2 medium) | IAM least privilege | Accepted: test-only policies, explained beside them in `test/integ.tenant.ts` and in integration-test.md (the step 16 hook test policy, the account B probe role); both go with the run's stacks |
 | Two CVEs in build tooling (2 medium) | CVE | As below: build toolchain only, none in a Lambda bundle |
 | `cognito-idp:DescribeUserPoolClient` on the test user pool (low) | IAM least privilege | Accepted: the action's resource is the user pool, the narrowest it takes |
 

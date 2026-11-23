@@ -1113,19 +1113,17 @@ Design points:
   physical names from the fleet name (`<fleet>-cell-build`,
   `<fleet>-tenant-build`). Each build role trusts CodeBuild only on its own
   project's `aws:SourceArn`, computed from that name, so no other project
-  can run as it.
-  Their roles,
-  `<fleet>-cell-build` and `<fleet>-tenant-build`, hold no application-plane
-  permission: each may only `sts:AssumeRole` on its half of the account role
-  pair, by name, in any account (ADR-025; spec N-8), and `sts:TagSession` on
-  it with exactly its half's tag keys (ADR-0051, spec R-52). The target
-  role's trust policy, written by the account owner, is the gate; the
-  AssumeRole session
-  name is the operator id, so the owner's CloudTrail attributes every
-  provisioning call (M23). Role chaining caps the script's credentials at one
-  hour, which is also the build task budget (N-7). The credentials are read
-  into shell variables inside the buildspec and never written to CodeBuild
-  environment variables, the execution input, or the log (M21).
+  can run as it. Their roles, `<fleet>-cell-build` and
+  `<fleet>-tenant-build`, hold no application-plane permission: each may
+  only `sts:AssumeRole` on its half of the account role pair, by name, in
+  any account (ADR-025; spec N-8), and `sts:TagSession` on it with exactly
+  its half's tag keys (ADR-0051, spec R-52). The target role's trust policy,
+  written by the account owner, is the gate; the AssumeRole session name is
+  the operator id, so the owner's CloudTrail attributes every provisioning
+  call (M23). Role chaining caps the script's credentials at one hour, which
+  is also the build task budget (N-7). The credentials are read into shell
+  variables inside the buildspec and never written to CodeBuild environment
+  variables, the execution input, or the log (M21).
 - **Threat-model hardening (ADR-019/020/021, ADR-0046):** all four projects cap
   `concurrentBuildLimit` at the deployer's value, 5 by default, so a leaked
   token's amplification cannot fan out. CodeBuild refuses a start over the
@@ -1197,31 +1195,30 @@ Design points:
   failures and transaction conflicts, and retry exhaustion is caught so
   records do not remain indefinitely in an in-flight state. `StartExecution`
   rejection is compensated as in §6.
-- The **account role pair** (`CellAccountRoles`, installed per account) carries
-  the asymmetry: `<fleet>-cell-provisioning` reads `/application-plane/shared/*`
-  and `/application-plane/applications/*` and gets/puts/deletes its own
-  cell's `/application-plane/cells/${aws:PrincipalTag/CellId}` and what is
-  under it; `<fleet>-tenant-provisioning` reads those two and its own cell's
+- The **account role pair** (`CellAccountRoles`, installed per account)
+  carries the asymmetry: `<fleet>-cell-provisioning` reads
+  `/application-plane/shared/*` and `/application-plane/applications/*` and
+  gets/puts/deletes its own cell's
+  `/application-plane/cells/${aws:PrincipalTag/CellId}` and what is under
+  it; `<fleet>-tenant-provisioning` reads those two and its own cell's
   namespace, and gets/puts/deletes its own deployment's
   `/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}`
   and what is under it — all in that account (ADR-0051). It cannot mutate
   cell-owned parameters, and a session reaches no other cell's or
-  deployment's namespace. One pair serves every application the
-  account admits, so one application's scripts can read another's shared
-  namespaces in the same account (trusted vendor code; a pair per
-  application is a recorded seam, spec §11). Each half trusts the control
-  plane account in three statements: one narrowed by `aws:PrincipalArn` to
-  the API role, for `sts:AssumeRole` with no tags; two narrowed to the
-  matching build role, one for `sts:AssumeRole` only with that half's tag
-  keys and one for `sts:TagSession` only with exactly that half's tag
-  keys, at least one of them transitive (spec §6.4). The two AssumeRole
-  statements require `sts:ExternalId` when the owner set one; STS does not
-  evaluate it on
-  TagSession. The pair
-  is installed by the account owner (the control plane stack for its own
-  account, the `CellAccountStack` elsewhere), so provisioning source remains
-  trusted vendor code and the pair's policies remain the documented
-  hardening point in each account.
+  deployment's namespace. One pair serves every application the account
+  admits, so one application's scripts can read another's shared namespaces
+  in the same account (trusted vendor code; a pair per application is a
+  recorded seam, spec §11). Each half trusts the control plane account in
+  three statements: one narrowed by `aws:PrincipalArn` to the API role, for
+  `sts:AssumeRole` with no tags; two narrowed to the matching build role,
+  one for `sts:AssumeRole` only with that half's tag keys and one for
+  `sts:TagSession` only with exactly that half's tag keys, at least one of
+  them transitive (spec §6.4). The two AssumeRole statements require
+  `sts:ExternalId` when the owner set one; STS does not evaluate it on
+  TagSession. The pair is installed by the account owner (the control plane
+  stack for its own account, the `CellAccountStack` elsewhere), so
+  provisioning source remains trusted vendor code and the pair's policies
+  remain the documented hardening point in each account.
 - The optional `tenantBuildManagedPolicyArns` input (§10, ADR-022 narrowed by
   ADR-025) attaches deployer-supplied customer-managed policies to the
   **tenant provisioning role of the stack's own account**, in addition to the

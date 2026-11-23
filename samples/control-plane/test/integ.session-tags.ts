@@ -281,8 +281,7 @@ const allowed = 'allowed';
 const refused = 'refused';
 
 // The build role's grant and the pair's trust refuse every request a
-// correct cell build never makes,
-// and admits the correct one.
+// correct cell build never makes, and admit the correct one.
 expectBuild('cell-negatives', 'cell', NEGATIVES_BUILDSPEC, { KIND: 'cell', CELL_ID: CELL_1, TENANT_ID: TENANT_1, APPLICATION_ID: APP }, {
   untagged: refused,
   notTransitive: refused,

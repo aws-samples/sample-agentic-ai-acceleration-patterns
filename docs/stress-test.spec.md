@@ -778,12 +778,11 @@ decides no pass criterion.
 
 Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` and
 `sts:TagSession` on the account's CDK bootstrap roles (the build's session
-carries a transitive tag, control-plane ADR-0051). Each cell account
-carries one bootstrap, for cells only, whose execution role carries the
-cell permissions boundary and every role a cell creates the cell workload
-boundary (stress ADR-0011).
-The policies, the `/cell/` aspect and the scripts ship in
-`stress/application/` (W-10):
+carries a transitive tag, control-plane ADR-0051). Each cell account carries
+one bootstrap, for cells only, whose execution role carries the cell
+permissions boundary and every role a cell creates the cell workload
+boundary (stress ADR-0011). The policies, the `/cell/` aspect and the
+scripts ship in `stress/application/` (W-10):
 
 | Part | Value |
 |---|---|
