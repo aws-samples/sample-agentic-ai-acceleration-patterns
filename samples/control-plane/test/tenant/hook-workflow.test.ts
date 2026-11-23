@@ -17,11 +17,11 @@ import { GlobalHookRecord, HookDefinition, HookExecutionInput, ResolvedHook, SCR
 import { HOOK_BUILDSPEC } from '../../src/tenant/hook.workflow';
 import { resolveHooks } from '../../src/tenant/hooks';
 import { INLINE_BUILDSPECS, ProvisioningWorkflow } from '../../src/tenant/tenant.sfn';
+import { simulate, SimulationResult, TaskCall } from '../asl-simulator';
+import { evaluateJsonata } from '../workflow-jsonata';
 
 // The two halves differ only in their session tag line (ADR-0051); the outputs guard is the same in both.
 const INLINE_BUILDSPEC = INLINE_BUILDSPECS.tenant;
-import { simulate, SimulationResult, TaskCall } from '../asl-simulator';
-import { evaluateJsonata } from '../workflow-jsonata';
 
 const FLEET = 'control-plane';
 

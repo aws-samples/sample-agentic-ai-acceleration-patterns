@@ -265,10 +265,13 @@ matching build role and its API role, behind an external id (required for a
 customer's account, optional for the vendor's own), and carries only the SSM
 namespace grants below. A build tags its session with what it acts for
 (ADR-0051): `CellId` on a cell build, and `CellId`, `TenantId` and
-`ApplicationId` on a tenant build, all transitive. The trust admits a build
-role only with exactly those tags and the API role only without tags, and
-the grants name each session's own namespace by its tags, so cell 1's
-session cannot write cell 2's parameters in the same account. The CodeBuild build assumes the
+`ApplicationId` on a tenant build, all transitive. Each trust has three
+statements: the API role's AssumeRole without tags, the build role's
+AssumeRole with its tag keys and the external id, and the build role's
+TagSession with those tags (STS does not evaluate the external id there).
+The grants name each session's own namespace by its tags, so cell 1's
+session cannot write cell 2's parameters in the same account. The CodeBuild
+build assumes the
 role before your script runs, so the script executes **in** the cell's
 account with exactly what that account's owner installed. One pair serves
 every application the account admits. A customer installs
@@ -516,8 +519,9 @@ also trusts the control plane's API role, for the `PutAccount` handshake
 (ADR-0028), so the API role can use every policy attached here too. The
 platform stress test attaches one policy, which lets the cell build assume
 the deploy role and the two asset-publishing roles of a cell-only CDK
-bootstrap with the qualifier `cell`, with `sts:TagSession` beside it because
-the build's session carries its transitive `CellId` tag (ADR-0051). It leaves out the bootstrap's lookup
+bootstrap with the qualifier `cell`, with `sts:TagSession` for the
+inherited `CellId` key only beside it, because the build's session carries
+that transitive tag (ADR-0051). It leaves out the bootstrap's lookup
 role, which holds `ReadOnlyAccess`: with it, the cell build and the API
 role could read every cell's data in the account. A cell app that needs
 context lookups commits them to `cdk.context.json` instead. Replace
@@ -526,15 +530,27 @@ context lookups commits them to `cdk.context.json` instead. Replace
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": ["sts:AssumeRole", "sts:TagSession"],
-    "Resource": [
-      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-deploy-role-<ACCOUNT_ID>-<REGION>",
-      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-file-publishing-role-<ACCOUNT_ID>-<REGION>",
-      "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-image-publishing-role-<ACCOUNT_ID>-<REGION>"
-    ]
-  }]
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": [
+        "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-deploy-role-<ACCOUNT_ID>-<REGION>",
+        "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-file-publishing-role-<ACCOUNT_ID>-<REGION>",
+        "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-image-publishing-role-<ACCOUNT_ID>-<REGION>"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "sts:TagSession",
+      "Resource": [
+        "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-deploy-role-<ACCOUNT_ID>-<REGION>",
+        "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-file-publishing-role-<ACCOUNT_ID>-<REGION>",
+        "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-image-publishing-role-<ACCOUNT_ID>-<REGION>"
+      ],
+      "Condition": { "ForAllValues:StringEquals": { "aws:TagKeys": ["CellId"] } }
+    }
+  ]
 }
 ```
 
@@ -731,7 +747,8 @@ current default CDK bootstrap template allows, and in the policy that lets
 the pair role assume it. A policy in `cellBuildManagedPolicyArns` or
 `tenantBuildManagedPolicyArns` that allows only `sts:AssumeRole` on such a
 role is refused once the builds are tagged; add `sts:TagSession` on the
-same roles, as in the example below, before step 3.
+same roles, as the `cellBuildManagedPolicyArns` example under Deploy does,
+before step 3.
 
 ### Example: mounting tenant-identity
 

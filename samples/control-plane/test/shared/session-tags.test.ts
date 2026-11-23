@@ -146,12 +146,19 @@ describe('the role pair trust admits a build only with its session tags, the API
     }
   });
 
-  test('with an external id, both paths need it', () => {
-    const withId = roleNamed(synth('ext-12345'), 'control-plane-cell-provisioning').Properties.AssumeRolePolicyDocument;
-    expect(trustAdmits(withId, assume(buildRole('cell'), CELL_TAGS, ['CellId'], 'ext-12345'))).toBe(true);
-    expect(trustAdmits(withId, assume(buildRole('cell'), CELL_TAGS, ['CellId']))).toBe(false);
-    expect(trustAdmits(withId, assume(API, undefined, undefined, 'ext-12345'))).toBe(true);
-    expect(trustAdmits(withId, assume(API))).toBe(false);
+  test('with an external id, both paths of both halves need it', () => {
+    const withExternalId = synth('ext-12345');
+    const halves = [
+      ['cell', CELL_TAGS, ['CellId']],
+      ['tenant', TENANT_TAGS, ['CellId', 'TenantId', 'ApplicationId']],
+    ] as const;
+    for (const [kind, tags, transitive] of halves) {
+      const withId = roleNamed(withExternalId, `control-plane-${kind}-provisioning`).Properties.AssumeRolePolicyDocument;
+      expect(trustAdmits(withId, assume(buildRole(kind), tags, [...transitive], 'ext-12345'))).toBe(true);
+      expect(trustAdmits(withId, assume(buildRole(kind), tags, [...transitive]))).toBe(false);
+      expect(trustAdmits(withId, assume(API, undefined, undefined, 'ext-12345'))).toBe(true);
+      expect(trustAdmits(withId, assume(API))).toBe(false);
+    }
   });
 });
 

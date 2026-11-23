@@ -512,7 +512,7 @@ start one (R-41).
 | R-4 | **Store** | One database table holding all six entity types (application + account + cell + tenant + deployment + global hook) plus the idempotency record type and the hook counter, with support for multi-item ACID transactions and conditional writes. (The reference uses DynamoDB single-table design; any store with equivalent transactional conditional-write semantics qualifies.) |
 | R-5 | **Workflow** | One durable state machine executing provisioning builds and writing terminal state directly to the table. |
 | R-6 | **Build runners** | **Four** shared build projects: two provisioning projects (cell builds, tenant builds) and two hook projects (global hooks, application hooks, R-41). Per-execution overrides select the source and script; the projects themselves are never mutated per deployment, cell, account or hook. Before the script runs, each provisioning build assumes its half of the hosting account's provisioning role pair (R-25), so the script executes with that account's permissions. The provisioning projects' own roles may only assume those roles (tagging the session, R-52), read the source, and write their logs; each build role trusts CodeBuild only on its own project's `aws:SourceArn` and carries the R-41 deny. The hook projects' roles never assume a pair (R-41). |
-| R-25 | **Account role pair** | One deployable unit (reference: a CDK stack) that installs `<fleet>-cell-provisioning` and `<fleet>-tenant-provisioning` in an account with the asymmetric permissions of §6.2, trusting the control plane's two build roles and its API role (the registration probe, R-26) — and an optional external id. The account owner deploys it; the control plane stack installs the same pair in its own account so the home account needs no extra step (P-4). |
+| R-25 | **Account role pair** | One deployable unit (reference: a CDK stack) that installs `<fleet>-cell-provisioning` and `<fleet>-tenant-provisioning` in an account with the asymmetric permissions of §6.2, trusting the control plane's two build roles (with the session tags of R-52) and its API role (the registration probe, R-26), in the three statements per role of §6.4 — and an optional external id. The account owner deploys it; the control plane stack installs the same pair in its own account so the home account needs no extra step (P-4). |
 
 ```
 Vendor operator ──JWT──► API + Authorizer ──► Service (sync ops, placement,
@@ -1610,10 +1610,12 @@ registration probe passes none); one admits the build role for
 `sts:AssumeRole` only when every tag key of R-52 is present and no other
 key is passed (`Null` false on every `aws:RequestTag/<key>`,
 `ForAllValues:StringEquals` on `aws:TagKeys`); one admits the build role
-for `sts:TagSession` only with exactly those keys, all transitive (`Null`
-false also on `sts:TransitiveTagKeys`, `ForAllValues:StringEquals` on
+for `sts:TagSession` only with exactly those keys, at least one of them
+transitive and no other key transitive (`Null` false also on
+`sts:TransitiveTagKeys`, `ForAllValues:StringEquals` on
 `sts:TransitiveTagKeys`). A build request without the tags, with another
-key or with the tags not transitive MUST be refused. The external id
+key or with none of the tags transitive MUST be refused. The build passes
+every key transitive (R-52); the trust does not require that of each key. The external id
 condition below is on the two AssumeRole statements only: STS does not
 evaluate `sts:ExternalId` on `sts:TagSession`, where it would refuse every
 tagged request. Each build role's own policy allows `sts:TagSession` on its
@@ -1621,13 +1623,14 @@ half of the pair under the TagSession statement's conditions.
 
 A pair whose trust admits the build role for `sts:AssumeRole` alone refuses
 the tagged request, and a pair with the three statements refuses an
-untagged one. Upgrading a deployed control plane that runs untagged builds is therefore one ordered
-change with no build in between: redeploy the pair in every registered
-account, then the control plane stack (which carries the home account's
-pair). The registration probe passes no tags, so it does not show that a
-pair accepts them; a pair that does not fails its first build into
-`*_FAILED` with the refusal in `statusReason`. The two hook roles (§6.5) are deliberately absent from both
-trust policies: a hook never acts in a cell account. In the control
+untagged one, so the pair and the control plane change together (README,
+"Upgrading to session-tagged builds", ADR-0051). The registration probe
+passes no tags, so it does not show that a pair accepts them; a pair that
+does not fails its first build into `*_FAILED` with the refusal in
+`statusReason`.
+
+The two hook roles (§6.5) are deliberately absent from both trust
+policies: a hook never acts in a cell account. In the control
 plane's own account both pair roles also carry the R-41 deny, so an
 attached policy cannot grant them the denied actions.
 

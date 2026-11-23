@@ -63,8 +63,10 @@ export function sessionTagRequestConditions(kind: ProvisioningRoleKind): Record<
 /**
  * The conditions on a build's `sts:TagSession` to its half of the pair
  * (ADR-0051), used by the pair's trust and by the build role's own grant:
- * every tag of {@link SESSION_TAG_KEYS} is present, some key is transitive,
- * and no other key is passed or made transitive. The trust's TagSession
+ * every tag of {@link SESSION_TAG_KEYS} is present, at least one key is
+ * transitive, and no other key is passed or made transitive. They do not
+ * require every key transitive: the buildspec makes all of them transitive,
+ * and the threat model (M35) records the residual. The trust's TagSession
  * statement carries no `sts:ExternalId` condition: STS evaluates that key
  * on `sts:AssumeRole` only, and a TagSession statement that requires it
  * refuses every tagged request (shown by the integration test).

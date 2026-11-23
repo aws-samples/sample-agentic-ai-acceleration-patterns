@@ -59,4 +59,4 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 | [ADR-0048](0048-measure-tenant-churn-through-the-front-door-edge.md) | Measure tenant churn through the front door's edge | Accepted | 2026-11-21 |
 | [ADR-0049](0049-wait-for-a-build-slot-and-retry-terminal-transaction-conflicts.md) | Wait for a build slot, and retry terminal transactions cancelled by a conflict (amends ADR-0021) | Accepted | 2026-11-23 |
 | [ADR-0050](0050-retry-a-transaction-cancelled-only-by-races.md) | Retry a transaction cancelled only by races (amends ADR-0013) | Accepted | 2026-11-23 |
-| [ADR-0051](0051-tag-every-build-session-with-its-cell-tenant-and-application.md) | Tag every build session with its cell, tenant and application (amends ADR-0025) | Proposed | 2026-11-23 |
+| [ADR-0051](0051-tag-every-build-session-with-its-cell-tenant-and-application.md) | Tag every build session with its cell, tenant and application (amends ADR-0025) | Accepted | 2026-11-23 |

@@ -1,6 +1,6 @@
 # ADR-0051: Tag every build session with its cell, tenant and application
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-23
 - Amends: ADR-0025 (the pair's trust and namespace grants)
 - Deciders: Dave Roberts (SA)
@@ -78,9 +78,13 @@ its half is present and no other key is passed (`Null` false on each
 `aws:RequestTag/<key>`, `ForAllValues:StringEquals` on `aws:TagKeys`); this
 is the statement that refuses an untagged build, because STS checks
 `sts:TagSession` only when a request carries tags. The build role may
-`sts:TagSession` only with exactly those keys, all transitive (`Null` false
-also on `sts:TransitiveTagKeys`, `ForAllValues:StringEquals` on
-`sts:TransitiveTagKeys`). The external id is a condition of the two
+`sts:TagSession` only with exactly those keys, at least one of them
+transitive and no other key transitive (`Null` false also on
+`sts:TransitiveTagKeys`, `ForAllValues:StringEquals` on
+`sts:TransitiveTagKeys`). The buildspec makes every key transitive; the
+trust does not require that of each key, so a build role that made only
+`CellId` transitive would leave `TenantId` and `ApplicationId` settable on
+a chained hop (threat model M35). The external id is a condition of the two
 AssumeRole statements only: a TagSession statement that required it refused
 every tagged request in the integration test, so STS does not evaluate
 `sts:ExternalId` there. Each build role's identity policy allows

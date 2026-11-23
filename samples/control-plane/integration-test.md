@@ -298,12 +298,15 @@ about 4 to deploy, 2 for the builds and 3 to tear down.
 
 | Build | Project | Buildspec | What it checks |
 |---|---|---|---|
-| `cell-negatives` | cell | a test buildspec that does not assume the pair, so the script holds the build role's own credentials | The pair refuses an AssumeRole that is untagged, has `CellId` not transitive, adds another key (transitive or not), passes the tenant keys, or omits the external id; it admits `CellId`, transitive, with the external id (the positive control) |
+| `cell-negatives` | cell | a test buildspec that does not assume the pair, so the script holds the build role's own credentials; B's trust is the only gate (Session tag test shortcuts) | The pair refuses an AssumeRole that is untagged, has `CellId` not transitive, adds another key (transitive or not), passes the tenant keys, or omits the external id; it admits `CellId`, transitive, with the external id (the positive control) |
 | `tenant-negatives` | tenant | the same | The pair refuses an AssumeRole that is untagged, passes `CellId` alone, omits `TenantId`, has the three tags not transitive, or omits the external id; it admits the three tags with only `CellId` transitive (the trust allows any subset as transitive, the buildspec makes all three) and the three transitive (the positive control) |
 | `cell-1`, `cell-2` | cell | the sample's own cell buildspec (`INLINE_BUILDSPECS.cell`) | Two cells in one account. Each cell's session writes, lists and deletes its own `/application-plane/cells/<cellId>` parameters and reads the shared namespace; it cannot write or list the other cell's namespace or write a tenant namespace. It cannot chain into a role on which its policy allows `sts:AssumeRole` alone. It chains into a role on which its policy also allows `sts:TagSession`, and that session writes only under its own `CellId` (a policy that names `${aws:PrincipalTag/CellId}`), so the tag reached the next hop with the cell's value. Setting `CellId` on that chained AssumeRole is refused with `InvalidParameterValue` |
 | `tenant-1` | tenant | the sample's own tenant buildspec (`INLINE_BUILDSPECS.tenant`) | The tenant's session writes and deletes its own `/application-plane/tenants/<tenantId>/<applicationId>` and the parameters under it, and lists its own cell's namespace; it cannot write another application's or another tenant's deployment namespace, list another cell's namespace or write its own cell's |
 
-Every script cleans up what it wrote, so the run leaves no parameter in B.
+Every script cleans up what it wrote, a write that should have been refused
+included, so the run leaves no parameter in B. The chained role's
+`sts:TagSession` grant on the cell role names the `CellId` key only, as the
+stress test's `cell-build-policy` does.
 
 What it does not prove:
 
@@ -316,10 +319,11 @@ What it does not prove:
   execution role, which carries no tags, so per-cell scoping of an owner's
   policy does not reach them (README, Production hardening checklist).
 
-### Test-only shortcuts
+### Session tag test shortcuts
 
 | In the test | What a consumer does instead |
 |---|---|
 | Builds are started directly on the provisioning projects with test cell, tenant and application ids, and two builds use a buildspec that does not assume the pair | Builds start only through the workflow, with the service-resolved ids, under the inline buildspec |
+| Each build role also gets an unconditioned `sts:TagSession` on B's pair, so the negative builds are refused by B's trust alone, not by the build role's own conditioned grant (which the unit tests pin) | Nothing; the build roles carry only their conditioned grant |
 | Two test roles in B trust B's cell role, with `sts:TagSession`, and a test policy on the cell role lets it assume them | The owner's own roles and policies, scoped by the session tags |
 | A run probe in A starts each build once, finds it again by a `PROBE_LABEL` variable and returns its exported results | Nothing |

@@ -201,6 +201,9 @@ describe('the cell account check (spec §3.7)', () => {
     const wrong = `role pair cell role ${FLEET}-cell-provisioning has a trust policy other than its stack's`;
     const base = pairTrust('cell');
     const [api, assume, tag] = base.Statement;
+    /** A condition block with one operator removed, as IAM would return it. */
+    const without = (condition: Record<string, unknown>, operator: string) =>
+      Object.fromEntries(Object.entries(condition).filter(([op]) => op !== operator));
     const variants: any[] = [
       // The API statement.
       { ...base, Statement: [{ ...api, Principal: { AWS: 'arn:aws:iam::333333333333:root' } }, assume, tag] },
@@ -214,13 +217,13 @@ describe('the cell account check (spec §3.7)', () => {
       { ...base, Statement: [{ ...api, Condition: { ...api.Condition, StringEquals: { 'sts:ExternalId': 'x' } } }, assume, tag] },
       // The build AssumeRole statement: untagged, no key list, an extra key, TagSession folded in.
       { ...base, Statement: [api, { ...assume, Condition: { ArnEquals: assume.Condition.ArnEquals } }, tag] },
-      { ...base, Statement: [api, { ...assume, Condition: { ...assume.Condition, Null: undefined } }, tag] },
-      { ...base, Statement: [api, { ...assume, Condition: { ...assume.Condition, 'ForAllValues:StringEquals': undefined } }, tag] },
+      { ...base, Statement: [api, { ...assume, Condition: without(assume.Condition, 'Null') }, tag] },
+      { ...base, Statement: [api, { ...assume, Condition: without(assume.Condition, 'ForAllValues:StringEquals') }, tag] },
       { ...base, Statement: [api, { ...assume, Condition: { ...assume.Condition, 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId', 'TenantId'] } } }, tag] },
       { ...base, Statement: [api, { ...assume, Action: ['sts:AssumeRole', 'sts:TagSession'] }, tag] },
       // The build TagSession statement: no transitive keys, an extra key, an extra action, the external id.
       { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, Null: { 'aws:RequestTag/CellId': 'false' } } }] },
-      { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, 'ForAllValues:StringEquals': undefined } }] },
+      { ...base, Statement: [api, assume, { ...tag, Condition: without(tag.Condition, 'ForAllValues:StringEquals') }] },
       { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId', 'TenantId'], 'sts:TransitiveTagKeys': ['CellId'] } } }] },
       { ...base, Statement: [api, assume, { ...tag, Action: ['sts:TagSession', 'sts:SetSourceIdentity'] }] },
       { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, StringEquals: { 'sts:ExternalId': 'x' } } }] },

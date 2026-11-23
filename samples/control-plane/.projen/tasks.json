@@ -200,7 +200,7 @@
     },
     "integ:session-tags": {
       "name": "integ:session-tags",
-      "description": "Run the session tag integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~30 min)",
+      "description": "Run the session tag integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~10 min)",
       "steps": [
         {
           "exec": "bash test/integ-scripts/run-integ.sh integ.session-tags.ts"

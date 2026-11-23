@@ -33,18 +33,20 @@ probe sharedRead aws ssm get-parameters --names /application-plane/shared/probe
 probe chainAssume aws sts assume-role --role-arn "$CHAIN_ROLE_ARN" --role-session-name integ-chain
 
 # Transitivity: the chained role may write only under its session's CellId.
-if creds=$(aws sts assume-role --role-arn "$CHAIN_TAGGED_ROLE_ARN" --role-session-name integ-chain \
-  --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text 2>/dev/null); then
-  RESULTS[chainTaggedAssume]=allowed
-  read -r key secret token <<< "$creds"
+creds_file=$(mktemp)
+probe chainTaggedAssume env CREDS_FILE="$creds_file" bash -c 'aws sts assume-role --role-arn "$0" --role-session-name integ-chain \
+  --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text > "$CREDS_FILE"' "$CHAIN_TAGGED_ROLE_ARN"
+if [ "${RESULTS[chainTaggedAssume]}" = allowed ]; then
+  read -r key secret token < "$creds_file"
   as_chain() { env AWS_ACCESS_KEY_ID="$key" AWS_SECRET_ACCESS_KEY="$secret" AWS_SESSION_TOKEN="$token" "$@"; }
   probe chainOwnWrite as_chain aws ssm put-parameter --name "$ledger/$CELL_ID" --type String --value probe --overwrite
   probe chainPeerWrite as_chain aws ssm put-parameter --name "$ledger/$PEER_CELL_ID" --type String --value probe --overwrite
   probe chainOwnDelete as_chain aws ssm delete-parameter --name "$ledger/$CELL_ID"
-  unset creds key secret token
-else
-  RESULTS[chainTaggedAssume]=refused
+  # A write that should have been refused is removed again, so a regression leaves nothing in the account.
+  if [ "${RESULTS[chainPeerWrite]}" = allowed ]; then as_chain aws ssm delete-parameter --name "$ledger/$PEER_CELL_ID" || true; fi
+  unset key secret token
 fi
+rm -f "$creds_file"
 
 # An inherited transitive tag cannot be set again on the next hop: STS
 # answers InvalidParameterValue, whatever the value.
@@ -52,4 +54,7 @@ probe chainOverride aws sts assume-role --role-arn "$CHAIN_TAGGED_ROLE_ARN" --ro
   --tags "Key=CellId,Value=$PEER_CELL_ID"
 
 probe ownCellDelete aws ssm delete-parameter --name "$own/probe"
+# Writes that should have been refused are removed again (best effort).
+if [ "${RESULTS[peerCellWrite]}" = allowed ]; then aws ssm delete-parameter --name "$peer/probe" || true; fi
+if [ "${RESULTS[tenantWrite]}" = allowed ]; then aws ssm delete-parameter --name "/application-plane/tenants/$PEER_TENANT_ID/$APPLICATION_ID" || true; fi
 write_results

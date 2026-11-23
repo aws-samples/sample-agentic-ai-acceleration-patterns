@@ -32,7 +32,9 @@ import { INLINE_BUILDSPECS } from '../src/tenant/tenant.sfn';
  *   hold the build role's own credentials, and ask B's pair for the
  *   AssumeRole calls a correct build never makes (no tags, tags not
  *   transitive, another key, a missing key, no external id), then for the
- *   correct one (the positive control).
+ *   correct one (the positive control). Each build role gets a test-only
+ *   unconditioned `sts:TagSession` on B's pair, so B's trust is the only
+ *   gate for these requests.
  * - Three builds use the sample's own inline buildspecs
  *   (`INLINE_BUILDSPECS`), which assume the pair with the session tags, and
  *   run a test script as the tagged session: two cell builds (cells 1 and
@@ -193,7 +195,12 @@ const chainPolicy = new iam.ManagedPolicy(accountBStack, 'ChainAssumePolicy', {
   description: 'control-plane integ test only: the cell role may chain into the two test roles',
   statements: [
     new iam.PolicyStatement({ actions: ['sts:AssumeRole'], resources: [chainArn(chainRoleName), chainArn(chainTaggedRoleName)] }),
-    new iam.PolicyStatement({ actions: ['sts:TagSession'], resources: [chainArn(chainTaggedRoleName)] }),
+    // The inherited key only, as stress's cell-build-policy grants it.
+    new iam.PolicyStatement({
+      actions: ['sts:TagSession'],
+      resources: [chainArn(chainTaggedRoleName)],
+      conditions: { 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId'] } },
+    }),
   ],
 });
 accountBStack.roles.cellRole.node.addDependency(chainPolicy);
@@ -207,6 +214,15 @@ const stack = new TenantStack(app, fleetName, {
 });
 scriptsBucket.grantRead(stack.provisioning.cellProject);
 scriptsBucket.grantRead(stack.provisioning.tenantProject);
+// Test-only: an unconditioned sts:TagSession on B's pair beside each build
+// role's own conditioned grant, so in the negative builds B's trust is the
+// only gate (the unit tests pin the build roles' own conditions).
+for (const [kind, role] of [['cell', stack.provisioning.cellBuildRole], ['tenant', stack.provisioning.tenantBuildRole]] as const) {
+  role.addToPrincipalPolicy(new iam.PolicyStatement({
+    actions: ['sts:TagSession'],
+    resources: [provisioningRoleArn(partition, accountB, fleetName, kind)],
+  }));
+}
 
 const assertionStack = new Stack(app, `${fleetName}-assert`, { env: { account: accountA, region } });
 const integ = new IntegTest(app, `ControlPlaneSessionTags${runId}`, {

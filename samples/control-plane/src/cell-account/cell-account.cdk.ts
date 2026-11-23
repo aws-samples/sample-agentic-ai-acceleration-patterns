@@ -105,12 +105,14 @@ export class CellAccountRoles extends Construct {
     // Each half trusts two control-plane roles in three statements: the API
     // role (the PutAccount handshake probe, ADR-027/028) may assume it with
     // no session tags; the matching build role (the scripts) may assume it
-    // only with exactly its session tag keys, and tag the session only with
-    // those keys, all transitive (ADR-0051), so a build session always names
-    // its cell, and its tenant and application on a tenant build. The
-    // external id is a condition of the AssumeRole statements only: STS does
-    // not evaluate it on TagSession, where it would refuse every tagged
-    // request.
+    // only with every one of its session tag keys and no other, and tag the
+    // session only with those keys, at least one of them transitive
+    // (ADR-0051; the buildspec makes all of them transitive), so a build
+    // session always names its cell, and its tenant and application on a
+    // tenant build. The API role stays untagged because the TagSession
+    // statement names the build role only. The external id is a condition of
+    // the AssumeRole statements only: STS does not evaluate it on
+    // TagSession, where it would refuse every tagged request.
     const withExternalId = (conditions: Record<string, Record<string, string | string[]>>) =>
       externalId === undefined ? conditions : { ...conditions, StringEquals: { 'sts:ExternalId': externalId } };
     const apiTrust = new iam.PrincipalWithConditions(
