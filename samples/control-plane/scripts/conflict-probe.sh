@@ -94,13 +94,21 @@ STATUS=""
 BODY=""
 call() {
   local out
+  local data=()
+  [ "$#" -lt 3 ] || data=(--data "$3")
   out="$(mktemp)"
   BODY=""
   STATUS="$(curl -s -o "$out" -w '%{http_code}' -X "$1" "${API_URL}$2" \
     -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
-    ${3:+--data "$3"})" || STATUS=000
+    ${data[@]+"${data[@]}"})" || STATUS=000
   BODY="$(cat "$out")"
   rm -f "$out"
+}
+
+# The CreateDeployment body: the no-op scripts send no mail, so the address is the SES
+# mailbox simulator's.
+deployment_body() {
+  jq -cn --arg a "$APP_ID" '{applicationId: $a, adminEmail: "success@simulator.amazonses.com"}'
 }
 
 # wait_for PATH FIELD PATTERN SECONDS: polls GET PATH until .FIELD.status matches PATTERN, or
@@ -161,10 +169,11 @@ case "$verb" in
     call PUT "/accounts/${account}" "$(jq -n --arg a "$APP_ID" '{owner: "VENDOR", maxCells: 2, applicationIds: [$a]}')"
     log "PutAccount: ${STATUS}"
     log "account: $(wait_for "/accounts/${account}" account 'ACTIVE|[A-Z]+_FAILED' 300)"
-    : > "$TENANTS_FILE"
-    for i in $(seq 1 "$TENANTS"); do
+    # A rerun keeps the tenants an earlier setup made.
+    touch "$TENANTS_FILE"
+    for i in $(seq "$(($(wc -l < "$TENANTS_FILE") + 1))" "$TENANTS"); do
       call POST /tenants "$(jq -n --arg n "probe-${i}" '{name: $n}')"
-      [ "$STATUS" = 202 ] || { log "CreateTenant ${i}: ${STATUS}"; exit 1; }
+      [ "$STATUS" = 202 ] || { log "CreateTenant ${i}: ${STATUS} $(jq -r .message <<< "$BODY")"; exit 1; }
       jq -r .tenant.tenantId <<< "$BODY" >> "$TENANTS_FILE"
     done
     while read -r t; do
@@ -173,8 +182,9 @@ case "$verb" in
     done < "$TENANTS_FILE"
     log "tenants: ${TENANTS} ACTIVE"
     first="$(head -n 1 "$TENANTS_FILE")"
-    call POST "/tenants/${first}/deployments" "$(jq -n --arg a "$APP_ID" '{applicationId: $a}')"
+    call POST "/tenants/${first}/deployments" "$(deployment_body)"
     log "first CreateDeployment: ${STATUS}"
+    [ "$STATUS" = 202 ] || [ "$STATUS" = 409 ] || { log "$(jq -r .message <<< "$BODY")"; exit 1; }
     log "first deployment: $(wait_for "/tenants/${first}/deployments/${APP_ID}" deployment 'ACTIVE|[A-Z]+_FAILED' 1200)"
     ;;
 
@@ -182,7 +192,7 @@ case "$verb" in
     sign_in
     run="${HOME_DIR}/burst-$(date -u +%Y%m%dT%H%M%S)"
     mkdir -p "$run"
-    body="$(jq -n --arg a "$APP_ID" '{applicationId: $a}')"
+    body="$(deployment_body)"
     racers="$(tail -n +2 "$TENANTS_FILE")"
     log "burst: $(wc -l <<< "$racers") CreateDeployment calls at once onto one cell"
     while read -r t; do
