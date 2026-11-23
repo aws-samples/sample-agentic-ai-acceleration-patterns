@@ -75,7 +75,7 @@ same way.
 
 Note 2026-11-23: integration run 21 (`eu-west-1`) deleted the integration
 stack cleanly in 2398 s, with no network interface, log group or DNS
-resource left; run 20 (`eu-central-1`) also deleted its stack, in 2472 s.
+resource left.
 In run 21's CloudTrail the run function was deleted at 17:09:02 UTC and
 the first `DeleteNetworkInterface` calls by service principals came at
 17:34:18, before the roles went with the log drain at about 17:42. Which

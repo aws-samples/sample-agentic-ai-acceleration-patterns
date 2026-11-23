@@ -23,12 +23,10 @@ interface, DNS Firewall or query-log resource of the run.
 
 The other Regions are covered by earlier runs. In `us-east-1` (run 12)
 the DNS Firewall steps `dns` and `dns-platform` passed; in
-`eu-central-1` (runs 14 and 20) every step before the teardown passed,
-except that run 20 failed `runaway` on `nitro`: its memory fill ended as
-a tool overrun. Deploys of the integration stack took 1123 to 1328 s
-across runs 5 to 21. With ADR-0073's order (each VPC function's role kept
-until after the log drain's wait), runs 20 and 21 deleted their stacks in
-2398 to 2472 s.
+`eu-central-1` (run 14) every step before the teardown passed. Deploys
+of the integration stack took 1123 to 1328 s across runs 5 to 21. With
+ADR-0073's order (each VPC function's role kept until after the log
+drain's wait), run 21 deleted its stack in 2398 s.
 
 The demo stack (`src/main.ts`, `backends=microvm`, `standalone=true`) was
 deployed twice on 2026-11-22 in `eu-west-1` (635 s and 645 s);

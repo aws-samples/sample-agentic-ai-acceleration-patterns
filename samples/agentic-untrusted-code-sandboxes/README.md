@@ -174,7 +174,7 @@ deploys, the integration runs and the demo run, 2026-11-19 to 2026-11-23):
 | `microvm` only (the demo stack, tenants offboarded before the delete) | 635 to 645 s | 1374 to 1459 s |
 | `nitro` only | about 450 s (CloudFormation; image build not timed) | 1618 s |
 | `agentcore` (two instances, one with `sessionFiles`) | 924 to 989 s | 1895 s |
-| All three backends, two instances, gateway entry (integration stack) | 1123 to 1328 s | 2398 to 2472 s |
+| All three backends, two instances, gateway entry (integration stack) | 1123 to 1328 s | 2398 s (run 21) |
 
 In the `nitro` and `agentcore` deletes most of the time was the late
 release of the network interfaces of the functions in the tool subnets;
@@ -393,9 +393,10 @@ from all 64 process slots at once, the runner sometimes does not answer
 within `runTimeout` + 5 s (2 of 6 integration runs of the `runaway`
 step). The tool then stops the tenant's task and returns `timedOut` with
 `memoryExceeded` false, and the next call starts a fresh task without the
-tenant's `/work` files. Nothing reaches another tenant. The cause inside
-the task is not known; locking the runner's memory is an untested fix
-(spec §3.5, threat model T-89).
+tenant's `/work` files. The overrun cap still contains the job, and
+nothing reaches another tenant. The cause inside the task is not known;
+locking the runner's memory is an untested fix (spec §3.5, threat model
+T-89).
 
 **The AgentCore usage record is not checked.** The cost join for
 `agentcore` reads the AgentCore usage logs in the log group the construct
