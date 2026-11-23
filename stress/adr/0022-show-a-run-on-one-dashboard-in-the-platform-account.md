@@ -26,7 +26,7 @@ picture:
 | Platform account | control plane, CodeBuild, front-door registrar and route table, stress identity, the driver host | the run's Region |
 | Platform account, edge | CloudFront distribution and the router function | `us-east-1` |
 | Cell account 1 (and 2 at `medium` and `large`) | the ingress, authoriser, agents, tools, the cell API origin | the run's Region |
-| Driver host | what k6 counts: requests, isolation mismatches, refusals | the run's Region |
+| A process on the driver host (in the platform account) | what k6 counts: requests, isolation mismatches, refusals | the run's Region |
 
 The decision is where a person looks, and how the other places feed it. The
 constraints are the spec's: a cell account holds four kinds of stack and
@@ -95,8 +95,12 @@ namespace the runner and the driver host publish, with the dimensions `RunId`,
 user, agent or token. A `StressCell` namespace that metric filters in each cell
 publish from the cell's own structured log lines, with no tenant dimension. The
 stress cell app adds the filters (`stress/application/cell-app.ts`); the
-runtime-isolation sample does not change. Per-tenant metrics stay off; top
-tenants come from the Contributor Insights rules the cell already has.
+runtime-isolation sample does not change. Per-tenant metrics stay off, and the
+dashboard shows no tenant: the record's refusals by tenant, and the Contributor
+Insights rules the cell already has (read in the cell account), answer that. A
+Contributor Insights widget on the dashboard would need the link to share the
+cell's log groups and rules in the platform account, which this decision does not
+do (design §7).
 
 ## Consequences
 Easier: a person sees isolation mismatches, refusals, per-hop latency and quota
