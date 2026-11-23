@@ -12,7 +12,7 @@ import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix }
 import { Ctx, TOKEN_REUSE_MS } from './ctx';
 import { imageNameOf } from './deploy';
 import { HOSTILE_DIR, MAX_CODE_BYTES, PROBES, probeCode } from './hostile';
-import { checkLeftovers, formatFindings, leftoverExitCode, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes } from './leftovers';
+import { checkLeftovers, formatFindings, leftoverExitCode, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes, unavailableReason } from './leftovers';
 import { claimsFor, mint, signJws } from './mint.function';
 import { formatRecord, median, Recorder } from './record';
 import { runPhase } from './runner';
@@ -304,6 +304,12 @@ describe('the leftover check when the credentials or the CLI fail', () => {
   test('a not-found answer means the resource is gone', async () => {
     const aws = fake({ cli: async () => { throw cliError('An error occurred (ResourceNotFoundException) when calling the GetFirewallRuleGroup operation: not found'); } });
     expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([]);
+  });
+
+  test('a long stderr that repeats a classifier phrase is read in linear time', () => {
+    const t0 = Date.now();
+    for (const phrase of ['Token for ', 'config profile ', 'SSO session ']) expect(unavailableReason(new Error(phrase.repeat(30_000)))).toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(2000);
   });
 
   test('a not-found answer that follows a long stderr still means the resource is gone', async () => {

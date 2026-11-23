@@ -103,8 +103,8 @@ async function exists<T>(fn: () => Promise<T>): Promise<boolean> {
 }
 
 const UNAVAILABLE: ReadonlyArray<{ readonly pattern: RegExp; readonly reason: string }> = [
-  { pattern: /Unable to locate credentials|CredentialsProviderError|Could not load credentials|Error when retrieving credentials|config profile .* could not be found|Error loading SSO Token|SSOTokenLoadError|Token for .* does not exist/i, reason: 'no credentials found' },
-  { pattern: /ExpiredToken|RequestExpired|TokenRefreshRequired|security token included in the request is expired|SSO session .* (expired|invalid)|SSO access token has (either )?expired|Error when retrieving token from sso/i, reason: 'the credentials expired' },
+  { pattern: /Unable to locate credentials|CredentialsProviderError|Could not load credentials|Error when retrieving credentials|config profile [^\n]{0,200} could not be found|Error loading SSO Token|SSOTokenLoadError|Token for [^\n]{0,200} does not exist/i, reason: 'no credentials found' },
+  { pattern: /ExpiredToken|RequestExpired|TokenRefreshRequired|security token included in the request is expired|SSO session [^\n]{0,200} (expired|invalid)|SSO access token has (either )?expired|Error when retrieving token from sso/i, reason: 'the credentials expired' },
   { pattern: /InvalidClientTokenId|InvalidAccessKeyId|UnrecognizedClientException|AuthFailure|SignatureDoesNotMatch|IncompleteSignature|MissingAuthenticationToken|InvalidSignatureException|security token included in the request is invalid/i, reason: 'the credentials were refused' },
   { pattern: /AccessDenied|UnauthorizedOperation|UnauthorizedException|NotAuthorized/i, reason: 'access denied' },
   { pattern: /spawn aws (ENOENT|EACCES)/, reason: 'the aws CLI could not be started' },
