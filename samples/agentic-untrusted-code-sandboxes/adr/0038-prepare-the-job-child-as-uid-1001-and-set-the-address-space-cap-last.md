@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0038: Prepare the job child as uid 1001, and set the address space cap last
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0019
 - Deciders: Dave Roberts (Partner Solutions Architect)

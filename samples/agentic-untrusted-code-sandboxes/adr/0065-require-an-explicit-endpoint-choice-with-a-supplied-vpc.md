@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0065: Require an explicit endpoint choice with a supplied VPC
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0012
 - Deciders: Dave Roberts (Partner Solutions Architect)

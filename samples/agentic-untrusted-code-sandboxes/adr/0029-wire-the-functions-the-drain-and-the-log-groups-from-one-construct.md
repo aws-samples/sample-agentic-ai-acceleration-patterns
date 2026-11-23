@@ -2,8 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0029: Wire the functions, the drain and the log groups from one construct
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
+- Amended by: ADR-0071
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -139,3 +140,5 @@ on `toolRole`. The function lists in
 the spec say a bound function runs as the shared tool role; it holds the
 same statements on its own role instead, because a function's role is fixed
 when it is built. Revisit if the spec wants one role.
+
+Note 2026-11-23: amended by ADR-0071. Only the run function and functions bound with `bindRunCode` get the tool subnets and the network interface statement; the reaper, offboard and drain run outside the VPC.

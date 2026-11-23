@@ -406,11 +406,14 @@ CloudTrail Event history, and `RunTask` events showed the container
 override `environment` as `HIDDEN_DUE_TO_SECURITY_REASONS`.
 The `microvm` `/run` hook payload and the `nitro` `RUNNER_NONCE_HASH`
 variable carry only `nonceHash` = SHA-256(`"nonce" ‖ nonce`). The tool
-sends the nonce itself on the data channel with every `/hello` (`nitro`,
-over TLS) and every job (all three backends: the MicroVM's HTTPS
-endpoint, the task's TLS connection, the `InvokeAgentRuntime` payload),
-because it cannot know whether a runner has adopted it; adoption of a
-matching nonce is idempotent. The runner adopts it only if it matches
+sends the nonce itself on the data channel with every job (all three
+backends: the MicroVM's HTTPS endpoint, the task's TLS connection, the
+`InvokeAgentRuntime` payload), because it cannot know whether a runner
+has adopted it; adoption of a matching nonce is idempotent. On `nitro`
+only the `ready` probe's `/hello` carries the nonce, to the address it
+just read from the task's own ENI; the `/hello` before a job carries the
+challenge alone, and the runner proves with the nonce it holds, so a
+task that took over a recycled address never sees the nonce (ADR-0072). The runner adopts it only if it matches
 `nonceHash`, and removes `RUNNER_NONCE_HASH` from the environment it
 hands to code. On `agentcore`, which has no start call and so no hash,
 the job also carries `tenantId`, covered by `jobAuth`, and the runner
@@ -455,7 +458,8 @@ adoption. On `nitro` the hash is set at process start. It serves:
 
 - `GET /ping`: `{"status":"Healthy","bootId":…}` (AgentCore contract).
 - `POST /hello` (`nitro`): returns `bootId`, the certificate fingerprint
-  and `HMAC(nonce, challenge ‖ certFingerprint)`.
+  and `HMAC(nonce, challenge ‖ certFingerprint)`; the nonce is the one in
+  the body (the first `/hello`) or the one it holds (every later one).
 - `POST /run` (and `POST /invocations` for AgentCore): runs one job.
 
 A job runs one at a time. A second job while one runs is refused at once
@@ -703,21 +707,23 @@ to its own stdout through the runner.
 
 The runtime and execution roles reach no tenant data.
 
-### 3.7 Network (ADR-0012)
+### 3.7 Network (ADR-0012, ADR-0071)
 
-One VPC in two AZs, created unless `vpc` is given.
+One VPC in two AZs, created unless `vpc` is given. The reaper, the drain
+and the offboard function call AWS APIs only and run outside the VPC
+(ADR-0071).
 
 | Subnets | Route table | Used by |
 |---|---|---|
 | Public | default route to an internet gateway | the NAT gateway only; nothing else is placed there |
-| Tool | default route to one NAT gateway | the tool Lambda, the reaper, the drain, the offboard function; the ECS Managed Instances' primary ENIs |
+| Tool | default route to one NAT gateway | the tool Lambda (the standalone run function and every bound function); the ECS Managed Instances' primary ENIs |
 | Sandbox | local only, no default route | `nitro` task ENIs, the `agentcore` runtime ENIs, the `microvm` VPC egress connector |
 
 Endpoints in the sandbox subnets, each with a security group and a policy.
 Interface endpoints use private DNS, which applies to the whole VPC, so
 anything in the tool subnets that calls ECR or Logs also reaches these
 endpoints. Their security groups therefore admit the sandbox groups and
-the instance group; the tool, reaper, drain and offboard function call neither ECR nor Logs
+the instance group; the tool calls neither ECR nor Logs
 APIs directly (their own logs go through the Lambda service). The policies
 name only the sample's repository and log groups. The instances pull the
 runner image from that repository, through these endpoints or the NAT,

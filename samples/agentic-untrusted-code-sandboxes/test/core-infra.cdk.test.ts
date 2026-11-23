@@ -221,11 +221,22 @@ describe('roles (spec 3.6)', () => {
 });
 
 describe('functions (spec 3.1, 3.3, 3.7)', () => {
-  test('every function runs in the tool subnets with the tool security group, with the shared environment', () => {
+  test('the run function runs in the tool subnets with the tool security group; the stop functions run outside the VPC (ADR-0071)', () => {
+    const run = base.t.findResources('AWS::Lambda::Function')[fnId(base.t, 'RunCode')] as Json;
+    expect(run.Properties.VpcConfig.SecurityGroupIds).toHaveLength(1);
+    expect(run.Properties.VpcConfig.SubnetIds).toHaveLength(2);
+    for (const name of ['Reaper', 'Offboard', 'Drain']) {
+      const fn = base.t.findResources('AWS::Lambda::Function')[fnId(base.t, name)] as Json;
+      expect(fn.Properties.VpcConfig).toBeUndefined();
+    }
+    for (const role of ['ReaperRole', 'DrainRole']) {
+      expect(actionsOf(statementsOfRole(base.t, roleId(base.t, role))).filter((a) => /NetworkInterface|DescribeSubnets|PrivateIpAddresses/.test(a))).toEqual([]);
+    }
+  });
+
+  test('every function has the shared environment and JSON logs', () => {
     for (const name of ['RunCode', 'Reaper', 'Offboard', 'Drain']) {
       const fn = base.t.findResources('AWS::Lambda::Function')[fnId(base.t, name)] as Json;
-      expect(fn.Properties.VpcConfig.SecurityGroupIds).toHaveLength(1);
-      expect(fn.Properties.VpcConfig.SubnetIds).toHaveLength(2);
       const vars = fn.Properties.Environment.Variables as Record<string, unknown>;
       for (const key of Object.values(ENV)) expect(vars).toHaveProperty(key);
       expect(vars).toHaveProperty('FAKE_NITRO');

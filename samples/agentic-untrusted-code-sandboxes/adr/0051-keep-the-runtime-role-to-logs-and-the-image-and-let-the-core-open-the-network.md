@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0051: Keep the runtime role to logs and the image, and let the core open the network
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amended by: ADR-0067
 - Deciders: Dave Roberts (Partner Solutions Architect)

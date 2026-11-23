@@ -104,7 +104,8 @@ export interface PingResponse {
 /** `POST /hello` request (`nitro`, over TLS on 8443). */
 export interface HelloRequest {
   readonly v: 1;
-  readonly nonce: string;
+  /** Only on the first `/hello` (`ready`); a later one carries the challenge alone (ADR-0072). */
+  readonly nonce?: string;
   /** 32 random bytes, base64url without padding. */
   readonly challenge: string;
 }

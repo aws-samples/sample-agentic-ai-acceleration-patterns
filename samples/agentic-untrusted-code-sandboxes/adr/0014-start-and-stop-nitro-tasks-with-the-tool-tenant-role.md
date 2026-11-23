@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0014: Start and stop nitro tasks with the tool tenant role
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0048
 - Deciders: Dave Roberts (Partner Solutions Architect)

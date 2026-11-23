@@ -2,10 +2,10 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0018: Deliver the nonce on the data channel and bind every job to it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-19
 - Amends: ADR-0010
-- Amended by: ADR-0019
+- Amended by: ADR-0019, ADR-0072
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -63,3 +63,5 @@ registry still holds the nonce, readable by the vendor's roles. Spike
 S-14 checks what CloudTrail records for the start calls.
 
 Note 2026-11-19: amended by ADR-0019. S-14 ran the checks named above. With management events only, CloudTrail Event history held no `RunMicrovm` and no `InvokeAgentRuntime` event and showed `RunTask` override `environment` as hidden; no dummy nonce appeared in any event. The AgentCore container receives the session id header unchanged on every job.
+
+Note 2026-11-23: amended by ADR-0072. On `nitro` only the `ready` probe's `/hello` carries the nonce; the `/hello` before a job carries the challenge alone.

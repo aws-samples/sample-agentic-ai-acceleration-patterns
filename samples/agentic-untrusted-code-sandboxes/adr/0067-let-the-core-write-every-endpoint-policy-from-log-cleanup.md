@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0067: Let the core write every endpoint policy from its own resources and `logCleanup()`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0051
 - Deciders: Dave Roberts (Partner Solutions Architect)

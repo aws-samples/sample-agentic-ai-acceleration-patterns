@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0021: Close the socket and SysV routes, watch the nitro group, and reap every job
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0019, ADR-0020
 - Amended by: ADR-0022

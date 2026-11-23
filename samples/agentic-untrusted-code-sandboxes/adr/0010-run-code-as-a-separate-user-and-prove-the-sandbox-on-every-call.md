@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0010: Run code as a separate user, and prove the sandbox on every call
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0015, ADR-0018, ADR-0019
 - Deciders: Dave Roberts (Partner Solutions Architect)

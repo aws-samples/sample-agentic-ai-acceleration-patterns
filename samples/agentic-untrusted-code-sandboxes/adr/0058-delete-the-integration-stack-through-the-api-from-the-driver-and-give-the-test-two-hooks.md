@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0058: Delete the integration stack through the API from the driver, and give the test two hooks
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0008 (the destroy is the CloudFormation `DeleteStack` call from the driver process, not `cdk destroy` from the script's exit trap; its other decisions stand)
 - Deciders: Dave Roberts (Partner Solutions Architect)

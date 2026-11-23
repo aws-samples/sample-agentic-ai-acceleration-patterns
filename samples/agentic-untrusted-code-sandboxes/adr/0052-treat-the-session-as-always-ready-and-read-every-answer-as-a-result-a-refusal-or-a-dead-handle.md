@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0052: Treat the session as always ready, and read every answer as a result, a refusal or a dead handle
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Deciders: Dave Roberts (Partner Solutions Architect)
 

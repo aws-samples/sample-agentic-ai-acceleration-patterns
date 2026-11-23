@@ -211,8 +211,12 @@ for rejected traffic with one month of retention (ADR-0012).
 | Subnets | Routes | Hold |
 | --- | --- | --- |
 | Public (`/24`) | Internet gateway | The NAT gateway only |
-| Tool (`/22`) | Default route to the NAT | The tool, reaper, drain and offboard functions; the ECS instances' primary ENIs |
+| Tool (`/22`) | Default route to the NAT | The tool functions; the ECS instances' primary ENIs |
 | Sandbox (`/22`, isolated) | Local only: no default route | `nitro` task ENIs, `agentcore` runtime ENIs, the `microvm` connector |
+
+The reaper, drain and offboard functions call AWS APIs only and run
+outside the VPC, so a stack delete has no network interface of theirs to
+wait for (ADR-0071).
 
 A supplied VPC names its subnet groups `Tool` and `Sandbox`; the construct
 selects by group name (ADR-0027) and requires an explicit `createEndpoints`

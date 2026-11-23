@@ -117,18 +117,34 @@ class Sandbox:
         return self.nonce is None or hmac.compare_digest(nonce, self.nonce)
 
     def hello(self, body: bytes) -> Answer:
-        """nitro /hello: HMAC(nonce, challenge ‖ certFingerprint)."""
+        """nitro /hello: HMAC(nonce, challenge ‖ certFingerprint).
+
+        The first /hello (the tool's `ready`) delivers the nonce. A later one
+        (the tool's `run`) carries only the challenge, and the runner proves
+        with the nonce it holds, so a peer at a recycled address never
+        learns it (ADR-0072). Without a nonce in the body and none held, the
+        answer is wrong_sandbox.
+        """
         try:
             obj = wire.parse_object(body)
         except wire.Malformed:
             return self._refuse("tool_failed", wire.MALFORMED_JOB_STATUS)
-        nonce, challenge = wire.decode_32(obj.get("nonce")), wire.decode_32(obj.get("challenge"))
-        if self.backend != "nitro" or self.fingerprint is None or nonce is None or challenge is None:
+        challenge = wire.decode_32(obj.get("challenge"))
+        if self.backend != "nitro" or self.fingerprint is None or challenge is None:
             return self._refuse("wrong_sandbox")
-        with self._state:
-            if not self._may_adopt(nonce, None, None):
+        if "nonce" in obj:
+            nonce = wire.decode_32(obj.get("nonce"))
+            if nonce is None:
                 return self._refuse("wrong_sandbox")
-            self.nonce = nonce
+            with self._state:
+                if not self._may_adopt(nonce, None, None):
+                    return self._refuse("wrong_sandbox")
+                self.nonce = nonce
+        else:
+            with self._state:
+                if self.nonce is None:
+                    return self._refuse("wrong_sandbox")
+                nonce = self.nonce
         return 200, {"v": wire.PROTOCOL_VERSION, "bootId": self.boot_id, "certFingerprint": self.fingerprint.hex(),
                      "proof": wire.hello_proof(nonce, challenge, self.fingerprint)}
 

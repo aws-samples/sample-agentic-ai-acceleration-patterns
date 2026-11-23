@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0003: Give sandboxed code no internet and the fewest credentials each backend allows
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0015, ADR-0016
 - Deciders: Dave Roberts (Partner Solutions Architect)

@@ -246,7 +246,7 @@ export class UntrustedCodeSandboxes extends Construct {
     }
 
     // --- Roles (spec §3.6) ---
-    const toolRole = this.lambdaRole('ToolRole', 'run_code tool functions (spec 3.6 Tool role)');
+    const toolRole = this.lambdaRole('ToolRole', 'run_code tool functions (spec 3.6 Tool role)', true);
     this.toolRole = toolRole;
     this.tenantRole = new iam.Role(this, 'ToolTenantRole', {
       description: 'Assumed by the tool with a TenantId session tag; reaches only that tenant (spec 3.6)',
@@ -374,7 +374,7 @@ export class UntrustedCodeSandboxes extends Construct {
     this.logDrain.writer(this.drainResource);
 
     if (this.config.standalone) {
-      const run = this.lambdaFunction('RunCode', HANDLERS.runCode, toolRole, this.config.toolBudget, 'run_code for the vendor\'s own API (spec 3.2, ADR-0017)', 512);
+      const run = this.lambdaFunction('RunCode', HANDLERS.runCode, toolRole, this.config.toolBudget, 'run_code for the vendor\'s own API (spec 3.2, ADR-0017)', { memorySize: 512, inVpc: true });
       this.insights.addToolLogGroup(run.logGroup.logGroupName);
       (run.fn.node.defaultChild as lambda.CfnFunction).addResourceDependency(this.drainResource.node.defaultChild as CfnResource);
       this.runCodeFunction = run.fn;
@@ -538,13 +538,13 @@ export class UntrustedCodeSandboxes extends Construct {
     this.logDrain.writer(handler);
   }
 
-  /** An execution role for the functions in the tool subnets. */
-  private lambdaRole(id: string, description: string): iam.Role {
+  /** An execution role; one for functions in the tool subnets (`inVpc`) also manages their network interfaces. */
+  private lambdaRole(id: string, description: string, inVpc = false): iam.Role {
     const role = new iam.Role(this, id, {
       description,
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
     });
-    role.addToPrincipalPolicy(vpcAccessStatement());
+    if (inVpc) role.addToPrincipalPolicy(vpcAccessStatement());
     return role;
   }
 
@@ -572,15 +572,20 @@ export class UntrustedCodeSandboxes extends Construct {
     enabled.flatMap((b) => b.tenantStatements()).forEach((s) => this.tenantRole.addToPolicy(s));
   }
 
-  /** One function, with an owned log group, the shared environment and the tool subnets. */
+  /**
+   * One function, with an owned log group and the shared environment. Only a function that dials a sandbox
+   * (`inVpc`, the run function) sits in the tool subnets; the reaper, offboard and drain call AWS APIs only and
+   * run outside the VPC, so they leave no network interface for the stack delete to wait on (ADR-0071).
+   */
   private lambdaFunction(
     id: string,
     entry: string,
     role: iam.Role,
     timeout: Duration,
     description: string,
-    memorySize = 256,
+    options: { memorySize?: number; inVpc?: boolean } = {},
   ): { fn: NodejsFunction; logGroup: logs.LogGroup } {
+    const { memorySize = 256, inVpc = false } = options;
     const logGroup = new logs.LogGroup(this, `${id}Logs`, {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.DESTROY,
@@ -598,9 +603,7 @@ export class UntrustedCodeSandboxes extends Construct {
       role: iam.Role.fromRoleArn(this, `${id}RoleRef`, role.roleArn, { mutable: false }),
       description,
       environment: { ...this.environment },
-      vpc: this.vpc,
-      vpcSubnets: this.toolSubnets,
-      securityGroups: [this.toolSecurityGroup],
+      ...(inVpc ? { vpc: this.vpc, vpcSubnets: this.toolSubnets, securityGroups: [this.toolSecurityGroup] } : {}),
       logGroup,
       // JSON format, so a line written with process.stdout.write keeps its top-level fields (spec 3.8).
       loggingFormat: lambda.LoggingFormat.JSON,

@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0011: Stop sandboxes with a reaper, a drain and an offboard function
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0015, ADR-0019, ADR-0020, ADR-0049
 - Deciders: Dave Roberts (Partner Solutions Architect)

@@ -2,8 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0047: Prove the sandbox and run the job on one pinned TLS connection
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
+- Amended by: ADR-0072
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -72,3 +73,5 @@ A keep-alive socket that closes between `/hello` and the job also ends as
 tenant sees a timeout. That is the safe side, as in ADR-0044. An answer
 that arrives but is unusable (an HTTP error with no refusal) stays a dead
 handle, the honest-runner case of spec §3.5.
+
+Note 2026-11-23: amended by ADR-0072. `run` posts `/hello` with the challenge alone, so a peer at a recycled address never receives the nonce; `ready` still delivers it.

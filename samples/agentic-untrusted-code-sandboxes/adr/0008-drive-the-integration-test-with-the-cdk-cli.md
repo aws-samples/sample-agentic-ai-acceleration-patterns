@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0008: Drive the integration test with the CDK CLI
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0015, ADR-0058
 - Deciders: Dave Roberts (Partner Solutions Architect)

@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0063: Bound the answer by its JSON size and the input by the runner's limit
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0032
 - Deciders: Dave Roberts (Partner Solutions Architect)

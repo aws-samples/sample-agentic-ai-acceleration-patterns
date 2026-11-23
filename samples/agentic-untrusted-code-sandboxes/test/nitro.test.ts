@@ -85,6 +85,8 @@ class FakeRunner {
   public heldNonce?: string;
   /** Thrown by `/hello`, as a connection or timeout error would. */
   public helloError?: Error;
+  /** A runner that was never handed a nonce: another task that now holds the address. */
+  public holdsNone = false;
   public constructor(private readonly nonce: string) {}
 
   public readonly connect: Connect = async (host, port) => {
@@ -109,7 +111,9 @@ class FakeRunner {
         case 'wrong_sandbox': return { status: 403, body: JSON.stringify({ v: 1, error: 'wrong_sandbox' }) };
         default: break;
       }
-      if (body.nonce !== held) return { status: 403, body: JSON.stringify({ v: 1, error: 'wrong_sandbox' }) };
+      // As the runner does: a nonce in the body must match; without one the runner proves with the nonce it
+      // holds, and a runner that holds none refuses (ADR-0072).
+      if ('nonce' in body ? body.nonce !== held : this.holdsNone) return { status: 403, body: JSON.stringify({ v: 1, error: 'wrong_sandbox' }) };
       const fp = this.hello === 'other_fingerprint' ? OTHER_FP : FP;
       const proof = this.hello === 'bad_proof' ? 'A'.repeat(43) : helloProof(held, body.challenge as string, fp);
       return { status: 200, body: JSON.stringify({ v: 1, bootId: BOOT_ID, certFingerprint: fp, proof }) };
@@ -270,6 +274,8 @@ describe('ready', () => {
     expect(await backend.ready(noAddress, row)).toEqual({ state: 'ready', patch: { address: '10.0.8.21', bootId: BOOT_ID } });
     expect(runner.connects).toEqual([{ host: '10.0.8.21', port: 8443 }]);
     expect(runner.requests.map((r) => r.path)).toEqual(['/hello']);
+    // ready delivers the nonce, to the address it read from this task's own ENI (ADR-0072)
+    expect(runner.requests[0].body.nonce).toBe(nonce);
     expect(runner.closed).toBe(1);
   });
 
@@ -389,6 +395,8 @@ describe('run', () => {
     }
     expect(runner.connects).toEqual([{ host: '10.0.8.21', port: 8443 }]);
     expect(runner.requests.map((r) => r.path)).toEqual(['/hello', '/run']);
+    // the warm /hello carries the challenge alone; the nonce goes only in the job, after the proof (ADR-0072)
+    expect(Object.keys(runner.requests[0].body).sort()).toEqual(['challenge', 'v']);
     expect(runner.requests[1].body).toEqual(JSON.parse(JSON.stringify(job)));
     expect(runner.closed).toBe(1);
   });
@@ -416,15 +424,26 @@ describe('run', () => {
     expect(runner.requests.find((r) => r.path === '/run')?.maxBytes).toBe(1000 * 6 + 65536);
   });
 
-  test('a recycled address: the runner there holds another nonce, so no job bytes are sent', async () => {
+  test('a recycled address: the runner there holds another nonce, so neither the nonce nor job bytes are sent (ADR-0072)', async () => {
     const nonce = newNonce();
     const { backend, runner, handle } = make(nonce);
     runner.heldNonce = newNonce();
     const out = await backend.run(handle, jobFor(handle));
-    expect(out).toEqual({ kind: 'dead', reason: 'wrong_sandbox' });
+    expect(out).toEqual({ kind: 'dead', reason: 'the /hello proof does not match' });
     expect(runner.requests.map((r) => r.path)).toEqual(['/hello']);
     expect(JSON.stringify(runner.requests)).not.toContain('print(1)');
+    expect(JSON.stringify(runner.requests)).not.toContain(nonce);
     expect(runner.closed).toBe(1);
+  });
+
+  test('a recycled address whose runner holds no nonce refuses, and the nonce is never sent (ADR-0072)', async () => {
+    const nonce = newNonce();
+    const { backend, runner, handle } = make(nonce);
+    runner.holdsNone = true;
+    expect(await backend.run(handle, jobFor(handle))).toEqual({ kind: 'dead', reason: 'wrong_sandbox' });
+    expect(runner.requests).toHaveLength(1);
+    expect(runner.requests[0].body).not.toHaveProperty('nonce');
+    expect(JSON.stringify(runner.requests)).not.toContain(nonce);
   });
 
   test.each<[HelloMode, string]>([

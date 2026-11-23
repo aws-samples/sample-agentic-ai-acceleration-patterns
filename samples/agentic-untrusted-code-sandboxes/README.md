@@ -59,7 +59,8 @@ AgentCore session or Nitro task), whose runner returns the result.
 The AgentCore Gateway invokes the `run_code` Lambda in the tool subnets,
 which reaches the tenant's Nitro task over direct TLS on port 8443 and the
 tenant's MicroVM and AgentCore session over HTTPS through the NAT gateway;
-the sandbox subnets have no route out.
+the sandbox subnets have no route out. The reaper, drain and offboard
+function sit outside the VPC and call AWS APIs only (ADR-0071).
 
 Both diagrams show the gateway entry. With the standalone entry, the
 vendor's own API invokes `runCodeFunction` with IAM in place of the agent
@@ -277,9 +278,11 @@ the retry, one failed first start fails steps 1, 2, 6 and 7.
 Runs on 2026-11-22, in a non-production test account, `eu-west-1`, on a
 demo stack with `backends=microvm` and `standalone=true`. On the first
 stack the demo passed all seven steps with no failed start. On the
-second stack, a first start failed in each of the last two runs (a
-platform error in the first). The last run passed all seven steps in
-72 s, after tenant B's first start was retried once. The second stack
+second stack it ran twice. In the first run a MicroVM start failed with
+a platform error ("Internal service error"); the script had no retry yet,
+so the run failed. The retry was then added, and the second run passed
+all seven steps in 72 s, after tenant B's first start failed once and
+was retried. The second stack
 deployed in 645 s and deleted cleanly (`DELETE_COMPLETE`) in 1459 s. A
 read-only check afterwards found no network interface, log group or
 parameter of the stack.

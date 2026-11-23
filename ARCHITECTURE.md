@@ -140,6 +140,7 @@ Each layer is enforced on its own; a request passes all of them.
 | Tools | which tools may this agent call for this tenant user? | at target grain, a Policy engine star permit on the transaction token's granted `scope`; per tool, a REQUEST interceptor that checks each call and hands the tool a signed tenant context |
 | Data | which tenant's data may this code reach? | tenant-scoped credentials: ABAC with a `TenantId` session tag, issued per request; for a tool, a tool-side TVM that assumes the tool's own tenant role from the signed tenant context; for pooled agent memory, a Gateway Policy that binds the actor and the namespace to the `tenant_id` claim, behind a resource policy that admits only the Gateway |
 | Delegation | what may the agent do on the user's behalf? | the narrowest token that works: a short-lived transaction token the ingress mints with only the granted set; the identity token is never forwarded |
+| Execution | where does code written for this tenant run, and what can it reach? | a VM per tenant, chosen by the tool from the verified tenant: bytes in and out only, no route out, no credentials, every job bound to the VM by a start nonce (`agentic-untrusted-code-sandboxes`) |
 
 Four rules hold at every layer:
 

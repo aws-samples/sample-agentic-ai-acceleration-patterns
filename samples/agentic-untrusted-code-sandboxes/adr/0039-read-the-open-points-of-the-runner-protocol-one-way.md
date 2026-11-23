@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0039: Read the open points of the runner protocol one way
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amended by: ADR-0064
 - Deciders: Dave Roberts (Partner Solutions Architect)

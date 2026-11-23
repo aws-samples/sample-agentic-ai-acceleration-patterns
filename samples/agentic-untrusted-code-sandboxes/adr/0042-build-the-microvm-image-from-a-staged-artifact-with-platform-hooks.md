@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0042: Build the MicroVM image from a staged artifact, with the platform hooks enabled
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amended by: ADR-0068
 - Deciders: Dave Roberts (Partner Solutions Architect)

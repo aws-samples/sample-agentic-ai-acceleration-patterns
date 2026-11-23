@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0048: Scope the nitro statements by the condition keys each action supports
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0014
 - Deciders: Dave Roberts (Partner Solutions Architect)

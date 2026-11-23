@@ -233,9 +233,21 @@ class HashBackendsTest(unittest.TestCase):
         status, body = sb.hello(json.dumps(req).encode())
         self.assertEqual((status, body["proof"], body["certFingerprint"]),
                          (200, V["hello"]["expected"]["proof"], V["hello"]["certFingerprint"]))
-        for bad in (dict(req, challenge=V["mustRefuseChallenge"]["short"]), dict(req, nonce=wire.b64url(OTHER_NONCE))):
+        for bad in (dict(req, challenge=V["mustRefuseChallenge"]["short"]), dict(req, nonce=wire.b64url(OTHER_NONCE)),
+                    dict(req, nonce=None)):
             self.assertEqual(sb.hello(json.dumps(bad).encode())[0], 403)
         self.assertEqual(sb.hello(b"[]")[0], 400)
+        # A later /hello carries only the challenge; the runner proves with the nonce it holds (ADR-0072).
+        warm = {"v": 1, "challenge": V["hello"]["challenge"]}
+        status, body = sb.hello(json.dumps(warm).encode())
+        self.assertEqual((status, body["proof"]), (200, V["hello"]["expected"]["proof"]))
+
+    def test_hello_without_a_nonce_held_is_refused(self):
+        sb, _ = make("nitro")
+        sb.fingerprint = bytes.fromhex(V["hello"]["certFingerprint"])
+        status, body = sb.hello(json.dumps({"v": 1, "challenge": V["hello"]["challenge"]}).encode())
+        self.assertEqual((status, body["error"]), (403, "wrong_sandbox"))
+        self.assertIsNone(sb.nonce)
 
 
 class EntryTest(unittest.TestCase):

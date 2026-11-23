@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0032: Return tool errors as values, and write the registry in one order
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amended by: ADR-0063
 - Deciders: Dave Roberts (Partner Solutions Architect)

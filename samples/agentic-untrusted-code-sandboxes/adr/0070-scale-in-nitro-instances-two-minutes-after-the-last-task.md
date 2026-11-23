@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0070: Scale in `nitro` instances two minutes after the last task
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-22
 - Deciders: Dave Roberts (Partner Solutions Architect)
 

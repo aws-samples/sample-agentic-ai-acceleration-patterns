@@ -59,6 +59,7 @@ import {
   resultProof,
   RUNNER_PORTS,
   startToken,
+  type HelloRequest,
   type HelloResponse,
   type Refusal,
   type RunResult,
@@ -424,7 +425,7 @@ export class NitroBackend implements SandboxBackend {
       return { state: 'starting', patch: { address } };
     }
     try {
-      const hs = await this.handshake(conn, handle, PROBE_HELLO_MS);
+      const hs = await this.handshake(conn, handle, PROBE_HELLO_MS, true);
       if (hs.kind === 'ok') return { state: 'ready', patch: { address, bootId: hs.bootId } };
       if (hs.kind === 'identity') return { state: 'ended', reason: hs.reason };
       return { state: 'starting', patch: { address } };
@@ -456,7 +457,7 @@ export class NitroBackend implements SandboxBackend {
     try {
       let hs: Handshake;
       try {
-        hs = await this.handshake(conn, handle, Math.min(left(), 5000));
+        hs = await this.handshake(conn, handle, Math.min(left(), 5000), false);
       } catch (err) {
         return { kind: 'dead', reason: connectionReason('hello', err) };
       }
@@ -648,10 +649,16 @@ export class NitroBackend implements SandboxBackend {
       .filter((i) => i.State?.Name !== 'terminated').map((i) => i.InstanceId ?? '').filter((id) => id !== '');
   }
 
-  /** `POST /hello`: proves the peer holds the nonce, bound to the certificate of this connection. */
-  private async handshake(conn: RunnerConnection, handle: SandboxHandle, timeoutMs: number): Promise<Handshake> {
+  /**
+   * `POST /hello`: proves the peer holds the nonce, bound to the certificate of this connection. Only
+   * `ready` delivers the nonce (`deliver`), to the address it just read from this task's own ENI. `run`
+   * dials the address in the row, which a stopped task may have handed on, so it sends the challenge
+   * alone and the runner proves with the nonce it already holds (ADR-0072).
+   */
+  private async handshake(conn: RunnerConnection, handle: SandboxHandle, timeoutMs: number, deliver: boolean): Promise<Handshake> {
     const challenge = base64url(randomBytes(32));
-    const reply = await conn.post('/hello', JSON.stringify({ v: PROTOCOL_VERSION, nonce: handle.nonce, challenge }), timeoutMs, 4096);
+    const request: HelloRequest = deliver ? { v: PROTOCOL_VERSION, nonce: handle.nonce, challenge } : { v: PROTOCOL_VERSION, challenge };
+    const reply = await conn.post('/hello', JSON.stringify(request), timeoutMs, 4096);
     const body = parseJson(reply.body);
     const refusal = asRefusal(body);
     if (refusal !== undefined) {

@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0059: Switch on the test overrides through an escape hatch in the integration app
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amended by: ADR-0066
 - Deciders: Dave Roberts (Partner Solutions Architect)

@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0019: Cap job memory per backend
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-19
 - Amends: ADR-0010, ADR-0011, ADR-0016, ADR-0018
 - Amended by: ADR-0020, ADR-0021, ADR-0022, ADR-0038

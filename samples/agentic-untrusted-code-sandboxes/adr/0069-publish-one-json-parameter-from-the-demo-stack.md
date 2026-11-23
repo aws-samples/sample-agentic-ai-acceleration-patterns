@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0069: Publish one JSON parameter from the demo stack
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-22
 - Deciders: Dave Roberts (Partner Solutions Architect)
 

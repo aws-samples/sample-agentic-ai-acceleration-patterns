@@ -2,9 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0012: Split the VPC into tool subnets and dead-end sandbox subnets
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
-- Amended by: ADR-0015, ADR-0065
+- Amended by: ADR-0015, ADR-0065, ADR-0071
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -52,3 +52,5 @@ tag both tiers.
 Note 2026-11-18: amended by ADR-0015. ECR and S3 endpoints in the sandbox subnets serve `agentcore` only; the `nitro` task needs only the Logs endpoint, because the instance pulls the image.
 
 Note 2026-11-20: amended by ADR-0065. With a supplied `vpc`, `createEndpoints` has no default and must be set.
+
+Note 2026-11-23: amended by ADR-0071. The reaper, offboard and drain functions run outside the VPC; only a function that dials a sandbox sits in the tool subnets.

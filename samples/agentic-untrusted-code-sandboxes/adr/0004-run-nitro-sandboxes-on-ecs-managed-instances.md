@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0004: Run Nitro Sandboxes on ECS Managed Instances, not EKS
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)

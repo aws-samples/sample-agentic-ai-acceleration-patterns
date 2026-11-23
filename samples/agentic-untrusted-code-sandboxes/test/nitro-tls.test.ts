@@ -204,7 +204,8 @@ describe('NitroBackend over real TLS against a runner stand-in', () => {
       const body = JSON.parse(await readBody(req)) as Record<string, string>;
       seen.push(req.url ?? '');
       res.setHeader('Content-Type', 'application/json');
-      if (body.nonce !== nonce) {
+      // It already holds `nonce`, as after `ready`: a warm /hello carries no nonce (ADR-0072), a job does.
+      if ((req.url !== '/hello' || 'nonce' in body) && body.nonce !== nonce) {
         res.writeHead(403);
         res.end(JSON.stringify({ v: 1, error: 'wrong_sandbox' }));
         return;
@@ -256,11 +257,11 @@ describe('NitroBackend over real TLS against a runner stand-in', () => {
     expect(seen).toEqual(['/hello']);
   });
 
-  test('a runner of another tenant\'s task (another nonce) is refused and gets no job', async () => {
+  test('a runner of another tenant\'s task (another nonce) fails the proof and gets no job', async () => {
     const { port, seen } = await runnerStandIn(newNonce(), pemA);
     const nonce = newNonce();
     const out = await backendFor(port).run(handleFor(nonce), jobFor(nonce));
-    expect(out).toEqual({ kind: 'dead', reason: 'wrong_sandbox' });
+    expect(out).toEqual({ kind: 'dead', reason: 'the /hello proof does not match' });
     expect(seen).toEqual(['/hello']);
   });
 });

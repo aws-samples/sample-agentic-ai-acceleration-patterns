@@ -158,8 +158,18 @@ the session's first job.
 Request:
 
 ```json
-{ "v": 1, "nonce": "base64url", "challenge": "base64url, 32 bytes" }
+{ "v": 1, "nonce": "base64url, the ready probe only", "challenge": "base64url, 32 bytes" }
 ```
+
+The tool's `ready` probe sends `nonce`, to the address it has just read
+from the task's own ENI; the runner adopts it as a job would. The
+`/hello` before a job omits `nonce`, because the address comes from the
+registry row and another task may hold it now: the runner computes the
+proof with the nonce it holds, and a runner that holds none answers
+`wrong_sandbox` (HTTP 403). A `nonce` field that is present but does not
+decode is `wrong_sandbox` too (ADR-0072). The version stays 1: a runner
+of the earlier shape answers a `/hello` with no nonce `wrong_sandbox`,
+so the tool takes over with a fresh task, and no job is lost.
 
 Response, HTTP 200:
 
@@ -170,8 +180,8 @@ Response, HTTP 200:
 The tool computes the fingerprint of the certificate the TLS connection
 presented, checks that it equals `certFingerprint` and that `proof`
 matches, and then sends the job on the same connection (HTTP/1.1
-keep-alive). A runner whose `nonceHash` does not match answers with the
-`wrong_sandbox` refusal (HTTP 403).
+keep-alive). A runner whose `nonceHash` does not match a delivered nonce
+answers with the `wrong_sandbox` refusal (HTTP 403).
 
 ### Lifecycle hooks (`microvm`, port 9000)
 
