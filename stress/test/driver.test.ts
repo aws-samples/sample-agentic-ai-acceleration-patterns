@@ -99,6 +99,7 @@ describe('StressDriverStack at small (spec §3.1)', () => {
         's3:PutObject',
         's3:ListBucket',
         'ssm:UpdateInstanceInformation',
+        'cloudwatch:PutMetricData',
         ...SSM_AGENT_MESSAGE_ACTIONS,
       ]),
     );
@@ -110,8 +111,20 @@ describe('StressDriverStack at small (spec §3.1)', () => {
     const wildcards = hostPolicies()
       .flatMap((p) => p.Properties.PolicyDocument.Statement)
       .filter((s: any) => [s.Resource].flat().includes('*'));
-    expect(wildcards.map((s: any) => s.Sid)).toEqual(['SsmAgentMessages']);
+    expect(wildcards.map((s: any) => s.Sid)).toEqual(['SsmAgentMessages', 'PublishRunMetrics']);
     expect([statement('SsmAgentMessages').Action].flat().every((a: string) => a.startsWith('ec2messages:') || a.startsWith('ssmmessages:'))).toBe(true);
+  });
+
+  it('may publish metrics to the StressRun namespace only', () => {
+    expect(statement('PublishRunMetrics')).toMatchObject({
+      Action: 'cloudwatch:PutMetricData',
+      Effect: 'Allow',
+      Resource: '*',
+      Condition: { StringEquals: { 'cloudwatch:namespace': 'StressRun' } },
+    });
+  });
+
+  it('keeps the instance registration on the instance', () => {
     expect(JSON.stringify(statement('SsmAgentRegister').Resource)).toContain(':instance/*');
   });
 

@@ -107,6 +107,64 @@ for (const code of STATUS_CODES) {
 }
 statusCounters.other = new Counter('status_other');
 
+// -- the minute line (stress ADR-0022, stress/k6/relay.sh) ------------------------------------
+
+// Each VU counts, per epoch minute, what the dashboard's relay publishes: requests by status
+// class, isolation assertions and mismatches, refusals seen, and a latency histogram. One
+// `minute` JSON line a VU a minute goes to k6's output, like the `tenant_minute` ledger line,
+// and the relay sums the lines of all VUs. No tenant, token or header is in it.
+const LATENCY_STEP = Math.log(1.12);
+// log-spaced buckets about 12 % wide from 1 ms to 120 s: at most 104, below the 150 CloudWatch takes
+const LATENCY_MAX_BUCKET = Math.ceil(Math.log(120000) / LATENCY_STEP);
+let stat = null;
+
+function newStat(minute) {
+  return { minute, s2xx: 0, s3xx: 0, s4xx: 0, s5xx: 0, snone: 0, assertions: 0, mismatches: 0, refusals: 0, hist: {} };
+}
+
+function flushStat() {
+  if (stat === null) {
+    return;
+  }
+  const line = { kind: 'minute', epochMinute: stat.minute, vu: exec.vu.idInTest };
+  for (const key of Object.keys(stat)) {
+    if (key !== 'minute') {
+      line[key] = stat[key];
+    }
+  }
+  console.log(JSON.stringify(line));
+  stat = null;
+}
+
+/** Applies one count to this VU's minute; flushes the minute that has ended, and the last one near the scenario's end. */
+function bump(apply) {
+  const minute = Math.floor(Date.now() / 60000);
+  if (stat !== null && stat.minute !== minute) {
+    flushStat();
+  }
+  stat = stat || newStat(minute);
+  apply(stat);
+  let progress = 0;
+  try {
+    progress = exec.scenario.progress;
+  } catch (_) {
+    // outside a scenario (setup): nothing to flush at
+  }
+  if (progress >= 0.99) {
+    flushStat();
+  }
+}
+
+/** The status class of a response: 2xx to 5xx, or none for a status of 0 or an unusual one. */
+export function statusClass(status) {
+  return status >= 200 && status < 600 ? `s${Math.floor(status / 100)}xx` : 'snone';
+}
+
+/** The log-spaced bucket of a latency in ms: bucket i holds up to 1.12^i ms. */
+export function latencyBucket(ms) {
+  return Math.min(LATENCY_MAX_BUCKET, Math.max(0, Math.ceil(Math.log(Math.max(1, ms)) / LATENCY_STEP)));
+}
+
 /** Counts one response by status; a 4xx or 5xx is also a refusal the run must attribute. */
 export function countStatus(status, tenantId) {
   (statusCounters[status] || statusCounters.other).add(1);
@@ -116,6 +174,13 @@ export function countStatus(status, tenantId) {
   if (status === 429) {
     tenant429.add(1, { tenant: tenantId });
   }
+  const cls = statusClass(status);
+  bump((s) => {
+    s[cls] += 1;
+    if (status >= 400) {
+      s.refusals += 1;
+    }
+  });
 }
 
 /**
@@ -129,6 +194,9 @@ export function countStatus(status, tenantId) {
  */
 export function countRefusal(tenantId, reason) {
   refusalsSeen.add(1);
+  bump((s) => {
+    s.refusals += 1;
+  });
   console.log(JSON.stringify({ kind: 'body_refusal', epochMinute: Math.floor(Date.now() / 60000), tenantId, reason: String(reason).slice(0, 64) }));
 }
 
@@ -136,6 +204,10 @@ export function countRefusal(tenantId, reason) {
 export function timed(ttfb, total, tags) {
   ttfbMs.add(ttfb, tags);
   clientMs.add(total, tags);
+  const bucket = latencyBucket(total);
+  bump((s) => {
+    s.hist[bucket] = (s.hist[bucket] || 0) + 1;
+  });
 }
 
 // -- the correlation header (stress ADR-0005) -------------------------------------------
@@ -543,6 +615,12 @@ export function ensureToken(entry) {
  */
 export function isolationCheck(entry, probeKind, status, bad, requestId, correlationId) {
   isolationAssertions.add(1, { probe: probeKind });
+  bump((s) => {
+    s.assertions += 1;
+    if (bad.length > 0) {
+      s.mismatches += 1;
+    }
+  });
   if (bad.length === 0) {
     return true;
   }

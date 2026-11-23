@@ -132,6 +132,16 @@ export class StressDriverStack extends Stack {
         resources: ['*'],
       }),
     );
+    // The host relay publishes each minute of a k6 scenario to the `StressRun` namespace (stress
+    // ADR-0022). The action has no resource type; the namespace condition is the limit.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishRunMetrics',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: { StringEquals: { 'cloudwatch:namespace': 'StressRun' } },
+      }),
+    );
     const invokeResource = `arn:${this.partition}:execute-api:${this.region}:${this.account}:*/*/*/*`;
     this.role.addToPolicy(
       new iam.PolicyStatement({
@@ -224,7 +234,7 @@ export class StressDriverStack extends Stack {
     acknowledgeGranularFinding(
       this.role,
       'AwsSolutions-IAM5[Resource::*]',
-      'The ec2messages and ssmmessages actions the SSM Agent needs have no resource type, so IAM takes only * (stress ADR-0009).',
+      'The ec2messages and ssmmessages actions the SSM Agent needs (stress ADR-0009) and cloudwatch:PutMetricData for the run dashboard (stress ADR-0022) have no resource type, so IAM takes only *; PutMetricData is limited to the StressRun namespace by condition.',
     );
     acknowledgeGranularFinding(
       this.role,
