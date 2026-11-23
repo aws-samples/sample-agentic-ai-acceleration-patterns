@@ -195,7 +195,8 @@ day at least 48 hours. So the runner stamps `RefusalsUnattributed` with its
 publish time instead of the window end when the window end is more than 3 hours
 old at publish time, and the dashboard shows the number once, after `collect`. The
 age rule rests on the PutMetricData documentation; it is unproven here (§14), and
-a `small` run is shorter than 3 hours, so it matters only for a tier whose scenario phase exceeds 3 hours (spec §4.1 has the scenario lengths). The runner
+a `small` run is shorter than 3 hours, so it matters only for a tier whose
+scenario phase exceeds 3 hours (spec §4.1 has the scenario lengths). The runner
 never backfills a finished run.
 
 ### 3.2 `StressCell`, published in each cell account
@@ -683,7 +684,7 @@ to the spec's work table (spec §9) when ADR-0022 is accepted.
 | W-12h | Host role statement for `PutMetricData` | `stress/driver/stress-driver.cdk.ts` | one statement, namespace-conditioned | ready |
 | SD-1 | Spike: link and sink between two test accounts; a dashboard widget reads a cell metric by account id; run the account check with the link | a non-production test setup | pass if the widget shows data and the check passes | open; blocks W-12e |
 | SD-2 | Spike: relay lag and k6 output buffering at the `small` rate; whether a named series of a new run shows at once | driver host | pass if a minute's counts reach CloudWatch within 3 minutes of the minute's end | open |
-| SD-3 | Spike: check each unproven metric of §3.3 and §6 exists as assumed; an `sdk retried` line from the authoriser and from each interceptor reaches `SdkRetryLines`; a `SEARCH` widget finds a metric created in the same run; time the dashboard deploy and destroy | platform account and a cell account | list of present and absent metrics; the two checks; two timings | open |
+| SD-3 | Spike: check each unproven metric of §3.3 and §6 exists as assumed; an `sdk retried` line from the authoriser and from each interceptor reaches `SdkRetryLines`; a `SEARCH` widget finds a metric created in the same run; a metric filter publishes `$.totalMs` with computed percentiles; a `RunId` dashboard variable switches a dimension; `GetMetricWidgetImage` renders a cross-account widget; time the dashboard deploy and destroy | platform account and a cell account | list of present and absent metrics; the checks; two timings | open; the image check needs the link of SD-1, the retry-line check the filters of W-12d |
 
 The spike ids differ from the spec's `S1` to `S7` (runtime-isolation scenarios) and the
 front door's spikes `S-2`, `S-3`, `S-5` and `S-7`.
@@ -707,7 +708,7 @@ front door's spikes `S-2`, `S-3`, `S-5` and `S-7`.
 | A Contributor Insights widget can show a cell account's rule, or a platform-account rule over shared cell log groups | not designed (§7); the documentation shows only the second | a change to ADR-0022 |
 | A metric filter can publish `$.totalMs` as a value whose p95 and p99 CloudWatch computes | standard feature, not run here | SD-3 |
 | A dashboard `RunId` variable can switch a dimension | not run | SD-3 |
-| A point stamped more than 3 hours back becomes readable only after up to two hours, which is why `RefusalsUnattributed` is stamped with its publish time past that age | from the PutMetricData documentation; not tried | the first `large` run |
+| A point stamped more than 3 hours back becomes readable only after up to two hours, which is why `RefusalsUnattributed` is stamped with its publish time past that age | from the PutMetricData documentation; not tried | the first run of a tier whose scenario phase exceeds 3 hours |
 | The live view trails a minute of load by under 3 minutes, and a 60-second period shows a 5-second herd as one point | not measured; the period is CloudWatch's standard resolution | SD-2 |
 | Searched widgets (B1 to B4, C1 to C3) show data from the first minute of PS-1 | a new metric can take up to 15 minutes to be listed | SD-3 |
 | `sdk retried` lines of the authoriser and the interceptors reach the `SdkRetryLines` metric | the code logs them (`jws.ts`); no filter exists yet | SD-3 |
