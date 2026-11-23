@@ -3340,40 +3340,37 @@ API function has a generated name. The stack under test outputs the
 API function's name (`ApiFunctionName`) and the workflow's ARN
 (`StateMachineArn`), and the test reads both after the deploy.
 
-Each run of the test takes its own fleet name, `cp-integ-<run id>`,
-within the `fleetName` charset and length (§3.3). The run id matches
-`[a-z0-9]{1,23}` and MUST NOT contain `aws`, `amazon` or `cognito`:
-the fleet name is then at most 32 characters, and the user pool domain
-prefix built from it ends in no hyphen and holds none of the words
-Cognito refuses in a domain prefix. The run uses the fleet name in
-every stack name, as the `fleetName` of the stack under test and of
-the role pair the account B stack installs, and in every other name
-the test creates that must be unique in an account or a Region: the
-probe role in B, the test policy on B's cell role (`<fleet>-cell-extra`),
-the hook test paths and policies, and the user pool domain prefix. The
-application ids derive from the run id, not the
-fleet name (`x-<run id>`, `y-<run id>`, `z-<run id>`, at most 25
-characters), because an application id is at most 32 characters
-(§4.1) and the parameter paths it names
-(`/application-plane/applications/<id>/shared/`,
-`/application-plane/tenants/<tenantId>/<id>`) are per account and
-Region, so two runs with one id would share them. Only one control
-plane stack fits in account A and a Region at a time, because every
-stack creates the fixed `/control-plane/tenant-api-url` parameter, so
-runs there go one after another; runs in other Regions can share
-account B. The test's leftover check looks for that run's stacks only,
-and a check that a parameter namespace ends empty looks at that run's
-applications, cells and tenants only. A run shares account A's quotas
-with every other workload in the account and Region: CodeBuild's
-concurrent builds per account and Region, which every run's builds and
-hook builds draw on, and the API Gateway control plane request rate,
-which a deploy of several REST APIs at once can exceed. Runs one after
-another also share state that per-run names do not separate: the stack under test's REST API creates the API Gateway
-CloudWatch role and the `AWS::ApiGateway::Account` setting that names
-it, which is one per account and Region, goes to whichever run
-deployed last, and is retained when the stack is deleted. That role
-and setting are expected leftovers, outside the per-run leftover
-check.
+Each run of the test takes its own fleet name, `cp-integ-<run id>`, within
+the `fleetName` charset and length (§3.3). The run id matches
+`[a-z0-9]{1,23}` and MUST NOT contain `aws`, `amazon` or `cognito`: the
+fleet name is then at most 32 characters, and the user pool domain prefix
+built from it ends in no hyphen and holds none of the words Cognito refuses
+in a domain prefix. The run uses the fleet name in every stack name, as the
+`fleetName` of the stack under test and of the role pair the account B stack
+installs, and in every other name the test creates that must be unique in an
+account or a Region: the probe role in B, the test policy on B's cell role
+(`<fleet>-cell-extra`), the hook test paths and policies, and the user pool
+domain prefix. The application ids derive from the run id, not the fleet
+name (`x-<run id>`, `y-<run id>`, `z-<run id>`, at most 25 characters),
+because an application id is at most 32 characters (§4.1) and the parameter
+paths it names (`/application-plane/applications/<id>/shared/`,
+`/application-plane/tenants/<tenantId>/<id>`) are per account and Region, so
+two runs with one id would share them. Only one control plane stack fits in
+account A and a Region at a time, because every stack creates the fixed
+`/control-plane/tenant-api-url` parameter, so runs there go one after
+another; runs in other Regions, or with another account A, can share account
+B. The test's leftover check looks for that run's stacks only, and a check
+that a parameter namespace ends empty looks at that run's applications,
+cells and tenants only. A run shares account A's quotas with every other
+workload in the account and Region: CodeBuild's concurrent builds per
+account and Region, which every run's builds and hook builds draw on, and
+the API Gateway control plane request rate, which a deploy of several REST
+APIs at once can exceed. Runs one after another also share state that
+per-run names do not separate: the stack under test's REST API creates the
+API Gateway CloudWatch role and the `AWS::ApiGateway::Account` setting that
+names it, which is one per account and Region, goes to whichever run
+deployed last, and is retained when the stack is deleted. That role and
+setting are expected leftovers, outside the per-run leftover check.
 
 1. **Deployment inputs and auth:** all four CodeBuild projects, the two
    hook projects included, report a concurrent build limit of 50, and
