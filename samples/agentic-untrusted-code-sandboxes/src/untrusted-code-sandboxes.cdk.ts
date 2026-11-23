@@ -23,7 +23,7 @@ import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import { Construct } from 'constructs';
+import { Construct, type IConstruct } from 'constructs';
 import type { BackendName } from './backend';
 import type { BackendConstruct, BackendContext, BackendFactory } from './backend-construct';
 import { createAgentcoreBackend } from './backends/agentcore.cdk';
@@ -75,6 +75,9 @@ function vpcAccessStatement(): iam.PolicyStatement {
   });
 }
 
+/** Id of the policy that holds a VPC function role's network interface actions (ADR-0073). */
+const VPC_ACCESS_POLICY_ID = 'VpcNetworkInterfaces';
+
 /** The log group that holds the stack's auto-delete provider logs, made by the first instance in the stack. */
 const autoDeleteGroups = new WeakMap<Stack, logs.LogGroup>();
 
@@ -117,8 +120,6 @@ export class UntrustedCodeSandboxes extends Construct {
   private readonly toolStatements: iam.PolicyStatement[];
   private readonly insights: InsightRules;
   private readonly logDrain: LogDrain;
-  /** Holds a VPC function's role until Lambda has released the function's network interfaces (ADR-0073). */
-  private readonly networkDrain: LogDrain;
   private readonly drainResource: CustomResource;
   private readonly toolSubnets: ec2.SubnetSelection;
   private nagContext: KnownContext;
@@ -191,12 +192,6 @@ export class UntrustedCodeSandboxes extends Construct {
 
     // --- Log drain and Contributor Insights rules ---
     this.logDrain = new LogDrain(this, 'LogDrain');
-    // A second waiter for the VPC functions' roles (ADR-0073). It cannot be the log drain: a role's policy names backend
-    // resources that wait for the log drain themselves, which would be a cycle.
-    this.networkDrain = new LogDrain(this, 'NetworkDrain', {
-      delay: Duration.seconds(120),
-      description: 'Waits on stack delete so Lambda can release a VPC function\'s network interfaces with its role (ADR-0073)',
-    });
     this.insights = new InsightRules(this, 'Insights', nameFor);
 
     // --- Backends ---
@@ -428,7 +423,11 @@ export class UntrustedCodeSandboxes extends Construct {
    * cannot replace: grant the event source with its L2 grant. Attach any
    * other managed policy before binding, and give the function a role of its
    * own, because a role shared with another function loses the two policies
-   * for both.
+   * for both. The network interface actions go in a policy of their own on
+   * the role; on stack delete the function goes before the log drain's
+   * 90 s wait and the role and that policy after it, so Lambda can release
+   * the function's network interfaces (ADR-0073). A role in another stack
+   * than the construct is left out of that order.
    */
   public bindRunCode(fn: lambda.IFunction): void {
     if (!(fn instanceof lambda.Function)) {
@@ -446,6 +445,9 @@ export class UntrustedCodeSandboxes extends Construct {
       throw new Error(`UntrustedCodeSandboxes.bindRunCode: the role carries ${eventSource.split('/').pop()}, which allows log writes on every group and also the event source rights; grant the event source with its L2 grant (for example queue.grantConsumeMessages(fn)) instead (ADR-0029)`);
     }
     const cfn = fn.node.defaultChild as lambda.CfnFunction;
+    // The function resource in the tool subnets needs the network interface actions before it is created (ADR-0073).
+    // The resource, not the construct: an L2 function's default role is its child and must not wait for its own policy.
+    cfn.node.addDependency(this.vpcAccess(role));
     const subnetIds = this.vpc.selectSubnets(this.toolSubnets).subnetIds;
     cfn.vpcConfig = { subnetIds, securityGroupIds: [this.toolSecurityGroup.securityGroupId] };
     cfn.timeout = this.config.toolBudget.toSeconds();
@@ -456,7 +458,6 @@ export class UntrustedCodeSandboxes extends Construct {
       const keep = managed.filter((m) => !/:iam::aws:policy\/service-role\/AWSLambda(Basic|VPCAccess)ExecutionRole$/.test(flatten(m)));
       // The property itself, not an override, so cdk-nag sees the role as it is.
       if (keep.length !== managed.length) cfnRole.managedPolicyArns = keep.length > 0 ? (keep as string[]) : undefined;
-      role.addToPrincipalPolicy(vpcAccessStatement());
       this.toolStatements.forEach((s) => role.addToPrincipalPolicy(s));
       this.tenantRole.assumeRolePolicy?.addStatements(new iam.PolicyStatement({
         principals: [new iam.ArnPrincipal(role.roleArn)],
@@ -495,9 +496,8 @@ export class UntrustedCodeSandboxes extends Construct {
     // Only the function resource waits for the drain, not its role, which the tenant role's trust names.
     cfn.addResourceDependency(this.drainResource.node.defaultChild as CfnResource);
     // Lambda releases the function's network interfaces with its role after the function is gone, so the role and its
-    // policy go only after the network drain's wait, and the function before it (ADR-0073).
-    this.networkDrain.protect(role);
-    this.networkDrain.writer(cfn);
+    // network interface policy go only after the log drain's wait, and the function before it (ADR-0073).
+    this.holdForNetworkInterfaces(role, cfn);
     this.insights.addToolLogGroup(groupName);
     acknowledgeKnownFindings(role, this.nagContext);
     this.bound.push(fn);
@@ -560,8 +560,32 @@ export class UntrustedCodeSandboxes extends Construct {
       description,
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
     });
-    if (inVpc) role.addToPrincipalPolicy(vpcAccessStatement());
+    if (inVpc) this.vpcAccess(role);
     return role;
+  }
+
+  /**
+   * The six network interface actions as a policy of their own on `role`, made once per role. It names no other
+   * resource, so it can wait for the log drain on delete without a cycle, while the role's default policy, which names
+   * the backends' resources, cannot (ADR-0073).
+   */
+  private vpcAccess(role: iam.Role): iam.Policy {
+    const found = role.node.tryFindChild(VPC_ACCESS_POLICY_ID);
+    if (found instanceof iam.Policy) return found;
+    return new iam.Policy(role, VPC_ACCESS_POLICY_ID, { statements: [vpcAccessStatement()], roles: [role] });
+  }
+
+  /**
+   * Lambda deletes a VPC function's network interfaces with the function's own role, about a minute after the
+   * function is gone; a role deleted at once leaves them `available`, holding the subnets (ADR-0073). The function goes
+   * before the log drain's wait, and the role and its network interface policy after it. A role in another stack is
+   * left out: the core's stack would then depend on that stack, which already depends on the core.
+   */
+  private holdForNetworkInterfaces(role: iam.Role, fn: IConstruct): void {
+    if (Stack.of(role) !== Stack.of(this)) return;
+    this.logDrain.writer(fn);
+    this.logDrain.protect(role.node.defaultChild as iam.CfnRole);
+    this.logDrain.protect(this.vpcAccess(role));
   }
 
   private addTenantStatements(table: dynamodb.ITable, enabled: readonly BackendConstruct[]): void {
@@ -630,13 +654,7 @@ export class UntrustedCodeSandboxes extends Construct {
     // The function waits for the role and its policy.
     fn.node.addDependency(role);
     this.logDrain.writer(fn);
-    // Lambda deletes a VPC function's network interfaces with the function's own role, about a minute after the
-    // function is gone. A role deleted at once leaves them `available`, and they hold the subnets (ADR-0073), so the
-    // role and its policy go only after the network drain's wait.
-    if (inVpc) {
-      this.networkDrain.writer(fn);
-      this.networkDrain.protect(role);
-    }
+    if (inVpc) this.holdForNetworkInterfaces(role, fn);
     return { fn, logGroup };
   }
 }

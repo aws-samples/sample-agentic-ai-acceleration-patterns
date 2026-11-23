@@ -143,4 +143,4 @@ when it is built. Revisit if the spec wants one role.
 
 Note 2026-11-23: amended by ADR-0071. Only the run function and functions bound with `bindRunCode` get the tool subnets and the network interface statement; the reaper, offboard and drain run outside the VPC.
 
-Note 2026-11-23: amended by ADR-0073. Every function in the tool subnets is deleted before a second waiter, `NetworkDrain`, and its role and policy after it, so Lambda can release the function's network interfaces with that role.
+Note 2026-11-23: amended by ADR-0073. The network interface actions sit in a policy of their own on each role of a function in the tool subnets; the function is deleted before the log drain's wait, and the role and that policy after it, so Lambda can release the function's network interfaces with that role.

@@ -244,15 +244,19 @@ describe('functions (spec 3.1, 3.3, 3.7)', () => {
     expect(drain.DependsOn).toEqual(expect.arrayContaining(toolRoutes));
   });
 
-  test('a VPC function goes before the network drain, and its role and policy after it (ADR-0073)', () => {
+  test('a VPC function goes before the log drain, and its role and network interface policy after it (ADR-0073)', () => {
     const all = base.t.toJSON().Resources as Record<string, Json>;
     const idOf = (suffix: string) => Object.entries(all).find(([, r]) => pathOf(r).endsWith(suffix))![0];
-    const waiter = all[idOf('/NetworkDrain/Resource/Default')];
-    expect(waiter.Properties.DelaySeconds).toBe(120);
-    expect(waiter.DependsOn).toEqual(expect.arrayContaining([idOf('/ToolRole/Resource'), idOf('/ToolRole/DefaultPolicy/Resource')]));
+    const waiter = all[idOf('/LogDrain/Resource/Default')];
+    expect(waiter.DependsOn).toEqual(expect.arrayContaining([idOf('/ToolRole/Resource'), idOf('/ToolRole/VpcNetworkInterfaces/Resource')]));
+    // The default policy names the backends' resources, which wait for the log drain: holding it would be a cycle.
+    expect(waiter.DependsOn).not.toContain(idOf('/ToolRole/DefaultPolicy/Resource'));
     expect(waiter.DependsOn).not.toContain(idOf('/ReaperRole/Resource'));
-    expect(all[fnId(base.t, 'RunCode')].DependsOn).toContain(idOf('/NetworkDrain/Resource/Default'));
-    expect(all[fnId(base.t, 'Reaper')].DependsOn ?? []).not.toContain(idOf('/NetworkDrain/Resource/Default'));
+    expect(all[fnId(base.t, 'RunCode')].DependsOn).toContain(idOf('/LogDrain/Resource/Default'));
+    // The network interface actions are in their own policy and nowhere else.
+    const vpcPolicy = all[idOf('/ToolRole/VpcNetworkInterfaces/Resource')];
+    expect(JSON.stringify(vpcPolicy.Properties.PolicyDocument)).toContain('ec2:CreateNetworkInterface');
+    expect(JSON.stringify(all[idOf('/ToolRole/DefaultPolicy/Resource')].Properties.PolicyDocument)).not.toContain('NetworkInterface');
   });
 
   test('every function has the shared environment and JSON logs', () => {
@@ -349,14 +353,43 @@ describe('bindRunCode (spec 3.3)', () => {
     const runs = Object.values(s.t.findResources('AWS::CloudWatch::InsightRule')).map((r) => JSON.stringify((r as Json).Properties.RuleBody)).find((b) => b.includes('$.runId')) as string;
     expect(runs).toContain('BoundLogs0');
     expect(runs).toContain('BoundLogs1');
-    // Each bound function goes before the network drain, and its role and policy after it (ADR-0073).
+    // Each bound function goes before the log drain, and its role and network interface policy after it (ADR-0073).
     const all = s.t.toJSON().Resources as Record<string, Json>;
     const idOf = (suffix: string) => Object.entries(all).find(([, r]) => pathOf(r).endsWith(suffix))![0];
-    const waiter = all[idOf('/NetworkDrain/Resource/Default')];
+    const waiter = all[idOf('/LogDrain/Resource/Default')];
     for (const id of ['One', 'Two']) {
-      expect(waiter.DependsOn).toEqual(expect.arrayContaining([idOf(`/${id}Role/Resource`), idOf(`/${id}Role/DefaultPolicy/Resource`)]));
-      expect(all[idOf(`/${id}/Resource`)].DependsOn).toContain(idOf('/NetworkDrain/Resource/Default'));
+      expect(waiter.DependsOn).toEqual(expect.arrayContaining([idOf(`/${id}Role/Resource`), idOf(`/${id}Role/VpcNetworkInterfaces/Resource`)]));
+      expect(all[idOf(`/${id}/Resource`)].DependsOn).toContain(idOf('/LogDrain/Resource/Default'));
     }
+  });
+
+  test('bound functions that invoke each other or the standalone function synthesise without a cycle (ADR-0073)', () => {
+    const role = (stack: Stack, id: string) => new iam.Role(stack, id, { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
+    const pair = synth({ standalone: false }, (stack, c) => {
+      const one = new lambda.Function(stack, 'One', { ...inline, role: role(stack, 'OneRole') });
+      const two = new lambda.Function(stack, 'Two', { ...inline, role: role(stack, 'TwoRole') });
+      c.bindRunCode(one);
+      c.bindRunCode(two);
+      two.grantInvoke(one);
+    });
+    expect(pair.t.toJSON().Resources).toBeDefined();
+    const toStandalone = synth({ standalone: true }, (stack, c) => {
+      const one = new lambda.Function(stack, 'One', { ...inline, role: role(stack, 'OneRole') });
+      c.bindRunCode(one);
+      c.grantInvokeRunCode(one);
+    });
+    expect(toStandalone.t.toJSON().Resources).toBeDefined();
+  });
+
+  test('a function bound with the tool role and no standalone function is held the same way (ADR-0073)', () => {
+    const s = synth({ standalone: false }, (stack, c) => {
+      c.bindRunCode(new lambda.Function(stack, 'OnTool', { ...inline, role: c.toolRole }));
+    });
+    const all = s.t.toJSON().Resources as Record<string, Json>;
+    const idOf = (suffix: string) => Object.entries(all).find(([, r]) => pathOf(r).endsWith(suffix))![0];
+    const waiter = all[idOf('/LogDrain/Resource/Default')];
+    expect(waiter.DependsOn).toEqual(expect.arrayContaining([idOf('/ToolRole/Resource'), idOf('/ToolRole/VpcNetworkInterfaces/Resource')]));
+    expect(all[idOf('/OnTool/Resource')].DependsOn).toEqual(expect.arrayContaining([idOf('/LogDrain/Resource/Default'), idOf('/ToolRole/VpcNetworkInterfaces/Resource')]));
   });
 
   test('a function built with the tool role needs no trust change, and a function with its own log group gets no second group', () => {
