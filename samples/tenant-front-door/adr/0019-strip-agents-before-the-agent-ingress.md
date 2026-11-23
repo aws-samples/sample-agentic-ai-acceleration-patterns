@@ -102,3 +102,6 @@ other `/agents` path get 404 at the edge.
   backend-name pattern, or when the `agentcore-gateway` ingress kind is
   put behind `/agents/*` and its URL form differs from
   `<baseUrl>/<backend>/invocations`.
+
+Note 2026-11-23: `src/shared-ingress.cdk.ts` in the Context is a file of
+the `agentic-runtime-isolation` sample, not of this one.

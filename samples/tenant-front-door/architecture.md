@@ -16,7 +16,8 @@
 > | Driver code the green run did not cover | The 0700 run directory, moving a reused run id's `state.env` aside, the wording of one skip in step 18, and the check of the sign-in host's log lines, which runs at the end of step 18. Only the driver's stub tests cover them; run `npx projen integ:host` after changing the driver |
 > | End-to-end demo | 2026-11-21, against a kept `host` mode deployment: three runs of `scripts/demo.sh` passed (137 s, 153 s and 199 s) |
 > | Unit tests | 43 suites, 1,318 tests passed, and eslint clean (the test and eslint steps of `npx projen build`, 2026-11-23) |
-> | Scans | ProtoShield 2026-11-22 on the sample, and ASH 2026-11-21 on the files the threat model's "Security review" lists; neither has been rerun on the code at the date of this block |
+> | Scans | ProtoShield 2026-11-22 on the sample; ASH 2026-11-21 on the files the threat model's "Security review" lists, and ASH 2026-11-23 on the whole sample with its default configuration (findings dispositioned in the threat model) |
+> | Evidence older than the code | The last green integration run (2026-11-21), the ProtoShield scan (2026-11-22) and the file-list ASH scan (2026-11-21) are dated before the latest change to `src/`, made on 2026-11-23. Only the unit tests and the whole-sample ASH scan ran on the current code. Rerun `npx projen integ:host` and ProtoShield before relying on the run or the scan for this code |
 
 This document describes what is built. The design is in
 [`design/tenant-front-door.spec.md`](design/tenant-front-door.spec.md), the
@@ -104,7 +105,8 @@ spec §3.3, which the ADRs and the threat model cite:
    table when the mode is `host` or the host is a dedicated domain; no
    entry gives 404.
 3. Answers 404 for any `/agents` path that is not
-   `/agents/<backend>/invocations` (ADR-0019).
+   `/agents/<backend>/invocations`, and for every `/agents` path with
+   `agentIngress` off (ADR-0019).
 4. Checks `Sec-Fetch-Site` on `/api/*`, `/agents/*` and, in `host` mode,
    `/signin-state`: `same-origin`, `none` or no header pass; anything else
    gets 403.
@@ -112,8 +114,9 @@ spec §3.3, which the ADRs and the threat model cite:
    token's claim without checking the signature (ADR-0005): no token, an
    undecodable one or a `tenants` list gets 401, and in `host` mode a claim
    other than the host's tenant gets 403. `/config.json` and `/signin-state`
-   take the host's tenant. An `Authorization` header over 8,192 bytes gets
-   401 on every path that needs a tenant.
+   take the host's tenant when the router looked the host up. An
+   `Authorization` header over 8,192 bytes gets 401 on every path that needs
+   a tenant.
 6. Reads `tenant#<id>`: no entry gives 403, `suspended` gives 503 with
    `Retry-After: 300`.
 7. For `/api/*`, reads the tenant's `cell#` entry (none gives 503), sets
@@ -155,11 +158,11 @@ it signs the call with the hook role's credentials. The registrar then:
 
 1. Admits only the hook role and the edge operator role (a resource policy
    with an explicit deny for every other principal).
-2. Reads the cell or deployment from the control plane with a reader token,
-   and takes the cell and account from that record, never from the body. A
-   read that times out, fails on the network or gets a 5xx is tried once
-   more inside a 10 s budget; a read that still fails refuses the write with
-   503 (spec §3.4 step 2).
+2. Reads the cell or deployment from the control plane with a reader token
+   (ADR-0015), and takes the cell and account from that record, never from
+   the body. A read that times out, fails on the network or gets a 5xx is
+   tried once more inside a 10 s budget; a read that still fails refuses the
+   write with 503 (spec §3.4 step 2).
 3. Refuses (403) a record that is missing or belongs to another
    application, and, for the hook role, refuses (409) a record that has no
    matching operation in flight.
@@ -219,7 +222,8 @@ remaining headroom and ACM's certificate quota (spec §4.1).
 ## 7. Sign-in
 
 The SPA signs in with the authorization code flow and PKCE and keeps tokens
-in memory (ADR-0007). In `single` mode the callback is `https://<appDomain>/`.
+in memory (ADR-0007). `single` mode is the default addressing mode
+(ADR-0001). In `single` mode the callback is `https://<appDomain>/`.
 In `host` mode the one callback is `https://login.<appDomain>/callback`. The
 router mints an HMAC-signed `state` that names the tenant host and a
 nonce, and the sign-in host forwards the code only to a registered pooled
@@ -274,9 +278,11 @@ deployment roles.
   tenant, one web ACL and the SPA bucket, so their cost is attributed from
   the access log: a tenant's request count times the CloudFront and AWS
   WAF per-request prices, plus its bytes out times the per-GB data
-  transfer price. The fixed parts (the registrar, the route table, the
-  logging delivery, the web ACL rules) are not attributable per tenant;
-  the vendor splits them by each tenant's share of requests, or equally.
+  transfer price. Log delivery and storage split by each tenant's share
+  of the access log's lines. The parts that carry no tenant (the route
+  table, the web ACL rules, the registrar) are not attributable per
+  tenant; the vendor splits them by each tenant's share of requests, or
+  equally.
 
 ## 11. Deployment and teardown
 

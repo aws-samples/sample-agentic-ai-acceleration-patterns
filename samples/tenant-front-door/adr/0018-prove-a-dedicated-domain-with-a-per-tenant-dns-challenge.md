@@ -14,20 +14,20 @@ front door's distribution (ADR-0002). Only the vendor's edge operator
 role sets a tenant's `customDomain` (spec §3.4 step 3), and the
 registrar then requests an ACM certificate in `us-east-1`, creates the
 distribution tenant once the certificate has validated, and writes the
-domain's `host#` key (spec §3.4 step 5). Two questions follow:
-does this path belong in the sample, and how does the vendor confirm
-that the tenant controls the domain before it is routed?
+domain's `host#` key (spec §3.4 step 5). Two questions follow: does this
+path belong in the sample, and how does the vendor confirm that the
+tenant controls the domain before it is routed?
 
 The validated certificate does not answer the second. ACM keeps one
 validation record per domain name per account and reuses it for every
-later certificate for that name. A validated certificate proves that
-the edge account's validation record is in the domain's DNS, not which
-tenant published it. A former holder's record keeps validating after
-the domain has moved to someone else, and a certificate requested for a
+later certificate for that name. A validated certificate proves that the
+edge account's validation record is in the domain's DNS, not which
+tenant published it. A former holder's record keeps validating after the
+domain has moved to someone else, and a certificate requested for a
 second tenant validates from the first tenant's record. The registrar
-already refuses a domain for which it holds another tenant's
-certificate (spec §3.4 step 4), but that only orders claims inside the
-registrar; it proves nothing about DNS control.
+already refuses a domain for which it holds another tenant's certificate
+(spec §3.4 step 4), but that only orders claims inside the registrar; it
+proves nothing about DNS control.
 
 Constraints: the proof must name the tenant and the domain, so neither
 another tenant's proof nor a stale one passes. It must work before the
@@ -54,18 +54,18 @@ tell the tenant that controls the domain from one that merely asked.
 
 ### Option 2: A TXT record carrying a token the registrar issued for the tenant and domain
 
-On the operator's first call for a domain, the registrar issues a
-random token, stores it in the tenant's `tenant#` entry next to `d`
-with an expiry, and answers 202 with the record to publish,
-`_tfd-challenge.<domain>` TXT `tfd-verify=<token>`. A repeat resolves the
-record, and only when it holds this token does the registrar request the
-certificate. Pros: the proof names one tenant and one domain; a token
-exists only from its issue, so no leftover record can hold it; works
-before the domain points anywhere; no new store, a few bytes per
-dedicated tenant; the same lookup re-checks a routed domain later.
-Cons: one more round for the tenant (publish a TXT record, then ACM's
-record); depends on what the registrar's resolver sees, including its
-cache; trusts DNS from one vantage point.
+On the operator's first call for a domain, the registrar issues a random
+token, stores it in the tenant's `tenant#` entry next to `d` with an
+expiry, and answers 202 with the record to publish,
+`_tfd-challenge.<domain>` TXT `tfd-verify=<token>`. A repeat resolves
+the record, and only when it holds this token does the registrar request
+the certificate. Pros: the proof names one tenant and one domain; a
+token exists only from its issue, so no leftover record can hold it;
+works before the domain points anywhere; no new store, a few bytes per
+dedicated tenant; the same lookup re-checks a routed domain later. Cons:
+one more round for the tenant (publish a TXT record, then ACM's record);
+depends on what the registrar's resolver sees, including its cache;
+trusts DNS from one vantage point.
 
 ### Option 3: An HTTP file challenge on the domain
 
@@ -163,19 +163,19 @@ before it writes the domain's `host#` key.
   negative-caching TTL, 15 minutes for a zone whose SOA TTL is 900 s and
   minimum at least 900 s. The tenant's DNS provider sets that TTL, and
   it can be an hour or more. In spike S-10 about one query in ten still
-  got the negative answer after the record was in the zone, the last
-  882 s after the negative lookup. S-10's data shows the first lookup of
-  an invocation stale in 28 of 318 and 34 of 315 invocations, and all
-  five lookups stale in only 7 and 3, which is why a query repeats its
-  lookup within the call. An environment whose first lookup was stale
-  got a stale first lookup on its next invocation about half the time
-  (14 of 24 and 16 of 31). The operator's call is repeat-safe and
-  answers `missing`; the operator repeats it only after the tenant
-  confirms the record is published and, if `missing` persists, after
-  the tenant zone's negative-caching TTL, and the 7-day `dx` bounds how
-  long the challenge stays open. A tenant that publishes the record
-  before the first repeat meets no delay. A longer negative-caching TTL
-  in the tenant's zone lengthens the worst case.
+  got the negative answer after the record was in the zone, the last 882
+  s after the negative lookup. S-10's data shows the first lookup of an
+  invocation stale in 28 of 318 and 34 of 315 invocations, and all five
+  lookups stale in only 7 and 3, which is why a query repeats its lookup
+  within the call. An environment whose first lookup was stale got a
+  stale first lookup on its next invocation about half the time (14 of
+  24 and 16 of 31). The operator's call is repeat-safe and answers
+  `missing`; the operator repeats it only after the tenant confirms the
+  record is published and, if `missing` persists, after the tenant
+  zone's negative-caching TTL, and the 7-day `dx` bounds how long the
+  challenge stays open. A tenant that publishes the record before the
+  first repeat meets no delay. A longer negative-caching TTL in the
+  tenant's zone lengthens the worst case.
 - Harder: the check trusts one DNS answer from one Region without
   DNSSEC, as ACM's own DNS validation does. Shortcut: one vantage point;
   upgrade to a second Region's answer, or DNSSEC validation, when a
@@ -186,22 +186,63 @@ before it writes the domain's `host#` key.
   challenge, routed or not, because a pending certificate request rests
   on the same proof; its alarm means the tenant does not show control of
   a domain it claimed. The sweeper keeps the history in a DynamoDB table
-  it owns (ADR-0020) and pins each page of a run to the lister's date
-  (ADR-0022). A pass resets the streaks, a miss adds to the miss streak,
-  and a resolver error adds only to the error streak, so an outage cannot
-  look like a lost proof. Three misses in a row raise one alarm, three
-  errors in a row another (`unverifiable`), so whoever controls a domain's
-  DNS cannot hold it out of detection by breaking only the challenge
-  name; further alarms say when a run's pages failed or no run started.
-  In S-10 a deleted record was still served 661 s after its deletion,
-  within the re-check's one-day bound, so a run that starts while a
-  removed record is still served can pass and delay the alarm by at most
-  one day. The sweeper does not drop the domain: a DNS fault or a
-  tenant's mistake would then take a routed domain offline with no person
-  deciding. The re-check does not follow ACM renewals, which depend on
-  ACM's own validation record. Spec §3.4 step 5 holds the full procedure:
-  the table's items, page sizes, lookups, schedules, retries, alarm
-  periods and the starter.
+  it owns (ADR-0020): an entry item for each tenant and domain, with the
+  last UTC day checked, that day's outcome and the miss and error
+  streaks, and a run item for each UTC day, with the pages started and
+  the page numbers finished. A run is one UTC day. The lister passes its
+  date to each page of 500 entries, and a page whose own date differs
+  exits without writing, so a retry or a redriven page never files an
+  outcome under another day (ADR-0022). Each page re-reads its tenants'
+  entries with `GetKey`, 10 at a time, and resolves their records 10
+  queries at a time, each query with up to five lookups of one try
+  abandoned after 1 s, as the registrar makes them, querying CNAME only
+  when the TXT answer is empty or holds the token. It records one outcome
+  for each entry and day (pass, miss or error), never the token, with one
+  conditional write that makes a repeat change nothing and lets a miss
+  replace a pass. A pass resets both streaks, a miss adds to the miss
+  streak, and an error adds to the error streak and leaves the miss
+  streak as it was, so a resolver outage cannot look like a lost proof.
+  A streak counts checks, not calendar days, so a failed page delays an
+  alarm and never cancels one. A miss that leaves the miss streak at
+  three or more makes a three-miss line with the tenant and the domain
+  and one count, as an embedded metric format log line, to the metric
+  the alarm watches. An entry that errors three times in a row, with no
+  pass or miss between, gets an `unverifiable` line and a count to a
+  second metric and alarm, so whoever controls a domain's DNS cannot
+  hold it out of detection by breaking only the challenge name. A page
+  that fails, after Lambda's two retries, is kept in an on-failure queue.
+  The daily schedule's retry policy (2 retries, 1 hour maximum event age)
+  and the sweeper's asynchronous maximum event age (3 hours), with its
+  15-minute function timeout, end every run by 09:30 UTC on the day it
+  starts. The next day's lister reads the previous run's item and emits a
+  missing-pages count. A previous day with no run item counts only when
+  an earlier run item exists, so the first run after the sweeper is
+  deployed does not alarm. Four alarms watch the re-check besides the
+  three-miss alarm: the queue's depth, the `unverifiable` count, and two
+  on the missing-pages count, which say that detection was down and judge
+  only finished runs. The missing-pages alarm fires on a `Maximum` above
+  zero, one one-day period, 1 of 1, missing data not breaching. The
+  no-lister alarm fires on a `SampleCount` below one, two one-day
+  periods, 2 of 2, missing data breaching, so it alarms only after two
+  days with no lister and stays OK before the day's 02:00 UTC run. A
+  custom resource, the starter, deployed with the sweeper, starts one run
+  with the Scheduler's input on its Create, when the stack is created
+  with `dedicatedDomains` on and on the off-to-on update. No entry holds
+  a `d` then, so it is a zero-page run that emits 0 and gives the
+  no-lister alarm a datapoint a few minutes after deployment; until then
+  the alarm can read ALARM. The starter does not wait for it: if that run
+  fails, the no-lister alarm reads ALARM until the first daily run, which
+  emits 0 under the first-run rule. In S-10 a deleted record whose TTL
+  (86400) was above the resolver's 300 s cap was still served 661 s after
+  its deletion (631 s after `INSYNC`), in one run, within the daily
+  re-check's one-day bound; values changed at TTL 60 and 300 cleared
+  within their TTL, 31 s and 181 s after `INSYNC`. A run that starts while
+  a removed record is still served can pass, which delays the alarm by at
+  most one day while any such stale window is under a day. The sweeper
+  does not drop the domain: a DNS fault or a tenant's mistake would then
+  take a routed domain offline with no person deciding. The re-check does
+  not follow ACM renewals, which depend on ACM's own validation record.
+  Spec §3.4 step 5 holds the full procedure.
 - Harder: a CNAME at `_tfd-challenge.<d>` is refused, so a tenant whose
   DNS provider publishes records through a CNAME must publish the TXT
   record itself.
@@ -230,8 +271,8 @@ before it writes the domain's `host#` key.
   call is repeat-safe); then both roles are narrowed, the sweeper's as
   it goes with the sweeper, and the schedules are removed, which depend
   on the guard; a refusal rolls all of it back together. The operator
-  drops every dedicated domain first (spec §3.4 IAM, and §3.6); spec §10
-  step 14 tests the refusal.
+  drops every dedicated domain first (spec §3.4, the IAM paragraph, and
+  §3.6); spec §10 step 14 tests the refusal.
 - Known limitations: not tested end to end, and covered by unit tests
   with a stubbed resolver or clock instead: challenge expiry and
   reissue, a resolver error (`unresolved`), a CNAME at the challenge
@@ -290,8 +331,8 @@ decision:
   registrar creates the distribution tenant only once the certificate is
   `ISSUED`, so a dedicated domain never carries tokens or the sign-in
   flow over plain HTTP.
-- Not built. The registrar still answers 409 for a domain in use.
-  Adding the takeover needs a spike first: the request field, the DNS
-  record CloudFront checks, the IAM action the registrar's role then
-  needs, and what the source distribution's owner sees. The 409 path
-  stays as the fallback for a domain whose move fails.
+- Not built. The registrar still answers 409 for a domain in use. Adding
+  the takeover needs a spike first: the request field, the DNS record
+  CloudFront checks, the IAM action the registrar's role then needs, and
+  what the source distribution's owner sees. The 409 path stays as the
+  fallback for a domain whose move fails.

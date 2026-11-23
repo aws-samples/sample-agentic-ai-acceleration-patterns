@@ -24,17 +24,17 @@ lifted. The placement check proves which account is calling. It cannot
 prove that the vendor's script is the caller.
 
 The control plane's global hooks (control-plane R-39 to R-46,
-control-plane ADR-0044) run vendor code on cell and deployment
-events: `PRE` before the script, `POST` after it succeeded, global hooks
+control-plane ADR-0044) run vendor code on cell and deployment events:
+`PRE` before the script, `POST` after it succeeded, global hooks
 wrapping application hooks. They run in CodeBuild in the control plane's
 account under `<fleet>-global-hook`, a role no cell account holds or
 trusts. A failing `POST` hook fails a create or update; a delete hook is
 retried three times and then skipped, so it never stops a delete. A
 `POST` hook receives the script's outputs (`SCRIPT_OUTPUTS`) as
 untrusted data. Constraints: one front door per application (ADR-0014),
-while a global hook runs for every application; every global hook
-shares the one role (control-plane R-41); a control plane holds at most
-five global hooks (control-plane R-39).
+while a global hook runs for every application; every global hook shares
+the one role (control-plane R-41); a control plane holds at most five
+global hooks (control-plane R-39).
 
 ## Options considered
 
@@ -44,8 +44,8 @@ ADR-0013 as designed. Pros: no dependency on control-plane hooks; the
 script holds everything it needs. Cons: a tenant-owned account holds a
 credential the registrar admits and can use it at any time, in any
 order, with any body. The delete and re-put above lifts a suspension,
-and every later rule has to be proven safe against any sequence of
-calls a tenant can make.
+and every later rule has to be proven safe against any sequence of calls
+a tenant can make.
 
 ### Option 2: Option 1 plus tombstones and operator-only rules
 
@@ -55,8 +55,8 @@ small change to the registrar; no new dependency. Cons: it closes one
 sequence, not the cause. The tenant still holds a credential that
 reaches the registrar, so each status or lifecycle rule added later
 needs its own counter-rule. A tombstone is a third kind of `tenant#`
-entry for the router, the size ceilings and the delete paths, which is
-the reason this option was rejected.
+entry for the router, the size ceilings and the delete paths. Dave
+Roberts rejected it for that reason.
 
 ### Option 3: The control plane writes the route table directly
 
@@ -72,29 +72,28 @@ use (ADR-0013 Option 3).
 ### Option 4: A control-plane global hook calls the registrar
 
 The front door ships a route hook and registers it as two global hooks.
-Pros: the only non-operator credential the registrar admits lives in
-the vendor's control-plane account; no role of a cell account is
-admitted, so a tenant cannot call the registrar at all. The registrar
-keeps every check. The route is written by the operation itself, so a
-failed registration fails the create or update, and `ACTIVE` means
-routed. A `PRE` delete hook removes the route before the delete script
-tears down what it points at. Cons: depends on control-plane ADR-0044.
-Each cell and deployment event runs one more CodeBuild
-build: its start time plus the 45 s propagation wait. The front door
-takes two of the control plane's five global hook slots. The global
-hook role is shared by every global hook, so the registrar cannot trust
-the role alone. The deployer has setup in the control plane's account.
-A global hook runs for every application on the control plane, not only
-front-door applications: every create and update runs one
-`front-door-post` build (a CodeBuild start and a parameter read) and
-every delete one `front-door-pre` build, even when the hook exits 0. A
-`RouteHookAccess` policy that answers AccessDenied fails the creates and
-updates of every application and delays every delete by three attempts.
-An application whose front door hook parameter is missing reaches
-`ACTIVE` with no route, so "`ACTIVE` means routed" holds only while the
-parameter exists. One `register-hooks.sh` pin serves every front door
-on the control plane, so upgrading the hook for one upgrades it for
-all.
+Pros: the only non-operator credential the registrar admits lives in the
+vendor's control-plane account; no role of a cell account is admitted,
+so a tenant cannot call the registrar at all. The registrar keeps every
+check. The route is written by the operation itself, so a failed
+registration fails the create or update, and `ACTIVE` means routed. A
+`PRE` delete hook removes the route before the delete script tears down
+what it points at. Cons: depends on control-plane ADR-0044. Each cell
+and deployment event runs one more CodeBuild build: its start time plus
+the 45 s propagation wait. The front door takes two of the control
+plane's five global hook slots. The global hook role is shared by every
+global hook, so the registrar cannot trust the role alone. The deployer
+has setup in the control plane's account. A global hook runs for every
+application on the control plane, not only front-door applications:
+every create and update runs one `front-door-post` build (a CodeBuild
+start and a parameter read) and every delete one `front-door-pre` build,
+even when the hook exits 0. A `RouteHookAccess` policy that answers
+AccessDenied fails the creates and updates of every application and
+delays every delete by three attempts. An application whose front door
+hook parameter is missing reaches `ACTIVE` with no route, so "`ACTIVE`
+means routed" holds only while the parameter exists. One
+`register-hooks.sh` pin serves every front door on the control plane, so
+upgrading the hook for one upgrades it for all.
 
 ## Decision
 
@@ -157,34 +156,33 @@ the response body.
   during its delete, through the shared role: the status check admits a
   hook's put only while the record is `CREATING` or `UPDATING` and its
   delete only while the record is `DELETING` or gone. It does not bind
-  the write to the hook that runs: any global hook, in either phase,
-  can write while an operation on that record is in flight.
+  the write to the hook that runs: any global hook, in either phase, can
+  write while an operation on that record is in flight.
 - Residual, until the control plane offers a role per global hook (its
   §11 seam): any global hook can set the origin of a cell that has no
   route yet, during the cell's create or, for a cell older than the
   hooks, during an `UpdateCell`, and can put a tenant's route during
   that deployment's create or update. The write-once origin turns the
-  first into a failed operation: the route hook's own put then gets
-  409 (an older cell's hook already fails on its missing output), the
-  cell lands in `CREATE_FAILED` or `UPDATE_FAILED`, placement
-  claims only `ACTIVE` cells, and the cell stays out of `ACTIVE` until
-  the edge operator role replaces the origin. The second
-  gains nothing, because the record supplies cell and account and a put
-  keeps `s`. The [threat model](../threat-model.md) records this residual
-  (T-20, AR-1).
-- A failing `POST` hook leaves the cell or deployment in
-  `CREATE_FAILED` or `UPDATE_FAILED` with the hook named. From
-  `UPDATE_FAILED` the operator fixes the cause and retries with
-  `UpdateCell` or `UpdateDeployment`. `CREATE_FAILED` cannot be retried
-  with an update (control-plane §5.2, §5.3): the operator deletes the
-  failed deployment, and a failed cell once empty, whose `front-door-pre`
-  hooks remove any route already written, and creates it again. A cell
-  event whose script wrote no `frontDoorApiDomain` fails the same way.
+  first into a failed operation: the route hook's own put then gets 409
+  (an older cell's hook already fails on its missing output), the cell
+  lands in `CREATE_FAILED` or `UPDATE_FAILED`, placement claims only
+  `ACTIVE` cells, and the cell stays out of `ACTIVE` until the edge
+  operator role replaces the origin. The second gains nothing, because
+  the record supplies cell and account and a put keeps `s`. The [threat
+  model](../threat-model.md) records this residual (T-20, AR-1).
+- A failing `POST` hook leaves the cell or deployment in `CREATE_FAILED`
+  or `UPDATE_FAILED` with the hook named. From `UPDATE_FAILED` the
+  operator fixes the cause and retries with `UpdateCell` or
+  `UpdateDeployment`. `CREATE_FAILED` cannot be retried with an update
+  (control-plane §5.2, §5.3): the operator deletes the failed
+  deployment, and a failed cell once empty, whose `front-door-pre` hooks
+  remove any route already written, and creates it again. A cell event
+  whose script wrote no `frontDoorApiDomain` fails the same way.
 - A cell whose API moves to a new host fails its `UpdateCell` with 409
   until the edge operator role sets the new origin. Cells created before
   the hooks get their routes from the edge operator role's
-  `PutCellRoute` while the cell is `ACTIVE`, then `UpdateDeployment`
-  for each `ACTIVE` or `UPDATE_FAILED` deployment in it, and delete and
+  `PutCellRoute` while the cell is `ACTIVE`, then `UpdateDeployment` for
+  each `ACTIVE` or `UPDATE_FAILED` deployment in it, and delete and
   create for each `CREATE_FAILED` one, which `UpdateDeployment` refuses
   (spec §3.4).
 - A delete hook that fails three times is skipped, and the control
@@ -252,13 +250,15 @@ control plane's own account and partition. The build differs from what
 this record assumed in four points: `fleet` follows the narrowed
 `fleetName` pattern `[a-z0-9][a-z0-9-]{0,31}`; the hook also checks
 `HOOK_SCOPE` and its registration before it acts; the hooks are
-registered with `timeoutMinutes` 10, inside the control plane's 5 to
-30; and the hook parameter is one JSON document written from a
-`registrarUrl` input after the main stack deploys (ADR-0027). The
-record operations ADR-0045 makes asynchronous (202) run no front door
-hook, because the two hooks name only cell and deployment events.
+registered with `timeoutMinutes` 10, inside the control plane's 5 to 30;
+and the hook parameter is one JSON document written from a
+`registrarUrl` input after the main stack deploys (ADR-0027). The record
+operations ADR-0045 makes asynchronous (202) run no front door hook,
+because the two hooks name only cell and deployment events.
 
 Note 2026-11-23: ADR-0025 amends this record. The registrar reads the
 control plane on every hook write; `UpdateTenantRouteStatus`, an edge
 operator call that writes only the status, skips that read, so a
-suspension works while the control plane cannot be read.
+suspension works while the control plane cannot be read. This record
+supersedes ADR-0013, as its Decision says; the header carries no
+`Supersedes` field, which the template does not have.

@@ -23,12 +23,12 @@ retries, so whether a retry is a new run is undefined; and the supplied
 day is a test seam in the shipped function. A table keeps the history
 without either.
 
-Constraints: the state is small (at most 3,472 dedicated tenants,
-spec §4.1, ADR-0012). The route table is registrar-only (P-3). An
-outcome must count once for each day however often a page or the lister
-runs. The next day must be able to tell that a run did not finish. The
-test must reach a third missed day without waiting three days and
-without an input in the shipped function. The table exists only with
+Constraints: the state is small (at most 3,472 dedicated tenants, spec
+§4.1, ADR-0012). The route table is registrar-only (P-3). An outcome
+must count once for each day however often a page or the lister runs.
+The next day must be able to tell that a run did not finish. The test
+must reach a third missed day without waiting three days and without an
+input in the shipped function. The table exists only with
 `dedicatedDomains` (ADR-0018), and every DynamoDB table in this
 repository has point-in-time recovery.
 
@@ -36,34 +36,34 @@ repository has point-in-time recovery.
 
 ### Option 1: The log as the record
 
-Pros: no new resource and no data access beyond Logs; the log lines
-also serve as an audit trail. Cons: every page runs a Logs Insights
-query and joins its rows in memory; the 10,000-row limit bounds the
-look-back to 19 runs and fails the page when it is reached; the
-concurrent-query quota bounds the pages; a run sees the run before it
-only after the log has indexed it; run identity depends on the
-invocation id; the test needs a supplied day; and a first-run rule has
-to be derived from log lines.
+Pros: no new resource and no data access beyond Logs; the log lines also
+serve as an audit trail. Cons: every page runs a Logs Insights query and
+joins its rows in memory; the 10,000-row limit bounds the look-back to
+19 runs and fails the page when it is reached; the concurrent-query
+quota bounds the pages; a run sees the run before it only after the log
+has indexed it; run identity depends on the invocation id; the test
+needs a supplied day; and a first-run rule has to be derived from log
+lines.
 
 ### Option 2: A table owned by the sweeper
 
 Pros: the state is the streak itself, one small item for each tenant and
-domain; a day's outcome is one conditional write, so repeats are
-no-ops; a run is a key (the UTC date), so a retry is the same run by
-construction; detecting an unfinished run is a counter on that item;
-the test seeds items and needs no input in the function; no look-back
-limit and no query quota. Cons: one more resource with its own IAM
-(the sweeper's role, and the test role in the test); a lost table
-restarts every streak at zero; item cleanup is the lister's job;
-about 3,500 writes a day at the ceiling.
+domain; a day's outcome is one conditional write, so repeats are no-ops;
+a run is a key (the UTC date), so a retry is the same run by
+construction; detecting an unfinished run is a counter on that item; the
+test seeds items and needs no input in the function; no look-back limit
+and no query quota. Cons: one more resource with its own IAM (the
+sweeper's role, and the test role in the test); a lost table restarts
+every streak at zero; item cleanup is the lister's job; about 3,500
+writes a day at the ceiling.
 
 ### Option 3: Fields in the route table
 
 The sweeper writes the streaks into the domain's `tenant#` entry. Pros:
-no new resource. Cons: it makes the sweeper a second writer of the
-route table, against P-3; the registrar rewrites those entries on every
-hook and would have to carry the fields through every write; each field
-takes bytes from the 20 % headroom that dedicated domains already use
+no new resource. Cons: it makes the sweeper a second writer of the route
+table, against P-3; the registrar rewrites those entries on every hook
+and would have to carry the fields through every write; each field takes
+bytes from the 20 % headroom that dedicated domains already use
 (ADR-0012); and every sweeper write competes with the registrar for the
 store's ETag and takes 60 s to propagate for nothing the router reads.
 
@@ -71,14 +71,14 @@ store's ETag and takes 60 s to propagate for nothing the router reads.
 
 Option 2. The sweeper owns one DynamoDB table in the main stack, with
 on-demand capacity and point-in-time recovery, deployed and removed with
-the sweeper. An entry item for each tenant and domain holds the last
-UTC day it recorded, that day's outcome, the miss and error streaks
-after it, and the same two streaks before it; a run item for each UTC
-day holds the number of pages started and the set of page numbers
-finished. A day's outcome is written once, with a condition that the
-item is new, or older than today, or from today with a weaker outcome
-(error, then pass, then miss), which makes a page, a lister or a day's
-run safe to repeat and lets a miss replace a pass. A pass resets both streaks, a
+the sweeper. An entry item for each tenant and domain holds the last UTC
+day it recorded, that day's outcome, the miss and error streaks after
+it, and the same two streaks before it; a run item for each UTC day
+holds the number of pages started and the set of page numbers finished.
+A day's outcome is written once, with a condition that the item is new,
+or older than today, or from today with a weaker outcome (error, then
+pass, then miss), which makes a page, a lister or a day's run safe to
+repeat and lets a miss replace a pass. A pass resets both streaks, a
 miss ends an error streak and adds to the miss streak, and an error adds
 to the error streak and leaves the miss streak alone. The alarms fire
 when a write leaves a streak at 3 or more. The run is identified by its
@@ -87,8 +87,8 @@ by hand are one run. The next day's lister reads the previous run item
 and emits the missing-pages count; a missing run item counts only when
 an earlier one exists. The lister deletes the entry items whose tenant
 and domain are no longer current, so the registrar needs no access to
-the table. The sweeper takes no day from its caller. Option 1 would
-keep the sweeper stateless at the price of the machinery above; Option 3
+the table. The sweeper takes no day from its caller. Option 1 would keep
+the sweeper stateless at the price of the machinery above; Option 3
 breaks the one-writer rule for the route table. The starter, the
 on-failure queue, the no-lister alarm, the in-call lookups, the guard,
 the page size and the removal paths are as ADR-0018 states them.
@@ -104,10 +104,10 @@ the page size and the removal paths are as ADR-0018 states them.
   result (the domain challenge step of spec §10). The test role holds
   `dynamodb:GetItem` and `PutItem` on this table only, listed among the
   test-only shortcuts; the table holds no token and no key.
-- Easier: a page takes at most 500 ÷ 10 × (2 queries × 5.4 s + 2 DynamoDB
-  calls × 2 s) = 740 s, plus 2 s to finish, 742 s, inside the 15-minute
-  timeout. The sweeper's role holds `dynamodb:GetItem`, `Query`,
-  `UpdateItem` and `DeleteItem` on the table, and no Logs
+- Easier: a page takes at most 500 ÷ 10 × (2 queries × 5.4 s + 2
+  DynamoDB calls × 2 s) = 740 s, plus 2 s to finish, 742 s, inside the
+  15-minute timeout. The sweeper's role holds `dynamodb:GetItem`,
+  `Query`, `UpdateItem` and `DeleteItem` on the table, and no Logs
   Insights actions.
 - Size and cost: at the ceiling of 3,472 dedicated tenants, 3,472 entry
   items of under 400 bytes (about 1.4 MB) and about 14 run items, which
@@ -137,11 +137,11 @@ the page size and the removal paths are as ADR-0018 states them.
   switch being turned off, or when a dropped and re-set domain must not
   keep its earlier streaks.
 
-Amended 2026-11-18 by ADR-0022: the lister passes its
-UTC date to each page, which must match today and is then today for
-every read and write; the three-miss count is emitted only on a miss;
-each page re-reads its passed tenants' entries with `GetKey`; and the
-sweeper's role also holds `dynamodb:BatchWriteItem`.
+Amended 2026-11-18 by ADR-0022: the lister passes its UTC date to each
+page, which must match today and is then today for every read and write;
+the three-miss count is emitted only on a miss; each page re-reads its
+passed tenants' entries with `GetKey`; and the sweeper's role also holds
+`dynamodb:BatchWriteItem`.
 
 Note 2026-11-19: the sweeper's role holds `dynamodb:GetItem`, `Query`,
 `UpdateItem` and `BatchWriteItem` on the table. It does not hold

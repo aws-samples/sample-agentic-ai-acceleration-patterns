@@ -47,18 +47,17 @@ The runner calls `slice.sh` with each verb (`budget`, `deploy`, `seed`,
 `run <scenario>`, `collect`, `teardown`), writes `results.md` and the records
 under `$STRESS_HOME/$STRESS_PREFIX/<run id>/`, and tears down at the end, also
 when anything fails. `STRESS_HOME` defaults to `~/.aaa-stress`. The tier is
-`small`; the slice reads `STRESS_TIER_JSON` and seeds
-`min(tenantsActive, 100)` active tenants, a write pool of
-`min(100, tenantsSeeded)` plus the sustained writes (30 at `small`, up to 60),
-and one spare: 71 tenants at `small`, up to 261 at `medium` and `large`. The
-slice keeps its state in `$STRESS_HOME/$STRESS_PREFIX/tenant-front-door/`:
-`manifest.json` (the tenants), `outputs.json` (the stacks' outputs),
-`context.json` (the record of the prefix), `resources.json` (what teardown
-checks), `timings.txt`, `requests.<scenario>.jsonl` (one request log per
-scenario) and the CDK output folders. A deploy takes about 11 minutes (the
-main stack, with the distribution, is most of it) and a destroy of the stacks
-about 9, with about 6.5 more when `teardown` removes 71 tenants (see
-Measured).
+`small`; the slice reads `STRESS_TIER_JSON` and seeds `min(tenantsActive, 100)`
+active tenants, a write pool of `min(100, tenantsSeeded)` plus the sustained
+writes (30 at `small`, up to 60), and one spare: 71 tenants at `small`, up to
+261 at `medium` and `large`. The slice keeps its state in
+`$STRESS_HOME/$STRESS_PREFIX/tenant-front-door/`: `manifest.json` (the tenants),
+`outputs.json` (the stacks' outputs), `context.json` (the record of the prefix),
+`resources.json` (what teardown checks), `timings.txt`,
+`requests.<scenario>.jsonl` (one request log per scenario) and the CDK output
+folders. A deploy takes about 11 minutes (the main stack, with the distribution,
+is most of it) and a destroy of the stacks about 9, with about 6.5 more when
+`teardown` removes 71 tenants (see Measured).
 
 | Input | Meaning |
 |---|---|
@@ -106,24 +105,22 @@ that is not a write is counted by cause: for a 503, `route-table-busy` (five
 ETag conflicts), `control-plane-unreadable` or `other`; `throttled` for a 429;
 `server-error` for another 5xx but 507; and `network` for no answer.
 
-The tokens come from `tenant-identity`'s test aid `IssueToken`; they live
-5 minutes, so a scenario issues its own and issues new ones every 200 s while
-it runs. Forged tokens reuse a real token's
-header and signature, so the router (which never checks signatures,
-ADR-0005) routes them and the cell refuses them.
+The tokens come from `tenant-identity`'s test aid `IssueToken`; they live 5
+minutes, so a scenario issues its own and issues new ones every 200 s while it
+runs. Forged tokens reuse a real token's header and signature, so the router
+(which never checks signatures, ADR-0005) routes them and the cell refuses them.
 
 ## Correlation
 
-The router can log one value with `cf.logCustomData`, and it logs the
-tenant (ADR-0010). The slice adds no correlation header (ADR-0029). Every
-response carries `x-amz-cf-id`, and CloudFront's standard log carries the
-same value as `x-edge-request-id`, so `collect` joins each request to its
-edge log line on it, and every request of the measured runs joined. The
-same join gives the edge's own time (`time-taken`) as
-the `edge` hop and shows that every router refusal is a
-`FunctionGeneratedResponse`. The origin is joined by its counts, not per
-request: the cell's log counts by status must equal the number of requests
-the driver saw reach it.
+The router can log one value with `cf.logCustomData`, and it logs the tenant
+(ADR-0010). The slice adds no correlation header (ADR-0029). Every response
+carries `x-amz-cf-id`, and CloudFront's standard log carries the same value as
+`x-edge-request-id`, so `collect` joins each request to its edge log line on it,
+and every request of the measured runs joined. The same join gives the edge's
+own time (`time-taken`) as the `edge` hop and shows that every router refusal is
+a `FunctionGeneratedResponse`. The origin is joined by its counts, not per
+request: the cell's log counts by status must equal the number of requests the
+driver saw reach it.
 
 `collect` writes none of the contract's late `refusals` and `cost` fields:
 the driver records refusals when it sends, and the slice reads no cost. It
@@ -166,10 +163,10 @@ them in platform mode (exit 2).
 ### Inputs and manifests
 
 `AWS_REGION`, `STRESS_PREFIX`, `STRESS_HOME`, `STRESS_FD_ZONE_ID`,
-`STRESS_FD_ZONE_NAME` as in slice mode. The
-files are in `$STRESS_HOME/$STRESS_PREFIX/`, JSON, ids and names only, mode 0600;
-a missing file or field stops the verb with a message that names the file and the
-slice that writes it.
+`STRESS_FD_ZONE_NAME` as in slice mode. The files are in
+`$STRESS_HOME/$STRESS_PREFIX/`, JSON, ids and names only, mode 0600; a missing
+file or field stops the verb with a message that names the file and the slice
+that writes it.
 
 | File | Written by | This slice |
 |---|---|---|
@@ -179,8 +176,8 @@ slice that writes it.
 | `tenant-front-door.json` | **this slice**: `deploy` (phase 1), rewritten by `step phase-two` (phase 2) | `edgeUrl`, `registrarUrl`, `agentBackend` (`default`), `appDomain`, `distributionArn`, `hookPolicyArn` (the `RouteHookAccess` policy, for the control plane's `globalHookManagedPolicyArns`), `operatorRoleArn`, `phase`; phase 2 adds `agentIngressUrl` (the ingress base URL: https, no secret in it) |
 
 `outputs.json` in the slice's own state directory keeps what `collect` and the
-driver need (`edgeLogGroup`, `routerFunction`, `identityApiUrl`, ...), as in slice
-mode.
+driver need (`edgeLogGroup`, `routerFunction`, `identityApiUrl`, ...), as in
+slice mode.
 
 ### Phase two
 
@@ -188,8 +185,9 @@ mode.
 ingress reader role with the run's own credentials (the driver's credentials
 provider keeps them in memory; nothing prints or writes them; session name
 `tfd-stress-phase-two`), and reads the one parameter the role allows, the cell's
-ingress parameter `/application-plane/shared/agent-runtime/StressCell-<cell id>/ingress`.
-The `baseUrl` in its JSON value becomes the front door's `agentIngress` input,
+ingress parameter
+`/application-plane/shared/agent-runtime/StressCell-<cell id>/ingress`. The
+`baseUrl` in its JSON value becomes the front door's `agentIngress` input,
 `https://<host>/<stage>` with no trailing slash (`agentIngressOf` in
 `test/stress/platform.ts`; the front door's own validation takes the domain and
 the origin path from it). The main stack is redeployed alone (`--exclusively`)
@@ -201,7 +199,8 @@ A distribution update takes minutes to reach every edge, so the step then polls
 `GET /agents/<backend>/invocations` with an unsigned token for a made-up tenant
 until the router's own `403` (no route for that tenant) comes back five times in
 a row, for up to 10 minutes. Before phase two the same request gets the router's
-`404`. Running the step again with the same ingress changes nothing in the stack.
+`404`. Running the step again with the same ingress changes nothing in the
+stack.
 
 ### PS-7 in platform mode
 
@@ -232,16 +231,16 @@ to start when `RouteHookAccess`'s policy is still attached to a role (it names
 the role and says to run `unhook` first; nothing is removed) and otherwise
 deletes, in order: the `RouteHookAccess` stack; the hook parameter
 `/application-plane/applications/<application id>/shared/front-door-hook`, which
-the stack retains; edge logging; main; edge; the support stack. It checks that no
-stack, resource, log group, edge parameter or hook parameter is left, and only
-then removes `tenant-front-door.json` and the slice's state; otherwise the trail
-stays and the run exits non-zero. `--fixtures` changes nothing: the front door
-has no fixtures. Log groups that CDK's custom resource functions leave are listed
-with the line that removes each, as in slice mode.
+the stack retains; edge logging; main; edge; the support stack. It checks that
+no stack, resource, log group, edge parameter or hook parameter is left, and
+only then removes `tenant-front-door.json` and the slice's state; otherwise the
+trail stays and the run exits non-zero. `--fixtures` changes nothing: the front
+door has no fixtures. Log groups that CDK's custom resource functions leave are
+listed with the line that removes each, as in slice mode.
 
 Use one prefix in one mode only: both modes name their support stack
-`<prefix>-support`, and the platform run's support stack has no stand-in hook role
-(the smoke app's `smokeHookRole=false`), which the slice-mode run needs.
+`<prefix>-support`, and the platform run's support stack has no stand-in hook
+role (the smoke app's `smokeHookRole=false`), which the slice-mode run needs.
 
 ## Measured (small tier)
 
@@ -283,12 +282,12 @@ teardown that sweeps 71 tenants adds about 6.5 minutes before the stacks go:
 
 What the numbers say:
 
-- A write takes half a second when alone and up to about 9 s when 20 contend
-  for the store's one ETag; about one call in twelve is answered 503 after the
+- A write takes half a second when alone and up to about 9 s when 20 contend for
+  the store's one ETag; about one call in twelve is answered 503 after the
   registrar's five store attempts. The route hook retries those, as the driver
-  does. The 15 to 16 s the burst took
-  includes the driver's own wait (about 5 s) before it retries a 503, so it is
-  an upper bound on the store's time, not its throughput.
+  does. The 15 to 16 s the burst took includes the driver's own wait (about 5 s)
+  before it retries a 503, so it is an upper bound on the store's time, not its
+  throughput.
 - A route is not seen by every request at once. From the one client and
   location measured, the servers of an edge location learn a write at
   different times, up to 60 s in the measured runs, and a request can see a
@@ -319,11 +318,10 @@ What the numbers say:
   placeholders on a reserved example domain, because the run signs nobody in:
   `/config.json` of the stress front door cannot be used to sign in, and the
   SPA is not exercised.
-- `route-write` writes the routes of the first write tenants (the burst plus
-  the sustained writes: 50 at `small`) and measures how long each takes to
-  reach the edge. A second run on the same stacks finds
-  those routes already there and measures nothing, so each deploy supports one
-  `route-write`.
+- `route-write` writes the routes of the first write tenants (the burst plus the
+  sustained writes: 50 at `small`) and measures how long each takes to reach the
+  edge. A second run on the same stacks finds those routes already there and
+  measures nothing, so each deploy supports one `route-write`.
 - Slice mode: the registrar reads a stand-in control plane, and the global hook
   role is a role of the same account. Nothing in slice mode runs the route hook
   script, the real hooks or the cell scripts, and a slice-mode run registers no
@@ -353,18 +351,17 @@ What the numbers say:
   for `cloudfront` and `apigateway`), so `stress/src/budget.ts` has nothing
   to name and the slice declares only Lambda concurrency. The router's compute
   utilization is reported in the record under a key of its own.
-- At most 100 active tenants and a write burst of `min(100, tenantsSeeded)`;
-  the measurements above are of the small tier (a burst of 20). At `medium`
-  and `large` a scenario that outlasts 5 minutes relies on the token refresh,
-  which the small tier does not exercise for that long, and `large`'s tenants
-  stay between runs while its stacks
-  and their stand-in control plane records do not: `seed` writes the records
-  again for every tenant of the manifest.
+- At most 100 active tenants and a write burst of `min(100, tenantsSeeded)`; the
+  measurements above are of the small tier (a burst of 20). At `medium` and
+  `large` a scenario that outlasts 5 minutes relies on the token refresh, which
+  the small tier does not exercise for that long, and `large`'s tenants stay
+  between runs while its stacks and their stand-in control plane records do not:
+  `seed` writes the records again for every tenant of the manifest.
 - The driver runs on the host that runs the slice, not the stress driver host,
   so client latencies include that host's path to CloudFront.
-- A write answered with an answer the hook retries is retried four more
-  times, about 5 s apart (2.5 to 7.5 s); the real hook
-  retries five times over about two minutes.
+- A write answered with an answer the hook retries is retried four more times,
+  about 5 s apart (2.5 to 7.5 s); the real hook retries five times over about
+  two minutes.
 - CloudFront's own metrics have one point a minute; short scenarios share
   minutes.
 - Teardown leaves the log groups that CDK's custom resource functions create
@@ -373,8 +370,8 @@ What the numbers say:
   are listed with the `aws logs delete-log-group` line that removes each, and
   they do not fail the check. Any other leftover does.
 - The cell's per-tenant limit (2,000 requests per 5 minutes) is shared by every
-  scenario of a run; a larger tier may see `cell-rate-limited` answers, which are
-  counted as attributed refusals and are allowed for legitimate requests.
+  scenario of a run; a larger tier may see `cell-rate-limited` answers, which
+  are counted as attributed refusals and are allowed for legitimate requests.
 
 ## Files
 

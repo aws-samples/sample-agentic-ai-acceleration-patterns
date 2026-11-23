@@ -135,3 +135,6 @@ Note 2026-11-23: the `/api/*` origin request policy forwards three
 headers, `x-tenant-token`, `x-tenant-route` and `content-type`. Origin
 access control reads `x-amz-content-sha256` from the viewer request
 itself, because CloudFront refuses `x-amz-*` names in the policy.
+
+Note 2026-11-23: the spike result the Decision cites (S-3) was recorded on
+2026-11-16, after this record's Date, and before it was accepted.

@@ -16,13 +16,13 @@ registers for its own deployments. The sample puts one Amazon CloudFront
 multi-tenant distribution, in one **edge account**, in front of a shared
 single-page application (SPA) and every cell's API, wherever the cell lives.
 A CloudFront Function, the **tenant router**, finds the request's tenant,
-looks it up in a CloudFront KeyValueStore (the **route table**) and sends the
-request to the tenant's cell. Routes are registered by the control plane's
-own operations: a vendor **route hook**, which the control plane runs in
-its own account on cell and deployment events, calls a **route
-registrar** in the edge account. The registrar admits no role a cell
-account holds, and writes a route only to the cell and account the
-control plane placed it in (ADR-0017).
+looks it up in a CloudFront KeyValueStore (the **route table**) and sends
+the request to the tenant's cell. Routes are registered by the control
+plane's own operations: a vendor **route hook**, which the control plane
+runs in its own account on cell and deployment events, calls a **route
+registrar** in the edge account. The registrar admits no role a cell account
+holds, and writes a route only to the cell and account the control plane
+placed it in (ADR-0017).
 
 The router finds the tenant in one of two ways, chosen at deploy time
 (`addressing`):
@@ -104,10 +104,10 @@ has passed the registrar's domain challenge (ADR-0018).
 
 ## 2. Guiding principles
 
-1. **P-1: The edge reads the tenant; it never trusts it.** The router decodes
-   the token's tenant claim, or reads the host, only to choose where the
-   request goes and whether the tenant is live. It checks no signature and
-   grants nothing. A forged claim can only send a request to a cell that
+1. **P-1: The edge reads the tenant; it never trusts it.** The router
+   decodes the token's tenant claim, or reads the host, only to choose where
+   the request goes and whether the tenant is live. It checks no signature
+   and grants nothing. A forged claim can only send a request to a cell that
    then refuses it.
 2. **P-2: The tenant comes from the token or the host, never the client.**
    No header, query parameter or path segment names the tenant. In `single`
@@ -149,8 +149,8 @@ has passed the registrar's domain challenge (ADR-0018).
    or suspended tenants and cross-site API calls are refused before any
    origin is reached, so they cost no origin capacity.
 8. **P-8: One baseline, every tenant.** Security headers come from one
-   response headers policy. A tenant cannot weaken them, and an origin cannot
-   drop them.
+   response headers policy. A tenant cannot weaken them, and an origin
+   cannot drop them.
 9. **P-9: Register a tenant with one call.** Onboarding a pooled tenant is
    one registrar call, which the route hook makes after the control
    plane's deployment create script has run. In `host` mode the wildcard
@@ -625,7 +625,7 @@ given below):
    replacement does the same: only `UpdateTenantRouteStatus` changes it
    (§4.2).
 
-   #### Dedicated domains and the domain challenge
+   **Dedicated domains and the domain challenge.**
 
    A dedicated domain is kept in the `tenant#` entry as `d`, with its
    domain challenge as `dk` and `dx` (§4.1, ADR-0018). The operator's
@@ -668,18 +668,18 @@ given below):
       (`tenant-front-door:distribution`) and the cost allocation tag
       `TenantId`, the tenant id in the control plane's upper-case form, so
       Cost Explorer and CUR split the domain's certificate and distribution
-      tenant by tenant once the deployer activates the tag (standard §4.4).
-      A request past ACM's certificate quota fails with
-      `LimitExceededException`, and the call answers 429 with
-      `reason: certificate-quota` (§5.1). The registrar finds it among its
-      own certificates by domain name and tags, taking an issued one first,
-      then a pending one. A certificate in a terminal status (`FAILED`,
-      `VALIDATION_TIMED_OUT`, `REVOKED` or `EXPIRED`) counts as absent, so
-      the call requests a new one, and so does one the sweeper deleted
-      between the list and its read. The request's idempotency token is the
-      first 32 hex characters of a SHA-256 over the distribution id, the
-      tenant id, the domain and `dk`, so a repeat within ACM's hour gets the
-      same certificate and a new challenge gets a new one. The registrar
+      tenant by tenant once the deployer activates the tag
+      (`docs/sample-standard.md` §4.4). A request past ACM's certificate
+      quota fails with `LimitExceededException`, and the call answers 429
+      with `reason: certificate-quota` (§5.1). The registrar finds it among
+      its own certificates by domain name and tags, taking an issued one
+      first, then a pending one. A certificate in a terminal status
+      (`FAILED`, `VALIDATION_TIMED_OUT`, `REVOKED` or `EXPIRED`) counts as
+      absent, so the call requests a new one, and so does one the sweeper
+      deleted between the list and its read. The request's idempotency token
+      is the first 32 hex characters of a SHA-256 over the distribution id,
+      the tenant id, the domain and `dk`, so a repeat within ACM's hour gets
+      the same certificate and a new challenge gets a new one. The registrar
       finds the distribution tenant with `GetDistributionTenantByDomain`.
    4. Certificate pending: answer 202 with `stage: "certificate"` and
       ACM's validation record. The operator repeats the call once the
@@ -795,7 +795,7 @@ given below):
    second Region's answer, or DNSSEC validation, when a vendor needs the
    multi-perspective check public certificate authorities make.
 
-   #### The sweeper's daily re-check
+   **The sweeper's daily re-check.**
 
    The tenant keeps the `_tfd-challenge` record for as long as it
    holds the domain, pending or routed. A second EventBridge Scheduler
@@ -906,22 +906,21 @@ given below):
    restarts every streak at zero.
 
    When a page has recorded its last entry it adds its page number to
-   `pagesFinished` (an `ADD` to a set, so a retried page adds nothing).
-   A page that fails before that, after Lambda's two retries, is kept in
-   the sweeper function's on-failure destination, an SQS queue. Each of
-   a page's DynamoDB calls is made once, with a 2 s limit, and a failed
-   call fails the page. Each `GetKey` read is likewise made once, with a
-   2 s limit, and a read that fails with any error other than
-   `ResourceNotFoundException` (above) fails the page. The limit is chosen, not
-   measured: no spike measured `GetKey` latency from the deployment
-   Region to the store's global endpoint, so the page logs the time its
-   reads took and the integration run records it (§10 step 14). The
-   reads cost the page's size, not the store's: a page takes at most
-   500 ÷ 10 × 2 s = 100 s for the reads, plus 500 ÷ 10 × (2 queries ×
-   5.4 s + 2 calls × 2 s) = 740 s, plus 2 s to finish, 842 s, inside the
-   sweeper function's 15-minute timeout of 900 s (ADR-0022).
-   The route table holds at most 3,472 dedicated tenants (§4.1), so a
-   run is at most 7 pages.
+   `pagesFinished` (an `ADD` to a set, so a retried page adds nothing). A
+   page that fails before that, after Lambda's two retries, is kept in the
+   sweeper function's on-failure destination, an SQS queue. Each of a page's
+   DynamoDB calls is made once, with a 2 s limit, and a failed call fails
+   the page. Each `GetKey` read is likewise made once, with a 2 s limit, and
+   a read that fails with any error other than `ResourceNotFoundException`
+   (above) fails the page. The limit is chosen, not measured: no spike
+   measured `GetKey` latency from the deployment Region to the store's
+   global endpoint, so the page logs the time its reads took and the
+   integration run records it (§10 step 14). The reads cost the page's size,
+   not the store's: a page takes at most 500 ÷ 10 × 2 s = 100 s for the
+   reads, plus 500 ÷ 10 × (2 queries × 5.4 s + 2 calls × 2 s) = 740 s, plus
+   2 s to finish, 842 s, inside the sweeper function's 15-minute timeout of
+   900 s (ADR-0022). The route table holds at most 3,472 dedicated tenants
+   (§4.1), so a run is at most 7 pages.
 
    A run records only on the UTC day it starts, because a page that
    starts on a later day exits as above. A run by hand late in the day
@@ -1024,7 +1023,7 @@ given below):
    one gets the distribution tenant, and the other gets 409 and keeps a
    pending `d` until the operator drops it.
 
-   #### Removing a dedicated domain
+   **Removing a dedicated domain.**
 
    Removal runs in two phases. CloudFront deletes only a disabled
    distribution tenant, disabling deploys over minutes, longer than an API
@@ -1081,7 +1080,7 @@ given below):
    record](./spikes.md#smoke-run-2026-11-19), Smoke run), so the registrar,
    the sweeper and the teardown read them there.
 
-   #### ETag conflicts
+   **ETag conflicts.**
 
    On an ETag conflict, re-read the keys the write touches and repeat
    the step 3 operator checks, step 4 and the 507 size check (§4.1)
@@ -1749,8 +1748,9 @@ returns on the first 404. When none arrives within 45 s, it prints a warning
 and exits 0: the write succeeded and only propagation is late. In `host`
 mode `/config.json` on a tenant's own host is the one unauthenticated read
 that names a tenant, and an unknown host gets 404, so the host already shows
-whether the tenant exists. In `single` mode no unauthenticated read names a
-tenant, and the hook holds no token for one. A request with a forged,
+whether the tenant exists. In `single` mode there is no per-tenant host for
+the hook to poll, so no unauthenticated read it can make names a tenant, and
+the hook holds no token for one. A request with a forged,
 unsigned token shows a route that is not live (403), but a live route sends
 it on to the cell, so the hook does not probe and waits the full bound. A
 caller who already holds a tenant id can sort it the same way (§6.2 limits).
@@ -2235,12 +2235,12 @@ ingress behind `/agents/*` needs its URL form checked first.
 ### 6.4 Published interface
 
 - **Constructs** `TenantFrontDoor`, `CellRouteAccess` and `RouteHookAccess`
-  (`src/index.ts`). `src/index.ts` also exports `DemoCellApi` and its
-  `CellApiIssuer` props type, for the demo cell and the tests only; they are
-  not part of the published interface. `TenantFrontDoor` exposes
-  `distributionId`, `distributionArn`, `routeTableArn`, `registrarUrl`,
-  `appDomain`, `addressing`, `pooledTenantId` (the distribution tenant) and
-  `routingEndpoint`.
+  (`src/index.ts`). `src/index.ts` also exports `DemoCellApi` and its the
+  `CellApiIssuer` interface of its `issuer` prop, for the demo cell and the
+  tests only; they are not part of the published interface.
+  `TenantFrontDoor` exposes `distributionId`, `distributionArn`,
+  `routeTableArn`, `registrarUrl`, `appDomain`, `addressing`,
+  `pooledTenantId` (the distribution tenant) and `routingEndpoint`.
 - **Stack output** `RoutingEndpoint` of the main stack: the routing
   endpoint of the stack's connection group, which the pooled distribution
   tenant and every dedicated distribution tenant join. It is the CNAME
@@ -2447,18 +2447,19 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0022](../adr/0022-pin-each-sweeper-page-to-the-listers-date-and-re-read-the-route-table.md) | Pin each sweeper page to the lister's date, which it must match to today and then uses for every read and write; count three misses only on a miss; re-read each passed tenant's entry with `GetKey`, 10 at a time, with no scan (page bound 842 s); grant `BatchWriteItem`; amends ADR-0020 | no date passed; a date the page trusts; a date the page must match to today; a `ListKeys` scan with a deadline; a `GetKey` per passed id |
 | [ADR-0023](../adr/0023-pin-imported-spa-chunks-with-an-import-map-integrity.md) | Pin each imported SPA chunk with an `integrity` entry in an import map, and the entry script with `integrity`; the import map's hash joins the entry's in the CSP; amends ADR-0008 | an import map with `integrity`; one bundle with no imports; one hash per chunk in the CSP |
 | [ADR-0024](../adr/0024-test-the-agent-route-against-a-stand-in-ingress.md) | Test the agent route against the stand-in ingress of spike S-5, not a composed `agentic-runtime-isolation` | compose `agentic-runtime-isolation` (deploy or reuse); a stand-in |
-| [ADR-0025](../adr/0025-change-a-route-status-without-reading-the-control-plane.md) | The edge operator's status change skips the control-plane read, so a suspension works while the control plane is down | read the placement first; skip the read |
+| [ADR-0025](../adr/0025-change-a-route-status-without-reading-the-control-plane.md) | The edge operator's status change skips the control-plane read, so a suspension works while the control plane is down; amends ADR-0013, ADR-0017 | read the placement first; skip the read |
 | [ADR-0026](../adr/0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to each cell account as a plain string | a JSON document; a plain string |
-| [ADR-0027](../adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Write the front door hook parameter, one JSON document, from a `registrarUrl` input once the main stack is deployed | an input read after the main stack's deploy; the hook reads the edge parameter across accounts; a fixed registrar domain; a separate app |
+| [ADR-0027](../adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Write the front door hook parameter, one JSON document, from a `registrarUrl` input once the main stack is deployed; amends ADR-0014 | an input read after the main stack's deploy; the hook reads the edge parameter across accounts; a fixed registrar domain; a separate app |
 | [ADR-0028](../adr/0028-drive-the-integration-test-from-a-bash-driver.md) | Drive the §10 integration test from `scripts/integ.sh` over two CDK apps, one stack per CDK call, with the §6.2 teardown in an `EXIT` trap | integ-runner with integ-tests-alpha; a bash driver |
 | [ADR-0029](../adr/0029-join-stress-requests-on-the-cloudfront-request-id.md) | Join the stress slice's requests to the edge log on the CloudFront request id, with no correlation header; the origin is joined by counts | the stress ADR-0005 correlation header; the CloudFront request id; X-Ray trace ids |
 | [ADR-0030](../adr/0030-run-the-stress-slice-on-the-smoke-stack.md) | Run the stress slice on the smoke stack, its stacks, hook role and construct id named by a run prefix; budget Lambda concurrency only | the smoke stack named by a prefix; a stack of its own in the front door app; wait for platform mode |
-| [ADR-0031](../adr/0031-read-a-pre-condition-validation-error-as-an-etag-conflict.md) | Read a stale `IfMatch` as an ETag conflict whether the store answers `ConflictException` or a 400 `ValidationException` that says the pre-condition failed | `ConflictException` only; both answers; re-read the ETag after any failure |
+| [ADR-0031](../adr/0031-read-a-pre-condition-validation-error-as-an-etag-conflict.md) | Read a stale `IfMatch` as an ETag conflict whether the store answers `ConflictException` or a 400 `ValidationException` that says the pre-condition failed; amends ADR-0003 | `ConflictException` only; both answers; re-read the ETag after any failure |
 
 ## 9. Spikes
 
-Each spike reports its deploy and destroy time. The questions, pass
-criteria and measurements are in [spikes.md](./spikes.md).
+Each spike reports its deploy and destroy time, or says it was not measured.
+The questions, pass criteria and measurements are in
+[spikes.md](./spikes.md).
 
 | # | Question | Result |
 |---|---|---|
@@ -2659,7 +2660,7 @@ run.
    tenant-owned cell without a third account. It is a test-only shortcut
    that a deployment must not copy: a real front door's edge account is
    vendor-owned and hosts no tenant-owned cell (§6.1). Deploy the agent
-   ingress stand-in (S-5's: a REST API with a REQUEST authoriser and a
+   ingress stand-in (S-5's: a REST API with a REQUEST authorizer and a
    streaming Lambda proxy that records the path and headers it receives),
    then the front door, with `dedicatedDomains` on (§3.6),
    `edgeOperatorRoleArn` set to the operator role the test created,
@@ -2671,18 +2672,17 @@ run.
    `register-hooks.sh`: `ListHooks` names `front-door-post` and
    `front-door-pre`. Register the demo application, whose cell scripts write
    `frontDoorApiDomain` to `OUTPUTS_FILE`.
-2. Create tenant `a` (placed by the control plane in its own,
-   vendor-owned account, cell A) and tenant `b` (pinned with `accountId`
-   to the edge account, cell B). The route hook registers each cell and tenant
-   route after its script, and every cell and deployment reaches
-   `ACTIVE` with `front-door-post` in its `lastGlobalHooks`.
-   The test role then writes one fixture straight to the route table,
-   the only write that bypasses the registrar (P-3):
-   `host#dedicated-a.example.com` naming `a`, with the control plane's
-   account as `ac`, a dedicated domain with no DNS, certificate or
-   distribution tenant. It writes with the store's ETag, as every other
-   writer does, then polls `cloudfront:TestFunction` every 10 s, for at
-   most 120 s, until `/config.json` for that host answers 200, before
+2. Create tenant `a` (placed by the control plane in its own, vendor-owned
+   account, cell A) and tenant `b` (pinned with `accountId` to the edge
+   account, cell B). The route hook registers each cell and tenant route
+   after its script, and every cell and deployment reaches `ACTIVE` with
+   `front-door-post` in its `lastGlobalHooks`. The test role then writes one
+   fixture straight to the route table, the only write that bypasses the
+   registrar (P-3): `host#dedicated-a.example.com` naming `a`, with the
+   control plane's account as `ac`, a dedicated domain with no DNS,
+   certificate or distribution tenant. It writes with the store's ETag, as
+   every other writer does, then polls `cloudfront:TestFunction` every 10 s,
+   for at most 120 s, until `/config.json` for that host answers 200, before
    step 3.
 3. `/` serves the SPA with every §7.1 header, and so does every answer the
    router generates itself: the 302 of `/logout`, `/config.json`, and the

@@ -13,17 +13,16 @@ ADR-0020 keeps the daily re-check state in a sweeper-owned DynamoDB
 table. A run is one UTC day, and "the sweeper takes no day from its
 caller": each page reads the clock. That leaves four gaps.
 
-- A page that the on-failure queue redrives on a later day, or a page
-  of a run started by hand late in the day, reads a later date from
-  the clock. It files its outcomes and its page number under a day its
+- A page that the on-failure queue redrives on a later day, or a page of
+  a run started by hand late in the day, reads a later date from the
+  clock. It files its outcomes and its page number under a day its
   lister did not start, so the later day's run item shows a page it
   never planned and the earlier day shows the page as finished nowhere.
-- A page that starts before midnight and writes after it would split
-  its writes across two days.
+- A page that starts before midnight and writes after it would split its
+  writes across two days.
 - ADR-0020 has the alarms fire when a write leaves a streak at 3 or
-  more. An error day leaves `missStreak` as it was, so a domain at
-  three misses would count again on every error day, which is not a
-  new miss.
+  more. An error day leaves `missStreak` as it was, so a domain at three
+  misses would count again on every error day, which is not a new miss.
 - The lister lists the entries once, and a page starts up to 3 hours
   later (the on-failure retries). A page that trusts the lister's list
   can check a domain that was dropped or reopened in between. The
@@ -47,8 +46,8 @@ a store that does not exist.
 ## Options considered
 
 Two choices: which day a page files under (Options 1 to 3), and how a
-page re-reads the route table before it checks an entry (Options 4
-and 5).
+page re-reads the route table before it checks an entry (Options 4 and
+5).
 
 ### Option 1: No date passed (ADR-0020 as accepted)
 
@@ -82,58 +81,57 @@ day loses the pages that start after midnight.
 The lister passes each page a range of tenant ids. The page scans the
 whole store with `ListKeys`, keeps the `tenant#` entries in its range,
 and fails once the scan has run for a fixed deadline. Pros: one read
-pattern, and the role already holds `ListKeys`. Cons: the scan's cost
-is the store's shape, not the page's. A full store of small entries
-needs hundreds of calls, so a large store can miss the deadline on
-every page of every day, and the re-check stays down until the code
-changes, with only the missing-pages alarm to show it. The range can
-also grow between the lister and a retry, so a page can hold more than
-500 entries and overrun its bound.
+pattern, and the role already holds `ListKeys`. Cons: the scan's cost is
+the store's shape, not the page's. A full store of small entries needs
+hundreds of calls, so a large store can miss the deadline on every page
+of every day, and the re-check stays down until the code changes, with
+only the missing-pages alarm to show it. The range can also grow between
+the lister and a retry, so a page can hold more than 500 entries and
+overrun its bound.
 
 ### Option 5: A `GetKey` per passed tenant id
 
 The lister passes each page its list of tenant ids (at most 500 ids of
 at most 63 characters, about 33 KB, inside the 1 MB async limit). The
 page reads each `tenant#<id>` entry with `GetKey`, 10 at a time, and
-checks only those ids. Pros: the read cost is tied to the page size,
-not the store, so a large store changes nothing; the page never checks
-an entry the lister did not pass. Cons: one more IAM action on the
+checks only those ids. Pros: the read cost is tied to the page size, not
+the store, so a large store changes nothing; the page never checks an
+entry the lister did not pass. Cons: one more IAM action on the
 sweeper's role, and up to 500 reads a page instead of one scan of a
 small store.
 
 ## Decision
 
 Option 3 for the date and Option 5 for the re-read. The lister passes
-its UTC date to each page, a page whose date is not the current UTC
-date when it starts exits as a no-op with a stale-page line, and
-otherwise the passed date is today for every read and write of the
-page. A lost redriven page is already reported by the missing-pages
-alarm, which is better than outcomes filed under a day nobody started
-(Option 1) or a day anyone can name (Option 2). The lister also passes
-each page its list of tenant ids, and the page reads each one's
-`tenant#<id>` entry with `GetKey`, 10 at a time, each read made once
-with a 2 s limit, and skips one whose domain is gone or whose challenge
-is open; it does no `ListKeys` scan (the lister still lists). A
-`GetKey` that returns `ResourceNotFoundException` means the entry is
-gone, deleted after the lister ran: the page skips that id, logs one
-line naming the tenant id, writes no item for it (the next lister
-deletes its items) and finishes the rest. The lister has just read the
-store, so a 404 here is a missing key, not a missing store. Only another
-error on a `GetKey` fails the page, so one tenant's offboarding never
-costs the other domains on its page a day of checks. This
-bounds the page by its own size, where a scan (Option 4) is bounded by
-the store's. With it: the three-miss count is emitted only when this
-write's outcome is a miss and leaves `missStreak` at 3 or more, so an
-error day or a pass emits none; the sweeper's role holds
-`cloudfront-keyvaluestore:GetKey` on the store; and it holds
+its UTC date to each page, a page whose date is not the current UTC date
+when it starts exits as a no-op with a stale-page line, and otherwise
+the passed date is today for every read and write of the page. A lost
+redriven page is already reported by the missing-pages alarm, which is
+better than outcomes filed under a day nobody started (Option 1) or a
+day anyone can name (Option 2). The lister also passes each page its
+list of tenant ids, and the page reads each one's `tenant#<id>` entry
+with `GetKey`, 10 at a time, each read made once with a 2 s limit, and
+skips one whose domain is gone or whose challenge is open; it does no
+`ListKeys` scan (the lister still lists). A `GetKey` that returns
+`ResourceNotFoundException` means the entry is gone, deleted after the
+lister ran: the page skips that id, logs one line naming the tenant id,
+writes no item for it (the next lister deletes its items) and finishes
+the rest. The lister has just read the store, so a 404 here is a missing
+key, not a missing store. Only another error on a `GetKey` fails the
+page, so one tenant's offboarding never costs the other domains on its
+page a day of checks. This bounds the page by its own size, where a scan
+(Option 4) is bounded by the store's. With it: the three-miss count is
+emitted only when this write's outcome is a miss and leaves `missStreak`
+at 3 or more, so an error day or a pass emits none; the sweeper's role
+holds `cloudfront-keyvaluestore:GetKey` on the store; and it holds
 `dynamodb:BatchWriteItem` on the table. The rest of ADR-0020 stands.
 
 ## Consequences
 
 - Easier: a page's writes all land on one day, and a redrive or a late
   hand run never files under a day its lister did not start. The
-  Scheduler's input names no date, and the test still reaches other
-  days by editing items (spec §10 step 14).
+  Scheduler's input names no date, and the test still reaches other days
+  by editing items (spec §10 step 14).
 - Easier: a page takes at most 500 ÷ 10 × 2 s = 100 s for its reads,
   plus 500 ÷ 10 × (2 queries × 5.4 s + 2 DynamoDB calls × 2 s) = 740 s,
   plus 2 s to finish, 842 s, inside the 900 s timeout. Every term is a
@@ -146,9 +144,9 @@ error day or a pass emits none; the sweeper's role holds
   their own day.
 - Known limitations: not tested end to end, and covered by unit tests
   with a stubbed clock instead: a page whose date is not today exiting
-  with its stale-page line, an error day emitting no three-miss
-  count, and a `GetKey` that returns `ResourceNotFoundException`
-  skipping its id while the page finishes (spec §10).
-- Revisit when a measured `GetKey` time from the deployment Region
-  comes close to 2 s, or when a vendor needs a redriven page's work kept
+  with its stale-page line, an error day emitting no three-miss count,
+  and a `GetKey` that returns `ResourceNotFoundException` skipping its
+  id while the page finishes (spec §10).
+- Revisit when a measured `GetKey` time from the deployment Region comes
+  close to 2 s, or when a vendor needs a redriven page's work kept
   rather than reported.

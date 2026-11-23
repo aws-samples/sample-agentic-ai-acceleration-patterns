@@ -35,12 +35,12 @@ the flow keeps them in `sessionStorage`, from the authorize redirect until
 credentials, and `sessionStorage` is per tab and per origin.
 
 Pros: no server-side session component. The router and the cell API read
-the same bearer token, in both addressing modes. A browser never attaches
-the token on its own, so a cross-site request carries no credential, and
-Fetch Metadata refuses it at the edge as well (spec §7.3). No shared storage
-in `single` mode holds anything for the next tenant.
-Cons: a script that runs in the page can use the token while the page is
-open. A page reload drops the token, and the SPA signs in again.
+the same bearer token, in both addressing modes. A browser never
+attaches the token on its own, so a cross-site request carries no
+credential, and Fetch Metadata refuses it at the edge as well (spec
+§7.3). No shared storage in `single` mode holds anything for the next
+tenant. Cons: a script that runs in the page can use the token while the
+page is open. A page reload drops the token, and the SPA signs in again.
 
 ### Option 2: Backend-for-frontend with a `__Host-` cookie
 
@@ -55,15 +55,15 @@ concern. It is out of scope for this sample (spec §1.2).
 
 ## Decision
 
-Option 1. Access tokens stay in SPA memory, obtained with authorization code
-flow and PKCE, and the SPA sends them only in the `Authorization` header.
-The PKCE verifier and the nonce live in `sessionStorage` on the origin that
-starts sign-in until `/callback` deletes them. The router can
-read the tenant from the token at the edge without trusting it (P-1), the
-cell verifies the same token (P-4), and the shared origin in `single` mode
-holds no tenant state. The risk of script in the page using the token is
-handled by the browser baseline: a hash-based CSP with Trusted Types
-(ADR-0008) and the no-HTML-strings rule (spec §7.2).
+Option 1. Access tokens stay in SPA memory, obtained with authorization
+code flow and PKCE, and the SPA sends them only in the `Authorization`
+header. The PKCE verifier and the nonce live in `sessionStorage` on the
+origin that starts sign-in until `/callback` deletes them. The router
+can read the tenant from the token at the edge without trusting it
+(P-1), the cell verifies the same token (P-4), and the shared origin in
+`single` mode holds no tenant state. The risk of script in the page
+using the token is handled by the browser baseline: a hash-based CSP
+with Trusted Types (ADR-0008) and the no-HTML-strings rule (spec §7.2).
 
 ## Consequences
 

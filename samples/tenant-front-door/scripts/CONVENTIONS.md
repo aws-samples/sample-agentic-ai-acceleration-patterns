@@ -9,19 +9,19 @@ hook in `../hooks/`. `smoke.sh` deploys the front door with one demo
 cell and a stand-in control plane in a test account, and checks the
 edge, the cell and the registrar live without the control plane's hooks
 (the Smoke run in [the spike record](../design/spikes.md)).
-`smoke-domains.sh` checks dedicated domains on that deployment, deployed
-with `SMOKE_DEDICATED_DOMAINS=true`. `register-hooks.sh` puts or
-deletes the front door's two global hooks on the control plane (spec
-§5.2). `integ.sh`, with its parts in `integ/`, is the integration test
-driver (spec §10, ADR-0028); the integration test's demo application
-scripts and its `tfd-probe` hook in `../test/integ/` follow these
-conventions too. `demo.sh` walks the tenants of a kept `host` run
-through the front door and suspends and resumes one of them (README,
-End-to-end demo); it sources `integ/lib.sh`. What a script prints lands
-in the operator's terminal and, in CI, the job log; what the route hook
-prints lands in the control plane's hook build log. The scripts handle
-access tokens, temporary passwords and SigV4 credentials, so none of
-those ever reach output.
+`smoke-domains.sh` checks dedicated domains on a smoke deployment made
+with `SMOKE_DEDICATED_DOMAINS=true scripts/smoke.sh deploy`; it deploys
+nothing. `register-hooks.sh` puts or deletes the front door's two global
+hooks on the control plane (spec §5.2). `integ.sh`, with its parts in
+`integ/`, is the integration test driver (spec §10, ADR-0028); the
+integration test's demo application scripts and its `tfd-probe` hook in
+`../test/integ/` follow these conventions too. `demo.sh` walks the
+tenants of a kept `host` run through the front door and suspends and
+resumes one of them (README, End-to-end demo); it sources
+`integ/lib.sh`. What a script prints lands in the operator's terminal
+and, in CI, the job log; what the route hook prints lands in the control
+plane's hook build log. The scripts handle access tokens, temporary
+passwords and SigV4 credentials, so none of those ever reach output.
 
 ## Log hygiene
 

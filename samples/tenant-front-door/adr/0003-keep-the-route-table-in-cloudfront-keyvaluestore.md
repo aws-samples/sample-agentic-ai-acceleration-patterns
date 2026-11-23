@@ -117,3 +117,7 @@ Note 2026-11-23: ADR-0031 amends this record. A writer treats a stale
 `IfMatch` as a conflict whether the store answers `ConflictException`,
 HTTP 409 or 412, or a `ValidationException` whose message says the
 pre-condition failed, and retries it as this record's ETag rule says.
+
+Note 2026-11-23: the spike results the Decision cites (S-1 and S-2) were
+recorded on 2026-11-16, after this record's Date, and before it was
+accepted.

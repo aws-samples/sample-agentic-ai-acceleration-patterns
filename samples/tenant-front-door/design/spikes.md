@@ -119,7 +119,7 @@ ingress sees the path without `/agents`, as `<stage>/<backend>/invocations`
 (ADR-0019); the `Managed-AllViewerExceptHostHeader` policy deploys with the
 pinned CDK version. Recorded as negatives: `/agents` and `/agents/` get 404
 at the edge. **Passed 2026-11-18**, eu-central-1 ingress stand-in (REST API,
-REQUEST authoriser, streaming Lambda proxy) behind a standard distribution
+REQUEST authorizer, streaming Lambda proxy) behind a standard distribution
 in us-east-1, 20 rounds each of `GET` and `POST`: every stream 200 and
 complete; first byte p50 13 ms and max 14 ms after the ingress wrote it
 (direct baseline p50 16 ms, so CloudFront added none); one event per read
@@ -289,9 +289,10 @@ origin access control; 401 with no token and with an `Authorization` header
 over 8,192 bytes; 403 for an unrouted tenant, `Sec-Fetch-Site: same-site`, a
 forged payload (refused by the cell) and a direct function URL call; a
 client `x-tenant-route` ignored; registrar 403 unsigned and 503 for
-`PutCellRoute` with the control plane unreadable; and `UpdateTenantRouteStatus`
-suspending and resuming a tenant with no control plane (ADR-0025), with the
-other tenant still served, and 409 for a tenant with no route.
+`PutCellRoute` with the control plane unreadable; and
+`UpdateTenantRouteStatus` suspending and resuming a tenant with no control
+plane (ADR-0025), with the other tenant still served, and 409 for a tenant
+with no route.
 
 **Propagation.** From one client, polling once a second from the end of
 the write, a seeded route was first served 16 to 37 s after it, and the
@@ -318,10 +319,10 @@ The smoke stacks stay up, so destroy was not measured.
 ## Dedicated-domain run, 2026-11-20
 
 `scripts/smoke-domains.sh` against the smoke deployment with
-`dedicatedDomains` on and a stand-in control plane (`test/smoke/smoke.app.ts`:
-API Gateway with a Cognito authorizer, the registrar's client-credentials
-reader token, fixture records). The registrar read the stand-in for every
-hook and operator write.
+`dedicatedDomains` on and a stand-in control plane
+(`test/smoke/smoke.app.ts`: API Gateway with a Cognito authorizer, the
+registrar's client-credentials reader token, fixture records). The registrar
+read the stand-in for every hook and operator write.
 
 **Found and fixed.** With an IAM `Null` condition on
 `aws:ResourceTag/tenant-front-door:distribution`, `RequestCertificate` was

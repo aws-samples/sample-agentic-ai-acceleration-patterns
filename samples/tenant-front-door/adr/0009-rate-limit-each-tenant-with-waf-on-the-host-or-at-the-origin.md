@@ -73,8 +73,8 @@ requests to A's SPA paths during the block were all 200.
   with its own limit (spec §3.1).
 - Harder: `single` mode gives up P-7 for rate limits. Over-limit traffic is
   refused only after it reaches the cell.
-- Harder: in `host` mode a flood spread over many unknown hosts stays under
-  each host's limit. The router refuses those with 404 at the edge
+- Harder: in `host` mode a flood spread over many unknown hosts stays
+  under each host's limit. The router refuses those with 404 at the edge
   (spec §3.3 step 2), so they reach no origin.
 - Follow-up: add the per-tenant limit to the cell API contract (spec §6.1)
   and to the demo cell API. The agent ingress of `agentic-runtime-isolation`
@@ -83,8 +83,8 @@ requests to A's SPA paths during the block were all 200.
   per-host counts are seen through metrics and sampled requests.
 - Revisit when WAF can key on a value derived from the token payload.
 
-Amended 2026-11-18 by ADR-0021: in `host` mode the web
-ACL also carries a rate rule aggregated on `Host` and client IP,
-`ipRequestsPer5Min`, ahead of the per-host rule, so one address cannot
-use up a tenant's budget. Each rule's custom 429 also names the rule
-that answered in an `x-tfd-rate-rule` response header (`ip` or `host`).
+Amended 2026-11-18 by ADR-0021: in `host` mode the web ACL also carries
+a rate rule aggregated on `Host` and client IP, `ipRequestsPer5Min`,
+ahead of the per-host rule, so one address cannot use up a tenant's
+budget. Each rule's custom 429 also names the rule that answered in an
+`x-tfd-rate-rule` response header (`ip` or `host`).

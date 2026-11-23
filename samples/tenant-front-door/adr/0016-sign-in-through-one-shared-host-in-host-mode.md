@@ -54,9 +54,8 @@ per second, raced by concurrent onboarding; tenants in different client
 groups have different client ids, so `/config.json` and the token carry
 one per tenant group and the cell and the control plane must accept all of
 them; one more place a tenant script must clean up. The client count is not
-the limit: the route table caps `host` mode at 8,583 tenants (ADR-0012,
-note of 2026-11-18), which is 86 clients, inside the default quota of
-1,000.
+the limit: ADR-0012, as ADR-0017 amends it, caps `host` mode at 8,583
+tenants, which is 86 clients, inside the default quota of 1,000.
 
 ### Option 2: One shared sign-in host with a signed `state`
 
@@ -79,28 +78,29 @@ matched it loosely would send codes to any host under the domain.
 
 ## Decision
 
-Option 2. In `host` mode the one callback URL is the shared sign-in
-host, `login.<appDomain>`, a reserved label (spec §4.1) served by the
-same router function as every other host. The router mints a `state`
-signed with an HMAC key from the route table that binds the tenant host,
-the SPA's nonce and a 10-minute expiry; the sign-in host forwards the
-code only to an active, registered tenant host, and the SPA's nonce and
-PKCE verifier make a replayed `state` useless. The router mints a
-`state` only on a pooled host, one label under `appDomain` that the
-vendor's wildcard DNS record and certificate cover, and the sign-in host
-forwards only to one, so a dedicated domain signs in on its pooled host
-`<tenant>.<appDomain>`, which `/config.json` names as `signInHost`. The
-registrar refuses a `customDomain` that equals `appDomain` or ends in
-`.<appDomain>` (spec §3.4 step 4), so a pooled host's only `host#` entry
-is its own tenant's. That rule is what makes a pooled host always the
-vendor's SPA for its own tenant. Sign-out uses Cognito's `redirect_uri`
-form of `/logout` with a fresh `state` for the tenant host, because S-4o
-showed that the `logout_uri` form drops `state`: the user signs out,
-signs in again and returns to their own tenant host. This needs no
-issuer change per tenant and has no ceiling, where Option 1 needs a
-client update per tenant at 15 per second and Option 3 does not work on
-Cognito; Option 1 stays possible for a deployer with few tenants. The
-`state` format, the mint, the sign-in host's checks, the key and its
+Option 2. In `host` mode the one callback URL is the shared sign-in host,
+`login.<appDomain>`, a reserved label (spec §4.1) served by the same
+router function as every other host. The router mints a `state` signed
+with an HMAC key from the route table that binds the tenant host, the
+SPA's nonce and a 10-minute expiry; the sign-in host forwards the code
+only to an active, registered tenant host, and the SPA's nonce and PKCE
+verifier make a replayed `state` useless. The router mints a `state`
+only on a pooled host, one label under `appDomain` that the vendor's
+wildcard DNS record and certificate cover, and the sign-in host
+forwards only to one, so a dedicated domain signs in on its pooled
+host `<tenant>.<appDomain>`, which `/config.json` names as
+`signInHost`. The registrar refuses a `customDomain`
+that equals `appDomain` or ends in `.<appDomain>` (spec §3.4 step 4),
+so a pooled host's only `host#` entry is its own tenant's. That rule is
+what makes a pooled host always the vendor's SPA for its own tenant.
+Sign-out uses Cognito's `redirect_uri` form of `/logout` with a fresh
+`state` for the tenant host, because S-4o showed that the `logout_uri`
+form drops `state`: the user
+signs out, signs in again and returns to their own tenant host. This
+needs no issuer change per tenant and has no ceiling, where Option 1
+needs a client update per tenant at 15 per second and Option 3 does not
+work on Cognito; Option 1 stays possible for a deployer with few tenants.
+The `state` format, the mint, the sign-in host's checks, the key and its
 rotation are in spec §3.3 step 2, §3.5 and §4.1.
 
 ## Consequences
@@ -144,15 +144,15 @@ rotation are in spec §3.3 step 2, §3.5 and §4.1.
   the deployer keeps those actions off every other role (spec §6.1).
 - Harder: the SPA needs `sessionStorage` for two single-use values
   (ADR-0007).
-- Follow-up: the sample's [threat
-  model](../threat-model.md#who-can-read-and-write-what) lists every
-  principal that can read the `signin` key, the integration test role
-  that calls `TestFunction` and signs a test `state` among them (spec
-  §10 step 18), and every principal that can write the store, the test
-  role included: it holds `PutKey` and `DeleteKey` for its fixture,
-  scoped to the test run (spec §6.1). It also lists every reader of the
-  CloudFront log group in `us-east-1`, which sees each request to the
-  sign-in host and names the tenant of every routed request.
+- Follow-up: the sample's [threat model](../threat-model.md#who-can-read-and-write-what)
+  lists every principal that can read
+  the `signin` key, the integration test role that calls `TestFunction`
+  and signs a test `state` among them (spec §10 step 18), and every
+  principal that can write the store, the test role included: it holds
+  `PutKey` and `DeleteKey` for its fixture, scoped to the test run
+  (spec §6.1). It also lists every reader of the CloudFront log group
+  in `us-east-1`, which sees each request to the sign-in host and names
+  the tenant of every routed request.
 - Follow-up: count `state` refusals apart from other 400s: every 400 on
   `login.<appDomain>` in the access log is a refusal.
 - Revisit when the issuer matches wildcard callback URLs strictly, returns
@@ -167,3 +167,7 @@ point it at a server of its own, so an authorization code sent there
 could leave the vendor's edge. A dedicated domain therefore stays out
 of the sign-in path, and one with its own callback URL stays out of
 scope.
+
+Note 2026-11-23: the `host` mode ceiling of 8,583 tenants that Option 1
+cites is set by ADR-0012's 2026-11-18 note, which took effect when
+ADR-0017 was accepted.

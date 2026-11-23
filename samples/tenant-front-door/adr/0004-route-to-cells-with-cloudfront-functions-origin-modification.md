@@ -78,3 +78,6 @@ latency and a second lookup path.
   though the distribution's default origin had no origin access control.
   Results are in ADR-0011. Deploy 506 s, destroy 185 s.
 - Revisit when origins other than function URLs and S3 are needed.
+
+Note 2026-11-23: the spike result the Decision cites (S-3) was recorded on
+2026-11-16, after this record's Date, and before it was accepted.

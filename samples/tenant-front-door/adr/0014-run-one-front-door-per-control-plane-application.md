@@ -69,10 +69,10 @@ front door's `RouteHookAccess` stack will write
 `/application-plane/applications/<applicationId>/shared/front-door-hook`,
 with `registrarUrl`, in the control plane's account, a name of its own
 so that it never collides with the cell-account copy in a control-plane
-account that also hosts cells. The route hook,
-one pair of global hooks for every front door on the control plane,
-will act only for an application that has that parameter and exits 0 for
-every other, so one front door per application will still hold.
+account that also hosts cells. The route hook, one pair of global hooks
+for every front door on the control plane, will act only for an
+application that has that parameter and exits 0 for every other, so one
+front door per application will still hold.
 
 Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
 effect. The hook parameter is one JSON document, `registrarUrl` with
