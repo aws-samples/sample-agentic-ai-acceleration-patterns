@@ -485,13 +485,12 @@ with `busy`. The runner:
    No backend grants `CAP_SYS_RESOURCE`, and S-14 found the runner
    starting at 1000 on `microvm` and `agentcore` and at -998 on
    `nitro`. The design relies on neither score on `microvm` and
-   `agentcore`. On `nitro` the runner's
-   survival of a kernel kill was measured only at the platform's -998,
-   and only with SysV IPC filtered (S-18), and it held in all 85 S-19
-   fills; the watchdog is an early warning that often, not always, acts
-   before the kernel (S-19). On `microvm` the job's environment also sets
-   `MALLOC_ARENA_MAX` = 2, so each thread does not reserve a 64 MiB
-   allocator arena out of A.
+   `agentcore`. On `nitro` the runner's survival of a kernel kill was
+   measured only at the platform's -998, and only with SysV IPC
+   filtered (S-18), and it held in all 85 S-19 fills; the watchdog is an
+   early warning that often, not always, acts before the kernel (S-19).
+   On `microvm` the job's environment also sets `MALLOC_ARENA_MAX` = 2,
+   so each thread does not reserve a 64 MiB allocator arena out of A.
 3. At `runTimeout` wall time, or when the job ends, kills the process group
    and then every remaining uid 1001 process, so nothing the code forked
    survives into the next job. It then deletes every file uid 1001 owns
@@ -596,9 +595,9 @@ because the watchdog opened its files on every poll, and an open
 allocates: in the full group it waited 6 to 19 s. So the watchdog
 opens `memory.current` and `memory.stat` and reads them once at claim,
 before any job, keeps them open and reads them with `pread`. On one
-stack, in one Region, at the default task size, 0 of 14 fills of the
+stack, in one Region, at the default task size, 0 of 26 fills of the
 final runner overran: each answered `memoryExceeded` in 0.54 to 7.4 s
-on the same task with `/work` kept (0 of 58 across the runner variants
+on the same task with `/work` kept (0 of 70 across the runner variants
 of ADR-0074). A fill that still overran would end as before (§4.1 step
 5), with the tenant's `/work` lost and nothing crossing tenants.
 

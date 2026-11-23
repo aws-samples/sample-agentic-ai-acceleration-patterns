@@ -102,7 +102,9 @@ class MonitorTest(unittest.TestCase):
     def executor(self, backend, **kw):
         size = sz.Sizing(backend, 1024 * MIB)
         f = None if backend == "agentcore" else FakeFilter()
-        return jb.Executor(backend, size, f, uid=os.getuid() + 100000, **kw)
+        ex = jb.Executor(backend, size, f, uid=os.getuid() + 100000, **kw)
+        self.addCleanup(lambda: [os.close(fd) for fd in ex._group_fds or ()])  # the watchdog's files, if it opened them
+        return ex
 
     def test_nitro_watchdog_counts_without_page_cache(self):
         ex = self.executor("nitro", task_group=self.group)
@@ -123,8 +125,6 @@ class MonitorTest(unittest.TestCase):
             write(os.path.join(self.group, "memory.current"), str(800 * MIB))
             self.assertTrue(ex._above_l())  # the new value, read through the same descriptor
         self.assertEqual(opened.call_count, 2)
-        for fd in ex._group_fds:
-            os.close(fd)
 
     def test_nitro_watchdog_files_open_at_claim_not_at_the_first_poll(self):
         ex = self.executor("nitro", task_group=self.group)
@@ -135,8 +135,6 @@ class MonitorTest(unittest.TestCase):
         with mock.patch.object(jb.os, "open") as opened:
             self.assertFalse(ex._above_l())
         opened.assert_not_called()
-        for fd in ex._group_fds:
-            os.close(fd)
 
     def test_nitro_watchdog_open_failure_is_left_to_the_first_poll(self):
         ex = self.executor("nitro", task_group=os.path.join(self.group, "missing"))
@@ -155,8 +153,6 @@ class MonitorTest(unittest.TestCase):
                 ex._above_l()
         self.assertIsNone(ex._group_fds)
         self.assertFalse(ex._above_l())  # opened again
-        for fd in ex._group_fds:
-            os.close(fd)
 
     def test_nitro_watchdog_closes_a_half_open_pair(self):
         ex = self.executor("nitro", task_group=self.group)

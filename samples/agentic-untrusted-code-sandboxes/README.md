@@ -395,7 +395,7 @@ code fills memory from all 64 process slots at once, the job holds the
 task group at its limit until the watchdog or the kernel ends it. The
 runner locks its own pages, so the fill cannot evict them, and it
 answers `memoryExceeded` on the same sandbox with the tenant's `/work`
-files kept (ADR-0074). In a test account 0 of 14 such fills of this
+files kept (ADR-0074). In a test account 0 of 26 such fills of this
 runner overran, against 5 of 8 before the lock. With this runner such
 a fill still takes up to about 7 s at the default task size, because
 the runner's own allocations wait while the group is full. With a
