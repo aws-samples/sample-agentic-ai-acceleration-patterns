@@ -87,7 +87,9 @@ Step Functions and are outside this decision.
 ## Consequences
 CreateDeployment answers a race-only cancellation, once its attempts are
 spent, with a 409 whose message carries the retry hint, never a 500.
-PutHook and DeleteHook answer the same 409. The paired compensation is sent
+PutHook and DeleteHook answer the same 409; the model declares
+`ConflictError` on DeleteHook, because the generated handler answers an error
+an operation does not declare with a 500. The paired compensation is sent
 again on a race, so it strands the records only when every attempt races; the
 compensation stays best-effort (ADR-0011). A cancellation with every reason
 `None`, a failed condition in a position the classifier does not name, and

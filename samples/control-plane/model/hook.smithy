@@ -278,10 +278,12 @@ list LastGlobalHookList {
 /// A create claims a slot of the hook counter in the same transaction; a sixth
 /// hook is a ConflictError that says to delete a hook first. A replace
 /// increments the revision. A put that raced a create or delete of the same
-/// hook is a ConflictError to retry. Takes effect on operations accepted
-/// afterwards; executions in flight keep the snapshot they were accepted with.
-/// A source ref that is not a full commit SHA is accepted with a logged
-/// warning naming the hook. Operator only. Synchronous.
+/// hook, or whose create transaction met concurrent writes on every attempt
+/// and wrote nothing, is a ConflictError to retry. Takes effect on
+/// operations accepted afterwards; executions in flight keep the snapshot
+/// they were accepted with. A source ref that is not a full commit SHA is
+/// accepted with a logged warning naming the hook. Operator only.
+/// Synchronous.
 @authorizer("vendor-authorizer")
 @idempotent
 @http(method: "PUT", uri: "/hooks/{hookId}", code: 200)
@@ -357,8 +359,9 @@ operation GetHook {
 /// Deletes a global hook and releases its slot of the hook counter in one
 /// transaction. No guard on executions in flight: each runs the snapshot it
 /// was accepted with, and StopExecution is the only stop for them.
-/// ResourceNotFoundError when the hook is not registered. Operator only.
-/// Synchronous.
+/// ResourceNotFoundError when the hook is not registered; ConflictError to
+/// retry when the transaction met concurrent writes on every attempt and
+/// nothing was written. Operator only. Synchronous.
 @authorizer("vendor-authorizer")
 @idempotent
 @http(method: "DELETE", uri: "/hooks/{hookId}", code: 200)
@@ -378,6 +381,7 @@ operation DeleteHook {
 
     errors: [
         ResourceNotFoundError
+        ConflictError
     ]
 }
 

@@ -15,9 +15,12 @@ import {
 import { CallerContext } from '../../src/shared/service-config';
 import {
   ConflictError,
+  CreateDeploymentSerializer,
+  DeleteHookSerializer,
   InternalServerError,
   PutApplicationInput,
   PutHookInput,
+  PutHookSerializer,
   ResourceNotFoundError,
   ValidationException,
 } from '../../src/smithy/source/typescript-ssdk-codegen/src';
@@ -355,6 +358,18 @@ describe('GetHook / ListHooks / DeleteHook (§5.5)', () => {
     const error = await service.DeleteHook({ hookId: 'gate' }, context).catch((e) => e);
     expect(error).toBeInstanceOf(ConflictError);
     expect(error.message).toContain('retry the request');
+  });
+});
+
+describe('the operations that answer the race 409 declare it in the model (ADR-0050)', () => {
+  // An error an operation does not declare reaches the caller as a 500: the generated
+  // handler serialises only the errors of the operation's own list.
+  test.each([
+    ['CreateDeployment', new CreateDeploymentSerializer()],
+    ['PutHook', new PutHookSerializer()],
+    ['DeleteHook', new DeleteHookSerializer()],
+  ])('%s serialises a ConflictError', (_name, serializer) => {
+    expect(serializer.isOperationError(new ConflictError({ message: 'retry the request' }))).toBe(true);
   });
 });
 

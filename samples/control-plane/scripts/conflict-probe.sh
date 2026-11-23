@@ -281,7 +281,7 @@ case "$verb" in
     other=0
     while read -r t; do
       if [ "$(cat "${run}/${t}.code")" = 409 ]; then
-        if jq -e '.message | test("retry the request")' "${run}/${t}.body" > /dev/null 2>&1; then
+        if jq -e '.message | test("retry the request"; "i")' "${run}/${t}.body" > /dev/null 2>&1; then
           hint=$((hint + 1))
         else
           other=$((other + 1))
