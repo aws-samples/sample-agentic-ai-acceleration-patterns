@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0016: Offer a DNS Firewall as an option
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-19
 - Amends: ADR-0003
 - Amended by: ADR-0019
@@ -69,3 +69,7 @@ firewall causes it, the README says so next to the prop. Revisit the
 default once the allow list has held through several runs.
 
 Note 2026-11-19: amended by ADR-0019. S-14 measured the same AgentCore ready time (552 s) without the firewall, so the firewall does not cause it and the README needs no note next to the prop; the cause of the difference from S-9 is unknown. The default stays off for the allow-list upkeep.
+
+Note 2026-11-21: the allow list also has `*.ec2.internal`. In us-east-1 the VPC's private host names are `ip-*.ec2.internal`, not `*.compute.internal`, and the integration test's `dns-platform` step found sandboxes looking them up there. The VPC resolver answers both zones.
+
+Note 2026-11-21: the `dns-platform` step also accepts a blocked PTR query from a sandbox for the reverse name of its own address.

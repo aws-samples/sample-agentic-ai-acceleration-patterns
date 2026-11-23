@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0006: Pass input bytes in, and never let the sandbox fetch
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Deciders: Dave Roberts (Partner Solutions Architect)
 

@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0005: Keep one sandbox per tenant in a tenant-keyed registry
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)

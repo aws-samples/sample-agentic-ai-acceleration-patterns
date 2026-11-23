@@ -29,6 +29,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
   - [Tenant Memory Isolation through AgentCore Gateway](#tenant-memory-isolation-through-agentcore-gateway)
   - [Tenant usage metering for agentic applications](#tenant-usage-metering-for-agentic-applications)
   - [Tenant front door for agentic applications](#tenant-front-door-for-agentic-applications)
+  - [Untrusted code sandboxes for agentic applications](#untrusted-code-sandboxes-for-agentic-applications)
 - [Contributing a sample](#contributing-a-sample)
 - [Further Reading](#further-reading)
 - [Costs](#costs)
@@ -46,6 +47,7 @@ described in [the Sample Standard](./docs/sample-standard.md).
 | [Tenant Memory Isolation through AgentCore Gateway](./samples/tenant-memory-isolation/) | One pooled AgentCore Memory that tenants reach only through an AgentCore Gateway with the native Memory connector: Cedar in `ENFORCE` binds every write and recall to the token's `tenant_id`, each tenant's facts live in the namespace equal to its tenant id, and a resource policy denies every data operation outside the Gateway's role. |
 | [Tenant usage metering for agentic applications](./samples/tenant-usage-metering/) | One metering service the vendor owns: emitters admitted by their SigV4 role and their registered tenant bindings, written by a registrar such as the control plane's hooks, a replayable raw store, hourly recounts under a run-time meter catalog with `ADJUSTMENT` records for late events, configured sinks and a usage bus with a subscriber construct. |
 | [Tenant front door for agentic applications](./samples/tenant-front-door/) | One CloudFront multi-tenant distribution in an edge account that serves a shared single-page app and routes each request to the cell that hosts its tenant, across vendor-owned and tenant-owned accounts. A router reads the tenant from the token or the host and looks it up in a route table that only a registrar writes, called from the control plane's global hooks; the cell verifies the token. Optional dedicated domains proved by a DNS challenge, per-tenant rate limits and one web security baseline. |
+| [Untrusted code sandboxes for agentic applications](./samples/agentic-untrusted-code-sandboxes/) | One `run_code` tool that runs model-written Python for one tenant at a time in that tenant's own sandbox (Lambda MicroVMs, Nitro Sandboxes on ECS Managed Instances, or AgentCore Runtime), with no internet, no tenant credentials in the sandbox, and every job bound to the sandbox it was started for. |
 
 ## The Cell-Based Control Plane
 
@@ -217,6 +219,27 @@ It consumes `control-plane` (global hooks and its read API) and, for the demo
 issuer, `tenant-identity`; it ships the constructs `TenantFrontDoor`,
 `CellRouteAccess` and `RouteHookAccess`. See
 [Tenant front door for agentic applications](./samples/tenant-front-door/).
+
+## Untrusted code sandboxes for agentic applications
+
+Agents write code, and an agent that serves many tenants runs that code on
+their data. Run in the agent's own process or a shared container, one
+tenant's script can read another tenant's files, call out to the internet,
+or use the credentials the agent holds.
+
+This sample is one `run_code` tool that runs Python for one tenant at a time
+in a virtual machine of that tenant's own: a Lambda MicroVM, a Nitro Sandbox
+on ECS Managed Instances, or an AgentCore Runtime session, chosen at deploy
+time. The tool picks the tenant from a verified source, reads the tenant's
+input with tenant-scoped credentials, and hands the sandbox only bytes. The
+sandbox has no route to the internet and no tenant credentials, and every
+job is bound to the sandbox it was started for, so a recycled address or a
+replaced session refuses it. An optional DNS Firewall closes the one path
+out that remains. It ships as the `UntrustedCodeSandboxes` construct, with a
+`RunCodeToolTarget` that puts it behind `agentic-runtime-isolation`'s tools
+gateway.
+
+[Untrusted code sandboxes for agentic applications](./samples/agentic-untrusted-code-sandboxes/)
 
 ## Contributing a sample
 

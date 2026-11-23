@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0022: Leave room for the runner in the nitro process cap
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0019, ADR-0021
 - Deciders: Dave Roberts (Partner Solutions Architect)
@@ -56,3 +56,5 @@ Proposed until then. The file-cache correction held: jobs writing up to
 2000 MiB to `/work` were never killed, while `memfd` and `/dev/shm`
 pages still counted. The watchdog records `memoryExceeded` before it
 sends the kill.
+
+Note 2026-11-23: accepted. The integration test's `runaway` step runs the real runner on `nitro`: one process that allocates past its own address-space limit gets `MemoryError` with `memoryExceeded` false (the watchdog silent), and the next call on the same sandbox works. That passed in run 14, which is the S-20 check repeated with the real runner. The runner's own footprint was not measured separately.

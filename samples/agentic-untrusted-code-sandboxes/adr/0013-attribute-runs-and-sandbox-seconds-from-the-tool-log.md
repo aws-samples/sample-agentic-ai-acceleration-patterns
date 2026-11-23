@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0013: Attribute runs and sandbox seconds from the tool log
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
 - Amended by: ADR-0015
 - Deciders: Dave Roberts (Partner Solutions Architect)

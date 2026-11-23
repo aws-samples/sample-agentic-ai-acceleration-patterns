@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0020: Filter job system calls on microvm, and back the caps with a free-memory floor
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-19
 - Amends: ADR-0011, ADR-0019
 - Amended by: ADR-0021

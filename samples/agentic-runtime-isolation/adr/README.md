@@ -60,3 +60,4 @@ SPDX-License-Identifier: MIT-0
 | [0052](./0052-run-the-stress-test-as-a-slice-of-the-platform-stress-contract.md) | Run the stress test as a slice of the platform stress contract | Accepted | Amends the stress-test plan; Amended by ADR-0054 | 2026-11-19 |
 | [0053](./0053-log-the-client-correlation-id-at-the-ingress.md) | Log the client's correlation id at the ingress | Accepted | Meets ADR-0052's revisit trigger | 2026-11-20 |
 | [0054](./0054-drive-the-platform-scenarios-through-the-front-door-edge.md) | Drive the platform scenarios through the front door's edge | Accepted | Amends ADR-0052 | 2026-11-21 |
+| [0055](./0055-bundle-from-the-package-directory-not-the-working-directory.md) | Bundle from the package directory, not the working directory | Accepted | - | 2026-11-20 |

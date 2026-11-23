@@ -1,0 +1,499 @@
+{
+  "source": "https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave.html#nitro-enclave-reqs",
+  "retrieved": "2026-11-20",
+  "note": "Parent instance requirements, each family with the sizes the page excludes (\"All instance types, except\"). Accelerated computing families are listed last.",
+  "families": {
+    "m5": [
+      "large",
+      "metal"
+    ],
+    "m5a": [
+      "large"
+    ],
+    "m5ad": [
+      "large"
+    ],
+    "m5d": [
+      "large",
+      "metal"
+    ],
+    "m5dn": [
+      "large",
+      "metal"
+    ],
+    "m5n": [
+      "large",
+      "metal"
+    ],
+    "m5zn": [
+      "large",
+      "metal"
+    ],
+    "m6a": [
+      "large",
+      "metal"
+    ],
+    "m6g": [
+      "medium",
+      "metal"
+    ],
+    "m6gd": [
+      "medium",
+      "metal"
+    ],
+    "m6i": [
+      "large",
+      "metal"
+    ],
+    "m6id": [
+      "large",
+      "metal"
+    ],
+    "m6idn": [
+      "large",
+      "metal"
+    ],
+    "m6in": [
+      "large",
+      "metal"
+    ],
+    "m7a": [
+      "medium",
+      "large",
+      "metal-48xl"
+    ],
+    "m7g": [
+      "medium",
+      "metal"
+    ],
+    "m7gd": [
+      "medium",
+      "metal"
+    ],
+    "m7i": [
+      "large",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "m8a": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "m8azn": [
+      "medium",
+      "metal-12xl",
+      "metal-24xl"
+    ],
+    "m8g": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "m8gb": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "m8gd": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "m8gn": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "m8i": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "m8id": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "m8in": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "m8idn": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "m8ine": [
+      "large"
+    ],
+    "m8ib": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "m8idb": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "m9g": [
+      "medium",
+      "metal-48xl"
+    ],
+    "m9gd": [
+      "medium",
+      "metal-48xl"
+    ],
+    "c5": [
+      "large",
+      "metal"
+    ],
+    "c5a": [
+      "large"
+    ],
+    "c5ad": [
+      "large"
+    ],
+    "c5d": [
+      "large",
+      "metal"
+    ],
+    "c5n": [
+      "large",
+      "metal"
+    ],
+    "c6a": [
+      "large",
+      "metal"
+    ],
+    "c6g": [
+      "medium",
+      "metal"
+    ],
+    "c6gd": [
+      "medium",
+      "metal"
+    ],
+    "c6gn": [
+      "medium"
+    ],
+    "c6i": [
+      "large",
+      "metal"
+    ],
+    "c6id": [
+      "large",
+      "metal"
+    ],
+    "c6in": [
+      "large",
+      "metal"
+    ],
+    "c7a": [
+      "medium",
+      "large",
+      "metal-48xl"
+    ],
+    "c7g": [
+      "medium",
+      "metal"
+    ],
+    "c7gd": [
+      "medium",
+      "metal"
+    ],
+    "c7i": [
+      "large",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "c8a": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "c8g": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "c8gb": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "c8gd": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "c8gn": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "c8i": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "c8id": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "c8in": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "c8ine": [
+      "large"
+    ],
+    "c8ib": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "c9g": [
+      "medium",
+      "metal-48xl"
+    ],
+    "c9gd": [
+      "medium",
+      "metal-48xl"
+    ],
+    "r5": [
+      "large",
+      "metal"
+    ],
+    "r5a": [
+      "large"
+    ],
+    "r5ad": [
+      "large"
+    ],
+    "r5b": [
+      "large",
+      "metal"
+    ],
+    "r5d": [
+      "large",
+      "metal"
+    ],
+    "r5dn": [
+      "large",
+      "metal"
+    ],
+    "r5n": [
+      "large",
+      "metal"
+    ],
+    "r6a": [
+      "large",
+      "metal"
+    ],
+    "r6g": [
+      "medium",
+      "metal"
+    ],
+    "r6gd": [
+      "medium",
+      "metal"
+    ],
+    "r6i": [
+      "large",
+      "metal"
+    ],
+    "r6id": [
+      "large",
+      "metal"
+    ],
+    "r6idn": [
+      "large",
+      "metal"
+    ],
+    "r6in": [
+      "large",
+      "metal"
+    ],
+    "r7a": [
+      "medium",
+      "large",
+      "metal-48xl"
+    ],
+    "r7g": [
+      "medium",
+      "metal"
+    ],
+    "r7gd": [
+      "medium",
+      "metal"
+    ],
+    "r7i": [
+      "large",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "r7iz": [
+      "large",
+      "metal-16xl",
+      "metal-32xl"
+    ],
+    "r8a": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "r8g": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "r8gb": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "r8gd": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "r8gn": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "r8i": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "r8id": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "r8in": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "r8idn": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "r8ib": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "r8idb": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "r9g": [
+      "medium",
+      "metal-48xl"
+    ],
+    "r9gd": [
+      "medium",
+      "metal-48xl"
+    ],
+    "x2gd": [
+      "medium",
+      "metal"
+    ],
+    "x2idn": [
+      "metal"
+    ],
+    "x2iedn": [
+      "metal"
+    ],
+    "x2iezn": [
+      "metal"
+    ],
+    "x8g": [
+      "medium",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "x8aedz": [
+      "metal-12xl",
+      "metal-24xl"
+    ],
+    "x8i": [
+      "large",
+      "metal-48xl",
+      "metal-96xl"
+    ],
+    "z1d": [
+      "large",
+      "metal"
+    ],
+    "d3": [],
+    "d3en": [],
+    "i3en": [
+      "large",
+      "metal"
+    ],
+    "i4g": [],
+    "i4i": [
+      "large",
+      "metal"
+    ],
+    "i7i": [
+      "large",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "i7ie": [
+      "large",
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "i8g": [
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "i8ge": [
+      "metal-24xl",
+      "metal-48xl"
+    ],
+    "dl1": [],
+    "dl2q": [],
+    "f2": [],
+    "g4dn": [
+      "metal"
+    ],
+    "g5": [],
+    "g5g": [
+      "metal"
+    ],
+    "g6": [],
+    "g6e": [],
+    "g6f": [
+      "large"
+    ],
+    "gr6": [],
+    "gr6f": [],
+    "g7": [],
+    "g7e": [],
+    "inf1": [],
+    "inf2": [],
+    "p4d": [],
+    "p4de": [],
+    "p5": [],
+    "p5e": [],
+    "p5en": [],
+    "p6-b300": [],
+    "p6e-gb200": [],
+    "trn2": [],
+    "trn2u": []
+  }
+}

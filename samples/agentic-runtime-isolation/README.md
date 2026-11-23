@@ -403,6 +403,9 @@ two subscriptions and a cut the same way.
 
 Declare this sample as a local dependency (`file:../agentic-runtime-isolation`)
 in your `.projenrc.ts` and import from its package entry (standard §1.1).
+The entry is `src/index.ts`, so only a `file:` install of a checkout is
+supported, not a registry or tarball copy. A deep import of a file under
+`src/` is refused by the package `exports` map.
 
 ```ts
 import * as path from 'node:path';
@@ -410,7 +413,7 @@ import { Duration } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
-import { AgentBackend, SharedIngress, ToolTarget } from 'agentic-runtime-isolation/src';
+import { AgentBackend, SharedIngress, ToolTarget } from 'agentic-runtime-isolation';
 
 const userPoolId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/userPoolId');
 const appClientId = ssm.StringParameter.valueForStringParameter(this, '/application-plane/shared/identity/appClientId');
@@ -558,11 +561,14 @@ The agent must:
 
 #### Tool contract
 
-A Lambda tool wraps its handler with `toolHandler` (exported from
-[`src/index.ts`](./src/index.ts), code in [`src/tools/context.ts`](./src/tools/context.ts)):
+A Lambda tool wraps its handler with `toolHandler` (code in
+[`src/tools/context.ts`](./src/tools/context.ts)). Import it from the
+`agentic-runtime-isolation/tools` subpath, which holds the tool-side library
+only, so the tool's bundle does not pull in the constructs or `aws-cdk-lib`.
+The package entry exports it too:
 
 ```ts
-import { toolHandler } from 'agentic-runtime-isolation/src';
+import { toolHandler } from 'agentic-runtime-isolation/tools';
 
 export const handler = toolHandler(async ({ context, args, credentials }) => {
   return { tenantId: context.tenantId };

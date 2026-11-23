@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0017: Split the core from the gateway entry
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-19
 - Amends: ADR-0001
 - Deciders: Dave Roberts (Partner Solutions Architect)

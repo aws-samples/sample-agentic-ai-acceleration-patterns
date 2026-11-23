@@ -2,7 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Untrusted code sandboxes for agentic applications: specification
 
-Status: draft, not built. Spikes S-1 to S-20 ran from 2026-11-18 to 2026-11-20 (§7.1 to §7.7).
+Status: built; the implemented state and its last integration run are in
+[architecture.md](../architecture.md). Spikes S-1 to S-21 ran from
+2026-11-18 to 2026-11-20 (§7.1 to §7.8).
 
 ## 1. Problem statement
 
@@ -70,7 +72,7 @@ AgentCore session on one shared runtime. The MicroVM image, the task
 definition and the second runtime are shared definitions; only running
 instances are per-tenant.
 
-### 1.2 What this sample does not do yet
+### 1.2 What this sample does not do
 
 - Egress allowlists. Code reaches no internet host on any backend; a sandbox
   that must reach one host is a later option (ADR-0003).
@@ -183,6 +185,7 @@ claim in the README without a test row behind it is a defect.
 | Reaper | Lambda on a 5-minute schedule | Idle stop, orphan sweep | the reaper role (§3.6) |
 | Drain | CloudFormation custom resource | Stop everything on delete | the drain role (§3.6) |
 | Offboard | Lambda, invoked with IAM | Stop a tenant's sandboxes | the reaper role (§3.6), which holds no instance action |
+| Runner image copy (with `nitro` or `agentcore`) | CloudFormation custom resource, the ECR deployment library's provider | One copy per architecture into the construct's runner repository (ADR-0024) | the image copy role (§3.6) |
 
 ### 3.2 Caller and identity model
 
@@ -235,11 +238,18 @@ Lambda whose handler wraps the same run logic in the producer's
 `sandboxes.bindRunCode(fn)`. `bindRunCode` gives the function everything
 the core function has: the tool subnets and tool security group, the
 environment (table, bucket, image, connector, pinned task definition,
-runtime and tenant role ARNs, limits), the timeout from the budget, a
-place in the tool tenant role's trust policy, the tool role's sandbox
-actions, a log group the core owns (retention set, deleted on destroy)
-and inclusion in the §3.8 Contributor Insights rules. Its read-only
-property is `toolTarget`. It names the producer, which standard §1.1
+runtime and tenant role ARNs, limits), the timeout from the budget, the
+tool role's sandbox actions, and inclusion in the §3.8 Contributor
+Insights rules. A function that runs as `toolRole`, as the one
+`RunCodeToolTarget` builds does, already holds the actions and the
+trust. A function with a role of its own gets the same statements, a
+place in the tool tenant role's trust policy, and loses the basic and VPC
+managed policies, which allow log writes on every group. The role must be
+in the construct's stack (`bindRunCode` refuses another), gets the
+network interface actions in a policy of its own, and outlives the
+function on delete behind the log drain (ADR-0073). A function built
+with its own `logGroup` keeps it; otherwise the core sets a group it owns
+(retention set, deleted on destroy). It names the producer, which standard §1.1
 allows only in demo apps and tests; ADR-0017 records this adapter as the
 exception.
 
@@ -257,18 +267,19 @@ no unsigned entry.
 | `defaultBackend` | one of `backends` | first entry | used when the call names none |
 | `runTimeout` | `Duration` | 30 s | runner kill time; 1 s to 60 s |
 | `startWait` | `Duration` | 15 s | how long one call waits for a starting sandbox before `sandbox_starting` |
-| `maxOutputBytes` | `number` | 262144 | stdout and stderr together; stdout is cut first |
-| `maxInputBytes` | `number` | 5242880 | refuse larger inputs before any sandbox starts |
+| `maxOutputBytes` | `number` | 262144 | stdout and stderr together, at most 4 MiB; stdout is cut first. The tool also bounds the JSON-encoded answer at 5 MiB (a control byte is six bytes of JSON), so an answer fits the 6 MB Lambda response limit |
+| `maxInputBytes` | `number` | 5242880 | refuse larger inputs before any sandbox starts; at most 6 MiB, the largest input the runner takes |
 | `sandboxIdle` | `Duration` | 15 min | idle time before a sandbox is stopped or suspended |
 | `sandboxMaxLife` | `Duration` | 8 h | hard life cap on every backend |
 | `perTenantMetrics` | `boolean` | `false` | emit CloudWatch metrics with a `TenantId` dimension (ADR-0013) |
-| `vpc` | `ec2.IVpc` | created (§3.7) | must have subnets tagged for the tool and the sandboxes |
-| `dnsFirewall` | `boolean \| { allowDomains?: string[] }` | `false` | associate a Route 53 Resolver DNS Firewall rule group with the VPC that allows only the §3.9 AWS names and blocks the rest with NXDOMAIN, plus VPC query logging; `allowDomains` adds names; refused with a supplied `vpc` (ADR-0016) |
-| `createEndpoints` | `boolean` | `true` | create the §3.7 sandbox endpoints; `false` when a supplied `vpc` already has them, which then must meet §3.7 |
+| `vpc` | `ec2.IVpc` | created (§3.7) | must have subnet groups named `Tool` and `Sandbox` (ADR-0027) |
+| `s3PrefixListId` | `string` | none | id of the `com.amazonaws.<region>.s3` managed prefix list (`pl-` and hex). Required with a supplied `vpc` when the `agentcore` runtime's endpoints are created: its 443 egress to the S3 gateway endpoint names the list. With the created VPC the egress is any address on 443, which that VPC routes nowhere else (ADR-0028) |
+| `dnsFirewall` | `boolean \| { allowDomains?: string[] }` | `false` | associate a Route 53 Resolver DNS Firewall rule group with the VPC that allows only the §3.9 AWS names and blocks the rest with NXDOMAIN, plus VPC query logging; `allowDomains` adds names, each of two labels or more (`example.com`, `*.example.com`; a bare top-level domain is refused, but a public suffix such as `*.co.uk` or a shared zone such as `*.s3.amazonaws.com` passes, so the vendor is responsible for listing only names it controls, T-32); refused with a supplied `vpc` (ADR-0016). With it off, DNS is the one path out of a sandbox (T-29) |
+| `createEndpoints` | `boolean` | `true` with the created VPC; required with a supplied `vpc` | create the §3.7 sandbox endpoints; `false` when a supplied `vpc` already has them; those endpoints must meet §3.7, and the app opens 443 from each backend's client security groups (`backends.<name>.endpointClients()`) to them, because the construct adds no endpoint or egress rule in that case. The interface endpoints use private DNS, which applies to the whole supplied VPC (T-92) |
 | `inputBucket` | `s3.IBucket` | created | the bucket with `inputs/<tenant>/` |
-| `microvm.memoryMiB` | `number` | 1024 | MicroVM image `MinimumMemoryInMiB`; the guest gets about four times this (S-15: 1024 gives 3998 MiB and 2 vCPUs, 2048 gives 8016 MiB and 4) |
+| `microvm.memoryMiB` | `number` | 1024 | MicroVM image `MinimumMemoryInMiB`; the guest gets about four times this (S-15: 1024 gives 3998 MiB and 2 vCPUs, 2048 gives 8016 MiB and 4). Synth warns for a value other than 1024 or 2048, the two sizes measured |
 | `nitro.cpu`, `nitro.memoryMiB` | `number` | 512, 1024 | task size |
-| `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements, and the architecture of the `nitro` runner image. The default is the one type run end to end; `m7g.large` (Graviton, 2 vCPU) reports Nitro Enclaves support and is likely cheaper, but has not been run on ECS. Synth checks each type against a static table of types with Nitro Enclaves support (Intel types need 4 vCPU or more, so `m7i.large` is refused), and refuses a type whose architecture has no `nitro` job filter table (§3.5) |
+| `nitro.instanceTypes` | `string[]` | `['m7i.xlarge']` | capacity provider instance requirements, and the architecture of the `nitro` runner image. The capacity provider's launch template enables Nitro Enclaves (`NitroEnclavesEnabled`), because an `ISOLATED_SANDBOX` task launches only on such a provider (ADR-0046), so every listed type must support Nitro Enclaves. The default is the one type run end to end; `m7g.large` (Graviton, 2 vCPU) reports Nitro Enclaves support and is likely cheaper, but has not been run on ECS. Synth checks each type against a static table of types with Nitro Enclaves support (Intel types need 4 vCPU or more, so `m7i.large` is refused) and refuses a list that mixes `x86_64` and `arm64` types, because the `nitro` runner image has one architecture. The runner holds a job filter table for each architecture (§3.5) |
 | `agentcore.sessionFiles` | `boolean` | `false` | grant the runtime role `sessions/${aws:AgentCoreRuntimeSourceSid}/*` on the input bucket (ADR-0007) |
 
 Timing budget: the tool Lambda timeout is set to
@@ -279,16 +290,26 @@ turn shares that ingress's fixed 120 s integration timeout, so a tool
 budget above 90 s leaves the agent no time (S-11). The `+ 10 s` margin
 is what makes the tool return `timedOut` itself: per the AgentCore
 Gateway documentation, a Lambda error reaches the agent only as a generic
-`isError` result, with no code. Validation at synth fails on: an unknown backend,
-empty `backends`, `defaultBackend` not enabled, `runTimeout` outside 1 s to
-60 s, a budget above the cap, `sandboxMaxLife` above 8 h, `sandboxIdle`
-below 1 min or at or above `sandboxMaxLife`, `dnsFirewall` together with
-a supplied `vpc`. `RunCodeToolTarget` fails at synth when the core's
-budget is above 90 s.
+`isError` result, with no code. Validation at synth fails on: an unknown
+or repeated backend, empty `backends`, `defaultBackend` not enabled,
+`runTimeout` outside 1 s to 60 s, a negative `startWait`, a budget above
+the cap, `sandboxMaxLife` above 8 h, `sandboxIdle` below 1 min or at or
+above `sandboxMaxLife`, `maxOutputBytes` above 4 MiB, `maxInputBytes`
+above 6 MiB, any size or count prop that is not a positive integer, an
+`s3PrefixListId` that is not `pl-` and hex, an `allowDomains` name that is
+not `example.com` or `*.example.com` (two labels or more, at most 255
+characters), `dnsFirewall` together with a supplied `vpc`, and a supplied
+`vpc` with no `createEndpoints`. `RunCodeToolTarget` fails at synth when
+the core's budget is above 90 s.
 
-Read-only properties: `runCodeFunction` (undefined unless `standalone`), `registryTable`, `inputBucket`, `toolRole` (the one tool role every tool function runs as),
-`toolTenantRole`, `offboardFunction`, `vpc`, and per backend the image ARN,
-cluster ARN or runtime ARN.
+Read-only properties: `runCodeFunction` (undefined unless `standalone`),
+`registryTable`, `inputBucket`, `runnerRepository` (with `nitro` or
+`agentcore`), `toolRole` (the one tool role every tool function runs as),
+`toolTenantRole`, `offboardFunction`, `vpc`, `dnsFirewall` (with
+`dnsFirewall` on), `environment`, `config` (the resolved props),
+`backends` (each enabled backend's CDK side), and `backendOutputs`: per backend
+`imageArn`, `clusterArn` and `taskDefinitionArn`, or `runtimeArn`.
+Methods: `bindRunCode(fn)` and `grantInvokeRunCode(principal)`.
 
 Exports from `src/index.ts`: the construct and its props, `runCode`,
 `offboardTenant`, the `SandboxBackend` interface and the three backend
@@ -348,7 +369,12 @@ architecture without emulation. The `nitro` runner makes its key and
 certificate with the `openssl` binary that the Python base image carries,
 so no compiled wheels are copied in. The
 AgentCore backend is a container runtime (ADR-0015). The runner process
-runs as root inside the VM; it never runs tenant code as root.
+runs as root inside the VM; it never runs tenant code as root. One program
+serves all three backends: the environment variable `RUNNER_BACKEND`
+(`microvm`, `nitro` or `agentcore`), which each backend's construct sets on
+the image, the task definition or the runtime, picks the setup and the
+listener, and a runner with a missing or unknown value exits at start
+(ADR-0037).
 
 Build-time egress. `AWS::Lambda::MicrovmImage` requires an egress
 connector for the image build, and the build runs with the Lambda-managed
@@ -383,11 +409,14 @@ CloudTrail Event history, and `RunTask` events showed the container
 override `environment` as `HIDDEN_DUE_TO_SECURITY_REASONS`.
 The `microvm` `/run` hook payload and the `nitro` `RUNNER_NONCE_HASH`
 variable carry only `nonceHash` = SHA-256(`"nonce" ‖ nonce`). The tool
-sends the nonce itself on the data channel with every `/hello` (`nitro`,
-over TLS) and every job (all three backends: the MicroVM's HTTPS
-endpoint, the task's TLS connection, the `InvokeAgentRuntime` payload),
-because it cannot know whether a runner has adopted it; adoption of a
-matching nonce is idempotent. The runner adopts it only if it matches
+sends the nonce itself on the data channel with every job (all three
+backends: the MicroVM's HTTPS endpoint, the task's TLS connection, the
+`InvokeAgentRuntime` payload), because it cannot know whether a runner
+has adopted it; adoption of a matching nonce is idempotent. On `nitro`
+only the `ready` probe's `/hello` carries the nonce, to the address it
+just read from the task's own ENI; the `/hello` before a job carries the
+challenge alone, and the runner proves with the nonce it holds, so a
+task that took over a recycled address never sees the nonce (ADR-0072). The runner adopts it only if it matches
 `nonceHash`, and removes `RUNNER_NONCE_HASH` from the environment it
 hands to code. On `agentcore`, which has no start call and so no hash,
 the job also carries `tenantId`, covered by `jobAuth`, and the runner
@@ -420,7 +449,8 @@ below). It listens on
 8080 (HTTP: MicroVM proxy, AgentCore contract) or 8443 (TLS: `nitro`), and
 on `microvm` also on 9000 for the lifecycle hooks. The 9000 listener
 accepts the `/run` hook's `nonceHash` once and ignores every later `/run` hook,
-answers `/suspend` and `/resume`, and serves no jobs; the tool's auth
+answers `/ready` once it can take a job, answers `/suspend` and
+`/resume`, and serves no jobs; the tool's auth
 tokens allow port 8080 only, so a caller cannot reach 9000. On
 `microvm`, until the `/run` hook has delivered the `nonceHash`, `/ping`
 reports no `bootId` and the 8080 job route refuses every job, and the
@@ -431,7 +461,8 @@ adoption. On `nitro` the hash is set at process start. It serves:
 
 - `GET /ping`: `{"status":"Healthy","bootId":…}` (AgentCore contract).
 - `POST /hello` (`nitro`): returns `bootId`, the certificate fingerprint
-  and `HMAC(nonce, challenge ‖ certFingerprint)`.
+  and `HMAC(nonce, challenge ‖ certFingerprint)`; the nonce is the one in
+  the body (the first `/hello`) or the one it holds (every later one).
 - `POST /run` (and `POST /invocations` for AgentCore): runs one job.
 
 A job runs one at a time. A second job while one runs is refused at once
@@ -440,11 +471,13 @@ with `busy`. The runner:
 1. Writes the input to `/work/input`. `/work` is owned by uid 1001.
 2. Starts `python3 -I -S` on the code as uid 1001 (`sandbox`), in a new
    session and process group, with `/work` as the working directory and
-   these limits, each with soft = hard and set before the drop to uid
-   1001, so code cannot raise them (S-15): `RLIMIT_CPU` = `runTimeout`,
-   `RLIMIT_AS` = A, `RLIMIT_NPROC` = N, `RLIMIT_FSIZE` = 100 MiB,
-   `RLIMIT_NOFILE` = 256 (64 on `microvm`, which bounds the Unix socket
-   buffers each process can hold). A, N and what caps the job's total memory depend
+   these limits, each with soft = hard so code cannot raise them (S-15):
+   `RLIMIT_CPU` = `runTimeout`, `RLIMIT_NPROC` = N and `RLIMIT_FSIZE` =
+   100 MiB, set before the drop to uid 1001; and `RLIMIT_NOFILE` = 256 (64
+   on `microvm`, which bounds the Unix socket buffers each process can hold)
+   and `RLIMIT_AS` = A, set last, after the drop and the filter install,
+   because the child is a fork of the runner and may hold more descriptors
+   and address space than the job may until it execs (ADR-0038). A, N and what caps the job's total memory depend
    on the backend (memory cap, below). The runner sets the job's
    `oom_score_adj` to 1000, which needs no capability, and tries to set
    its own to -1000, ignoring `EACCES`. No backend grants
@@ -474,12 +507,30 @@ with `busy`. The runner:
    first `fork` failed with `EAGAIN` on `microvm` and `agentcore`
    (S-18). On `agentcore` the runner then reads the job group's
    `memory.current` less `file` plus `shmem` (as the `nitro` watchdog
-   does, so the page cache of files in `/work` does not count). If it is
-   not below 32 MiB, the runner starts no further job and refuses every
+   does, so the page cache of files in `/work` does not count), less
+   `slab_reclaimable`: a disk fill leaves about 215 MiB of slab charged to
+   the group (the integration test's `dirty_group` line), and the
+   reclaimable part (dentries and inodes) the kernel frees under pressure. Unreclaimable slab stays counted, because SysV
+   semaphores and message queues are charged as kernel memory (S-18). The read is
+   repeated for the rest of the 3 s the runner allows after a job, because
+   the memory the sweep freed takes a moment to leave the group's counters
+   (ADR-0064).
+   If it is still not below 32 MiB, the runner starts no further job and refuses every
    later one with `dirty`, which the tool treats as a dead handle
    (§4.1 step 3), so the takeover stops the session and the next start
-   gets a fresh one under the same id. 32 MiB is a design value: no spike
-   has read the job group after a sweep. Files in `/work` stay (below).
+   gets a fresh one under the same id. 32 MiB is a design value. §7 S-21
+   measured a 2 GiB SysV fill draining below it inside 1 s, and 420 000
+   empty files in `/work` staying above it in a run that neither polled
+   nor left out reclaimable slab; the result of the current rule on that
+   case is not measured. Files in `/work` stay (below).
+
+   After a job ends, the kill, the sweep and the thread joins of the runner
+   share one budget of 3 s, so the answer comes with 2 s to spare inside the
+   tool's `runTimeout` + 5 s wait (§4.1 step 5). A step the budget cuts
+   short, or a uid 1001 process that survives the kill, marks the runner
+   `dirty` on every backend, and a `dirty` runner refuses every later job.
+   On `agentcore` the job group read above polls every 0.05 s for the rest
+   of that budget (ADR-0064, `runner/PROTOCOL.md`).
 4. Returns `exitCode`, `stdout`, `stderr` (together at most
    `maxOutputBytes`, stdout cut first, `truncated` flag), `durationMs`,
    `timedOut`, `memoryExceeded`, `bootId` and the nonce proof.
@@ -510,13 +561,13 @@ with and without `fsync`, were never killed, the counted value peaked at
 168 MiB, and the kernel limit never acted on page cache. `memfd` and
 `/dev/shm` pages still counted. The watchdog records `memoryExceeded`
 before it sends the kill, so a job killed under it is always marked
-(S-20 found the opposite order missed one). A fast fill outruns it: at a
+(recording after the kill missed one job in S-20). A fast fill outruns it: at a
 200 ms poll it fires first for certain only below about 1.3 GiB/s, the
-256 MiB between L and the task limit over one poll. S-18
-dropped the earlier sum of resident memory: it counts shared pages once
-per process, so it saw 827 MiB for a 64-process Python job whose group
-held about 140 MiB, and it missed `memfd`, tmpfs, socket and SysV memory
-entirely. In S-19 it fired before the kernel in 12 of 12 anonymous
+256 MiB between L and the task limit over one poll. The watchdog does
+not sum resident memory: that sum counts shared pages once per process,
+so it saw 827 MiB for a 64-process Python job whose group held about
+140 MiB, and it misses `memfd`, tmpfs, socket and SysV memory entirely
+(S-18). In S-19 it fired before the kernel in 12 of 12 anonymous
 fills (about 1.5 GiB/s, at 200 and 50 ms polls and in shared and
 private memory), but late, at 852 to 1000 of the 1024 MiB limit; in
 7 of 9 `memfd` writes (about 2.9 GiB/s), in
@@ -524,6 +575,20 @@ private memory), but late, at 852 to 1000 of the 1024 MiB limit; in
 64-process socket load, when its polls slipped to 447 ms and once 4.8 s.
 It did not kill a 64-process job that held 176 MiB. `memoryExceeded`
 was right in all 85 fills. It costs about 0.06 % of one CPU at idle.
+
+A job that fills memory from every process slot at once (64 processes,
+each to A) can also stall the runner. In two of six integration runs
+of the `runaway` step on `nitro` the runner wrote no `job_done` line
+within `runTimeout` + 5 s, so no `memoryExceeded` reached the tool. The
+tool stopped the tenant's task as an overrun (§4.1 step 5) and returned
+`timedOut` with exit -9 and `memoryExceeded` false.
+The next call started a fresh task. The stall's cause inside the task is
+not known: the runner logged nothing between the last job and the stop.
+The overrun cap still contains the job: the damage stays in the
+tenant's own sandbox, and the tenant loses its `/work` files. Locking
+the runner's memory (`mlockall`, with a `memlock` ulimit in the task
+definition) would keep the watchdog thread resident under that
+pressure; it is untested.
 
 Mounts (S-16). On every backend `/dev/shm` is the only tmpfs uid 1001
 can write: 64 MiB on `microvm` and `agentcore`, 576 MiB on `nitro`
@@ -610,8 +675,8 @@ syscall numbers from the architecture of the runner image, which follows
 for Intel types, `AUDIT_ARCH_AARCH64` with the aarch64 generic table for
 Graviton types. A port that changed only the constant would block the
 wrong calls, or kill every job. The runner holds one table per
-architecture, and `synth` refuses a `nitro.instanceTypes` entry whose
-architecture has no table. Only the x86_64 table has run (S-18, S-19).
+architecture, and `synth` refuses a `nitro.instanceTypes` list that
+mixes architectures. Only the x86_64 table has run (S-18, S-19).
 In S-18 the three creates failed
 at once, nothing was charged, and the sweep and the next job were fine.
 On x86_64 the x32 ABI, whose numbers carry bit 30, is off in the `nitro`
@@ -645,34 +710,37 @@ to its own stdout through the runner.
 
 | Role | May | May not |
 |---|---|---|
-| Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image (every MicroVM action authorizes against the image ARN; there is no MicroVM ARN), `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only, so a start without the connector, which would get `INTERNET_EGRESS`, is refused; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime; `ecs:DescribeTasks` on the cluster. One role, shared: `runCodeFunction` and every function bound with `bindRunCode` run as it; `ToolTarget` adds `kms:GetPublicKey` on the context key when a gateway function is bound | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
+| Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image (every MicroVM action authorizes against the image ARN; there is no MicroVM ARN), `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only, so a start without the connector, which would get `INTERNET_EGRESS`, is refused; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime and its endpoints; `ecs:DescribeTasks` on the cluster. One role, shared: `runCodeFunction` and the `RunCodeToolTarget` function run as it; a function with its own role gets the same statements through `bindRunCode`; `ToolTarget` adds `kms:GetPublicKey` on the context key when a gateway function is bound. Each role of a function in the tool subnets also holds, in a policy of its own (`VpcNetworkInterfaces`), the six network interface actions on `*` that the managed VPC access policy grants (create, describe, delete, assign and unassign addresses, describe subnets), because Lambda manages the function's interfaces with its role (ADR-0029, ADR-0073) | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
 | Standalone invokers (with `standalone`) | `lambda:InvokeFunction` on `runCodeFunction`, through `grantInvokeRunCode(principal)` in the app, or an identity policy on the published `runCodeFunctionArn` in another app | the gateway path; see T-82 for same-account identity policies |
 | Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only, with the request tag condition and `ecs:cluster` = the sample's cluster; `ecs:TagResource` on `task/<cluster>/*` with the request tag condition and `ecs:CreateAction` = `RunTask` (the action has no `ecs:cluster` key, and this stops the role retagging existing tasks); `ecs:StopTask` with the resource tag condition and `ecs:cluster`; `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
-| Task execution role | `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
-| AgentCore runtime role | `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime; code can create extra groups under the prefix, which the cleanup resource removes); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
-| Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms` on `*` (it takes no resource; the call filters by image), `GetMicrovm`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime; `offboardTenant` runs as this role, because it needs only the row writes and the stop actions | the input bucket; the instance actions of the drain role |
+| Task execution role | trust `ecs-tasks.amazonaws.com` with `aws:SourceAccount`; `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
+| AgentCore runtime role | trust `bedrock-agentcore.amazonaws.com` with `aws:SourceAccount` and `aws:SourceArn` = this account's runtimes named `<runtimeName>-*`; `ecr:GetAuthorizationToken` on `*`, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, `DescribeLogStreams` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` (the name is known at synth, and runtime names cannot contain `-`, so the prefix matches only this runtime; code can create extra groups under the prefix, which the cleanup resource removes); with `sessionFiles`, `s3:GetObject`, `s3:PutObject` on `sessions/${aws:AgentCoreRuntimeSourceSid}/*` and `s3:ListBucket` with an `s3:prefix` condition | everything else |
+| Reaper role | read, update and delete every registry row; `ecs:ListTasks`, `DescribeTasks`, `StopTask` on the cluster; `lambda:ListMicrovms` on `*` (it takes no resource; the call filters by image), `GetMicrovm`, `TerminateMicrovm` on the image; `StopRuntimeSession` on the runtime and its endpoints; `offboardTenant` runs as this role, because it needs only the row writes and the stop actions | the input bucket; the instance actions of the drain role |
 | Drain role | the reaper role, plus `ecs:ListContainerInstances` and `ecs:DeregisterContainerInstance` on the cluster (their only resource type), `ecs:DescribeContainerInstances` on `container-instance/<cluster>/*`, and `ec2:DescribeInstances` (which takes no resource) | the input bucket; the reaper role never holds the instance actions, because a forced deregister ends the instance and a live tenant's sandbox on it, so `offboardTenant`, which the vendor's tenant delete script calls at run time, does not run as this role |
-| MicroVM image build role | trust `lambda.amazonaws.com`; `s3:GetObject` on the runner code artifact; `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents` on `/aws/lambda-microvms/<imageName>` | everything else |
-| MicroVM connector operator role | trust `lambda.amazonaws.com`; `ec2:CreateNetworkInterface` on network interfaces, the sandbox subnets and the connector security group; `ec2:CreateTags` on network interfaces with `ec2:ManagedResourceOperator` = `network-connectors.lambda.amazonaws.com` | everything else |
+| MicroVM image build role | trust `lambda.amazonaws.com` with `aws:SourceAccount`; `s3:GetObject` on the runner code artifact; `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents` on `/aws/lambda-microvms/<imageName>` | everything else |
+| MicroVM connector operator role | trust `lambda.amazonaws.com` with no source condition (ADR-0068); `ec2:CreateNetworkInterface` on network interfaces, the sandbox subnets and the connector security group; `ec2:CreateTags` on network interfaces with `ec2:ManagedResourceOperator` = `network-connectors.lambda.amazonaws.com` | everything else |
+| Image copy role (the ECR deployment library's provider) | the library's grant: ECR write and S3 read, to copy the runner image from the CDK asset repository into the runner repository | ECR write outside the runner repositories, any S3 action on the input bucket, `logs:CreateLogGroup` (explicit denies; the provider logs to a group the construct owns) |
 | Log cleanup role (the log cleanup resource and the task log drain) | `logs:DescribeLogGroups`; `logs:DeleteLogGroup` on `/aws/bedrock-agentcore/runtimes/<runtimeName>-*`, on `/aws/lambda-microvms/<imageName>` and on the task log group | every other log group; everything else |
 
 The runtime and execution roles reach no tenant data.
 
-### 3.7 Network (ADR-0012)
+### 3.7 Network (ADR-0012, ADR-0071)
 
-One VPC in two AZs, created unless `vpc` is given.
+One VPC in two AZs, created unless `vpc` is given. The reaper, the drain
+and the offboard function call AWS APIs only and run outside the VPC
+(ADR-0071).
 
 | Subnets | Route table | Used by |
 |---|---|---|
 | Public | default route to an internet gateway | the NAT gateway only; nothing else is placed there |
-| Tool | default route to one NAT gateway | the tool Lambda, the reaper, the drain, the offboard function; the ECS Managed Instances' primary ENIs |
+| Tool | default route to one NAT gateway | the tool Lambda (the standalone run function and every bound function); the ECS Managed Instances' primary ENIs |
 | Sandbox | local only, no default route | `nitro` task ENIs, the `agentcore` runtime ENIs, the `microvm` VPC egress connector |
 
 Endpoints in the sandbox subnets, each with a security group and a policy.
 Interface endpoints use private DNS, which applies to the whole VPC, so
 anything in the tool subnets that calls ECR or Logs also reaches these
 endpoints. Their security groups therefore admit the sandbox groups and
-the instance group; the tool, reaper, drain and offboard function call neither ECR nor Logs
+the instance group; the tool calls neither ECR nor Logs
 APIs directly (their own logs go through the Lambda service). The policies
 name only the sample's repository and log groups. The instances pull the
 runner image from that repository, through these endpoints or the NAT,
@@ -695,7 +763,9 @@ Security groups:
 | `microvm` connector | none | none |
 | Endpoints | 443 from the sandbox groups and the ECS instance group | none |
 
-Tasks cannot reach each other: no task group admits another. The tool
+The VPC the construct creates has flow logs for rejected traffic only, in a log
+group with one month of retention that is deleted on destroy; it is how a
+blocked path shows up. Tasks cannot reach each other: no task group admits another. The tool
 reaches MicroVM endpoints, AWS APIs and the AgentCore data plane through
 the NAT. The integration test tries a presigned PUT to a bucket outside
 these policies through the S3 endpoint, and expects a refusal.
@@ -704,22 +774,35 @@ these policies through the S3 endpoint, and expects a refusal.
 
 The tool writes one structured line per call with `process.stdout.write`
 (top-level fields, so Logs Insights and Contributor Insights can key on
-them): `tenantId`, `backend`, `handle` (MicroVM id, task ARN or
+them). Every line is one JSON object with an `event` field (`run`,
+`sandbox_stopped`). The run line carries `tenantId` (`invalid` when the
+id breaks its rule), `backend`, `handle` (MicroVM id, task ARN or
 `runtimeSessionId`), `runId`, `sandbox` (`started` or `reused`),
 `outcome` (tool error code or `ok`), `exitCode`, `timedOut`, `durationMs`,
-`startMs`, `inputBytes`, `outputBytes`, and on a failed start
-`stoppedReason`. Each sandbox gets exactly one stop line, with `tenantId`,
-`backend`, `handle` and `sandboxSeconds` (`stoppedAt - createdAt`). It is
+`startMs`, `inputBytes`, `outputBytes`, and on a failed start or a fault
+`stoppedReason` (the platform's reason, `start_cap`, or an error class
+name, at most 200 characters). Each sandbox gets exactly one stop line,
+with `tenantId`, `backend`, `handle`, `sandboxSeconds`, `by` (the writer:
+`tool`, `reaper`, `drain` or `offboard`), `reason` (`idle`, `expired`,
+`overrun`, `dead`, `failed_start`, `gone`, `offboard`, `drain` or
+`orphan`) and, when the platform gives one, `stoppedReason`.
+`sandboxSeconds` is `stoppedAt - startedAt` from the platform's facts
+where it gives them, else from the row's `createdAt` and the time of the
+stop. The reaper and the drain also write their own summary and error
+lines (ADR-0033). The stop line is
 written by whoever moves the sandbox's row out of `STARTING` or `READY`
 with a successful conditional write: the tool (dead handle, overrun,
 failed start), the reaper, the drain, or the offboard function. A writer
-that finds the row already `FAILED` or `STOPPING` writes none. A sandbox
+that finds the row already `FAILED` or `STOPPING` writes none. A start call
+that throws before the platform returns a handle sets `FAILED` and writes no
+line, because there is no sandbox to name; a sandbox the call launched anyway
+is an orphan the sweep stops. A sandbox
 with no row (an orphan the sweep or the drain stops: a handle-less
 takeover, a crashed start, or a row TTL removed while the reaper was not
 running) gets its line from the stopper, marked `orphan` = true, with
 `tenantId` from the task's `TenantId` tag on `nitro`, or `unknown` on
 `microvm`, whose MicroVMs take no tags. An `agentcore` orphan session gets no stop
-line, because no API lists it; its cost still reaches the tenant through
+line, because no API lists it; its cost should reach the tenant through
 AgentCore's usage logs (table below), so the `sandboxSeconds` ranking is
 not complete for `agentcore`. On
 `microvm` the line also carries `runningSeconds` and `suspendedSeconds`.
@@ -727,19 +810,30 @@ not complete for `agentcore`. On
 the MicroVM is ended. `suspendedSeconds` comes from the row's
 `suspendedMs` counter. On every backend, when a call first reaches the
 sandbox at time `t`, its start write sets `lastUsedAt` = `t`, conditioned
-on `attribute_not_exists(lastUsedAt) OR lastUsedAt = :read` (re-reading
-once on a condition failure); on `microvm` the same write adds
+on the row still being this handle's and nonce's `READY` row and on
+`attribute_not_exists(lastUsedAt) OR lastUsedAt = :read` (re-reading and
+retrying up to three times); on `microvm` the same write adds
 `max(0, t - lastUsedAt - sandboxIdle)` to `suspendedMs`, so each gap is
 added once. Step 4 moves `lastUsedAt` to the end of the run with a
 monotonic condition, `lastUsedAt < :end`, and adds nothing. The stop adds
 the final gap up to `terminatedAt` (or the stop time on other backends).
 `runningSeconds` is the difference, clamped at 0. The line carries `estimated` = true,
 because the API reports no per-state times and the counter assumes the
-MicroVM suspends exactly at `sandboxIdle`.
+MicroVM suspends exactly at `sandboxIdle`. On `agentcore` the platform
+reports no session end, so a stop line written for a session the platform
+already ended at its idle timeout counts up to the stop (by the drain, the
+reaper or the tool) and over-counts idle time: §7.8 S-21 saw
+`sandboxSeconds` of 560 to 900 s for sessions the platform ended after
+60 s. For `agentcore` cost, use AgentCore's usage logs (table below), not
+`sandboxSeconds`; their record format and the join through
+`runtimeSessionId` are unverified (S-21 saw no usage record in 90
+minutes of calls and stops).
 Two Contributor Insights rules rank tenants by runs and by
 `sandboxSeconds`. With `perTenantMetrics`, the
 tool also emits EMF metrics `Runs`, `Errors`, `RunDuration`,
-`SandboxSeconds` with dimensions `TenantId` and `Backend`; it is off by
+`SandboxSeconds` in the namespace `UntrustedCodeSandboxes`, with
+dimensions `TenantId` and `Backend`; a stop line with `tenantId`
+`unknown` emits no metric. It is off by
 default because the custom metric count grows with tenants.
 
 Cost attribution per backend:
@@ -748,21 +842,24 @@ Cost attribution per backend:
 |---|---|---|---|
 | `microvm` | `sandboxSeconds` per tenant from the registry (MicroVMs take no tags) | baseline rate × seconds running + suspended storage rate × seconds suspended | the image build |
 | `nitro` | `TenantId` task tag with ECS split cost allocation data turned on (account setting) | Cost Explorer split of instance cost by task reservation | idle instance capacity, NAT and endpoints, apportioned by `sandboxSeconds` |
-| `agentcore` | AgentCore's session-level usage logs, joined to the tenant through `runtimeSessionId` in the tool line | per-second vCPU and memory rates × the session's reported usage (consumption billing, no configured baseline) | none beyond the shared endpoints and NAT |
+| `agentcore` | AgentCore's session-level usage logs, joined to the tenant through `runtimeSessionId` in the tool line (format unverified, §7.8) | per-second vCPU and memory rates × the session's reported usage (consumption billing, no configured baseline) | none beyond the shared endpoints and NAT |
 
 ### 3.9 DNS Firewall option (ADR-0016)
 
 With `dnsFirewall` on, the construct creates one Route 53 Resolver DNS
 Firewall rule group and associates it with the whole VPC
-(`MutationProtection` off, so `cdk destroy` can remove it; `FirewallFailOpen` `DISABLED`, so a firewall fault blocks lookups instead of letting them through). Every backend's
+(`MutationProtection` off, so `cdk destroy` can remove it; `FirewallFailOpen` is left at the service default, `DISABLED`, so a firewall fault blocks lookups instead of letting them through). Every backend's
 lookups reach the VPC resolver, so one rule group covers all three
 (S-13). The rule group applies to the tool subnets too, so the allow list
 also carries the ECS Managed Instances' names.
 
 | Priority | Action | Domains |
 |---|---|---|
-| 100 | ALLOW | `amazonaws.com`, `*.amazonaws.com`, `*.on.aws` (MicroVM endpoints), `*.api.aws` (ECS Managed Instances), `time.aws.com`, `*.compute.internal`, plus `allowDomains` |
+| 100 | ALLOW | `amazonaws.com`, `*.amazonaws.com`, `*.on.aws` (MicroVM endpoints), `*.api.aws` (ECS Managed Instances), `time.aws.com`, `*.compute.internal`, `*.ec2.internal` (the private host names in us-east-1), plus `allowDomains` |
 | 200 | BLOCK, `NXDOMAIN` | `*` |
+
+The rule group is associated with the VPC at priority 101, the first free
+slot of a VPC that holds only this construct's resources.
 
 Resolver query logging for the VPC goes to a log group the construct owns
 (retention set, deleted on destroy). Every blocked lookup is logged with
@@ -778,8 +875,19 @@ Every allowed zone is answered by AWS. `*.amazon.pool.ntp.org`, which
 the MicroVM and AgentCore platforms look up, is a third-party zone and is
 left blocked: its servers would see every label. S-13 saw no failure with
 it blocked over 15 minutes; clock behaviour over hours is unverified.
+Each sandbox address looks up its own reverse name (a PTR query, for
+example `187.13.0.10.in-addr.arpa`) on every backend, as the integration
+step `dns-platform` records: the platforms make it, the firewall leaves it blocked and it gets
+NXDOMAIN. On `agentcore` the address is the shared runtime address. The
+integration step `dns-platform` ignores a PTR for the querying address's own
+reverse name, as it ignores the NTP zone, and fails on any other PTR.
 Names a vendor adds in `allowDomains` are the vendor's own exception to
 C-3.
+
+Each instance with `dnsFirewall` on adds one account-level CloudWatch Logs
+resource policy of its own, and each `agentcore` backend adds one more. The per-Region
+quota for these policies is 10 (check the current quota before deploying
+more instances into one Region and account).
 
 Scope. The association covers the whole VPC. The construct creates its
 own VPC, so nothing else is affected. With a supplied `vpc`, BLOCK `*`
@@ -832,6 +940,8 @@ One DynamoDB table, PITR on, `DESTROY`.
 | `expiresAt` | `createdAt + sandboxMaxLife`; the expiry the tool and the reaper use |
 | `ttlAt` | `expiresAt` + 1 h, in epoch seconds; the TTL attribute, a backstop for a reaper that stopped running |
 | `version` | number, incremented on every write |
+| `replaces` | the handle a takeover replaced, kept until that sandbox is stopped so no sweep takes it for an orphan (ADR-0034) |
+| `replacesLined` | boolean; true once the call that took the row over has stopped the replaced sandbox and written its stop line |
 
 Reads and writes use the tool tenant role, whose policy allows only items
 with `dynamodb:LeadingKeys` = `TENANT#${aws:PrincipalTag/TenantId}`.
@@ -863,20 +973,23 @@ Reuse rule, per call (the tool):
    `PROVISIONING` or `PENDING` it is still starting. The reason
    (`stoppedReason`, `stateReason`, or `start_cap`) goes in the tool line.
 2. Take over: put a `STARTING` row with a new nonce if the row is missing
-   (`attribute_not_exists(PK)`) or `version = v`. On a condition failure,
+   or unreadable (no valid `state`, or no nonce, version, `createdAt` or
+   `expiresAt`), or if its `version` and `nonce` are those read. On a condition failure,
    another call won: go back to step 1 once. The winner stops the handle it
    replaced, if any, then starts and records `handle` (and `address` when
    the start returns it), then probes as in step 1.
 3. Run. A failed identity check, a `wrong_sandbox` or `dirty` refusal
-   from the runner, "not found", or a connection refusal marks
-   the row dead: go to step 2 with the version just read. A call that has
+   from the runner, "not found", a connection refusal, or a no answer (a
+   proxy 502 included, which the platform also sends for a terminated MicroVM)
+   from a MicroVM that `GetMicrovm` shows `TERMINATED` more than 2 s before the
+   request left, marks the row dead: go to step 2 with the version just read. A call that has
    already waited for a start in this invocation does not wait again after
    a takeover: it returns `sandbox_starting`. A changed `bootId` means the
    sandbox restarted (on `agentcore`, the session under the same id): the
    tool rewrites the row with the new `bootId` and reports
    `sandbox` = `started`.
 4. After the run, set `lastUsedAt` to the run's end with
-   `attribute_exists(PK) AND handle = :h AND lastUsedAt < :end`, so a row
+   `attribute_exists(PK) AND handle = :h AND state = READY AND lastUsedAt < :end`, so a row
    deleted or replaced meanwhile is not recreated and `lastUsedAt` only
    moves forward, whichever call wrote last (a `busy` call's start mark
    included).
@@ -888,7 +1001,14 @@ Reuse rule, per call (the tool):
 5. If the runner does not answer by `runTimeout` + 5 s, set `STOPPING`
    with the call's current version (re-reading once if another call moved
    it, and stopping anyway if the handle is unchanged), stop the sandbox, and return a result with
-   `timedOut` = true.
+   `timedOut` = true, `exitCode` -9 (killed), and empty `stdout` and
+   `stderr`. A backend may report no answer sooner, and the call
+   ends the same way: on `nitro`, a connection lost, refused or cut after
+   the `/hello` check passed is no answer at once, even when no job byte
+   was sent (a keep-alive socket closed between `/hello` and `/run`, or the
+   reaper stopping the task in that gap), because the tool cannot tell
+   whether the runner read the job, and a rerun in a fresh sandbox would run
+   the code twice (ADR-0047).
 
 The reaper, every 5 minutes, writes the row before any stop with
 `version = :seen`, so a call that updated the row meanwhile wins: `FAILED`
@@ -897,13 +1017,18 @@ otherwise. It:
 
 - stops `nitro` sandboxes in `READY` rows with `lastUsedAt` older than
   `sandboxIdle`; for a `STARTING` row it applies the tool's step 1 rule
-  (mark a failed start `FAILED`, leave a starting one alone), and it leaves
-  `FAILED` rows to the tool until `expiresAt`;
+  (mark a failed start `FAILED`, leave a starting one alone); for a `FAILED`
+  or `STOPPING` row the reaper stops again a sandbox the platform still
+  lists, writes no line (a stopped sandbox already has one; a start that
+  threw has none, there being no sandbox to name), deletes a `STOPPING`
+  row as soon as the sandbox has left the platform's list, and deletes a
+  `FAILED` row once `expiresAt` has passed and the sandbox is gone;
 - stops every task tagged by the sample whose own `startedAt` is older than
   `sandboxMaxLife`, with or without a row (the third cap on `nitro`);
-- checks each `READY` `microvm` row with `GetMicrovm`; when the MicroVM is
-  gone or terminated (the platform ended it), writes the stop line and
-  deletes the row (`FAILED` and `STOPPING` rows already have theirs);
+- checks each `READY` row that the platform does not list with the
+  backend's `isAlive` (`GetMicrovm` on `microvm`, `DescribeTasks` on
+  `nitro`); when the sandbox is gone or terminated (the platform ended
+  it), writes the stop line and deletes the row (`FAILED` and `STOPPING` rows already have theirs);
 - deletes rows past `expiresAt` after stopping their handle;
 - sweeps orphans with no matching row: tasks tagged by the sample and
   MicroVMs of the image. AgentCore has no API that lists a runtime's
@@ -985,18 +1110,23 @@ Errors (tool error `code`, no stack, no tenant data):
 
 | Code | Retry | When |
 |---|---|---|
-| `context_invalid` | no | gateway entry: the context failed verification (from `toolHandler`) |
+| `context_invalid` | no | gateway entry: the context failed verification (from `toolHandler`), or the verified tenant id breaks the §5.1 tenant id rule |
 | `invalid_argument` | no | a field breaks its rule |
-| `input_not_found` | no | no such object under the tenant's prefix |
+| `input_not_found` | no | no such object under the tenant's prefix, or S3 refused the read (S3 answers 403 for a missing key; the caller never learns which) |
 | `input_too_large` | no | the object exceeds `maxInputBytes` (`HeadObject` before any start) |
 | `backend_disabled` | no | `backend` names one not deployed |
 | `sandbox_starting` | yes, after `retryAfterSeconds` | the tenant's sandbox is starting (§4.1) |
-| `sandbox_busy` | yes | the tenant's sandbox is running another job |
+| `sandbox_busy` | yes | the tenant's sandbox is running another job, or, on `agentcore`, two first calls reached the session at once |
 | `sandbox_failed` | yes, after `retryAfterSeconds` | the sandbox ended before it served, or died mid-run (§4.1 failed starts) |
 | `tool_failed` | no | any other fault (from `toolHandler` on the gateway entry, from the core handler on the standalone entry) |
 
 The runner's `wrong_sandbox` and `dirty` refusals never reach a caller:
 the tool treats them as a dead handle (§4.1 step 3).
+
+On the gateway entry, a `tenantId` argument, an argument the tool does not
+declare (`code`, `input`, `backend`, `saveOutput` are the declared ones),
+or an argument of the wrong JSON type returns `invalid_argument` with a
+short fixed `message`; no value from the call appears in it.
 
 A script that exits non-zero, times out or is killed is not a tool error: it
 returns a result with `exitCode`, `timedOut` and its output.
@@ -1005,8 +1135,11 @@ returns a result with `exitCode`, `timedOut` and its output.
 
 A Lambda function the vendor invokes with IAM (`lambda:InvokeFunction`),
 input `{ "tenantId": … }`. It sets each of the tenant's rows `STOPPING`
-with a version condition, stops the sandbox, deletes the row, and returns
-the stopped handles. It runs as the reaper role (§3.6), which holds the stop actions and
+with a version condition, stops the sandbox (and any sandbox a takeover
+replaced), and deletes the row, or leaves it `STOPPING` while the platform
+still lists the sandbox, for the reaper to delete. It returns the stopped
+handles. A sandbox or row it cannot clear makes the call fail, so the
+caller repeats it. It runs as the reaper role (§3.6), which holds the stop actions and
 no instance action, so an offboard call cannot end another tenant's
 sandbox by ending the instance it shares. It is idempotent: a repeat call
 stops nothing and returns the same shape. The caller removes the tenant's `run_code` grant
@@ -1020,35 +1153,43 @@ runtime and the image are deleted, and the order matters. It stops every
 handle in the registry, then every task and MicroVM the orphan sweep
 finds, and waits until `ListTasks` shows every task `STOPPED` and
 `ListMicrovms` shows every MicroVM of the image `TERMINATED` (at most 10
-minutes). A MicroVM image cannot be deleted while MicroVMs of it are live
-(running or suspended), and a capacity provider cannot be deleted while a
-task is still stopping; in both cases CloudFormation fails the delete, the
-second after a 20-minute stall. It also fails while an idle managed
-instance still runs (S-14), and CloudFormation does not retry it. So once
-every task is `STOPPED`, the drain reads the cluster's container
-instances and their EC2 instance ids, deregisters each with `force`,
-which on ECS Managed Instances terminates the instance (ECS developer
-guide, Managed Instances draining), and waits until `DescribeInstances`
-shows every one of those ids `terminated`. It repeats the read,
-deregister and wait until `ListContainerInstances` is empty, within its
-10-minute bound. In S-16 an instance reached `terminated` 17 to 30 s
-after the deregister, no replacement started, and the stack delete then
-succeeded first time in 38 s. Without the drain, the capacity provider
-delete waits for scale-in (`ScaleInAfter` plus about 15 s, 162 s in
-all at 120 s) and fails when `ScaleInAfter` is long (S-14, 900 s). The
-sample sets `ScaleInAfter` to 120 s (S-7, S-16), so instances go about
-two minutes after the last task (ADR-0020). The
-capacity provider has no minimum-instances setting, so the sample
-keeps no warm instance. The `synth` test checks that the drain role may
+minutes). A MicroVM image cannot be deleted while MicroVMs of it are
+live (running or suspended), and a capacity provider cannot be deleted
+while a task is still stopping; in both cases CloudFormation fails the
+delete, the second after a 20-minute stall. It also fails while an idle
+managed instance still runs (S-14), and CloudFormation does not retry
+it. So once every task is `STOPPED`, the drain reads the cluster's
+container instances and their EC2 instance ids, deregisters each with
+`force`, which on ECS Managed Instances terminates the instance (ECS
+developer guide, Managed Instances draining), and waits until
+`DescribeInstances` shows every one of those ids `terminated`. It
+repeats the read, deregister and wait until `ListContainerInstances` is
+empty, within its 10-minute bound. In S-16 an instance reached
+`terminated` 17 to 30 s after the deregister, no replacement started,
+and the stack delete then succeeded first time in 38 s. Without the
+drain, the capacity provider delete waits for scale-in (`ScaleInAfter`
+plus about 15 s, 162 s in all at 120 s) and fails when `ScaleInAfter` is
+long (S-14, 900 s). The sample sets `ScaleInAfter` to 120 s (S-7, S-16),
+so instances go about two minutes after the last task (ADR-0070). The
+capacity provider has no minimum-instances setting, so the sample keeps
+no warm instance. The `synth` test checks that the drain role may
 deregister on the cluster and the reaper role may not, and that the
-offboard function runs as the reaper role. A
-`StopTask` takes 45 to 78 s, so the runner
-exits at once on `SIGTERM`. AgentCore sessions in rows are stopped with
-`StopRuntimeSession`; sessions with no row end within about 20 s of the
-runtime's delete, which takes about 200 s. Creating a runtime took 548
-to 553 s in S-13 and S-14, with and without the DNS Firewall, against
-201 to 204 s in S-9, cause unknown; with `agentcore` enabled it sets
-the deploy time.
+offboard function runs as the reaper role. With sandboxes live, the
+whole stack delete takes 23 to 32 minutes (§7 S-21). In the `nitro` and
+`agentcore` runs most of it was the late release of the network
+interfaces of the drain and reaper functions, which were in the VPC
+then; ADR-0071 has since taken them out of it. The `microvm` run's cause
+was not isolated. The run function and bound functions keep their
+interfaces in the tool subnets. Lambda releases them with the function's
+role after the function is gone (about 45 s in run 14, one observation),
+so the log drain holds each such role and its network interface policy
+for its 90 s (ADR-0073). Plan 30 to 40 minutes for a destroy. A
+`StopTask` takes 45 to 78 s, so the runner exits at once on `SIGTERM`.
+AgentCore sessions in rows are stopped with `StopRuntimeSession`;
+sessions with no row end within about 20 s of the runtime's delete,
+which takes about 200 s. Creating a runtime took 548 to 553 s in S-13
+and S-14, with and without the DNS Firewall, against 201 to 204 s in
+S-9, cause unknown; with `agentcore` enabled it sets the deploy time.
 
 Log groups. The construct owns the task log group and a log drain waits
 90 s on delete before it goes, as agentic-runtime-isolation ADR-0019 does.
@@ -1058,7 +1199,7 @@ own them. Instead a cleanup custom resource, on which the runtime depends,
 takes that prefix as a property (known at synth, no reference to the
 runtime), is deleted after the runtime, and then deletes every group under
 the prefix. The session usage logs that §3.8 uses for `agentcore`
-cost are delivered (`AWS::Logs::DeliverySource`, `DeliveryDestination`,
+cost (format unverified, §7.8) are delivered (`AWS::Logs::DeliverySource`, `DeliveryDestination`,
 `Delivery`) to a log group the construct owns. AgentCore names its groups
 `/aws/bedrock-agentcore/runtimes/<runtimeName>-<10-character id>-DEFAULT`,
 and code with the runtime role can add more under the same prefix; the
@@ -1083,6 +1224,9 @@ truncates, and appends 8 hex characters of a hash of the path:
 | DNS Firewall domain lists, rule group, association, query-log config and its log group | Resolver names `[\w-]`, 64; log group `[\w./#-]`, 512 |
 | Query-log Logs resource policy | `[\w-]` (the sanitiser emits only these), 255, unique per account and Region |
 
+The ECS capacity provider name gets the prefix `cp-` when it would start
+with `aws`, `ecs` or `fargate`, which ECS refuses.
+
 The `synth` unit test asserts that every one of these names is unique and
 matches its charset when two instances share a stack.
 
@@ -1103,8 +1247,7 @@ matches its charset when two instances share a stack.
   quota (`L-CD1C0CC4`, one quota per architecture; the runner image is
   ARM_64). It counts the configured baseline (`microvm.memoryMiB`) of
   running and suspended MicroVMs, and defaults to 2048 GB per account
-  and Region, about 2048 sandboxes at the default size (S-16; S-4 read
-  it wrongly as 2048 MiB). A tenant holds `microvm.memoryMiB` of quota
+  and Region, about 2048 sandboxes at the default size (S-16). A tenant holds `microvm.memoryMiB` of quota
   from its first call until 30 suspended minutes after `sandboxIdle`.
   `RunMicrovm` is limited to 5 calls per second per account, which
   limits how fast a burst of new tenants can start.
@@ -1151,20 +1294,24 @@ Consumes:
 | `agentic-runtime-isolation` | construct `ToolTarget` from its package entry and `toolHandler` from its `./tools` subpath (local `file:../agentic-runtime-isolation`, dev and optional peer dependency; the gateway entry supports only a `file:` install of the producer, ADR-0017), parameter `/application-plane/shared/agent-runtime/ingress` | the tools gateway, the signed tenant context; used only by the gateway entry |
 | `tenant-identity` `shared-pool` | its parameters, through `agentic-runtime-isolation` only | users and tenants for the integration test |
 
-Publishes:
+Publishes (ADR-0069):
 
 | Parameter | Value |
 |---|---|
-| `/application-plane/shared/code-sandbox/sandboxes` | one JSON document: `version`, `toolTarget` (from `RunCodeToolTarget`, or `none`), `runCodeFunctionArn` (with `standalone`, or `none`), `backends`, `defaultBackend`, `registryTableName`, `inputBucketName`, `offboardFunctionArn`, and per backend `imageArn`, `clusterArn` or `runtimeArn` |
+| `/application-plane/shared/code-sandbox/sandboxes` | one JSON document: `version` (1), `toolTarget` (the `RunCodeToolTarget` name, or `none`; `none` in the demo stack, which has no gateway entry), `runCodeFunctionArn` (with `standalone`, or `none`), `backends`, `defaultBackend`, `registryTableName`, `inputBucketName`, `offboardFunctionArn`, and per backend `imageArn` (`microvm`), `clusterArn` and `taskDefinitionArn` (`nitro`), or `runtimeArn` (`agentcore`) |
 
-The demo stack writes the parameter from the construct's read-only
-properties; the construct writes no parameter (standard §4.5), and the
-integration stack publishes nothing (agentic-runtime-isolation ADR-0042), so
-its two construct instances cannot collide on it.
+The demo stack (`src/demo.cdk.ts`) writes the parameter from the
+construct's read-only properties; the construct writes no parameter
+(standard §4.5), and the integration stack publishes nothing
+(agentic-runtime-isolation ADR-0042), so its two construct instances cannot
+collide on it. A parameter only names resources: a consumer in another app
+still makes its grants through `grantInvokeRunCode` or `RunCodeToolTarget`
+in the app that owns the construct.
 
 Constructs: `UntrustedCodeSandboxes` from the package root and `RunCodeToolTarget` from the `gateway` subpath, with their props, plus the exports in §3.3.
-The `ARCHITECTURE.md` namespace row and samples-map row are added in the
-pull request that ships the sample.
+The sample has a row in the `ARCHITECTURE.md` samples map and its
+parameter namespace, `/application-plane/shared/code-sandbox/*`, in §5.1
+there.
 
 ## 7. Spikes
 
@@ -1179,7 +1326,7 @@ deploy and destroy time, and cleans up on exit.
 | S-4 | Cold `RunMicrovm` to first `/run`, and resume after suspend: P50 and P90 over 20 runs. Does the runner as root and code as uid 1001 work on the AL2023 base image? | `startWait`, runner model |
 | S-5 | In an `ISOLATED_SANDBOX` task with no task role, can code read the execution role's credentials, the ECS task metadata endpoint, or IMDS? Does the container start as root and may the runner drop code to uid 1001? | C-2 on `nitro`, runner model |
 | S-6 | Does the task pull its image through its own ENI or the instance's? With sandbox subnets and a task group open only to the Logs endpoint, can code reach the internet or another task? Do `awslogs` logs arrive? | C-3 on `nitro`, endpoint set |
-| S-7 | `RunTask` to `RUNNING` on a warm instance, and from zero instances; idle instance cost; is a stopped task's private IP reused within an hour? | a warm-instance option (dropped, ADR-0020), ADR-0010 |
+| S-7 | `RunTask` to `RUNNING` on a warm instance, and from zero instances; idle instance cost; is a stopped task's private IP reused within an hour? | a warm-instance option (dropped, ADR-0070), ADR-0010 |
 | S-8 | Does `InvokeAgentRuntime` support a condition on the session id, so the tool role can be limited per tenant? | enforced or filtered call (§3.4) |
 | S-9 | Does a V2 runtime in VPC mode with the §3.7 endpoints and policies start, pull, refresh and log? Can its code reach the internet or PUT to another bucket through the S3 endpoint? Does deleting the runtime end its live sessions, and how long does the delete take? | C-3 on `agentcore`, drain |
 | S-10 | With the §3.6 runtime role, what can code do with the metadata endpoint's credentials, and does `aws:AgentCoreRuntimeSourceSid` scope the `sessionFiles` grant to one session? Does the container start as root and may the runner drop code to uid 1001? | C-2 on `agentcore`, ADR-0007, runner model |
@@ -1193,6 +1340,7 @@ deploy and destroy time, and cleans up on exit.
 | S-18 | On `microvm`: ordinary job code under the full ADR-0020 setup, the `clone` entries, the child check, Unix sockets across N processes and in flight, every open route at once, and the free-memory floor against slow and fast fills. On `nitro` and `agentcore`: SysV and Unix socket memory against the task and job groups, and the SysV sweep | §3.5 job filters, floor, watchdog and step 3, ADR-0021 |
 | S-19 | The `nitro` watchdog on `memory.current` against every fill, and the runner's share of the group; the `nitro` filter on the x32 ABI; the 50 ms `microvm` floor against an unmapped fill the list misses; the loopback TCP accept queue at a backlog of 8 with every other open route; the blocked-call self-test | §3.5 watchdog, A on `nitro`, floor, `nitro` filter, ADR-0022 |
 | S-20 | On `nitro`, with a probe runner close to §3.5: the runner's share of the group; a single process at A = L − 64 MiB; `/work` file writes against the watchdog's `memory.current` less `file` plus `shmem`; the S-19 routes again; a job mixing files and anonymous memory | §3.5 watchdog, A on `nitro`, ADR-0022 |
+| S-21 | One deployment per backend of the built construct (three smoke runs) through the standalone entry: the steps that run on one backend, the `agentcore` job group after a sweep against the 32 MiB `dirty` threshold, and the stack delete with live sandboxes | §3.5 step 3, §3.8 stop line, §8 run budget |
 
 ### 7.1 Spike results, S-1 to S-12 (2026-11-18, a non-production test account, eu-central-1)
 
@@ -1398,9 +1546,27 @@ removed; one INACTIVE task definition revision was left.
 | Watchdog marking order | marking after the kill missed `memoryExceeded` once; marking first, 12 of 12 right |
 | Deploy and teardown | stack 217 s, drain 19 s, delete 40 s |
 
+### 7.8 Spike results, S-21 (2026-11-20, a non-production test account, eu-west-1)
+
+Three single-backend deployments of the construct (`standalone` on,
+`sandboxIdle` 2 min, 1 min on `agentcore`, `runTimeout` 20 s; `dnsFirewall`
+off on `nitro` and `agentcore`), driven through `runCodeFunction` with the
+steps of §8 that need no gateway and no other backend. The `agentcore` run
+had two stacks, `sessionFiles` off and on, and ran its SysV case again
+after a redeploy on the build with the 1 s poll. Every stack was removed; no stack, runtime,
+task, function or log group of the runs was left.
+
+| Check | Result |
+|---|---|
+| `agentcore` job group after a sweep | 1000 SysV semaphore arrays (2 GiB) are swept and the group drains below 32 MiB inside the 1 s poll: no `dirty`; the 2 GiB case ran once, and five SysV jobs from 20 MiB to a fill-to-kill kept the session. 420 000 empty files in `/work` kept the group above 32 MiB (slab memory charged to it; seen before the poll existed and before reclaimable slab was left out of the read, not run again since), so the runner marked itself `dirty` and the next start gets a fresh session, which is the §3.5 rule |
+| `agentcore` stop line | for sessions the platform already ended at its idle timeout, the drain's stop lines carry `sandboxSeconds` of 560 to 900 s: the session's end is not known, so the line counts to the drain (§3.8). No AgentCore usage-log record arrived in 90 minutes of calls and stops, only the delivery's validation stream |
+| Stack delete with live sandboxes | `nitro` 27 min (the drain 80 s; the VPC-attached `RunCodeDrain` function 21 min, its network interfaces release late); `microvm` 23 min (cause not isolated); `agentcore`, two stacks, 31.7 min (the VPC-attached Reaper and Drain functions 19.5 min each). A delete of stacks that never ran a sandbox took 15 s |
+
 ## 8. Integration test outline
 
-Driver: the CDK CLI in `scripts/integ.sh` (ADR-0008). It reuses the
+Driver: `test/integ/driver.ts`, called by name from `scripts/integ.sh`
+(ADR-0008, ADR-0058). It deploys with the CDK CLI and deletes the stack
+through the CloudFormation API. It reuses the
 `TenantIdentity-shared-pool` fixture and never destroys it. It always
 deploys its own `SharedIngress` in the integration app, with a test-only
 token mint granted `tokenSigner.grantSign` (copied from
@@ -1412,27 +1578,29 @@ runs once through the producer's sample agent with its deterministic
 `tool <target>/<tool> {json}` probe, so the grant and the 120 s ingress
 path are exercised as a consumer would. It deploys one integration stack with two
 construct instances, each with its own VPC: `run-code` with all three
-backends, `sandboxIdle` = 2 min, `dnsFirewall` on, `standalone` on, and a
+backends, `sandboxIdle` = 2 min, `runTimeout` = 20 s, `dnsFirewall` on, `standalone` on,
+`maxInputBytes` and `maxOutputBytes` at their caps (6 MiB and 4 MiB, so
+`limits` sends both through every platform), and a
 `RunCodeToolTarget` named `run-code`; and `run-code-files` with
 `agentcore` only, `sessionFiles` on, `dnsFirewall` off, and a
 `RunCodeToolTarget` named `run-code-files`. Every step runs through the
-gateway entry except `standalone`; `session-files` uses `run-code-files`. Both are destroyed at the end; the shared pool is never
+gateway entry except `standalone`; `session-files` uses `run-code-files`. The stack with both is deleted at the end; the shared pool is never
 touched.
 
 | Step | Checks |
 |---|---|
-| seed | tenants `A` and `B`, each with `inputs/<t>/invoice.csv` (synthetic) and grants for the `run-code` and `run-code-files` tools |
+| seed | tenants `A` and `B`, each with `inputs/<t>/invoice.csv` (synthetic) and grants for the `run-code` and `run-code-files` tools; on `run-code` an input for A of exactly `maxInputBytes` and one a byte over |
 | parse | A runs a script that parses its invoice; output matches; `sandbox` = `started` (or `sandbox_starting`, then retried) |
 | reuse | A writes `/work/marker`; A's next call reads it; `sandbox` = `reused` |
 | apart | B's call on the same backend cannot see A's marker; B's `sandbox` = `started` |
 | race | two concurrent first calls for a new tenant `C` start one sandbox |
 | prefix | the tool refuses `input` = `../B/invoice.csv` and any name outside A's prefix |
 | iam-wall | `iam:SimulatePrincipalPolicy` on the tool tenant role with `aws:PrincipalTag/TenantId` = `A` denies `inputs/B/*`, the `TENANT#B` row, and `StopTask` on B's task |
-| limits | a 6 MiB input returns `input_too_large`; a 1 MiB print returns `truncated` = true; `multiprocessing.Lock()` raises `PermissionError` on `microvm` and works on `nitro` and `agentcore`, where a file the job leaves in `/dev/shm` is gone at its next call; on `microvm` `os.memfd_create`, `semget`, `setsockopt(SO_SNDBUF)`, `socket(AF_UNIX)` and `listen(128)` raise `PermissionError`, `socketpair` and `listen(5)` work, and the job's `/proc/self/status` shows `Seccomp: 2`; on `nitro` `semget` raises `PermissionError` |
-| no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no answer within the script's own 3 s timeout), and the `GetObject` fails. `agentcore`: credentials load, and every call outside C-2 is denied |
-| no-egress | A's script tries HTTPS to `example.com`, a TCP connect to a public IP address on port 443 with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy. Every request fails within 5 s, and for the IP-literal probe the TCP connect itself must not complete (a TLS error after a completed connect is a failure of the step) |
-| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and the job plus N − 1 children that each allocate up to their `RLIMIT_AS` (on `nitro` and `agentcore` a total far above the sandbox memory), whose N-th fork fails with `EAGAIN`: each returns `timedOut`, `memoryExceeded` (the memory fill on `nitro` and `agentcore`) or a non-zero exit (on `microvm` with `MemoryError` in `stderr`); one process filled past its own `RLIMIT_AS` returns `memoryExceeded` false and `MemoryError` in `stderr` on every backend; on `nitro` a job that writes 900 MiB of files to `/work` is not killed; on `microvm` a job of four threads that each allocate 32 MiB completes; on `nitro` and `agentcore` a `memfd` fill aimed at 1.5 × L (100 MiB per `memfd`; about 1.2 GiB on `nitro`, 11 GiB on `agentcore`) returns `memoryExceeded` true with the same `bootId`, and the next call works; on `agentcore` a SysV semaphore array a job creates is gone at the next call; after a job that forked N − 1 children was killed, the next job can fork N − 1 children again (no zombies left); the runner is still the one that answers (same `bootId`), nothing of the job survives into A's next call, and A's next call works |
-| dead-handle | stop A's sandbox out of band; A's next call returns `sandbox` = `started` |
+| limits | an input one byte over `maxInputBytes` returns `input_too_large`; an input of exactly `maxInputBytes` is read back whole (size and SHA-256 match); a print of `maxOutputBytes` `0x01` bytes (six bytes each in JSON) returns `truncated` = true with a result under the 6 MB Lambda response limit; `multiprocessing.Lock()` raises `PermissionError` on `microvm` and works on `nitro` and `agentcore`, where a file the job leaves in `/dev/shm` is gone at its next call; on `microvm` `os.memfd_create`, `semget`, `setsockopt(SO_SNDBUF)`, `socket(AF_UNIX)` and `listen(128)` raise `PermissionError`, `socketpair` and `listen(5)` work, and the job's `/proc/self/status` shows `Seccomp: 2`; on `nitro` `semget` raises `PermissionError` |
+| no-credentials | A's script tries IMDS, the ECS and AgentCore metadata endpoints, and `boto3` default credentials, then `GetObject` on B's invoice. `microvm` and `nitro`: no credentials are returned (the MicroVM metadata service answers but its `iam/security-credentials/` path gives 404; the ECS credentials path gives 404; IMDS on `nitro` gives no TCP connection within the script's own 2 s), and the `GetObject` makes no connection. `agentcore`: credentials load, and every call outside C-2 is denied; the `GetObject` on B's invoice reaches S3 and is refused with 403. The `GetItem` on B's row makes no connection on any backend |
+| no-egress | A's script first sends a positive control with the same request code and deadline to the sandbox's own allowed address (the metadata service on `microvm` and `agentcore`, the ECS credentials path on `nitro`), which must answer with a status; it proves the request code and its deadline, not a name lookup or a route. It then tries HTTPS to `example.com`, a TCP connect to a public IP address on port 443 with no name lookup (so the route and security group are tested even when the firewall answers the name first), TCP to B's sandbox address, and a presigned PUT to a test bucket outside the endpoint policy. Every request fails before its TCP connect completes (a name that does not exist, or a connect that fails or takes over 2 s on each of up to four addresses of the name, IPv4 first; the driver checks 14 s, a 5 s lookup included), except the presigned PUT on `agentcore`, which reaches the S3 gateway endpoint and must be refused with 403. A request whose connect completes counts as open, however slow or broken its answer, and so does a lookup with no answer in 5 s or a resolver failure, so a slow but open path cannot pass. For the IP-literal probe the TCP connect itself must not complete |
+| runaway | a loop, a `setsid` child that sleeps past the job, a kill of PID 1 and of the runner, a disk fill, and the job plus N − 1 children that each allocate up to their `RLIMIT_AS` (on `nitro` and `agentcore` a total far above the sandbox memory), whose N-th fork fails with `EAGAIN`: each returns `timedOut`, `memoryExceeded` (the memory fill on `nitro` and `agentcore`) or a non-zero exit (on `microvm` with `MemoryError` in `stderr`); on `nitro` the memory fill may instead be a tool overrun (exit -9, `timedOut`, §3.5) when the next call starts a fresh task with a new `bootId`, and the later checks then compare against that runner; one process filled past its own `RLIMIT_AS` returns `memoryExceeded` false and `MemoryError` in `stderr` on every backend; on `nitro` a job that writes 900 MiB of files to `/work` is not killed; on `microvm` a job of four threads that each allocate 32 MiB completes; on `nitro` and `agentcore` a `memfd` fill aimed at 1.5 × L (100 MiB per `memfd`; about 1.2 GiB on `nitro`, 11 GiB on `agentcore`) returns `memoryExceeded` true with the same `bootId`, and the next call works; on `agentcore` a SysV semaphore array a job creates is gone at the next call; after a job that forked N − 1 children was killed, the next job can fork N − 1 children again (no zombies left); the runner is still the one that answers (same `bootId`), nothing of the job survives into A's next call, and A's next call works |
+| dead-handle | stop A's sandbox out of band (on `microvm` wait until 4 s past the MicroVM's `terminatedAt`, beyond the 2 s clock margin of ADR-0044); A's next call returns `sandbox` = `started` |
 | recycled-address | `nitro`: point A's row at B's live task address (test-only shortcut standing in for an IP that ECS reassigned), then call A: the identity check fails, nothing is sent to B's task, and A gets a fresh task |
 | idle | after `sandboxIdle` (2 min) idle the driver invokes the reaper; A's `nitro` task is stopped, and the stop line carries `sandboxSeconds` |
 | cold-from-zero | `nitro`: with no instance running, a new tenant `D`'s first call returns `sandbox_starting`; retries reuse the same task until it is `READY`, and no second task starts |
@@ -1442,21 +1610,22 @@ touched.
 | synth | a unit test synthesises two construct instances in one stack and asserts that every §5.3 name is unique and matches its charset, and that the drain role's policy allows `ecs:DeregisterContainerInstance` on the cluster ARN and the reaper role's does not, and the offboard function runs as the reaper role |
 | session-files | `run-code-files`: A's session writes and reads its own `sessions/<sid>/`; a `GetObject` on B's session prefix is denied |
 | dns | `run-code` (firewall on): A's script looks up `example.com`, a unique `<token>.example.com`, a 40-character exfil label and a TXT name, then `logs.<region>.amazonaws.com`; the first four return NXDOMAIN and appear in the query log as `BLOCK`, the last resolves to an endpoint address. `run-code-files` (firewall off): `example.com` resolves to a public address. On `nitro` the `BLOCK` line's `srcaddr` is A's task address |
-| dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9); any other blocked name is a platform name missing from the allow list and fails the step |
+| dns-platform | after the run, every `BLOCK` line in `run-code`'s query log is for a name some test script looked up, or `*.amazon.pool.ntp.org` (left blocked on purpose, §3.9), or a PTR query by a sandbox for the reverse name of its own address (also left blocked, §3.9); any other blocked name, and any other PTR, is a platform name missing from the allow list and fails the step |
 | telemetry | Logs Insights finds one tool line per call with the §3.8 fields and the right `tenantId` |
 | standalone | the driver invokes `run-code`'s `runCodeFunction` with IAM, as a vendor's own API would, with `tenantId` = `A`: A's script parses its invoice; `input` = `../B/invoice.csv`, `tenantId` = `A/x` and an empty `tenantId` each return `invalid_argument`; a role with no invoke grant is refused (shows IAM applies, not that only granted roles can reach it, T-82). Through the gateway, a `tenantId` argument returns `invalid_argument` |
 | standalone-build | before deploy, the driver runs `npm pack` on the sample and installs the tarball into a stub consumer app that has no `agentic-runtime-isolation` anywhere in its tree (a packed install carries no dev dependencies and no symlink back to the sample), with the consumer's default `cdk.json` app command (`ts-node --prefer-ts-exts`): `npm install` succeeds with no peer error, `tsc` compiles, and `cdk synth` of `UntrustedCodeSandboxes` with `standalone: true` succeeds, including the `runCodeFunction` bundle, and no module reached from the package root resolves to the producer |
-| forged | a direct Lambda invoke with a tampered tenant context returns `context_invalid` and starts nothing (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
-| offboard | after `C`'s grant is removed, `offboardTenant` for `C` stops its sandboxes and deletes its rows; a second call returns the same result with nothing stopped |
-| teardown | `cdk destroy` with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or construct-owned Logs resource policy of the sample, and the `DescribeResourcePolicies` statements that name the query-log group's ARN match their state before deploy (any difference is reported as the §3.9 known leftover), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
+| forged | a direct invoke of the gateway tool function with a tenant context signed by the wrong key returns `context_invalid`, starts nothing and leaves no registry row (test-only shortcut: only the gateway role may invoke the function in a real deployment) |
+| offboard | the driver stops minting tokens for `C`, which stands in for removing its grant, and starts `C`'s sandbox on every backend; `offboardTenant` for `C` stops them and deletes each row, or leaves it `STOPPING` while the sandbox is still listed; a second call returns the same shape with nothing newly stopped |
+| teardown | the driver deletes the stack through the CloudFormation API with sandboxes still running for A and B; afterwards no MicroVM, task, instance or log group of the sample is left (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, and every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), no DNS Firewall resource or construct-owned Logs resource policy of the sample, and the `DescribeResourcePolicies` statements that name the query-log group's ARN match their state before deploy (any difference is reported as the §3.9 known leftover), and the runtime is gone (AgentCore lists no sessions, so "runtime gone" is the `agentcore` check) |
 
 Preconditions, checked by the driver before it deploys: the account's
 "maximum allocated ARM_64 MicroVM memory" quota (Service Quotas, looked up
 by quota code, not by name) is at least
 5 × `microvm.memoryMiB` (tenants A, B, C and E, plus a restart), and the
-account has a free CloudWatch Logs resource policy slot (10 per Region,
-not adjustable) for the `dnsFirewall` instance; the driver fails early
-naming the quota if not. Every behaviour step runs
+account has three free CloudWatch Logs resource policy slots (10 per
+Region, not adjustable): one for the `dnsFirewall` instance and one for the
+usage log of each `agentcore` backend, a number the driver computes from
+the app; the driver fails early naming the cause if not. Every behaviour step runs
 once per backend unless it names one. `cold-from-zero` records the
 `nitro` start time and fails if it comes within half of the start cap. The run
 records cold and warm latency per backend and the deploy and destroy time.

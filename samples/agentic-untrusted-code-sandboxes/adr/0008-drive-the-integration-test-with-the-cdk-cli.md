@@ -2,9 +2,9 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # ADR-0008: Drive the integration test with the CDK CLI
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-18
-- Amended by: ADR-0015
+- Amended by: ADR-0015, ADR-0058
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -39,3 +39,5 @@ check. The `teardown` step is `cdk destroy` itself, so C-6 is tested on
 the consumer's path, not by a test-only stop.
 
 Note 2026-11-18: amended by ADR-0015. The driver always deploys its own ingress with a test-only token mint, because no consumer can sign tokens for an ingress it does not own; it reuses only the shared identity pool.
+
+Note 2026-11-20: amended by ADR-0058. The destroy is the CloudFormation `DeleteStack` call from the driver process, not the CLI destroy from the script's exit trap; the other decisions stand.

@@ -1,0 +1,146 @@
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
+<!-- SPDX-License-Identifier: MIT-0 -->
+# ADR-0029: Wire the functions, the drain and the log groups from one construct
+
+- Status: Accepted
+- Date: 2026-11-20
+- Amended by: ADR-0071, ADR-0073
+- Deciders: Dave Roberts (Partner Solutions Architect)
+
+## Context
+
+Spec §3.1, §3.3 and §5.3 want four functions (tool, reaper, drain,
+offboard) in the tool subnets, a function bound with `bindRunCode` to get
+everything the core function has, a drain that runs on delete before the
+backends' resources go, and log groups that are deleted with the stack
+without a late write recreating them. The handlers are written by another
+owner; this decision fixes the contract between the two.
+
+## Options considered
+
+### Option 1: Direct custom resource for the drain
+Pros: the drain handler answers the CloudFormation response URL itself, as
+the siblings' custom resources do, and needs no framework Lambda. Cons: the
+handler must always answer (a `try`/`finally`), or the delete waits
+`ServiceTimeout`.
+
+### Option 2: `custom-resources.Provider`
+Pros: the handler returns a value or throws, and the framework answers.
+Cons: one framework Lambda and role more, and the drain's wait runs inside
+the framework function's own 15-minute timeout.
+
+### Option 3: Name a bound function's log group `/aws/lambda/<function name>`
+Pros: no change to the function. Cons: the group depends on the function, the
+function depends on the drain (it must be deleted first so no new sandbox
+starts) and on the log drain, and the log drain depends on the group: a
+cycle. Left outside the log drain instead, the group is deleted before the
+function and a late invocation recreates it with no retention.
+
+## Decision
+
+Option 2 for the drain (the handler was written as an `onEvent` handler,
+ADR-0034), with a function per handler and the log drain for the construct's
+own groups.
+
+- The drain is `AWS::CloudFormation::CustomResource` with `ServiceToken` =
+  the provider's framework function, which invokes the drain function.
+  `Create` and `Update` return the physical id at once; `Delete` stops every
+  sandbox and returns, or throws, so the framework answers success or
+  failure (spec §5.3). The framework function has a role and a log group of
+  the construct's own, behind the log drain. The drain function timeout and
+  `ServiceTimeout` are both 15 minutes.
+- Delete order: tool functions, then the drain, then each backend's
+  `drainOrder()` resources, then the log cleanup resource. The tool
+  functions depend on the drain; the drain depends on every `drainOrder()`
+  resource and on the registry table; every `drainOrder()` resource depends
+  on the log cleanup resource.
+- The core builds all four functions with an explicit log group each
+  (retention one month, deleted on destroy), behind a log drain that waits
+  90 s on delete. Function logs use the JSON format and application level
+  INFO, so a line written with `process.stdout.write` keeps its top-level
+  fields for Logs Insights and Contributor Insights.
+- `bindRunCode(fn)` takes a `lambda.Function` built with a role created in
+  the app (an imported role is refused, because its policy cannot be
+  changed) and sets its VPC config, timeout and environment on the
+  underlying `CfnFunction`. The tool statements and the network interface
+  statement go on the function's own role, so a bound function holds the
+  same rights as the tool role without running as it, and the role is added
+  to the tenant role's trust. The basic and VPC access execution policies are
+  removed from it, because both allow log writes on every group; the function
+  writes to its owned group, or to its own group's ARN when it was built with
+  one. A role that carries the SQS, Kinesis, DynamoDB or MSK execution
+  policy is refused at synth: those allow the same log writes and also
+  event source rights the core cannot replace, so the app grants the event
+  source with its L2 grant. Attach other managed policies before binding, and
+  give the function a role of its own: a role shared with another function
+  loses the two policies for both. The function resource, not its role, becomes
+  a dependent of the drain. If the function was built with its own log group
+  the core reads it; if not the core creates an unnamed group (retention one
+  month, deleted on destroy), sets it on the function, grants the role the
+  write, and puts it behind the log drain like its own (the function depends
+  on the group, so there is no cycle). The tenant role's trust policy has a
+  default limit of 2,048 characters, about seven bound roles; share one
+  role when more are needed.
+- No role of the construct attaches `AWSLambdaVPCAccessExecutionRole`. Its
+  document also allows log writes and `logs:CreateLogGroup` on every group,
+  which would let a function recreate a group the stack deleted. The roles
+  hold the six network interface actions as one inline statement, and the
+  functions get an immutable reference to the role so the L2 adds no managed
+  policy. A function writes only to its own group.
+- The image copy library puts one Lambda in the stack, shared by every copy,
+  with ECR write and S3 read on every resource and no log group of its own.
+  The core asks for its own memory size (1,088 MiB), which gives it a
+  function and role of its own, so an app's other image copies in the same
+  stack keep the library's defaults and are not denied anything (an app that
+  asks for exactly 1,088 MiB would share the function and its denies). It adds
+  explicit denies to that role (ECR write outside the stack's runner
+  repositories, any S3 action on the stack's input buckets, log group
+  creation), gives the function a log group the core owns behind the log
+  drain, and makes it wait for the log drain. The role still reads any other
+  bucket (`s3:GetObject` on `*`: the library needs the CDK asset bucket) and
+  writes to any log group through the basic execution policy; the
+  acknowledgement says so. The bucket's auto-delete provider, which CDK adds
+  to the stack with no log group, is pointed at a group the core owns behind
+  the log drain too.
+- The reaper schedule is deleted before the drain starts, so no new reaper run
+  begins during the drain. A run already in flight (timeout four minutes) can
+  still overlap it; both may then write an `orphan` stop line for the same
+  sandbox, a double count bounded to one run.
+- Every custom resource of the construct, the two image copies included, sets
+  `ServiceTimeout` a little above its function's timeout (the drain's is 15
+  minutes with the same `ServiceTimeout`, and its handler stops 30 s before
+  its own timeout so the framework can answer), so a function that cannot
+  start never holds a delete for the default hour. The bucket's
+  auto-delete resource is CDK's own.
+- `reaper` and `offboard` share one role; the drain has its own.
+- The core copies the runner image (ADR-0024) for every container backend:
+  `BackendContext.runnerImageTag(arch)` builds the image asset and the copy
+  into the construct repository the first time an architecture is asked for,
+  and returns `runner-<arch>-<asset hash>`. The core makes each of that
+  backend's `drainOrder()` resources depend on the copies the backend asked
+  for, so the runtime or cluster is never created before its image exists and
+  is deleted before the copy, and the repository is emptied last. `microvm`
+  asks for no tag and waits for no copy. Every `drainOrder()` resource also
+  waits for the sandbox endpoints (the endpoints, their policies and the
+  endpoint groups' ingress), so a runtime or cluster never starts without
+  them; a security group is the exception, because it is a client the
+  endpoints' ingress rules name and waiting would be a cycle.
+
+## Consequences
+
+The drain handler returns or throws on `Delete`, and the framework answers
+CloudFormation, so every path ends in a response. The failure message ends in
+`Logs: /aws/lambda/<drain function name>`, which is not a group of this
+stack: the drain logs to `DrainLogs` and the framework to `DrainProviderLogs`.
+A gateway function built with its own log group has that group in the app's
+hands; the core cannot put it behind its log drain. The core functions
+run on immutable role references, so a grant made through
+`runCodeFunction.role` or `offboardFunction.role` does nothing; statements go
+on `toolRole`. The function lists in
+the spec say a bound function runs as the shared tool role; it holds the
+same statements on its own role instead, because a function's role is fixed
+when it is built. Revisit if the spec wants one role.
+
+Note 2026-11-23: amended by ADR-0071. Only the run function and functions bound with `bindRunCode` get the tool subnets and the network interface statement; the reaper, offboard and drain run outside the VPC.
+
+Note 2026-11-23: amended by ADR-0073. The network interface actions sit in a policy of their own on each role of a function in the tool subnets; the function is deleted before the log drain's wait, and the role and that policy after it, so Lambda can release the function's network interfaces with that role.
