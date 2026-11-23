@@ -799,13 +799,13 @@ The driver keeps every wave of creates and deletes at the build limit:
 CodeBuild refuses a build over a project's limit rather than queueing it, and
 the workflow then fails the operation. Concurrent placements and deletes on one
 cell also meet each other in DynamoDB. The control plane sends a placement
-transaction cancelled only by such races again, and answers a 409 with the retry
-hint when every attempt raced
+transaction cancelled only by such races again, and answers a 409 with the
+retry hint when every attempt raced
 ([ADR-0050](./adr/0050-retry-a-transaction-cancelled-only-by-races.md)); it
 answers a cancelled terminal write with `CREATE_FAILED` or `DELETE_FAILED`. The
 driver retries them, a placement with its client token, and the records show
-them as `409:conflict` requests with `conflict` refusals and as `CREATE_FAILED:retried` and
-`DELETE_FAILED:retried` counts
+them as `409:conflict` requests with `conflict` refusals and as
+`CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts
 ([stress ADR-0013](../../stress/adr/0013-pace-waves-at-the-build-limit-and-retry-conflicts.md)).
 
 ## End-to-end demo
