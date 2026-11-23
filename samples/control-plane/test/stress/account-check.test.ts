@@ -196,6 +196,35 @@ describe('the cell account check (spec §3.7)', () => {
     ]);
   });
 
+  it('accepts the pair\'s tag-named namespace grants and refuses one widened to every cell or tenant (ADR-0051)', () => {
+    const s = healthy();
+    const parameter = (path: string) => `arn:aws:ssm:${REGION}:${ACCOUNT}:parameter${path}`;
+    const withGrant = (half: 'cell' | 'tenant', resource: string) => ({
+      ...s.pair[half]!,
+      inline: [{ ...s.pair[half]!.inline![0], document: { Statement: [{ Effect: 'Allow', Action: 'ssm:PutParameter', Resource: resource }] } }],
+    });
+    expect(check({ ...s, pair: { ...s.pair, cell: withGrant('cell', parameter('/application-plane/cells/${aws:PrincipalTag/CellId}/*')) } })).toEqual([]);
+    expect(check({
+      ...s,
+      pair: { ...s.pair, tenant: withGrant('tenant', parameter('/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}')) },
+    })).toEqual([]);
+    const cellName = s.pair.cell!.inline![0].name;
+    const tenantName = s.pair.tenant!.inline![0].name;
+    expect(check({ ...s, pair: { ...s.pair, cell: withGrant('cell', parameter('/application-plane/cells/*')) } })).toEqual([
+      `role pair cell role ${FLEET}-cell-provisioning: inline policy ${cellName} grants more than the SSM namespace actions`,
+    ]);
+    expect(check({ ...s, pair: { ...s.pair, tenant: withGrant('tenant', parameter('/application-plane/tenants/*')) } })).toEqual([
+      `role pair tenant role ${FLEET}-tenant-provisioning: inline policy ${tenantName} grants more than the SSM namespace actions`,
+    ]);
+    // The cell role never holds the tenant's deployment namespace.
+    expect(check({
+      ...s,
+      pair: { ...s.pair, cell: withGrant('cell', parameter('/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}')) },
+    })).toEqual([
+      `role pair cell role ${FLEET}-cell-provisioning: inline policy ${cellName} grants more than the SSM namespace actions`,
+    ]);
+  });
+
   it('refuses a role pair trust other than its stack\'s: another principal, a wider role list, an extra statement, a dropped condition', () => {
     const s = healthy();
     const wrong = `role pair cell role ${FLEET}-cell-provisioning has a trust policy other than its stack's`;

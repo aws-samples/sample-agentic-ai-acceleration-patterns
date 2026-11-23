@@ -32,9 +32,11 @@ import { INLINE_BUILDSPECS } from '../src/tenant/tenant.sfn';
  *   hold the build role's own credentials, and ask B's pair for the
  *   AssumeRole calls a correct build never makes (no tags, tags not
  *   transitive, another key, a missing key, no external id), then for the
- *   correct one (the positive control). Each build role gets a test-only
- *   unconditioned `sts:TagSession` on B's pair, so B's trust is the only
- *   gate for these requests.
+ *   correct one (the positive control). The build role's own grant carries
+ *   the same TagSession conditions as B's trust, so a request with the
+ *   wrong keys is refused by both; the untagged request and the one without
+ *   the external id are refused by B's trust alone. The positive builds
+ *   below run through both, as production builds do.
  * - Three builds use the sample's own inline buildspecs
  *   (`INLINE_BUILDSPECS`), which assume the pair with the session tags, and
  *   run a test script as the tagged session: two cell builds (cells 1 and
@@ -214,15 +216,6 @@ const stack = new TenantStack(app, fleetName, {
 });
 scriptsBucket.grantRead(stack.provisioning.cellProject);
 scriptsBucket.grantRead(stack.provisioning.tenantProject);
-// Test-only: an unconditioned sts:TagSession on B's pair beside each build
-// role's own conditioned grant, so in the negative builds B's trust is the
-// only gate (the unit tests pin the build roles' own conditions).
-for (const [kind, role] of [['cell', stack.provisioning.cellBuildRole], ['tenant', stack.provisioning.tenantBuildRole]] as const) {
-  role.addToPrincipalPolicy(new iam.PolicyStatement({
-    actions: ['sts:TagSession'],
-    resources: [provisioningRoleArn(partition, accountB, fleetName, kind)],
-  }));
-}
 
 const assertionStack = new Stack(app, `${fleetName}-assert`, { env: { account: accountA, region } });
 const integ = new IntegTest(app, `ControlPlaneSessionTags${runId}`, {
@@ -247,6 +240,7 @@ const NEGATIVES_BUILDSPEC = [
   '        export OUTPUTS_FILE',
   '        bash session-tags/negatives.sh',
   '        SCRIPT_OUTPUTS=$(jq -c . "$OUTPUTS_FILE")',
+  '        export SCRIPT_OUTPUTS',
 ].join('\n');
 
 const buildPoll = { totalTimeout: Duration.minutes(15), interval: Duration.seconds(20) };

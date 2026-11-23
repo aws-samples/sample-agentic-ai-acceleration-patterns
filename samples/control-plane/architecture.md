@@ -308,10 +308,11 @@ Every account that hosts cells — the control plane's own included — installs
 deployed by the control plane stack into its own account and by the
 `CellAccountStack` into every other). Each half trusts its control-plane
 build role and the control-plane API role (`<fleet>-api`, for the registration
-probe, ADR-028) by `aws:PrincipalArn`, optionally behind `sts:ExternalId`, and
-carries the cell-script/tenant-script asymmetry (§7). The build roles may only
-assume their half of the pair, by name, in any account; the buildspec does so
-before the script runs. The pair in each account is the provisioning blast
+probe, ADR-028) by `aws:PrincipalArn`, optionally behind `sts:ExternalId`,
+admitting the build role only with its session tags (ADR-0051, spec §6.4),
+and carries the cell-script/tenant-script asymmetry (§7). The build roles may
+only assume, and tag a session for, their half of the pair, by name, in any
+account; the buildspec does so before the script runs. The pair in each account is the provisioning blast
 radius and the hardening point; the account owner decides what it may do.
 One pair serves every application the account admits.
 
@@ -1210,8 +1211,8 @@ Design points:
   plane account in three statements: one narrowed by `aws:PrincipalArn` to
   the API role, for `sts:AssumeRole` with no tags; two narrowed to the
   matching build role, one for `sts:AssumeRole` only with that half's tag
-  keys and one for `sts:TagSession` only with exactly that half's
-  transitive tags (spec §6.4). The two AssumeRole statements require
+  keys and one for `sts:TagSession` only with exactly that half's tag
+  keys, at least one of them transitive (spec §6.4). The two AssumeRole statements require
   `sts:ExternalId` when the owner set one; STS does not evaluate it on
   TagSession. The pair
   is installed by the account owner (the control plane stack for its own

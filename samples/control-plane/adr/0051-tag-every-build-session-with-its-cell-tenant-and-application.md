@@ -136,7 +136,7 @@ Option 3 for their own account; this record does not choose for them.
   Option 2 or Option 3.
 - The session tag integration test (`test/integ.session-tags.ts`) shows,
   in two accounts with real IAM: the pair refuses a build role's AssumeRole
-  untagged, with the tags not transitive, with another key, with a missing
+  untagged, with none of the tags transitive, with another key, with a missing
   key and without the external id, and admits the correct one; two cell
   sessions in one account each write their own cell namespace and neither
   writes the other's; a tenant session writes its own deployment namespace

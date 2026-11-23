@@ -34,19 +34,26 @@ probe chainAssume aws sts assume-role --role-arn "$CHAIN_ROLE_ARN" --role-sessio
 
 # Transitivity: the chained role may write only under its session's CellId.
 creds_file=$(mktemp)
+trap 'rm -f "$creds_file"' EXIT
 probe chainTaggedAssume env CREDS_FILE="$creds_file" bash -c 'aws sts assume-role --role-arn "$0" --role-session-name integ-chain \
   --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text > "$CREDS_FILE"' "$CHAIN_TAGGED_ROLE_ARN"
 if [ "${RESULTS[chainTaggedAssume]}" = allowed ]; then
   read -r key secret token < "$creds_file"
-  as_chain() { env AWS_ACCESS_KEY_ID="$key" AWS_SECRET_ACCESS_KEY="$secret" AWS_SESSION_TOKEN="$token" "$@"; }
+  # A subshell that exports the chained credentials, so they never appear in an argv.
+  as_chain() (
+    export AWS_ACCESS_KEY_ID="$key" AWS_SECRET_ACCESS_KEY="$secret" AWS_SESSION_TOKEN="$token"
+    "$@"
+  )
   probe chainOwnWrite as_chain aws ssm put-parameter --name "$ledger/$CELL_ID" --type String --value probe --overwrite
   probe chainPeerWrite as_chain aws ssm put-parameter --name "$ledger/$PEER_CELL_ID" --type String --value probe --overwrite
   probe chainOwnDelete as_chain aws ssm delete-parameter --name "$ledger/$CELL_ID"
   # A write that should have been refused is removed again, so a regression leaves nothing in the account.
   if [ "${RESULTS[chainPeerWrite]}" = allowed ]; then as_chain aws ssm delete-parameter --name "$ledger/$PEER_CELL_ID" || true; fi
+  if [ "${RESULTS[chainOwnWrite]}" = allowed ] && [ "${RESULTS[chainOwnDelete]}" != allowed ]; then
+    echo "Left behind in this account: $ledger/$CELL_ID"
+  fi
   unset key secret token
 fi
-rm -f "$creds_file"
 
 # An inherited transitive tag cannot be set again on the next hop: STS
 # answers InvalidParameterValue, whatever the value.

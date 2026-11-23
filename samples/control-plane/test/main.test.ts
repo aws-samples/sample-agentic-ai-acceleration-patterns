@@ -754,7 +754,7 @@ describe('build roles and the home account role pair (ADR-025)', () => {
     expect(tenants).not.toContain('tenants/*');
   });
 
-  test('the home pair carries the §6.2 asymmetry: cell role owns cells/*, tenant role reads it and owns tenants/*', () => {
+  test('the home pair carries the §6.2 asymmetry: the cell role manages its cell namespace, the tenant role reads its cell\'s and manages its deployment\'s', () => {
     const statements = (kind: string) =>
       policyFor(logicalIdOf(`control-plane-${kind}-provisioning`)).Properties.PolicyDocument.Statement as any[];
     const sids = (kind: string) => statements(kind).map((s) => s.Sid).sort();

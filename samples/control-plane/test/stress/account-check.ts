@@ -18,6 +18,7 @@
  */
 
 import { sessionTagConditions, sessionTagRequestConditions } from '../../src/shared/fleet';
+import { OWN_CELL_PATH, OWN_DEPLOYMENT_PATH } from '../../src/shared/ssm-namespaces';
 
 export const CELL_TOOLKIT_STACK = 'CDKToolkit-cell';
 export const ACCOUNT_BASE_TAG = { key: 'stress:part', value: 'account-base' } as const;
@@ -91,7 +92,7 @@ function trustStatementShape(st: Record<string, unknown>): string | undefined {
  * `<fleet>-api` role (`ArnEquals aws:PrincipalArn`), with no other condition. One allows
  * `sts:AssumeRole` to the fleet's `<fleet>-<kind>-build` role only with the half's tag keys
  * (`sessionTagRequestConditions`), and one `sts:TagSession` to the same role only with the
- * half's transitive tags (`sessionTagConditions`, control-plane ADR-0051). A vendor-owned
+ * half's tag keys, at least one transitive (`sessionTagConditions`, control-plane ADR-0051). A vendor-owned
  * cell account carries no external id (control-plane ADR-0029).
  */
 export function pairTrustProblems(half: 'cell' | 'tenant', role: RoleState, s: AccountState, input: CheckInput): string[] {
@@ -129,10 +130,25 @@ export const PAIR_INLINE_ACTIONS: readonly string[] = [
 ];
 
 /**
+ * The parameter paths the role pair stack grants each half (control-plane §6.2): the shared
+ * namespaces, and the session's own cell and deployment named by its session tags
+ * (control-plane ADR-0051). A pair widened back to every cell's or every tenant's
+ * namespace is refused.
+ */
+export const PAIR_PARAMETER_PATHS: Readonly<Record<'cell' | 'tenant', readonly string[]>> = (() => {
+  const shared = ['/application-plane/shared/*', '/application-plane/applications/*'];
+  const own = (path: string) => [path, `${path}/*`];
+  return {
+    cell: [...shared, ...own(OWN_CELL_PATH)],
+    tenant: [...shared, ...own(OWN_CELL_PATH), ...own(OWN_DEPLOYMENT_PATH)],
+  };
+})();
+
+/**
  * Problems with what the role pair half holds beyond its own stack's set: a managed policy
  * other than its owner policy, an inline policy other than the stack's default policy, or a
- * default policy that grants anything but the SSM namespace actions on
- * `/application-plane/` parameters.
+ * default policy that grants anything but the SSM namespace actions on the
+ * {@link PAIR_PARAMETER_PATHS} of its half.
  */
 export function pairPolicyProblems(half: 'cell' | 'tenant', role: RoleState, s: AccountState, suffix = ''): string[] {
   const problems: string[] = [];
@@ -160,7 +176,7 @@ export function pairPolicyProblems(half: 'cell' | 'tenant', role: RoleState, s: 
         actions.length > 0 &&
         actions.every((a) => PAIR_INLINE_ACTIONS.includes(a)) &&
         resources.length > 0 &&
-        resources.every((r) => r.startsWith(prefix) && r.includes(`:${s.accountId}:parameter/application-plane/`));
+        resources.every((r) => r.startsWith(prefix) && PAIR_PARAMETER_PATHS[half].some((path) => r.endsWith(`:${s.accountId}:parameter${path}`)));
       if (!ok) problems.push(`role pair ${half} role ${role.name}: inline policy ${p.name} grants more than the SSM namespace actions`);
     }
   }

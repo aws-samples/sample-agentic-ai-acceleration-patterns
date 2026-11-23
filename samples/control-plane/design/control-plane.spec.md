@@ -3769,7 +3769,7 @@ the R-50 commit replay, the rotation and the unknown start.
 The session tags of R-52 have a second, smaller scenario of their own in
 the same two accounts, which starts builds directly on the provisioning
 projects with the workflow's overrides: B's pair refuses a build role's
-AssumeRole untagged, with the tags not transitive, with another key, with a
+AssumeRole untagged, with none of the tags transitive, with another key, with a
 missing key, or without the external id, and admits the correct one; two
 tagged cell sessions in B each write their own cell namespace and not the
 other's; a tagged tenant session writes only its own deployment namespace

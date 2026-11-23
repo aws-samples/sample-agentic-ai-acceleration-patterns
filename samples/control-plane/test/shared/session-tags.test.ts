@@ -129,6 +129,10 @@ describe('the role pair trust admits a build only with its session tags, the API
     expect(trustAdmits(tenantTrust, assume(buildRole('tenant'), TENANT_TAGS, ['CellId', 'TenantId', 'ApplicationId']))).toBe(true);
   });
 
+  test('a tenant build with the three tags and only CellId transitive is admitted (the residual of threat model M35)', () => {
+    expect(trustAdmits(tenantTrust, assume(buildRole('tenant'), TENANT_TAGS, ['CellId']))).toBe(true);
+  });
+
   test('a tenant build missing a tag, untagged, or passing an extra key is refused', () => {
     for (const missing of Object.keys(TENANT_TAGS)) {
       const tags = Object.fromEntries(Object.entries(TENANT_TAGS).filter(([k]) => k !== missing));

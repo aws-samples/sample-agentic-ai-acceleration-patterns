@@ -269,8 +269,11 @@ namespace grants below. A build tags its session with what it acts for
 statements: the API role's AssumeRole without tags, the build role's
 AssumeRole with its tag keys and the external id, and the build role's
 TagSession with those tags (STS does not evaluate the external id there).
-The grants name each session's own namespace by its tags, so cell 1's
-session cannot write cell 2's parameters in the same account. The CodeBuild
+The pair's own grants name each session's own namespace by its tags, so
+through them cell 1's session cannot write cell 2's parameters in the same
+account. A stack the script deploys acts through its CloudFormation
+execution role, which carries no tags (Production hardening checklist,
+Accounts). The CodeBuild
 build assumes the
 role before your script runs, so the script executes **in** the cell's
 account with exactly what that account's owner installed. One pair serves
@@ -747,7 +750,7 @@ current default CDK bootstrap template allows, and in the policy that lets
 the pair role assume it. A policy in `cellBuildManagedPolicyArns` or
 `tenantBuildManagedPolicyArns` that allows only `sts:AssumeRole` on such a
 role is refused once the builds are tagged; add `sts:TagSession` on the
-same roles, as the `cellBuildManagedPolicyArns` example under Deploy does,
+same roles, as the `cellBuildManagedPolicyArns` example under Adding an account does,
 before step 3.
 
 ### Example: mounting tenant-identity

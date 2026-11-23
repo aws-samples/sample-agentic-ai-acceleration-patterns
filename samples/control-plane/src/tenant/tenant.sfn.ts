@@ -292,8 +292,9 @@ function inlineBuildspec(kind: ProvisioningRoleKind): string {
  *
  * Two shared CodeBuild projects with distinct service roles separate cell
  * builds from tenant builds (ADR-002, ADR-012). The project roles hold no
- * application-plane permission (ADR-025): each may only assume its half
- * of the provisioning role pair in the cell's account (`accountId`,
+ * application-plane permission (ADR-025): each may only assume, and tag a
+ * session for (ADR-0051), its half of the provisioning role pair in the
+ * cell's account (`accountId`,
  * `cellRoleArn` / `tenantRoleArn`, `externalId` in the input), and the
  * buildspec does so before the script runs. Every lifecycle transition is
  * compare-and-set on the exact expected status; failure writes are
@@ -334,8 +335,8 @@ export class ProvisioningWorkflow extends Construct {
     // Two shared CodeBuild projects (ADR-002 refined by ADR-012, ADR-025).
     // Base source is NO_SOURCE + dummy buildspec: every execution overrides
     // both. The project roles carry NO application-plane permission: each
-    // may only assume its half of the provisioning role pair, by name, in
-    // any registered account (N-8). The pair in each account — installed by
+    // may only assume, and tag a session for, its half of the provisioning
+    // role pair, by name, in any registered account (N-8, ADR-0051). The pair in each account — installed by
     // the account owner — is the provisioning blast radius and THE hardening
     // point of the sample (P-12, §6.4).
     // ------------------------------------------------------------------
@@ -1313,7 +1314,7 @@ function buildRole(scope: Construct, id: string, fleetName: string, kind: Provis
         'aws:SourceArn': buildProjectArn(stack.partition, stack.region, stack.account, fleetName, `${kind}-build` as BuildProjectKind),
       },
     }),
-    description: `${fleetName} control plane ${kind} build: may only assume ${fleetName}-${kind}-provisioning in registered accounts (ADR-025)`,
+    description: `${fleetName} control plane ${kind} build: may only assume and tag a session for ${fleetName}-${kind}-provisioning in registered accounts (ADR-025, ADR-0051)`,
   });
   const target = provisioningRoleArn(stack.partition, '*', fleetName, kind);
   role.addToPolicy(
