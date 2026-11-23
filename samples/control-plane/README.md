@@ -804,7 +804,7 @@ hint when every attempt raced
 ([ADR-0050](./adr/0050-retry-a-transaction-cancelled-only-by-races.md)); it
 answers a cancelled terminal write with `CREATE_FAILED` or `DELETE_FAILED`. The
 driver retries them, a placement with its client token, and the records show
-them as `409:conflict` requests and as `CREATE_FAILED:retried` and
+them as `409:conflict` requests with `conflict` refusals and as `CREATE_FAILED:retried` and
 `DELETE_FAILED:retried` counts
 ([stress ADR-0013](../../stress/adr/0013-pace-waves-at-the-build-limit-and-retry-conflicts.md)).
 

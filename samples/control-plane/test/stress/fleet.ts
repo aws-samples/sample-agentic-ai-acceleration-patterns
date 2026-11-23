@@ -34,10 +34,11 @@ export const adminEmailOf = (tenant: string): string => `success+${tenant.toLowe
 
 /**
  * One `CreateDeployment`, retried on a lost claim race (control-plane ADR-0031), a 409
- * that carries the retry hint (a placement transaction cancelled by races on every attempt
- * wrote nothing, control-plane ADR-0050), an ambiguous placement (a 500 the control plane
- * answers when a placement transaction's outcome is unknown: control-plane spec §7 never
- * retargets it), a throttle or a transport failure. Every attempt carries the same client token, so a retry after an
+ * with the retry hint, which the control plane answers when it wrote nothing (such as a
+ * placement transaction cancelled by races on every attempt, control-plane ADR-0050, or a
+ * tenant still `CREATING`), an ambiguous placement (a 500 the control plane answers when a
+ * placement transaction's outcome is unknown: control-plane spec §7 never retargets it), a
+ * throttle or a transport failure. Every attempt carries the same client token, so a retry after an
  * ambiguous outcome replays it instead of placing twice (stress ADR-0013). Returns
  * `accepted` (202), `exists` (the tenant has one), `full` (`InsufficientCapacityError`,
  * which never clears by waiting) or `failed`.
