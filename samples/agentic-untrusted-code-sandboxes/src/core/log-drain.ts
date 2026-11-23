@@ -17,8 +17,10 @@ import { acknowledgeServiceTimeout } from './nag';
  * retention and outside any stack. The drain sits between the two on
  * delete: writers -> drain (waits) -> log groups.
  *
- * - `protect(logGroup)`: the drain depends on the log group, so the group
- *   is deleted after the drain.
+ * - `protect(construct)`: the drain depends on the construct, so it is
+ *   deleted after the drain: a log group, or a VPC function's role and its
+ *   network interface policy, which Lambda needs to release the function's
+ *   network interfaces after the function is gone (ADR-0073).
  * - `writer(construct)`: the construct depends on the drain, so it is
  *   deleted before the drain starts waiting.
  *
@@ -68,9 +70,9 @@ export class LogDrain extends Construct {
     acknowledgeServiceTimeout(this.resource);
   }
 
-  /** The log group is deleted only after the drain has waited. */
-  public protect(logGroup: IConstruct): void {
-    this.resource.node.addDependency(logGroup);
+  /** The construct (a log group, or a role and its policy) is deleted only after the drain has waited. */
+  public protect(construct: IConstruct): void {
+    this.resource.node.addDependency(construct);
   }
 
   /** The writer is deleted before the drain starts waiting. */

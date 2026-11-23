@@ -53,19 +53,21 @@ nothing else. The function is deleted before the log drain's 90 s wait,
 and the role and that policy after it. The wait starts once the last
 function that writes to the drain is gone, so it also covers an interface
 that several functions share and Lambda deletes with any of their roles.
-A role in another stack than the construct is left out, because the
-construct's stack would then depend on a stack that already depends on it.
+`bindRunCode` refuses a role in another stack than the construct: such a
+role was never deployable, because each stack would depend on the other.
 
 ## Consequences
 
-A delete takes up to 90 s longer only when nothing else holds the log
-drain. The 90 s rests on one observation (about 45 s in run 14); a miss
+A delete takes a few seconds longer: the log drain already waited 90 s
+for its other writers, the run function among them. The 90 s rests on one
+observation (about 45 s in run 14); a miss
 shows as the same `DELETE_FAILED` on the tool subnets. The integration
 test's `teardown` step is the proof; unit tests pin the order for the
 standalone function, bound functions and a function bound with the tool
-role, and that bound functions that invoke each other still synthesise.
+role, and that a bound function granted to invoke another, or the
+standalone function, still synthesises.
 A stack update that removes a bound function, or replaces its role,
 deletes the role at once with no wait, and can leave that function's
 interfaces behind. A function an app builds in the tool subnets without
-`bindRunCode`, or with a role in another stack, is outside this order, and
-its role should outlive it the same way.
+`bindRunCode` is outside this order, and its role should outlive it the
+same way.

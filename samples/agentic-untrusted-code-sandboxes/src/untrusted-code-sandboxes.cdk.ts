@@ -423,11 +423,15 @@ export class UntrustedCodeSandboxes extends Construct {
    * cannot replace: grant the event source with its L2 grant. Attach any
    * other managed policy before binding, and give the function a role of its
    * own, because a role shared with another function loses the two policies
-   * for both. The network interface actions go in a policy of their own on
-   * the role; on stack delete the function goes before the log drain's
-   * 90 s wait and the role and that policy after it, so Lambda can release
-   * the function's network interfaces (ADR-0073). A role in another stack
-   * than the construct is left out of that order.
+   * for both. Rights on a function in the tool subnets (`runCodeFunction` or
+   * another bound function) go through its L2 grant or a policy created with
+   * `roles: [role]`, never through the role's inline policies or a managed
+   * policy the app creates, which the role itself would then wait for: a cycle. The role
+   * must be in the same stack as the construct. The network interface
+   * actions go in a policy of their own on the role; on stack delete the
+   * function goes before the log drain's 90 s wait and the role and that
+   * policy after it, so Lambda can release the function's network
+   * interfaces (ADR-0073).
    */
   public bindRunCode(fn: lambda.IFunction): void {
     if (!(fn instanceof lambda.Function)) {
@@ -438,6 +442,11 @@ export class UntrustedCodeSandboxes extends Construct {
       throw new Error('UntrustedCodeSandboxes.bindRunCode needs a function built with a role created in this app, not an imported one (ADR-0029)');
     }
     // Every refusal comes before the first change, so a caller that catches one is left with the function as it was.
+    if (Stack.of(role) !== Stack.of(this)) {
+      // The tool tenant role's trust names the role and the role gets the tool statements, while the function gets this
+      // stack's subnets and drain: each stack would depend on the other (ADR-0073).
+      throw new Error('UntrustedCodeSandboxes.bindRunCode needs the function\'s role in the same stack as the construct; a role in another stack makes the two stacks depend on each other (ADR-0073)');
+    }
     const cfnRole = role.node.defaultChild as iam.CfnRole;
     const managed = role === this.toolRole ? [] : ((Stack.of(role).resolve(cfnRole.managedPolicyArns) as unknown[] | undefined) ?? []);
     const eventSource = managed.map(flatten).find((m) => /:iam::aws:policy\/service-role\/AWSLambda(SQSQueue|Kinesis|DynamoDB|MSK)ExecutionRole$/.test(m));
@@ -578,11 +587,10 @@ export class UntrustedCodeSandboxes extends Construct {
   /**
    * Lambda deletes a VPC function's network interfaces with the function's own role, about a minute after the
    * function is gone; a role deleted at once leaves them `available`, holding the subnets (ADR-0073). The function goes
-   * before the log drain's wait, and the role and its network interface policy after it. A role in another stack is
-   * left out: the core's stack would then depend on that stack, which already depends on the core.
+   * before the log drain's wait, and the role and its network interface policy after it. `bindRunCode` refuses a role in
+   * another stack, so the role is always in this one.
    */
   private holdForNetworkInterfaces(role: iam.Role, fn: IConstruct): void {
-    if (Stack.of(role) !== Stack.of(this)) return;
     this.logDrain.writer(fn);
     this.logDrain.protect(role.node.defaultChild as iam.CfnRole);
     this.logDrain.protect(this.vpcAccess(role));

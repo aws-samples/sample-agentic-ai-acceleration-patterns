@@ -363,7 +363,7 @@ describe('bindRunCode (spec 3.3)', () => {
     }
   });
 
-  test('bound functions that invoke each other or the standalone function synthesise without a cycle (ADR-0073)', () => {
+  test('a bound function granted to invoke another bound function or the standalone function synthesises without a cycle (ADR-0073)', () => {
     const role = (stack: Stack, id: string) => new iam.Role(stack, id, { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
     const pair = synth({ standalone: false }, (stack, c) => {
       const one = new lambda.Function(stack, 'One', { ...inline, role: role(stack, 'OneRole') });
@@ -379,6 +379,18 @@ describe('bindRunCode (spec 3.3)', () => {
       c.grantInvokeRunCode(one);
     });
     expect(toStandalone.t.toJSON().Resources).toBeDefined();
+  });
+
+  test('a bound function whose role is in another stack is refused before any change (ADR-0073)', () => {
+    const app = new App();
+    const core = new Stack(app, 'Core');
+    const sandboxes = new UntrustedCodeSandboxes(core, 'Sandboxes', { standalone: false });
+    const other = new Stack(app, 'Other');
+    const role = new iam.Role(other, 'R', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
+    const fn = new lambda.Function(core, 'F', { ...inline, role });
+    expect(() => sandboxes.bindRunCode(fn)).toThrow(/role in the same stack as the construct/);
+    expect((fn.node.defaultChild as lambda.CfnFunction).vpcConfig).toBeUndefined();
+    expect(role.node.tryFindChild('VpcNetworkInterfaces')).toBeUndefined();
   });
 
   test('a function bound with the tool role and no standalone function is held the same way (ADR-0073)', () => {

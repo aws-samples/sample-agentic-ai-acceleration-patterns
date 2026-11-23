@@ -214,7 +214,13 @@ The construct's read-only properties are `runCodeFunction` (with
 `toolRole`, `toolTenantRole`, `offboardFunction`, `vpc`, `dnsFirewall`,
 `environment`, `config` (the resolved props), `backends` (each enabled
 backend's CDK side) and `backendOutputs`; its methods are `bindRunCode` and
-`grantInvokeRunCode`.
+`grantInvokeRunCode`. A function given to `bindRunCode` needs a role of its
+own in the construct's stack. Give that role rights on a function in the
+tool subnets through the L2 grant, not through the role's inline policies
+or a managed policy the app creates, which would make the role wait for itself
+(ADR-0073). On stack delete the role outlives its function by the log
+drain's 90 s, so Lambda can release the function's network interfaces; an
+app's own function in the tool subnets needs the same order.
 
 ### Published interface
 
