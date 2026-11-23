@@ -67,9 +67,9 @@ export const MAX_ROUTER_BYTES = 10 * 1024;
 export const REGISTRAR_STAGE = 'v1';
 
 /**
- * The stage throttle: the store takes about three writes a second, and a
- * burst of 100 creates should reach the registrar and queue on the ETag
- * (§3.4 step 5). Chosen, not measured.
+ * The stage throttle: a burst of up to 100 creates reaches the registrar and
+ * queues on the store's one ETag (§3.4 step 5). The limits are chosen. The
+ * stress slice measured a burst of 20 writes, all written within 16 s.
  */
 export const REGISTRAR_THROTTLE = { rateLimit: 10, burstLimit: 100 } as const;
 

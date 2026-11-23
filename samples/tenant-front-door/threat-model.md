@@ -129,10 +129,10 @@ spec §11 question).
 | T-4 | B1 | I | A caller learns that a tenant exists or is suspended. In `single` mode a forged claim for a known id gets 403 when unregistered and 503 when suspended. In `host` mode an unknown host gets 404, and a suspended tenant's host gets 503 on `/config.json` | Accepted (AR-11) | M-37 |
 | T-5 | B1 | D | In `single` mode WAF cannot read the token, so there is no edge rate rule. Forged claims naming a live tenant reach its cell | Accepted (AR-8) | M-28, M-1 |
 | T-6 | B1 | D | In `host` mode an anonymous client sends tokenless requests to one tenant host. WAF counts them before the router refuses them, so the tenant's own users get 429. Many addresses, or one shared office address, change the picture | Mitigated for one address; residual AR-9 | M-27 |
-| T-7 | B1 | D | Floods of unknown hosts or tenants, and hostile input to the router (a very large token, long paths) | Mitigated: refused at the edge, no origin reached, and an `Authorization` header over 8,192 bytes gets 401 before the decode. The cost of refused traffic is accepted (AR-9) | M-1, M-27, M-47 |
+| T-7 | B1 | D | Floods of unknown hosts or tenants, and hostile input to the router (a very large token, long paths) | Open for the router's compute margin in the worst minute under ordinary load (spec §11, Q-1); mitigated for the rest: refused at the edge, no origin reached, and an `Authorization` header over 8,192 bytes gets 401 before the decode. The cost of refused traffic is accepted (AR-9) | M-1, M-27, M-47 |
 | T-8 | B1 | T, E | A page on another site, or another tenant's host in `host` mode, makes a request to `/api/*`, `/agents/*` or `/signin-state` from the user's browser | Mitigated; residual AR-13 | M-29, M-32 |
 | T-9 | B1 | I | A response made for one tenant is cached and served to another, most likely in `single` mode where every tenant shares one host | Mitigated | M-33 |
-| T-10 | B1 | E | A suspension or a route delete takes about 30 s to reach every edge location. Until then the tenant is still routed | Accepted (AR-7) | M-2, M-13 |
+| T-10 | B1 | E | A suspension or a route delete takes about 30 s to reach an edge location. Measured from one client, a suspension took 30 to 60 s to answer five 503s in a row. Until then the tenant is still routed | Accepted (AR-7) | M-2, M-13 |
 | T-11 | B2 | E | A caller reaches a cell's function URL without the edge, skipping the suspension check, the rate rule and the header baseline. Or `CellRouteAccess` is set loosely so another distribution passes | Mitigated | M-5 |
 | T-12 | B2 | I | A valid token reaches a cell that does not host its tenant: a wrong or stale `cell#` route, an operator backfill error, a wrong placement (T-28). If the account belongs to someone else, that party sees a live bearer token | Mitigated for the refusal. The cell still receives the token (AR-4) | M-2, M-8, M-4 |
 | T-13 | B2 | E | A cell API does not verify the token, ignores the hint or skips the hosts check, so a forged token or a token for another tenant is served | Contract only; the front door cannot enforce it (AR-26) | M-2 |
@@ -186,7 +186,7 @@ spec §11 question).
 | T-61 | B13 | T, E | Someone who can write an object under `/assets/*` in the SPA bucket changes a chunk. `'strict-dynamic'` trusts everything the hashed entry imports, so the script runs in every tenant's origin at once, with the access token and the refresh token in reach (T-46 for every tenant). `style-src 'self'` trusts the bucket too: a changed stylesheet defaces, but `img-src` and `default-src` keep it from sending data to another origin. `worker-src 'none'`, so no worker script loads. Someone who rewrites `index.html` can copy its two hashed inline scripts (the callback script and the import map) and the entry tag with its `integrity` byte for byte, so the hashes still match, and add markup around them: a phishing surface inside every tenant's origin, bounded by `form-action` (`'self'` and the authorize origin). They can also put back the previous release's `index.html`, which still runs while its hashes stay in the policy, a downgrade by one release. Neither runs new script | Mitigated for new script: a browser that checks the import map refuses a chunk it does not pin, and no worker loads. The rest rests on M-44, the bucket's write controls: a browser that ignores import map `integrity`, a rewritten `index.html` (markup, downgrade), a changed stylesheet. Residual: the edge account's administrators (AR-6) | M-44, M-45 |
 | T-62 | B13 | T, E | A principal in the edge account updates the router's code (`cloudfront:UpdateFunction`, `PublishFunction`), the distribution (`UpdateDistribution`), a response headers policy (`UpdateResponseHeadersPolicy`) or the web ACL (`wafv2:UpdateWebACL`, `us-east-1`). Each removes checks for every tenant at once: the router's routing and refusals, the origin access control, the P-8 header baseline, the rate rules | Accepted; the edge account's administrators are the deployer (AR-6), and the edge account is vendor-owned and hosts no tenant-owned cell (spec §6.1) | M-36 |
 | T-63 | B12 | D, T | The front door hook parameter is missing: deleted out of band in the control plane's account, or lost with a `RouteHookAccess` stack delete. The route hook reads `ParameterNotFound` and exits 0, a silent skip. Creates reach `ACTIVE` with no route. On a delete the hook also exits 0, so no skip alarm fires and the `tenant#` entry stays `active`, pointing at its old cell. The kept parameter brings two failures of its own: after a stack delete or a rolled-back first create, the next deploy of `RouteHookAccess` fails because the parameter exists; after a changed `applicationId`, the old application's parameter stays, the registrar answers 403 to the hook for that application, and its creates and updates fail | Mitigated against the stack delete (`Retain`). A deliberate deletion in the control plane's account is accepted (AR-30) | M-46 |
-| T-64 | B4 | D | Every writer uses the store's one ETag. A burst of hook writes (a bulk onboarding), operator calls and `signin` updates conflict, re-read and retry. A write that loses five attempts answers 503, the hook retries, and after the hook's retries the create fails (`CREATE_FAILED`) | Mitigated to a bounded retry. Sustained writes above about one a second, or a burst above about 100 (estimated), are accepted (AR-29) | M-15, M-49 |
+| T-64 | B4 | D | Every writer uses the store's one ETag. A burst of hook writes (a bulk onboarding), operator calls and `signin` updates conflict, re-read and retry. A write that loses five attempts answers 503, the hook retries, and after the hook's retries the create fails (`CREATE_FAILED`) | Mitigated to a bounded retry. Sustained writes above about one a second, or a burst larger than the 20 writes the stress slice measured, are accepted (AR-29) | M-15, M-49 |
 | T-65 | B5 | T | A hook build runs hidden: a start whose outcome the control plane cannot tell ("start outcome unknown", control-plane T40, T42) can leave a route hook build running beside a `CREATE_FAILED` or `UPDATE_FAILED` record, or beside a delete's next attempt | Mitigated: a hidden put lands only while the record is `CREATING` or `UPDATING` and gets 409 after; a route it wrote is removed by the delete that remedies the failed create; a hidden delete repeats an idempotent delete | M-7, M-9, M-13 |
 
 ## Mitigations
@@ -211,9 +211,9 @@ hardening checklist (standard §7).
 | M-10 | The display name `n` comes from the control plane's `GetTenant`, never from a hook. The registrar replaces control characters, `"` and `\`, and cuts it to 64 bytes, so no stored character needs escaping | Spec §3.4 step 2, §4.1; ADR-0017 | T-20 |
 | M-11 | Host and domain rules in every route write: only the edge operator role may send `customDomain`, and only while `dedicatedDomains` is on; one lower-case host of at most 64 characters, no wildcard; never `appDomain` or `*.<appDomain>`; reserved labels (`www`, `api`, `admin`, `auth`, `login`, `static`, `status`) refused; 409 on a host or a pending claim another tenant holds | Spec §3.4 steps 3 and 4, §4.1, §5.1; ADR-0013, ADR-0016, ADR-0018. Planned check: step 11 | T-39, T-40 |
 | M-12 | The route hook handles input as untrusted. Ids come from `CELL_ID` and `TENANT_ID`, never from `SCRIPT_OUTPUTS`, and must be control-plane ids. It refuses outputs that are not a JSON object of strings, finds a repeated key with a streaming parse, rejects a missing `frontDoorApiDomain`, reads the value exactly (a trailing newline included) and checks the origin form before sending (the registrar checks it again), builds bodies with `jq --arg`, and never `eval`s. Credentials come from `aws configure export-credentials`, are checked against their character sets so they cannot break the config line, reach `curl --aws-sigv4` through a mode-600 `-K` file and never a command line, and are never printed. The registrar's error body is printed, which holds no token | Spec §3.4 (route hook steps 1 to 3), §5.2; ADR-0017; control-plane R-43 | T-29, T-30 |
-| M-13 | Hook failure semantics keep the table honest. A failing `POST` hook fails the create or update, so `ACTIVE` means routed. The delete hook runs `PRE`, before the delete script, so the route goes while the record still exists. A delete hook that fails three times is skipped and counted by the control plane. The hook waits 45 s for propagation after a write | Spec §3.4 (route hook step 4 and the paragraphs after it), §4.2; ADR-0017, ADR-0003; control-plane R-45, R-46. Planned check: steps 16, 21, 22 | T-10, T-31, T-65 |
+| M-13 | Hook failure semantics keep the table honest. A failing `POST` hook fails the create or update, so `ACTIVE` means routed. The delete hook runs `PRE`, before the delete script, so the route goes while the record still exists. A delete hook that fails three times is skipped and counted by the control plane. The hook waits 45 s for propagation after a write, a bound the measured times can exceed (spec §4.2) | Spec §3.4 (route hook step 4 and the paragraphs after it), §4.2; ADR-0017, ADR-0003; control-plane R-45, R-46. Planned check: steps 16, 21, 22 | T-10, T-31, T-65 |
 | M-14 | The registrar reads the control plane with a reader token only: its own app client, whose `role` is a namespaced entry of the control plane's `readerRoles`, the client id in `vendorIdp.clientIds`, and `requiredScope` set when the client can call another API. The secret lives in Secrets Manager in the edge account. The token is cached until it expires. A failed read refuses the write | Spec §3.6, §6.1, §3.4 step 2; ADR-0015; spike S-9; control-plane R-36, R-38. Deployer action: rotate the secret | T-27, T-31 |
-| M-15 | Store writes are optimistic. Every write uses the store's ETag (`IfMatch`); on a conflict the registrar re-reads the keys, repeats the checks of steps 3 and 4 and the size check, and retries. A write that rests on a DNS answer is retried only if the entry still holds the same `d` and `dk`. The `signin` custom resource does the same | Spec §3.4 step 5 (end), §3.5; ADR-0003 | T-24, T-43, T-64 |
+| M-15 | Store writes are optimistic. Every write uses the store's ETag (`IfMatch`). A stale ETag is a conflict, whether the store answers `ConflictException` (409), an HTTP 412 or, as a real store does, a 400 `ValidationException` whose message says the pre-condition failed. On a conflict the registrar re-reads the keys, repeats the checks of steps 3 and 4 and the size check, and retries. A write that rests on a DNS answer is retried only if the entry still holds the same `d` and `dk`. The `signin` custom resource does the same | Spec §3.4 step 5 (end), §3.5; ADR-0003, ADR-0031 | T-24, T-43, T-64 |
 | M-16 | Roles are split and narrow. The registrar never deletes a distribution tenant or certificate, and holds no ACM or CloudFront domain action while `dedicatedDomains` is off. The sweeper cannot write routes: it holds read actions on the store, not `PutKey`. Only the sweeper role holds the sweeper table, and its ACM delete is conditioned on the registrar's distribution tag. The registrar's creates carry that tag with this distribution's id and no tag keys but its own three; its tag grants (`cloudfront:TagResource`, `acm:AddTagsToCertificate`) apply only where the resource's distribution tag is already this distribution's id, which a create's own tags satisfy, so it cannot put the distribution tag on a resource it did not create (it can rewrite the tenant tags on its own, residual AR-33). Each front door creates its pooled distribution tenant with the distribution tag set to `pooled/<distribution id>`: the value is no distribution's id, so IAM refuses every front door's registrar the tag grants on it and refuses the `UpdateDistributionTenant` and `DeleteDistributionTenant` of every front door's registrar, sweeper and teardown on it (residual AR-33). The sweeper and the teardown also skip it by its id before any read, a second guard. No code reads the tag's value. Where IAM cannot narrow an action, the code checks the tenant's distribution and tags first (409) | Spec §3.4 (IAM paragraphs), §3.1; ADR-0018, ADR-0020, ADR-0022 | T-25, T-55 |
 | M-17 | The edge operator role is the vendor's own and the stack does not create it. It sits behind the vendor's sign-in and multi-factor rule, and no role a cell account, a tenant or the hook role can assume reaches it. The registrar's own checks apply to it too: form of the origin, the `GetCell` read, the domain rules and the challenge | Spec §3.4 (operator role paragraph), §3.6; ADR-0017. Deployer action: MFA, short sessions, review of who can assume it | T-21, T-23 |
 | M-18 | Audit: the registrar logs the caller role, key and outcome, never the body (step 6). The API access log names the calling account, the edge account or the control plane's, on the refused calls. CloudTrail records each operator call under the role's name. The hook role's calls say "some global hook" (AR-1) | Spec §3.4 step 6, §10 step 15; ADR-0017 | T-23, T-26 |
@@ -245,9 +245,9 @@ hardening checklist (standard §7).
 | M-44 | The SPA bucket has one writer. Block Public Access is on, the bucket owner enforces ownership, versioning is on, and the bucket policy lets the distribution read (origin access control) and denies `s3:PutObject`, `DeleteObject` and `DeleteObjectVersion` to every principal except the stack's two deployment roles, the upload and the teardown emptying. A bad write is a new version that can be rolled back | Spec §3.1, §3.2, §7.1; ADR-0023. Planned check: the bucket policy template test, step 10 | T-61 |
 | M-45 | Imported chunks are pinned. The build writes an import map with an `integrity` (`sha384`) for every chunk the entry can import and puts `integrity` on the entry. The CSP, which the response headers policy carries and the bucket does not, holds the hashes of the entry and the import map. The build fails when a chunk has no entry. A browser that ignores import map `integrity` loads chunks unchecked, and M-44 is the control there | Spec §7.1, §7.2; ADR-0008, ADR-0023. Planned check: the SPA build test, step 10 | T-61 |
 | M-46 | The hook parameter outlives its stack. `RouteHookAccess` sets `DeletionPolicy` and `UpdateReplacePolicy` `Retain` on it, so deleting or replacing the stack leaves it, and the teardown deletes it as a step of its own. Only a deliberate deletion in the control plane's account removes it. Its name is fixed, so the operator deletes or imports it before deploying `RouteHookAccess` again after a stack delete or a rolled-back first create, and deletes the old application's parameter when `applicationId` changes | Spec §3.1, §3.4 (route hook step 1), §6.2; ADR-0017. Planned check: step 24 | T-63 |
-| M-47 | Header size is capped at the router. An `Authorization` header longer than 8,192 bytes gets 401 before any decode, in both modes. The limit is chosen, not measured: spike S-7 measured a 1,184-byte token at 13 % compute, and step 5 checks the compute of a header of exactly 8,192 bytes | Spec §3.3 step 5; ADR-0005; spike S-7. Planned check: step 5 | T-7 |
+| M-47 | Header size is capped at the router. An `Authorization` header longer than 8,192 bytes gets 401 before any decode, in both modes. The limit is chosen, not measured: spike S-7 measured a 1,184-byte token at 13 % compute, and step 5 checks the compute of a header of exactly 8,192 bytes. The stress slice's highest per-minute maximum is 94 % under ordinary load; its cause is not established (spec §3.3, §11 Q-1) | Spec §3.3 step 5; ADR-0005; spike S-7. Planned check: step 5 | T-7 |
 | M-48 | Alarms are wired. The optional `alarmTopicArn` input is the ALARM action of every alarm the specification defines: the five sweeper alarms of M-24 and the 80 % store alarm of M-43. A template test checks each one names it. With no topic the alarms notify no one (AR-25) | Spec §3.6, §3.4 step 5, §4.1, §10 | T-54 |
-| M-49 | Contention is bounded. The registrar attempts a write five times with a jittered backoff of 50 to 500 ms, then answers 503, and the hook retries five times over about two minutes. Estimated, not measured: about three writes a second at most, about one sustained, and a burst of 100 clears in about 70 s. Past that, creates fail visibly and are repeated. Sharding by distribution gives each shard its own ETag | Spec §3.4 step 5 and route hook step 4, §5.1, §6.2; ADR-0003, ADR-0012 | T-64 |
+| M-49 | Contention is bounded. The registrar attempts a write five times with a jittered backoff of 50 to 500 ms, then answers 503, and the hook retries five times over about two minutes. Measured by the stress slice: in a run that starts with a burst of 20, a write takes 0.50 to 0.51 s at the median and 7.2 to 7.8 s at the 95th percentile, and the burst is written within 16 s. The load assumed is about one write a second. Past what the store clears within the hook's retries, creates fail visibly and are repeated. Sharding by distribution gives each shard its own ETag | Spec §3.4 step 5 and route hook step 4, §5.1, §6.2; ADR-0003, ADR-0012 | T-64 |
 | M-50 | The exchange works from the browser and fails closed. The deployer lists `https://<appDomain>` (`single`) or `https://*.<appDomain>` (`host`) in `tenant-identity`'s `allowedOrigins` (`tenant-identity` §5.4.1 and ADR-0040), which echoes only a listed `Origin` and sends `Vary: Origin` on every answer; another issuer must echo only those origins. The SPA keeps the request a CORS simple request (only the form `Content-Type`, no credentials, the exchange URL excluded from tracing instrumentation). On a network error it retries at most twice and keeps the refresh token. The router refuses a `tenants` token with 401 either way, so a failed exchange is a gap in availability, not in the boundary. A browser test against a stub endpoint checks the headers and the retry; `tenant-identity`'s §10 step 7 checks its answers | Spec §3.5, §6.1, §6.3, §7.2, §10; `tenant-identity` ADR-0040 | T-50 |
 
 ## Who can read and write what
@@ -404,11 +404,13 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
 - **AR-7: Suspension and delete take effect after propagation (T-10).**
    A write reaches an edge location in about 30 s (spike S-2: median
    28.4 s, p99 29.4 s, max 29.5 s, one location). The hook waits 45 s.
-   Until then the tenant is still routed, and the cell's hosts check is the
-   only refusal. *Why:* the store is eventually consistent; no
-   alternative reads at the edge without a network call (ADR-0003). *Bounded
-   by:* the window is under a minute at the measured location; other
-   locations were not measured.
+   From one client the stress slice saw a suspension take 30 to 60 s to
+   answer five 503s in a row, and a new route missed by some request up to 60 s after its write:
+   both can exceed the hook's wait. Until then the tenant is still routed,
+   and the cell's hosts check is the only refusal. *Why:* the store is
+   eventually consistent; no alternative reads at the edge without a network
+   call (ADR-0003). *Bounded by:* the window is about a minute from the one
+   client and location measured; other locations were not measured.
 - **AR-8: `single` mode has no edge rate rule, and forged claims reach an
    origin (T-1, T-5).** WAF cannot read the token's tenant. A request with
    a forged claim naming a live tenant costs one invocation of that cell
@@ -575,13 +577,15 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
     race is between two vendor actions and ends in a 409, not a wrong route.
     *Bounded by:* the ETag re-check (M-15), the certificate and distribution
     tenant checks (M-16), and the operator's repeat-safe calls.
-- **AR-29: Route writes are limited to about one a second, or a burst of
-  about 100 (T-64).** Past that, creates fail after the hook's retries
-  (`CREATE_FAILED`) and the operator deletes and creates them again; a
-  delete hook that fails three times is skipped (AR-23). The figures are
-  estimated from the registrar's retry bound (five attempts, 50 to 500 ms
-  backoff), the hook's (five attempts over about two minutes) and an
-  assumed 0.3 s cycle from ETag read to write. No spike has measured them.
+- **AR-29: Route writes are limited to about one a second, or a burst the
+  store cannot clear within the hook's retries (T-64).** Past that, creates
+  fail after the hook's retries (`CREATE_FAILED`) and the operator deletes
+  and creates them again; a delete hook that fails three times is skipped
+  (AR-23). The one-a-second figure is the load the registrar is sized for.
+  The stress slice measured a write cycle of 0.50 to 0.51 s at the median
+  and 7.2 to 7.8 s at the 95th percentile in a run that starts with a burst
+  of 20, and that burst written within 16 s; no larger burst is
+  characterised (spec §3.4 step 5).
   *Why:* one store and one ETag keep writes correct (ADR-0003); throughput
   is the price. *Bounded by:* the bounded retries (M-49) and the 5 MB
   store (M-43). Sharding by distribution gives each shard its own ETag
@@ -656,7 +660,9 @@ starting "Why" gives the reason; "Bounded by" says what limits it.
 
 ## Open items
 
-None. Spec §11 has no open question.
+- T-7: the router's compute margin in the worst minute under ordinary load
+  (spec §11, Q-1). The stress slice reads 94 % and has not isolated the
+  invocation that costs it.
 
 ## Security review
 
@@ -676,6 +682,17 @@ checkov, gitleaks, CVE, IAM least privilege, licence headers): 0 critical,
 
 cdk-nag (47) and checkov (35) suppressions were all reviewed as info; each
 cites its reason in the code.
+
+ASH scanned the stress driver (`test/stress/`), its scripts
+(`scripts/stress/`, `scripts/smoke.sh`), the shared ETag test
+(`src/shared/etag-conflict.ts`, `src/registrar/route-store.ts`,
+`src/custom-resources/route-table-keys.function.ts` and their tests),
+`src/main.ts`, `src/edge/main.cdk.ts` and `test/smoke/smoke.app.ts` on
+2026-11-21 (semgrep, bandit, cdk-nag, checkov, detect-secrets, npm-audit):
+0 high, 0 medium and 0 low. The secret scanner raised three critical
+findings, all false positives. Two, a base32 alphabet and a mock credential
+in a test, carry an allowlist comment in the code. The third is a placeholder
+`clientSecretArn` in the usage comment of `src/main.ts`.
 
 ## Links
 
