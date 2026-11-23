@@ -14,7 +14,7 @@ SPDX-License-Identifier: MIT-0
 [`docs/stress-test.spec.md`](../../docs/stress-test.spec.md).
 
 A cell account holds one role pair, and every cell build in the account
-assumes the same pair role (spec §3.7). ADR-0006 accepts the result: a
+assumes the pair's cell role (spec §3.7). ADR-0006 accepts the result: a
 compromised cell build can change any cell in its account, which is the
 role pair's scope, and spec §3.7 adds that it can change nothing else in
 the account, because the account holds only cells.
@@ -90,13 +90,17 @@ way.
   nothing breaks. The rule becomes the same at every tier: one cell, one
   account.
 - Residual threat: closed for cell against cell, by script call and by
-  CDK. A compromised build still changes its own cell and the role pair.
+  CDK. A compromised build still changes its own cell and nothing else
+  in the account.
 - Stress code and text: `tiers.ts` (`large.cellAccounts` 4) and its test,
   the spec's tier table (§4.1), the account rows of §3.1, §3.2 and §3.6,
   W-11, the cell accounts file and `check-accounts`, the seeded-fleet
-  fixture (P-5), and the owner steps in `stress/application/README.md`.
-  The registration needs no change: the control plane computes `maxCells`
-  as the cells divided by the cell accounts.
+  fixture (P-5), the `large` fixture of
+  `samples/control-plane/test/stress/plan.test.ts`, and the owner steps in
+  `stress/application/README.md`. The registration code needs no change:
+  the control-plane slice driver computes `maxCells` as the cells divided
+  by the cell accounts (`maxCellsPerAccount` in
+  `samples/control-plane/test/stress/plan.ts`).
 
 ### Option 2: A CloudFormation execution role for each cell
 Give each cell its own execution role, scoped to that cell, and let the
@@ -148,7 +152,7 @@ ADR-0006 describes, and say why that is acceptable here.
   execution role under the known limitations.
 
 ## Decision
-Recommended: Option 3. The decision is open until Dave picks.
+Recommended: Option 3. The decision is open until the deciders choose.
 
 The stress accounts hold nothing but cells that the control plane builds
 from a pinned commit, and the test measures load and quotas, so the
