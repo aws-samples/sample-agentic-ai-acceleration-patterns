@@ -26,7 +26,8 @@
 # Environment: PROBE_PREFIX (names the stacks and the fleet), AWS_REGION, credentials for the
 # account (AWS_PROFILE), PROBE_TENANTS (default 20: one warm-up tenant and 19 racers),
 # PROBE_HOME (default ~/.conflict-probe), INTEG_DEPLOY_CONCURRENCY (default 2). It needs bash,
-# curl, git, jq, openssl, zip, node and the AWS CLI. It prints ids, statuses and counts only, never a
+# curl, git, jq, openssl, zip, node and the AWS CLI, and `npm ci` (then `npx projen pre-compile`
+# for the generated Smithy code) in the sample before `deploy`. It prints ids, statuses and counts only, never a
 # token or a password, and never runs `set -x` (scripts/CONVENTIONS.md).
 #
 # shortcut: one cell, one Region and the no-op scripts; enough to make placements meet on one
@@ -38,6 +39,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SAMPLE_DIR="$(cd "${here}/.." && pwd)"
 REPO="$(cd "${SAMPLE_DIR}/../.." && pwd)"
 verb="${1:-}"
+case "$verb" in
+  deploy | setup | burst | reset | clean) ;;
+  *)
+    echo "usage: conflict-probe.sh deploy | setup | burst | reset | clean" >&2
+    exit 2
+    ;;
+esac
 
 : "${PROBE_PREFIX:?conflict-probe.sh: set PROBE_PREFIX (names the stacks and the fleet)}"
 : "${AWS_REGION:?conflict-probe.sh: set AWS_REGION}"
@@ -84,11 +92,12 @@ sign_in() {
   secret="Aa1!$(openssl rand -hex 12)"
   INPUT="$(mktemp)"
   chmod 600 "$INPUT"
-  jq -n --arg p "$pool" --arg u probe-operator --arg s "$secret" \
-    '{UserPoolId: $p, Username: $u, Password: $s, Permanent: true}' > "$INPUT"
+  # The password reaches jq through its environment, never its argv.
+  PROBE_SECRET="$secret" jq -n --arg p "$pool" --arg u probe-operator \
+    '{UserPoolId: $p, Username: $u, Password: $ENV.PROBE_SECRET, Permanent: true}' > "$INPUT"
   aws cognito-idp admin-set-user-password --cli-input-json "file://${INPUT}" > /dev/null
-  jq -n --arg p "$pool" --arg c "$client" --arg u probe-operator --arg s "$secret" \
-    '{UserPoolId: $p, ClientId: $c, AuthFlow: "ADMIN_USER_PASSWORD_AUTH", AuthParameters: {USERNAME: $u, PASSWORD: $s}}' > "$INPUT"
+  PROBE_SECRET="$secret" jq -n --arg p "$pool" --arg c "$client" --arg u probe-operator \
+    '{UserPoolId: $p, ClientId: $c, AuthFlow: "ADMIN_USER_PASSWORD_AUTH", AuthParameters: {USERNAME: $u, PASSWORD: $ENV.PROBE_SECRET}}' > "$INPUT"
   token="$(aws cognito-idp admin-initiate-auth --cli-input-json "file://${INPUT}" \
     --query AuthenticationResult.IdToken --output text)"
   rm -f "$INPUT"
@@ -125,12 +134,13 @@ deployment_body() {
 # alternation such as `ACTIVE|[A-Z]+_FAILED`); a 404 ends the wait as `gone` when PATTERN
 # includes `gone`. Prints the last status; fails on timeout.
 wait_for() {
-  local path="$1" field="$2" want="$3" until=$((SECONDS + $4)) status
+  local path="$1" field="$2" want="$3" until=$((SECONDS + $4)) status refreshed=0
   while [ "$SECONDS" -lt "$until" ]; do
     call GET "$path"
-    if [ "$STATUS" = 401 ]; then
-      # The ID token outlived its hour: sign in again and poll on.
+    if [ "$STATUS" = 401 ] && [ "$refreshed" -eq 0 ]; then
+      # The ID token outlived its hour: sign in again, once per wait, and poll on.
       sign_in
+      refreshed=1
       continue
     fi
     if [ "$STATUS" = 404 ] && [[ gone =~ ^(${want})$ ]]; then
@@ -162,9 +172,10 @@ delete_deployments() {
       [ "$STATUS" = 202 ] || [ "$STATUS" = 404 ] || log "DeleteDeployment ${t}: ${STATUS}"
     done
     for t in "${wave[@]}"; do
-      for attempt in 1 2 3; do
+      for attempt in 1 2 3 4; do
         s="$(wait_for "/tenants/${t}/deployments/${APP_ID}" deployment 'gone|DELETE_FAILED' 900 || true)"
         [ "$s" != gone ] || break
+        [ "$attempt" -lt 4 ] || break
         log "deployment of ${t}: ${s}, deleting again (${attempt})"
         call DELETE "/tenants/${t}/deployments/${APP_ID}"
       done
@@ -190,9 +201,10 @@ case "$verb" in
       rmdir "$tree"
     fi
     log "deploy: ${SETUP_STACK} and ${CP_STACK} from ${commit} in ${AWS_REGION}"
+    account="$(aws sts get-caller-identity --query Account --output text)"
     started=$SECONDS
     (cd "$SAMPLE_DIR" && STRESS_PREFIX="$PROBE_PREFIX" STRESS_BUILD_LIMIT=50 STRESS_SOURCE_ZIP="$zip" \
-      CDK_DEFAULT_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)" CDK_DEFAULT_REGION="$AWS_REGION" \
+      CDK_DEFAULT_ACCOUNT="$account" CDK_DEFAULT_REGION="$AWS_REGION" \
       node_modules/.bin/cdk --app "node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/stress-app.ts" \
       --output "${HOME_DIR}/cdk.out" deploy "$SETUP_STACK" "$CP_STACK" --require-approval never \
       --concurrency "${INTEG_DEPLOY_CONCURRENCY:-2}" --progress events > "${HOME_DIR}/deploy.log" 2>&1) || {
@@ -290,9 +302,12 @@ case "$verb" in
     echo "refused calls that left a deployment: ${stray}"
     echo "results: ${run}"
     failed_500="$(grep -lx 500 "${run}"/*.code 2> /dev/null | wc -l || true)"
+    # Any first answer but 202, 409 and 500 (a transport failure, a 4xx, a 502 or 504).
+    other_codes="$(grep -Lx -e 202 -e 409 -e 500 "${run}"/*.code 2> /dev/null | wc -l || true)"
+    # CREATE_FAILED is settled: the workflow's terminal write is outside ADR-0050.
     left_creating="$(grep -cvx -e ACTIVE -e CREATE_FAILED "${run}/end" || true)"
-    if [ "$failed_500" -ne 0 ] || [ "$other" -ne 0 ] || [ "$stray" -ne 0 ] || [ "$left_creating" -ne 0 ]; then
-      log "burst: FAILED (${failed_500} answered 500, ${other} 409s without the hint, ${stray} strays, ${left_creating} not settled)"
+    if [ "$failed_500" -ne 0 ] || [ "$other_codes" -ne 0 ] || [ "$other" -ne 0 ] || [ "$stray" -ne 0 ] || [ "$left_creating" -ne 0 ]; then
+      log "burst: FAILED (${failed_500} answered 500, ${other_codes} other answers, ${other} 409s without the hint, ${stray} strays, ${left_creating} not settled)"
       exit 1
     fi
     log "burst: passed"
@@ -331,10 +346,5 @@ case "$verb" in
     log "clean: records $([ "$status" -eq 0 ] && echo removed || echo LEFT)"
     echo "Remove the stacks by hand, control plane first: ${CP_STACK}, then ${SETUP_STACK}."
     exit "$status"
-    ;;
-
-  *)
-    echo "usage: conflict-probe.sh deploy | setup | burst | reset | clean" >&2
-    exit 2
     ;;
 esac

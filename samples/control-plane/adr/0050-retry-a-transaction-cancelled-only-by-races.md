@@ -25,10 +25,10 @@ its deployment `CREATING` with no execution to move them.
 DynamoDB cancels a member for capacity too: `ThrottlingError` and
 `ProvisionedThroughputExceeded`. Those also applied nothing. A transaction
 with a member that failed its condition (`ConditionalCheckFailed`) is
-classified by position, as ADR-0013 decides. Two neighbouring errors are not cancellations:
-`TransactionConflictException` is thrown by a single-item write that meets a
-transaction in flight, which these five callers never send; and
-`TransactionInProgressException` is thrown when the same
+classified by position, as ADR-0013 decides. Two neighbouring errors are not
+cancellations: `TransactionConflictException` is thrown by a single-item
+write that meets a transaction in flight, which these five callers never
+send; and `TransactionInProgressException` is thrown when the same
 `ClientRequestToken` is still in flight, whose outcome may still be a commit.
 
 ## Options considered
@@ -41,16 +41,16 @@ full fleet would answer a 409 that names no race. It does nothing for the
 compensation or the hooks.
 
 ### Option 2: Send the same transaction again, then answer a retryable 409
-A cancellation whose every reason is `None` or a race code is sent again on
-the same candidate, a few times with full jitter, inside the API's 29-second
+A cancellation with at least one race code and every other reason `None` is
+sent again on the same candidate, a few times with full jitter, inside the API's 29-second
 window. When every attempt races, the repository throws
 `TransactionRaceError` and the service answers `ConflictError` with the retry
 hint of R-14: nothing was written, so the caller's retry can succeed. One
 classifier and one retry helper serve all five callers. Pros: a race costs a
 few hundred milliseconds instead of a failed request; the compensation does
-not strand records on a single race; no cell is created for a race. Cons: a hot
-cell item adds up to 350 ms of waiting to a request, and a placement under a
-sustained burst can still answer the 409.
+not strand records on a single race; no cell is created for a race. Cons: a
+hot cell item adds up to 350 ms of waiting to a request, and a placement under
+a sustained burst can still answer the 409.
 
 ### Option 3: Answer the 409 at once, with no retry
 Classify a race-only cancellation as `TransactionRaceError` on the first
@@ -73,7 +73,7 @@ The first attempt carries the caller's `ClientRequestToken`; each later
 attempt carries the token with the suffix `-r<attempt>`. A race-only
 cancellation is a definite answer that applied nothing, so a new token cannot
 apply the transaction twice, and it never meets whatever DynamoDB recorded for
-the cancelled attempt's token. The CreateDeployment idempotency item (ADR-017)
+the cancelled attempt's token. The CreateDeployment idempotency item (ADR-0017)
 is part of every attempt and is written only by the one that commits.
 
 `TransactionConflictException` and `TransactionInProgressException` are not
@@ -86,7 +86,7 @@ CreateDeployment answers a race-only cancellation, once its attempts are
 spent, with a 409 whose message carries the retry hint, never a 500.
 PutHook and DeleteHook answer the same 409. The paired compensation is sent
 again on a race, so it strands the records only when every attempt races; the
-compensation stays best-effort (ADR-011). A cancellation with every reason
+compensation stays best-effort (ADR-0011). A cancellation with every reason
 `None`, a failed condition in a position the classifier does not name, and
 any other error stay ambiguous, as ADR-0013 decides. Revisit the attempt count
 if a placement burst larger than the stress test's waves answers the 409 often.
