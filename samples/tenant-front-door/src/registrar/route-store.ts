@@ -7,7 +7,6 @@
 import '@aws-sdk/signature-v4a';
 import {
   type CloudFrontKeyValueStoreClient,
-  ConflictException,
   DescribeKeyValueStoreCommand,
   GetKeyCommand,
   ResourceNotFoundException,
@@ -16,6 +15,7 @@ import {
 } from '@aws-sdk/client-cloudfront-keyvaluestore';
 import { refuse } from './errors';
 import { emitRouteTableBytes } from './log';
+import { isEtagConflict } from '../shared/etag-conflict';
 import { MAX_STORE_BYTES } from '../shared/route-table';
 
 /**
@@ -61,13 +61,6 @@ export interface KvsRouteStoreOptions {
 }
 
 const bytes = (s: string): number => Buffer.byteLength(s, 'utf8');
-
-/** The store refuses the `IfMatch` of a stale ETag with a conflict (409; 412 is read the same way). */
-function isEtagConflict(error: unknown): boolean {
-  if (error instanceof ConflictException) return true;
-  const status = (error as { $metadata?: { httpStatusCode?: number } } | undefined)?.$metadata?.httpStatusCode;
-  return status === 409 || status === 412;
-}
 
 export class KvsRouteStore implements RouteStore {
   private readonly sleep: (ms: number) => Promise<void>;

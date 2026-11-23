@@ -28,6 +28,12 @@
     "projen": "projen"
   },
   "devDependencies": {
+    "@aws-crypto/sha256-js": "5.2.0",
+    "@aws-sdk/client-cloudwatch": "3.1125.0",
+    "@aws-sdk/client-cloudwatch-logs": "3.1125.0",
+    "@aws-sdk/client-sts": "3.1125.0",
+    "@aws-sdk/credential-providers": "3.1125.0",
+    "@smithy/signature-v4": "5.7.5",
     "@stylistic/eslint-plugin": "^2",
     "@types/aws-lambda": "8.10.163",
     "@types/jest": "^30.0.0",

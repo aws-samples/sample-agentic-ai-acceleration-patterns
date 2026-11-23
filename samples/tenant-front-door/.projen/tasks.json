@@ -324,6 +324,12 @@
           "execArgs": [
             "npm",
             "update",
+            "@aws-crypto/sha256-js",
+            "@aws-sdk/client-cloudwatch-logs",
+            "@aws-sdk/client-cloudwatch",
+            "@aws-sdk/client-sts",
+            "@aws-sdk/credential-providers",
+            "@smithy/signature-v4",
             "@stylistic/eslint-plugin",
             "@types/aws-lambda",
             "@types/jest",

@@ -11,7 +11,7 @@ folder's `cell-policies.yaml`, `app.js` and `probes.sh`. CP-9 is decided by
 stress [ADR-0011](../../adr/0011-give-the-roles-a-cell-creates-a-workload-boundary-without-iam.md).
 This folder is the record of the 2026-11-18 and 2026-11-19 runs only.
 
-Questions ([spec](../../../docs/stress-test.spec.md) §8, decision 7; §10 Q-5, the request path, stays open (CP-6);
+Questions ([spec](../../../docs/stress-test.spec.md) §8, decision 7; §10 Q-5, the request path, stayed open here (CP-6) and was answered by the first platform run at `small`, [`stress/results/2026-11-21-small.md`](../../results/2026-11-21-small.md);
 stress [ADR-0006](../../adr/0006-deploy-cells-through-a-scoped-cell-bootstrap.md)):
 does a cell bootstrap whose execution role and every cell role carry the
 cell boundary, with IAM scoped to the `/cell/` role path, refuse every way
@@ -108,7 +108,7 @@ three positive controls.
 | CP-3 | Every runtime-isolation role takes `Path: /cell/` from an aspect on `AWS::IAM::Role` resources, custom-resource provider roles included; the stack names roles by `Fn::GetAtt`, so no ARN breaks | answers the deploy of decision 7 |
 | CP-4 | A cell account needs more than the bootstrap and the role pair: the API Gateway account's CloudWatch Logs role (runtime-isolation stages log) and the identity parameters a cell reads (`/application-plane/shared/identity/*`, pointing at the platform's issuer) | the account owner's stack holds them; spec §3.7 lists it |
 | CP-5 | `cdk deploy` with the default or the CLI-credentials synthesizer needs the default bootstrap's bucket and roles; the legacy synthesizer deploys an asset-free stack inline with the caller's credentials | the owner stacks use it, so the account never gets a default bootstrap |
-| CP-6 | Not tested: the request path under `/cell/` in a cell account (the integration test reuses a shared pool and deploys stacks of its own beside the cell) | the first platform run at `small` is the check |
+| CP-6 | Not tested: the request path under `/cell/` in a cell account (the integration test reuses a shared pool and deploys stacks of its own beside the cell) | the first platform run at `small` is the check; it passed ([`stress/results/2026-11-21-small.md`](../../results/2026-11-21-small.md)) |
 | CP-7 | With `ssm:*` on `*`, any cell role could overwrite the owner's identity parameters, so the next cell would trust an issuer the attacker picks (found in review) | the boundary denies SSM writes to `/application-plane/shared/identity/*` and `/cdk-bootstrap/cell/*`; probed |
 | CP-8 | With `apigateway:*` on `*` and `iam:PassRole` on `/cell/`, any cell role could repoint the account's API Gateway CloudWatch Logs role, which the owner deploys, or break logging for every stage (found in review) | the boundary denies `apigateway:PATCH`, `PUT` and `DELETE` on `/account`; probed. A cell needs no change there, since the owner sets it |
 | CP-9 | The probe stack and the cell carry one boundary for the execution role and every role a cell creates, so a workload role holds IAM write, `iam:PassRole` and `sts:AssumeRole` headroom on `role/cell/*` that it never uses | W-10 decides whether cell roles get a second, narrower boundary (ADR-0006) |

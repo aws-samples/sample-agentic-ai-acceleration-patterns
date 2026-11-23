@@ -13,7 +13,10 @@
 # Inputs (environment): SMOKE_APP_DOMAIN (a name below SMOKE_ZONE_NAME),
 # SMOKE_ZONE_ID, SMOKE_ZONE_NAME. Region eu-central-1, edge in us-east-1.
 # Needs the tenant-identity shared-pool deployment (its published
-# parameters). Tokens and keys stay in shell variables and 0600 files.
+# parameters), and the account's API Gateway CloudWatch Logs role in the Region
+# (`aws apigateway update-account`): the registrar's stage writes its access
+# logs through it, and the stand-in API creates none. Tokens and keys stay in
+# shell variables and 0600 files.
 #
 # The stacks stay up after the run. Remove them with cdk destroy in the
 # order dns, cell, front door (edge-logging, main, edge), control plane, support.

@@ -97,6 +97,17 @@ bash against stub `curl`, `aws` and `sleep` commands placed first on
 `PATH`. A change to either script keeps those tests passing. The smoke
 scripts and `demo.sh` are checked by running them live.
 
+## The stress slice
+
+`stress/` follows the log hygiene and temp file rules above, and differs
+in two places. The runner calls its verbs one at a time, so the stacks it
+deploys stay up for the `teardown` verb, not for an `EXIT` trap, and
+`teardown` removes the run's tenants, routes, parameters and stacks and
+lists what it leaves. `seed` registers the vendor scope `app/use` on the
+shared pool when the catalogue lacks it and leaves it there, because a
+later run reuses it; it changes nothing else in the pool. See
+[`stress/README.md`](./stress/README.md).
+
 ## Scope
 
 These conventions apply to every script in this directory, the route

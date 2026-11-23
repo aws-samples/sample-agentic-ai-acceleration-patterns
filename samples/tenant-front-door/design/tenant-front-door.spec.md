@@ -419,11 +419,18 @@ The router reads at most three keys per request. `/api/*` on a host it
 looks up (`host` mode, or a dedicated domain) reads all three: `host#`,
 `tenant#` and `cell#`. The token decode reads no key, so the `host` mode
 agreement check of step 5 adds no read, and its compute is the decode
-S-7 measured (13-14 %). It checks no token signatures and writes
-nothing to the store; its only output besides the request or the
-answer is the tenant id it passes to `cf.logCustomData` (§3.1). In
-`single` mode it holds no secrets. In `host` mode it holds one, the
-sign-in HMAC key in the `signin` entry (§3.5, ADR-0016).
+S-7 measured (13-14 %). The stress slice reads the function's compute
+utilization once a minute, as the maximum over that minute's
+invocations, and its highest minute is 94 % under ordinary load. The
+two figures measure different things, one decode against the worst
+invocation of a minute. What raises the worst invocation to 94 % is
+not established, and the router's margin to the function's limit at
+that reading is open (§11, Q-1). The router checks no
+token signatures and writes nothing to the store; its only output
+besides the request or the answer is the tenant id it passes to
+`cf.logCustomData` (§3.1). In `single` mode it holds no secrets. In
+`host` mode it holds one, the sign-in HMAC key in the `signin` entry
+(§3.5, ADR-0016).
 
 ### 3.4 Route registrar, step by step
 
@@ -1065,21 +1072,33 @@ given below):
    held.
 
    Every writer shares the store's one ETag (ADR-0003), so writes
-   serialise and a conflict costs a re-read. The registrar attempts a
+   serialise and a conflict costs a re-read. A stale `IfMatch` is a
+   conflict whether the store answers `ConflictException` (409), an
+   HTTP 412, or a 400 `ValidationException` whose message says the
+   pre-condition failed (ADR-0031). The registrar attempts a
    write at most five times, with a jittered backoff of 50 to 500 ms
    between attempts, and then answers 503, which the route hook
    retries (route hook step 4: five attempts over about two
-   minutes). These bounds are chosen. The rates that follow are
-   estimated, not measured: a cycle from the ETag read to the write
-   takes about 0.3 s, so the store takes about three writes a second
-   at most and about half that under conflicts. The load assumed is
-   about one write a second; nothing throttles the registrar to it, and
-   at that load the store has room for the retries. A burst of
-   100 simultaneous creates clears in about 70 s, inside the hook's
-   two minutes. A larger burst leaves creates in `CREATE_FAILED`,
-   which the operator deletes and creates again (route hook, after
-   step 4). Sharding by distribution, each shard with its own store
-   and ETag (ADR-0012), is the way past the ceiling.
+   minutes). These bounds are chosen, and so is the stage throttle,
+   10 calls a second with a burst of 100. The rates that follow are
+   measured by the stress slice (`scripts/stress/README.md`, small
+   tier). A run starts with a burst of 20 writes at once, then writes
+   one a second for 30 s. In such a run a write takes 0.50 to 0.51 s
+   at the median, 7.2 to 7.8 s at the 95th percentile and 8.2 to 8.6 s
+   at the 99th, because every writer waits on the store's one ETag.
+   The 20 writes of the burst are all written within 16 s, which includes the
+   measuring client's own wait of about 5 s before it tries a 503
+   again, so the store takes no longer than that. About one registrar
+   call in twelve of such a run answers 503 after the registrar's five
+   attempts, and the route hook retries it. The load assumed is about
+   one write a second; nothing throttles the registrar to it, and at
+   that load the store has room for the retries. A burst of 20
+   creates at once is the largest one characterised, and the capacity
+   above it is not. A burst the store cannot clear within the hook's
+   retries leaves creates in `CREATE_FAILED`, which the operator
+   deletes and creates again (route hook, after step 4). Sharding by
+   distribution, each shard with its own store and ETag (ADR-0012), is
+   the way past the ceiling.
 6. Log the caller role, key and outcome, never the body.
 
 Deletes run steps 1 and 2, the write of step 5 with its ETag and its
@@ -1532,6 +1551,7 @@ carries over (step 5).
 | `ipRequestsPer5Min` | no | 500 | `host` mode only: the most requests one client IP may send to one tenant host's `/api/*` and `/agents/*` in 5 minutes before the edge answers 429, counted ahead of the per-host count (ADR-0021). One value for every tenant host; there is no per-tenant setting. A chosen value, not a measured one. Keep it below `tenantRequestsPer5Min`. A tenant whose users all reach the edge through one office NAT address shares one count: at 500 its whole user base gets about 1.7 requests per second before `tenantRequestsPer5Min` applies. Raising it raises it for every host. An integer from 10 to 2,000,000,000; set in `single` mode, synth fails |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports, on for the whole session in both modes. No report carries the callback's code, because the first inline script removes it from the URL before anything loads (§7.1 Reports) |
 | `registrarUrl` | no | none | The `registrarUrl` of this front door's edge parameter (§6.4), `https://<api id>.execute-api.<control plane Region>.amazonaws.com/v1/`, known once the main stack is deployed. Set, the app adds the `RouteHookAccess` stack in the control plane's account and Region (§3.1, ADR-0027); validated at synth |
+| `stackNamePrefix` | no | `TenantFrontDoor` | The start of every stack name, and of the app's construct id, which names the CloudFront policies and other account-wide resources. Two front doors in one account need different values, and different Regions, because the edge parameter's name is fixed (§6.4). The stress slice sets it (ADR-0030) |
 | `alarmTopicArn` | no | none | ARN of an SNS topic in the main stack's account and Region. The construct adds it as the ALARM action of every alarm this specification defines: the three-miss, `unverifiable`, queue-depth, missing-pages and no-lister alarms of the sweeper (§3.4 step 5) and the 80 % route table alarm on the registrar's `RouteTableBytes` metric (§4.1). Every one of these alarms is in the main stack's Region, so one topic serves them all. The deployer owns the topic, its policy (it must allow CloudWatch to publish) and its subscribers. With no topic the alarms exist and notify no one |
 
 `src/main.ts` also reads two test seams, `routerSourcePath` and
@@ -1691,9 +1711,14 @@ about 30 s at one location (spike S-2: median 28.4 s, p99 29.4 s, max
 29.5 s). It does not reach every server of that location at once: from
 one client the first routed request came 16 to 37 s after the write, and
 requests still missed the change up to about 63 s after it (design/spikes.md,
-Smoke run). A check that needs every request to see a change therefore
-waits 90 s. The route hook bounds its wait at 45 s after the registrar
-returns, so the operation does not end before its route is live. For
+Smoke run). The stress slice (`scripts/stress/README.md`) measured the first
+routed request 23 to 40 s after the registrar's answer at the median and up
+to 58 s at the 99th percentile, the last miss up to 60 s after it, and a
+suspension taking 30 to 60 s to answer five 503s in a row. A check that needs
+every request to see a change therefore waits 90 s. The route hook bounds its
+wait at 45 s after the registrar returns. That is a bound, not a guarantee:
+the times above can exceed it, and then an operation ends before every
+request sees its route. For
 cell routes and every call in `single` mode it waits the full 45 s, a
 bound and not a check: in `single` mode a route cannot be observed
 without a tenant token, and a `cell#` route cannot be observed from
@@ -2155,8 +2180,9 @@ Limits of these promises:
   application's creates and updates fail. The operator deletes the old
   application's parameter in the same change (§3.1).
 - Route writes share one store ETag, so sustained writes above about
-  one a second, or a burst above about 100, fail creates (§3.4
-  step 5). Those figures are estimates.
+  one a second, or a burst larger than the 20 writes the stress slice
+  sends at once, can fail creates (§3.4 step 5). One a second is the
+  load the registrar is sized for; no larger burst is characterised.
 - `single` mode has no edge rate rule. The origin's per-tenant limit
   counts verified requests only (ADR-0009).
 - In `host` mode the edge rate rules count a request before the router
@@ -2410,6 +2436,9 @@ mode, every other tenant's cookies. The sample sets no cookies (§3.5).
 | [ADR-0026](../adr/0026-copy-the-distribution-arn-to-cell-accounts-as-a-plain-string.md) | Copy the distribution ARN to each cell account as a plain string | a JSON document; a plain string |
 | [ADR-0027](../adr/0027-write-the-hook-parameter-from-the-registrar-url-input.md) | Write the front door hook parameter, one JSON document, from a `registrarUrl` input once the main stack is deployed | an input read after the main stack's deploy; the hook reads the edge parameter across accounts; a fixed registrar domain; a separate app |
 | [ADR-0028](../adr/0028-drive-the-integration-test-from-a-bash-driver.md) | Drive the §10 integration test from `scripts/integ.sh` over two CDK apps, one stack per CDK call, with the §6.2 teardown in an `EXIT` trap | integ-runner with integ-tests-alpha; a bash driver |
+| [ADR-0029](../adr/0029-join-stress-requests-on-the-cloudfront-request-id.md) | Join the stress slice's requests to the edge log on the CloudFront request id, with no correlation header; the origin is joined by counts | the stress ADR-0005 correlation header; the CloudFront request id; X-Ray trace ids |
+| [ADR-0030](../adr/0030-run-the-stress-slice-on-the-smoke-stack.md) | Run the stress slice on the smoke stack, its stacks, hook role and construct id named by a run prefix; budget Lambda concurrency only | the smoke stack named by a prefix; a stack of its own in the front door app; wait for platform mode |
+| [ADR-0031](../adr/0031-read-a-pre-condition-validation-error-as-an-etag-conflict.md) | Read a stale `IfMatch` as an ETag conflict whether the store answers `ConflictException` or a 400 `ValidationException` that says the pre-condition failed | `ConflictException` only; both answers; re-read the ETag after any failure |
 
 ## 9. Spikes
 
@@ -3043,4 +3072,9 @@ commands.
 
 ## 11. Open questions
 
-None is open.
+- Q-1: What raises the router's compute utilization to 94 % in the worst
+  minute under ordinary load, and what margin is left to the function's
+  limit (§3.3)? The stress slice reads the metric once a minute, as the
+  maximum over that minute's invocations, and does not isolate the
+  invocation that costs it. A run that sends one request in a minute
+  settles it.

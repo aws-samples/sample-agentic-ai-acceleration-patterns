@@ -7,6 +7,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { type Draw, type Limits, overdraws, parseDraws, sumDraws } from './budget';
+import { setupActions, stepsBeforeTeardown } from './platform';
 import { parseRecord, recordFailures, renderResults, type ResultRecord } from './result';
 import { loadSlice, orderSlices, type Slice, type Verb } from './slice';
 import { type Tier, tierOf, tierProblems } from './tiers';
@@ -145,7 +146,7 @@ export interface RunOptions {
   readonly repoRoot: string;
   readonly tier: string;
   readonly slices: readonly string[];
-  /** Scenario ids to run; default every scenario the slices declare (see `scenarioOrder`). */
+  /** Scenario ids to run; default per mode (see `scenarioOrder`): the `PS-<n>` scenarios in a platform run, every scenario but the `platformOnly` ones in a slice run. */
   readonly scenarios?: readonly string[];
   /** Folder for manifests, the lock and results, outside the repository (spec §4.2). */
   readonly home: string;
@@ -200,16 +201,38 @@ export function planRun(opts: Pick<RunOptions, 'repoRoot' | 'tier' | 'slices'>):
   const problems = tierProblems(tier);
   if (problems.length > 0) throw new Error(problems.join('; '));
   if (opts.slices.length === 0) throw new Error('name at least one slice');
-  const slices = orderSlices(opts.slices.map((s) => loadSlice(opts.repoRoot, s)));
-  return { tier, slices, mode: slices.length === 1 ? 'slice' : 'platform' };
+  const loaded = opts.slices.map((s) => loadSlice(opts.repoRoot, s));
+  // Several slices make a platform run, which needs every slice a slice needs. Say whether a
+  // missing one is no slice at all or only left out of --slices.
+  if (loaded.length > 1) {
+    const named = new Set(loaded.map((s) => s.name));
+    for (const s of loaded) {
+      for (const n of s.needs.filter((x) => !named.has(x))) {
+        const declared = fs.existsSync(path.join(opts.repoRoot, 'samples', n, 'scripts', 'stress', 'slice.json'));
+        throw new Error(
+          declared
+            ? `${s.name} needs ${n}, which the run does not include: add it to --slices`
+            : `${s.name} needs ${n}, which is not a slice: samples/${n}/scripts/stress/slice.json is missing`,
+        );
+      }
+    }
+  }
+  const slices = orderSlices(loaded);
+  const mode = slices.length === 1 ? 'slice' : 'platform';
+  setupActions(slices, mode); // refuses a platform order that calls a step a slice does not declare
+  return { tier, slices, mode };
 }
 
 /**
  * The default scenario order: the platform scenarios `PS-<n>` by number
  * (spec §5.1), then each slice's own scenarios in the order it declares them.
+ * `mode` picks what runs when no scenario is named (spec §5.2): a platform run
+ * takes only the `PS-<n>` scenarios, a slice run takes everything but the
+ * scenarios a slice marks `platformOnly`.
  */
-export function scenarioOrder(slices: readonly Slice[]): string[] {
-  const all = [...new Set(slices.flatMap((s) => s.scenarios))];
+export function scenarioOrder(slices: readonly Slice[], mode: 'slice' | 'platform'): string[] {
+  const platformOnly = new Set(slices.flatMap((s) => s.platformOnly));
+  const all = [...new Set(slices.flatMap((s) => s.scenarios))].filter((sc) => (mode === 'platform' ? /^PS-\d+$/.test(sc) : !platformOnly.has(sc)));
   const platform = all.filter((s) => /^PS-\d+$/.test(s)).sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
   return [...platform, ...all.filter((s) => !platform.includes(s))];
 }
@@ -237,9 +260,21 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   const { tier, slices, mode } = planRun(opts);
   // A scenario no slice declares is refused before anything touches disk,
   // so the corrected command can reuse the run id.
-  const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices))];
+  const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices, mode))];
   const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
   if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
+  if (scenarios.length === 0) {
+    throw new Error(
+      opts.scenarios !== undefined
+        ? '--scenarios names no scenario, so the run has nothing to run'
+        : mode === 'platform'
+          ? 'no slice in the run declares a PS-<n> scenario, so a platform run has nothing to run: name --scenarios or add the slices that own them'
+          : 'the slice declares no scenario to run in slice mode (none, or only platformOnly ones), so the run has nothing to run: add the slices it needs to --slices',
+    );
+  }
+  // A scenario that needs the other slices' interfaces has nothing to run against alone.
+  const alone = scenarios.filter((sc) => mode === 'slice' && slices.some((s) => s.platformOnly.includes(sc)));
+  if (alone.length > 0) throw new Error(`${alone.join(', ')} runs in platform mode only: name every slice it needs in --slices`);
   const prefixDir = path.join(opts.home, opts.prefix);
   const runDir = path.join(prefixDir, opts.runId);
   const resultsDir = path.join(runDir, 'results');
@@ -352,15 +387,20 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     }
     stopIfAborted();
 
-    for (const s of slices) {
+    // A slice-mode run deploys and then seeds each slice in turn; a platform run follows the
+    // interleaved order of `PLATFORM_SETUP` (spec §3.5), so a slice can read what an earlier
+    // slice made when it deploys. A slice's deploy seconds are the time of its `deploy` and
+    // its set-up steps, which is the time it takes to be ready to run (P-6); `seed` is not part of it.
+    const byName = new Map(slices.map((s) => [s.name, s]));
+    for (const a of setupActions(slices, mode)) {
+      const s = byName.get(a.slice)!;
       const t0 = Date.now();
-      started.set(s.name, { start: now().toISOString() });
-      if (!(await verb(s, 'deploy'))) throw new Stopped();
-      started.get(s.name)!.deploySeconds = Math.round((Date.now() - t0) / 1000);
-      stopIfAborted();
-    }
-    for (const s of slices) {
-      if (!(await verb(s, 'seed'))) throw new Stopped();
+      if (!started.has(s.name)) started.set(s.name, { start: now().toISOString() });
+      if (!(await verb(s, a.verb, a.step === undefined ? [] : [a.step]))) throw new Stopped();
+      if (a.verb !== 'seed') {
+        const info = started.get(s.name)!;
+        info.deploySeconds = (info.deploySeconds ?? 0) + Math.round((Date.now() - t0) / 1000);
+      }
       stopIfAborted();
     }
     for (const sc of scenarios) {
@@ -425,6 +465,13 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
 
   async function teardown(s: Slice): Promise<void> {
     const t0 = Date.now();
+    // Steps that must run before this slice's teardown (platform mode, `PLATFORM_BEFORE_TEARDOWN`), for the
+    // slices that started; their time counts in this slice's destroy seconds, and a failed one is recorded
+    // by `verb` and does not stop the teardown (the slice's own teardown names what it still finds).
+    for (const a of stepsBeforeTeardown(s.name, slices, mode)) {
+      const owner = slices.find((x) => x.name === a.slice);
+      if (owner !== undefined && started.has(owner.name)) await verb(owner, 'step', [a.step!]);
+    }
     const ok = await verb(s, 'teardown', opts.removeFixtures ? ['--fixtures'] : []);
     const info = started.get(s.name)!;
     const lifecycle: ResultRecord = {

@@ -12,7 +12,10 @@
  * - the cell workload boundary: on every role a cell creates; no IAM at all, and
  *   `sts:AssumeRole` on `role/cell/*` only (ADR-0011);
  * - the cell build policy: what the account owner attaches to the role pair's cell
- *   role through control-plane's `cellBuildManagedPolicyArns` (control-plane ADR-0047).
+ *   role through control-plane's `cellBuildManagedPolicyArns` (control-plane ADR-0047);
+ * - the cell tenant build policy: what the account owner attaches to the role pair's
+ *   tenant role through `tenantBuildManagedPolicyArns`, for the tenant script's
+ *   Entitlements API calls (stress ADR-0012).
  *
  * Every ARN is built from the stack's partition, account and Region pseudo parameters,
  * so the templates name no account.
@@ -177,11 +180,12 @@ export interface CellPolicyNames {
   readonly boundary: string;
   readonly workloadBoundary: string;
   readonly build: string;
+  readonly tenantBuild: string;
 }
 
 const SUFFIX = /^(-[a-z0-9]{1,16})?$/;
 
-/** The names of the four cell policies, with an optional suffix (`-` and up to 16 lower-case letters or digits). */
+/** The names of the five cell policies, with an optional suffix (`-` and up to 16 lower-case letters or digits). */
 export function cellPolicyNames(suffix = ''): CellPolicyNames {
   if (!SUFFIX.test(suffix)) {
     throw new Error('the cell policy suffix must be empty or `-` followed by 1 to 16 lower-case letters or digits');
@@ -191,6 +195,7 @@ export function cellPolicyNames(suffix = ''): CellPolicyNames {
     boundary: `cell-permissions-boundary${suffix}`,
     workloadBoundary: `cell-workload-boundary${suffix}`,
     build: `cell-build-policy${suffix}`,
+    tenantBuild: `cell-tenant-build-policy${suffix}`,
   };
 }
 
@@ -369,5 +374,30 @@ export function cellBuildBootstrapRoleArns(): string[] {
 export function cellBuildPolicyDocument(): iam.PolicyDocument {
   return new iam.PolicyDocument({
     statements: [new iam.PolicyStatement({ sid: 'AssumeCellBootstrapRoles', actions: ['sts:AssumeRole'], resources: cellBuildBootstrapRoleArns() })],
+  });
+}
+
+/** The Entitlements API methods a tenant build calls on its cell (`/entitlements/tenants/{tenantId}`). */
+export const TENANT_BUILD_METHODS = ['GET', 'PUT', 'DELETE'] as const;
+
+/**
+ * The cell tenant build policy: what the account owner attaches to the role pair's tenant
+ * role through control-plane's `tenantBuildManagedPolicyArns` (control-plane ADR-0022,
+ * ADR-0025). The tenant script writes and removes its tenant's subscription on the cell's
+ * Entitlements API with SigV4 (spec §3.3, step 3), so the role may invoke the tenant
+ * subscription methods of the account's APIs in this Region, and nothing else: not the
+ * plans, not the agent or tool routes.
+ */
+export function cellTenantBuildPolicyDocument(): iam.PolicyDocument {
+  return new iam.PolicyDocument({
+    statements: [
+      new iam.PolicyStatement({
+        sid: 'InvokeTenantSubscriptions',
+        actions: ['execute-api:Invoke'],
+        resources: TENANT_BUILD_METHODS.map(
+          (m) => `arn:${Aws.PARTITION}:execute-api:${Aws.REGION}:${Aws.ACCOUNT_ID}:*/*/${m}/entitlements/tenants/*`,
+        ),
+      }),
+    ],
   });
 }

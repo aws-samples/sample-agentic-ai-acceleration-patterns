@@ -81,6 +81,7 @@ describe('cellPolicyNames', () => {
       boundary: 'cell-permissions-boundary',
       workloadBoundary: 'cell-workload-boundary',
       build: 'cell-build-policy',
+      tenantBuild: 'cell-tenant-build-policy',
     });
   });
   it('takes a short suffix and refuses anything else', () => {
@@ -94,8 +95,8 @@ describe('cellPolicyNames', () => {
 describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
   const { json } = policiesTemplate();
 
-  it('passes cdk-nag, holds the four managed policies and nothing else, with no CDK bootstrap dependency', () => {
-    expect(Object.values(json.Resources).map((r: any) => r.Type)).toEqual(Array(4).fill('AWS::IAM::ManagedPolicy'));
+  it('passes cdk-nag, holds the five managed policies and nothing else, with no CDK bootstrap dependency', () => {
+    expect(Object.values(json.Resources).map((r: any) => r.Type)).toEqual(Array(5).fill('AWS::IAM::ManagedPolicy'));
     // Legacy synthesizer: no bootstrap version parameter or rule.
     expect(json.Parameters?.BootstrapVersion).toBeUndefined();
     expect(json.Rules?.CheckBootstrapVersion).toBeUndefined();
@@ -295,6 +296,22 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
     });
   });
 
+  describe('the tenant build policy (stress ADR-0012)', () => {
+    const p = managedPolicy(json, 'cell-tenant-build-policy');
+
+    it('invokes the tenant subscription methods of the account\'s APIs in its Region only', () => {
+      expect(p.statements).toEqual([
+        {
+          Sid: 'InvokeTenantSubscriptions',
+          Effect: 'Allow',
+          Action: 'execute-api:Invoke',
+          Resource: ['GET', 'PUT', 'DELETE'].map((m) => `arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:*/*/${m}/entitlements/tenants/*`),
+        },
+      ]);
+      expect(JSON.stringify(p.statements)).not.toMatch(/plans|POST|\/agents|\/tools/);
+    });
+  });
+
   it('follows the suffix in every name and in the boundary condition', () => {
     const names = cellPolicyNames('-v2');
     const { json: j } = policiesTemplate(names);
@@ -306,7 +323,7 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
 });
 
 describe('CellAccountBaseStack (spec §3.7, CP-4)', () => {
-  function base(props: { userPoolId?: string; appClientId?: string } = {}): any {
+  function base(props: { userPoolId?: string; appClientId?: string; platformAccountId?: string } = {}): any {
     const app = new App();
     Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
     return render(Template.fromStack(new CellAccountBaseStack(app, 'CellAccountBase', props)).toJSON());
@@ -337,6 +354,39 @@ describe('CellAccountBaseStack (spec §3.7, CP-4)', () => {
   it('refuses one identity input without the other', () => {
     expect(() => new CellAccountBaseStack(new App(), 'B', { userPoolId: 'x' })).toThrow(/both/);
     expect(() => new CellAccountBaseStack(new App(), 'C', { appClientId: 'x' })).toThrow(/both/);
+  });
+
+  describe('the ingress reader role (spec §3.5)', () => {
+    const PLATFORM = '123456789012';
+    const PARAMETERS = 'arn:<AWS::Partition>:ssm:<AWS::Region>:<AWS::AccountId>:parameter/application-plane/shared/agent-runtime/StressCell-*/ingress';
+    const readers = (json: any): any[] =>
+      (Object.values(json.Resources) as any[]).filter((r) => r.Type === 'AWS::IAM::Role' && r.Properties.AssumeRolePolicyDocument.Statement[0].Principal.Service === undefined);
+
+    it('exists only for a platform account', () => {
+      expect(readers(base())).toHaveLength(0);
+      expect(base().Outputs).toBeUndefined();
+    });
+
+    it('is trusted by the platform account only, on / with no boundary, and reads one parameter pattern', () => {
+      const json = base({ platformAccountId: PLATFORM });
+      const [role] = readers(json);
+      expect(readers(json)).toHaveLength(1);
+      expect(role.Properties.Path).toBeUndefined();
+      expect(role.Properties.PermissionsBoundary).toBeUndefined();
+      expect(role.Properties.AssumeRolePolicyDocument.Statement).toEqual([
+        { Action: 'sts:AssumeRole', Effect: 'Allow', Principal: { AWS: `arn:<AWS::Partition>:iam::${PLATFORM}:root` } },
+      ]);
+      const policies = (Object.values(json.Resources) as any[]).filter((r) => r.Type === 'AWS::IAM::Policy');
+      expect(policies).toHaveLength(1);
+      expect(policies[0].Properties.PolicyDocument.Statement).toEqual([
+        { Sid: 'ReadCellIngressParameters', Action: 'ssm:GetParameter', Effect: 'Allow', Resource: PARAMETERS },
+      ]);
+      expect(Object.keys(json.Outputs)).toEqual(['IngressReaderRoleArn']);
+    });
+
+    it('refuses a platform account that is not 12 digits', () => {
+      expect(() => new CellAccountBaseStack(new App(), 'D', { platformAccountId: 'platform' })).toThrow(/12-digit/);
+    });
   });
 });
 
