@@ -226,9 +226,16 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   files. Nothing on the host locks; give a concurrent run its own prefix and driver.
 - Budget limits are what `--limits` says; without it the runner checks
   against service defaults, not the accounts' applied quotas.
-- Scenarios run one after another. Spec §5.1 runs PS-5 (churn) and PS-7
-  (cross-cell probes) during PS-2; the runner runs PS-5 and PS-7 on their
-  own after PS-4, without PS-2's load.
+- Scenarios run one after another, by default in the order of their
+  numbers (spec §3.5), so PS-5 (churn) runs on its own after PS-4 and
+  PS-7 (cross-cell probes) on its own after PS-6, without PS-2's load
+  (spec §1.2, §5.1, stress ADR-0018).
+- The quota catalogue has no ids yet for the API Gateway control plane,
+  for CloudFront Functions compute and KeyValueStore size, or for the
+  Cognito user-write categories that the control-plane driver's identity
+  calls draw on (spec §4.4), so no slice can declare them. They are
+  added with the first slice that draws on them (W-7 for the front door,
+  W-9 for the identity calls).
 - Platform mode has not run live. Its parts are tested alone: the runner's order and
   scenario filter, the slice scripts against stubbed manifests and a stubbed `aws`, and PS-5
   against a simulated control plane, registrar and edge. `k6/probe.js`'s platform lines are
@@ -276,10 +283,6 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   registrar allows only its edge operator role for `UpdateTenantRouteStatus`, so the session
   that runs PS-5 must hold that role; with another role the finding reads `HTTP 403`, and with
   no credentials `HTTP 0`.
-- The quota catalogue has no ids yet for the API Gateway control plane or
-  for CloudFront Functions compute and KeyValueStore size (spec §4.4), so
-  no slice can declare them. They are added with the first slice that
-  draws on them (W-7 for the front door).
 - The k6 library has no k6 run in this folder's build: `record.js` is tested, `lib.js` is
   checked by running `k6/smoke.js` and `K6_COMMAND=inspect` on a deployed host. A change to
   `lib.js` needs that check again.

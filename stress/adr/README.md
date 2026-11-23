@@ -26,6 +26,8 @@ that change a sample are recorded in that sample's `adr/`.
 | [0014](./0014-ship-the-cell-source-as-a-zip-of-the-pinned-commit.md) | Ship the cell source as a zip of the pinned commit | Proposed | 2026-11-20 |
 | [0015](./0015-check-the-cell-accounts-with-the-owners-read-access.md) | Check the cell accounts with the owner's read access | Proposed | 2026-11-20 |
 | [0016](./0016-send-agent-traffic-to-the-one-cells-ingress-at-small.md) | Send agent traffic to the one cell's ingress at `small` | Proposed | 2026-11-20 |
+| [0017](./0017-create-the-identity-tenant-and-users-in-the-control-plane-driver.md) | Create each control-plane tenant's identity tenant and users in the control-plane driver | Proposed | 2026-11-20 |
+| [0018](./0018-run-churn-and-cross-cell-probes-on-their-own-not-beside-the-load.md) | Run churn and cross-cell probes on their own, not beside the load | Accepted | 2026-11-21 |
 
 In `samples/control-plane/adr/`:
 

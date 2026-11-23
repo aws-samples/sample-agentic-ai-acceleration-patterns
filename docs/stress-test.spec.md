@@ -26,7 +26,7 @@ time:
 |---|---|
 | How fast does the platform make a tenant ready to use? | onboarding crosses the control plane, CodeBuild, tenant-identity, the Entitlements API and the route registrar |
 | What does the front door add, and does it stay correct at 1,000s of tenants across cells and accounts? | the edge, the route table and the cell origins only exist together |
-| Do tenants that are added, suspended or removed during load reach the right place, and how soon? | churn is a control-plane write that the edge and the ingress must both see |
+| Do tenants that are added, suspended or removed reach the right place, and how soon? | churn is a control-plane write that the edge and the ingress must both see |
 
 A fourth question is a side effect of composition: the samples share
 account-wide quotas (Lambda concurrency, STS, KMS, CodeBuild, the API
@@ -46,7 +46,7 @@ runtime-isolation deployment for up to `maxTenants` tenants.
 - Isolation end to end: every request checks the tenant at the layers
   its path crosses (§5.3): the ingress and the vended credential for
   agent calls, under load; the edge and the cell for `/api/*` calls.
-- Churn under load: route updates seen at the edge within a measured time;
+- Churn: route updates seen at the edge within a measured time;
   suspended and removed tenants refused at the edge, never at an origin.
 - The shared quota that gives out first at each tier, with the tenant it
   hits.
@@ -63,6 +63,9 @@ runtime-isolation deployment for up to `maxTenants` tenants.
   (Q-7, stress ADR-0016). At `small` the edge check on agent calls reads
   no route hint (§5.3).
 - Several Regions.
+- Churn and cross-cell probes under load. The runner runs scenarios one
+  after another, so PS-5 and PS-7 run without PS-2's load beside them
+  (§5.1, stress ADR-0018).
 - Soak runs over days. One platform run is a working day at most.
 
 ### 1.3 What the test is NOT
@@ -102,7 +105,7 @@ budget shows by how much.
 **P-5. Pay for a large fleet once.** At `large`, onboarding thousands of
 tenants through CodeBuild takes hours. The fleet is seeded once through the
 control plane and kept as a fixture. Each run reuses it and onboards only a
-churn slice under load.
+churn slice.
 
 **P-6. Deploy and destroy time are results.** Every slice reports both,
 next to its functional results. A slice that cannot be destroyed cleanly
@@ -124,8 +127,8 @@ it first shows.
 |---|---|---|
 | Contract | `stress/` at the repository root | `src/`: tiers, slice declaration, quota budget, result records, runner (`run.sh`); the k6 library (`stress/k6/`) |
 | Driver host | `stress/driver/`, its own CDK app (stress ADR-0009) | one EC2 instance, no inbound rule, no public IP, SSM Session Manager, k6 and the AWS CLI |
-| Stress application | `stress/application/` | a control-plane application whose cell scripts deploy one runtime-isolation cell with a cell API origin and whose tenant scripts onboard one tenant (§3.3) |
-| Slice: `control-plane` | `samples/control-plane/scripts/stress/` | deploy the control plane, register accounts and the stress application, onboarding and churn scenarios |
+| Stress application | `stress/application/` | a control-plane application whose cell scripts deploy one runtime-isolation cell with a cell API origin and whose tenant scripts subscribe one tenant on its cell (§3.3) |
+| Slice: `control-plane` | `samples/control-plane/scripts/stress/` | deploy the control plane, register accounts and the stress application, onboarding and churn scenarios; its driver creates each onboarded tenant's identity tenant and users (§3.3 step 4, stress ADR-0017) |
 | Slice: `tenant-identity` | `samples/tenant-identity/scripts/stress/` | the platform's identity deployment, token issue and refresh scenarios |
 | Slice: `tenant-front-door` | `samples/tenant-front-door/scripts/stress/` | the edge, route writes, edge scenarios |
 | Slice: `agentic-runtime-isolation` | `samples/agentic-runtime-isolation/scripts/stress/` (exists) | the cell's ingress, agents and tools; scenarios S1 to S7 |
@@ -194,23 +197,45 @@ and the records in
    do not overwrite each other, and the parameter sits under the cell's
    stack name:
    `/application-plane/shared/agent-runtime/StressCell-<cellId>/ingress`.
-3. The tenant script runs: tenant-identity `CreateTenant` with the
-   control-plane tenant id, then `PutTenantSubscription` on the cell
-   ingress's Entitlements API. It records the deployment in the
-   parameter `/application-plane/tenants/<tenant id>/stress/deployment`,
-   below the namespace the cell API's hosts check reads; the delete
-   script and the slice's read-back use the same name. It does not call
-   `PutTenantRoute`: the front door's global post hook writes the
-   tenant route once the deployment's event has run (front-door
-   ADR-0017, front-door spec §3.2).
-4. The driver creates the tenant's users with tenant-identity `CreateUser`
-   and polls through the edge until the first `report` is served. It
-   then makes one `GET /api/whoami` call through the edge to the cell
-   API, whose answer carries the route hint (§5.3). The run's first
-   tenant is the warm-up tenant of §3.5: its deployment builds the
+3. The tenant script runs `PutTenantSubscription` on the cell ingress's
+   Entitlements API and makes no call to the identity or to the route
+   registrar. It records the deployment in the parameter
+   `/application-plane/tenants/<tenant id>/stress/deployment`, below the
+   namespace the cell API's hosts check reads; the delete script and the
+   slice's read-back use the same name. It does not run tenant-identity's
+   own control-plane mount (`scripts/control-plane/tenant/create.sh`),
+   because the platform API admits a caller in the identity's own account
+   only, the tenant role runs in a cell account, and the stress identity
+   has no mount policy or shared parameters (stress ADR-0017). It
+   does not call `PutTenantRoute`: the front door's global post hook
+   writes the tenant route once the deployment's event has run
+   (front-door ADR-0017, front-door spec §3.2).
+4. In a platform run, when the deployment is `ACTIVE`, the driver of the
+   `control-plane` slice creates the tenant's identity through the
+   IAM-signed platform API of the stress identity (stress ADR-0017). It
+   calls tenant-identity `CreateTenant` with the control-plane tenant
+   id, `scopes` `["app/use"]` and an admin e-mail address, which creates
+   the first admin. The scope is the vendor scope the slice-mode tenants
+   carry; the driver puts it in the identity's scope catalogue with
+   `PutScope` first, as the runtime-isolation `deploy` does in slice
+   mode. Then it calls `CreateUser` for each further user the tier lists
+   (§4.1). The driver paces the identity calls at about four a second
+   and repeats a throttled call with backoff, with the first-admin rule
+   of stress ADR-0017 for a half-created tenant. It does this for each
+   tenant PS-1 onboards, for the warm-up tenant (after front-door phase
+   two, §3.5) and for the `large` fleet's seed. PS-5 makes no identity
+   call, because its probes need no token (§5.1); at `large` its tenants
+   are the churn tenants that PS-1 onboarded, whose identity tenants
+   remain until teardown (§4.2). The driver then polls through the edge
+   until the first `report` is served. It then makes one `GET
+   /api/whoami` call through the edge to the cell API, whose answer
+   carries the route hint (§5.3). The identity calls and the polling are
+   part of PS-1's time to the first served request (§5.1). The run's
+   first tenant is the warm-up tenant of §3.5: its deployment builds the
    cell, and `/agents/*` is refused at the edge (404, or CloudFront's
    own 403 for a `POST`) until front-door phase two, so it is not timed
-   in PS-1.
+   in PS-1. In slice mode there is no front door and no token, and the
+   driver makes no identity call.
 
 **Request** (one prompt). At `small` the tier has one cell, and the
 front door's `agentIngress` input is that cell's ingress (stress
@@ -244,10 +269,10 @@ spec §3.5).
 `agentIngress`. Per-cell agent routing for those tiers is Q-7; no run
 above `small` starts until it is decided.
 
-**Churn** (during load): `CreateDeployment`, `UpdateTenantRouteStatus` to
-suspended and back, and `DeleteDeployment`, each on a tenant the steady
-load does not use, each timed from the call to the first edge response
-that shows it.
+**Churn** (after PS-4, §5.1): `CreateDeployment`,
+`UpdateTenantRouteStatus` to suspended and back, and `DeleteDeployment`,
+each on a tenant the steady set does not use, each timed from the call
+to the first edge response that shows it.
 
 ### 3.4 Slice contract
 
@@ -264,11 +289,30 @@ a declaration, `scripts/stress/slice.json`.
 | `teardown` | removes what the slice deployed | keep fixtures unless `--fixtures` is passed; verify nothing it owned is left; the runner times it (P-6) |
 
 `slice.json` names the slice, the slices it needs (by published interface),
-its scenarios, and the quotas it draws on. The runner orders slices by
-these needs: `tenant-identity`, `control-plane`, `tenant-front-door`, then
-`agentic-runtime-isolation` cells (deployed by the control plane in the
-platform run, by the slice itself when it runs alone). The platform
-run's set-up interleaves the control-plane and front-door verbs (§3.5).
+its scenarios, the scenarios only a platform run can run (`platformOnly`,
+optional), and the quotas it draws on. A `platformOnly` scenario works on
+what other slices made, such as the edge and the cells the control plane
+built, so a slice-mode run leaves it out and refuses one named in
+`--scenarios` (§3.5).
+
+The runner orders slices by their needs, and each slice runs its `deploy`
+and then its `seed` before the next slice starts, so a slice's `deploy`
+can read what an earlier slice seeded. `teardown` runs in the reverse
+order. The platform run's set-up needs the verbs of the control plane
+and the front door interleaved (§3.5), which the first platform run
+(W-9) adds to the runner. The needs the three existing slices declare,
+and the ones the front-door slice will declare (W-7), are:
+
+| Slice | Needs | `platformOnly` scenarios |
+|---|---|---|
+| `tenant-identity` | none | none |
+| `control-plane` | `tenant-identity` | PS-5 |
+| `tenant-front-door` | `tenant-identity`, `control-plane` (§3.5, steps 0 and 1) | PS-7 |
+| `agentic-runtime-isolation` | `tenant-identity`, `control-plane`, `tenant-front-door` | PS-2, PS-3, PS-4, PS-6, PS-8 |
+
+The `agentic-runtime-isolation` cells are deployed by the control plane in
+the platform run, and by the slice itself when it runs alone. With one
+slice named (slice mode) its needs are not required.
 
 Inputs every verb reads from the environment:
 
@@ -292,20 +336,32 @@ is stopped when it exits.
 
 ### 3.5 Runner
 
-`stress/run.sh run --tier <tier> --slices <a,b,...> [--scenarios <x,y>] [--limits <file>]`:
+`stress/run.sh run --tier <tier> --slices <a,b,...> [--scenarios <x,y>] [--limits <file>] [--remove-fixtures]`:
 
-1. Reads every named `slice.json`, checks the needs are present, and
-   refuses a `--scenarios` entry that no named slice declares.
+1. Reads every named `slice.json` and refuses:
+   a need that is no slice, and a need left out of `--slices`, when more
+   than one slice is named (one slice named is slice mode, which does not
+   check its needs); a cycle in the needs; a `--scenarios` entry that no
+   named slice declares; a `platformOnly` scenario named in a slice-mode
+   run, which has nothing to run against; and a run left with no
+   scenario to run (a platform run with no `PS-<n>` scenario, a
+   slice-mode run whose scenarios are all `platformOnly`).
 2. Sums `budget` per account and refuses to start when a sum is over its
    quota or another run holds the lock for the prefix.
-3. Runs `deploy` and `seed` in dependency order, then the scenarios in the
-   order of §5, then `collect`, then `teardown` in reverse order. Teardown
-   runs on failure and after SIGINT, SIGTERM or SIGHUP too.
+3. Runs `deploy` and then `seed` for one slice at a time, in the order
+   of the needs (§3.4), then the scenarios, then `collect`, then
+   `teardown` in reverse order. Without `--scenarios`, a platform run
+   (several slices) runs only the `PS-<n>` scenarios, by number (§5),
+   and a slice-mode run runs the slice's scenarios except its
+   `platformOnly` ones; `--scenarios` runs the scenarios named, in the
+   order given. Teardown runs on failure and after SIGINT, SIGTERM or
+   SIGHUP too.
 4. Writes the run's result file (§4.3). Runner lines and all verb output
    go to `run.log` in the run folder, which only the runner's user can read.
 
-With one slice named, the runner is that sample's stress test. With all of
-them, it is the platform run.
+With one slice named, the runner is that sample's stress test. With all
+of them, it is the platform run. `--remove-fixtures` passes `--fixtures`
+to every `teardown` (§3.4).
 
 In the platform run the front door deploys in two phases, because its
 `agentIngress` input is the first cell's ingress, which exists only
@@ -322,10 +378,10 @@ in it fails its hook with 409 until an operator backfills the route
 |---|---|---|
 | 0 | stress identity deployed, whose issuer the front door takes as its `issuer` input and every cell trusts | `tenant-identity` `deploy` |
 | 1 | control plane and its vendor IdP deployed, the vendor IdP with an app client with a secret for the registrar, whose client-credentials tokens carry the reader role for that client only; that client's id in `vendorIdp.clientIds`, and `readerRoles`; the secret in Secrets Manager in the platform account and the token URL from the user-pool domain, both for the front door's `controlPlane` input (control-plane R-36, R-38; front-door spec §6.1) | `control-plane` `deploy` |
-| 2 | front-door phase one, first deploy: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `applicationId` set to the stress application's id, `stress`, the value step 4 registers, with `controlPlane`, `fleet` and `edgeOperatorRoleArn` set (front-door spec §3.6; the edge operator role is the role the `tenant-front-door` slice deploys with), and with `agentIngress` unset, so the edge refuses `/agents/*` (404, or CloudFront's own 403 for a `POST`, front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
+| 2 | front-door phase one, first deploy: the edge stack, the main stack (distribution, router, route table, registrar) and the edge logging stack, with `applicationId` set to the stress application's id, `stress`, the value step 4 registers, with `issuer` naming the stress identity's app client (`identity.json`, §4.2; its other fields are Q-8), with `controlPlane`, `fleet` and `edgeOperatorRoleArn` set (front-door spec §3.6; the edge operator role is the role the `tenant-front-door` slice deploys with), and with `agentIngress` unset, so the edge refuses `/agents/*` (404, or CloudFront's own 403 for a `POST`, front-door spec §3.3 step 3) | `tenant-front-door` `deploy` |
 | 3 | front-door phase one, second deploy: the same app with `registrarUrl`, read from the edge parameter, which adds the `RouteHookAccess` stack in the control plane's account (front-door ADR-0027); then the control plane's `globalHookManagedPolicyArns` update and the global hooks registered with `register-hooks.sh`, whose hook source is the front door's repository on GitHub (or a fork), pinned to a full commit SHA (front-door spec §5.2). CodeBuild fetches the source from the remote, so the pinned commit must be pushed there: it is the run's commit when that is pushed, and otherwise the tip of the remote's default branch (`git ls-remote <remote> HEAD`) when it holds `samples/tenant-front-door/hooks/route-hook.sh`. The front-door `deploy` checks that the commit is on the remote (`gh api repos/<owner>/<repo>/commits/<sha>`) and that it holds the script (`gh api "repos/<owner>/<repo>/contents/samples/tenant-front-door/hooks/route-hook.sh?ref=<sha>"`), and fails before this step when either is missing | `tenant-front-door` `deploy`, with a second `control-plane` update |
 | 4 | the stress application registered, declaring a cell parameter whose `default` is the distribution ARN read from the edge parameter (control-plane R-34, ADR-0040); then the cell account registered for it, with `maxCells` 1 at `small`. The cell app passes the ARN to `CellRouteAccess` (front-door spec §5.2), so the cell account needs no front-door parameter and no stack beyond §3.7. Both answer 202, so the runner waits until the application and the account are `ACTIVE` | `control-plane` (application and account registration) |
-| 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the runner waits for the cell to be `ACTIVE`; the tenant's users and readiness poll (§3.3 step 4) run after step 6 | `control-plane`, not timed in PS-1 |
+| 5 | one warm-up tenant: its `CreateDeployment` builds the first cell, the hook registers the cell and tenant routes, and the runner waits for the cell to be `ACTIVE`; the tenant's identity and users and the readiness poll (§3.3 step 4) run after step 6 | `control-plane`, not timed in PS-1 |
 | 6 | front-door phase two: a main-stack update with `agentIngress` set to that cell's ingress, `registrarUrl` kept | `tenant-front-door` |
 | 7 | the rest of the tier's onboarding (PS-1 at `buildLimit`), then the other scenarios | §5.1 |
 
@@ -334,20 +390,10 @@ deployment only into an `ACTIVE` cell, and a placement that arrives
 while the only cell is `CREATING` claims a new cell slot (control-plane
 §7.2, ADR-0013 as amended by ADR-0024). At `maxCells` 1 such a placement
 is refused, so `small` keeps one cell and one `agentIngress`. Steps 2
-to 6 alternate between two slices' verbs, which the runner's
-`deploy`-then-`seed` order (item 3 of the list in this section) does
-not express; the first platform run (W-9) adds the order to the runner
-and the slices' `needs`.
-
-Teardown interleaves the same verbs in the front door's order
-(front-door spec §6.2), not the runner's reverse order: the
-`control-plane` slice deletes the deployments and cells while the
-registrar and the hooks are still in place; then
-`register-hooks.sh --delete`; then the `RouteHookAccess` policy leaves
-`globalHookManagedPolicyArns` and the control plane is updated; then
-`RouteHookAccess` is destroyed and its retained parameter deleted; then
-the front door, the control plane and the stress identity are destroyed
-in that order. W-9 adds this order to the runner too.
+to 6 alternate between two slices' verbs, which a runner that runs one
+slice's `deploy` and `seed` before the next slice starts (item 3 of the
+list in this section) does not express; the first platform run (W-9) adds
+the interleaved order to the runner.
 
 Phase two takes the origin's domain and its path, the ingress stage,
 from the ingress's published parameter,
@@ -365,6 +411,27 @@ account base (§3.7, W-11), with the platform account credentials it
 deploys with. Phase two is a CloudFront distribution change in the main
 stack, on every run at `small`. Its time is part of the front-door slice's
 `deploySeconds` (P-6), and the slice logs it on a line of its own.
+
+Teardown has one ordering rule that the reverse order alone does not
+give. In the reverse order the front door goes before the control plane,
+and the control plane's cell and deployment deletes run the front door's
+`PRE` hook (`CELL_DELETE`, `DEPLOYMENT_DELETE`) against the route
+registrar. When the run removes the fleet (`small`, `medium`, and
+`large` with `--remove-fixtures`), the `tenant-front-door` `teardown`
+therefore unregisters its two global hooks from the control plane
+(`register-hooks.sh --delete`, front-door spec §5.2) before it removes
+the registrar, so the control plane deletes deployments and cells with
+no call to a registrar that is gone. The control plane is still deployed
+at that point. Front-door spec §6.2 removes the routes through the hooks
+first (step 1) and then unregisters the hooks (step 2); here the
+registrar and the route table are destroyed in the same teardown, so no
+route needs removing. The rest of front-door spec §6.2's order follows:
+the policy out of `globalHookManagedPolicyArns` with a control-plane
+update, then `RouteHookAccess` and its parameter, then the stacks; the
+slice's `teardown` verifies that none is left (§3.4). At `large` without
+`--remove-fixtures` the fleet stays with its routes (P-5), so the
+registrar, the route table and the hooks stay with it, and the
+`tenant-front-door` `teardown` removes none of them.
 
 The lock is per prefix on the runner's host. A second run from another host
 against the same accounts is not detected; one run per set of accounts at a
@@ -463,6 +530,14 @@ Each cell's `maxTenants` is its seeded share plus its share of the churn
 count, so a churn create (PS-5) lands in a free slot of an existing cell and
 times a tenant build, not a cell build.
 
+Users per active tenant counts the admin that `CreateTenant` creates,
+when the control-plane driver (§3.3 step 4) or the `tenant-identity`
+`seed` creates the users: an active tenant has the admin and the tier's
+count minus one further users, and a tenant that is not active has the
+admin only (tenant-identity ADR-0042). The runtime-isolation slice's own
+`seed`, in slice mode, creates the tier's count of users beyond its
+admin.
+
 The `large` row splits the runtime-isolation `large` tier over four cells:
 100 agents in total, the same as the runtime-isolation `large` tier, so
 the Runtime count does not grow. Per cell
@@ -471,10 +546,49 @@ single-ingress runs; platform totals are.
 
 ### 4.2 Manifests
 
-One file per slice under `STRESS_HOME/<prefix>/`, outside the repository:
-tenant ids, user names, deployment and cell ids, account ids, the tier and
-the commit. Never a token, a password or a key. `seed` reuses what a
-manifest lists when it still exists and creates only what is missing.
+One file per slice or interface under `STRESS_HOME/<prefix>/`, outside the
+repository, mode 0600 in a 0700 folder: tenant ids, user names, deployment
+and cell ids, URLs, account ids, the tier and the commit. Never a token, a
+password or a key. `seed` reuses what a manifest lists when it still exists
+and creates only what is missing. A slice that finds a manifest missing or
+unusable stops with a message that names the file, the slice that writes it
+and, when the content is wrong, the field.
+
+A platform run uses four manifests:
+
+| File | Written by | Read by | Holds |
+|---|---|---|---|
+| `tenant-identity.json` | `tenant-identity` `seed` | `agentic-runtime-isolation` | `seeded[]`: `tenantId`, `name`, `admin` and `users[]`, each user as `{username, email}` |
+| `identity.json` | `tenant-identity` `deploy` | `agentic-runtime-isolation`; `control-plane`, for the identity calls of §3.3 step 4 (W-9); `tenant-front-door`, for the client id of the `issuer` input of §3.5 step 2 (W-7, Q-8) | the value of the SSM parameter `/<prefix>/identity`: `stack`, `region`, `apiUrl` (the execute-api URL of the platform API), `apiId`, `userPoolId`, `appClientId`; the issuer is `https://cognito-idp.<region>.amazonaws.com/<userPoolId>` |
+| `control-plane.json` | `control-plane` `seed`; its driver adds an `identity[]` entry for each identity it creates (§3.3 step 4) | `agentic-runtime-isolation`; `control-plane` (teardown) | tenant ids in `seeded[]` (the platform's steady set), `churn[]` and `extra[]`; the last two belong to the control-plane scenarios; `identity[]`: for each tenant whose identity the driver created (§3.3 step 4), `tenantId`, `admin` and `users[]` as in `tenant-identity.json` |
+| `tenant-front-door.json` | `tenant-front-door`, by the end of its `seed` (W-7) | `agentic-runtime-isolation`; `control-plane` (PS-5) | `edgeUrl` (an https origin, no path); `registrarUrl` (the registrar's execute-api URL with its stage, for `UpdateTenantRouteStatus`); `agentBackend` (optional, default `default`) |
+
+`agentic-runtime-isolation` also writes `platform/manifest.json` (the
+tenants it drove) and `platform-tenants.json` (tenants it refused or
+ignored, by id and reason: `no-identity-tenant`, `no-user`,
+`not-in-control-plane`) in its own folder. It drives, in platform mode,
+every tenant in `control-plane.json` `seeded` that has an admin user in
+the `identity[]` of the same file (W-9), and builds that set when each
+scenario starts, because the control plane onboards its tenants in PS-1,
+after every `seed`. It stops when fewer than two tenants are usable. The
+identity tenants the control-plane driver creates (§3.3 step 4) are not
+in `tenant-identity.json`, which only that slice's `seed` writes; the
+driver records them in `identity[]` (stress ADR-0017, W-9), and a
+control-plane tenant with no entry is refused (`no-identity-tenant`).
+The identity tenants outlive the deployments they were made for: the
+control plane's `DeleteDeployment` does not remove them, and the
+`tenant-identity` `teardown` removes only the tenants it seeded. So the
+`control-plane` `teardown` deletes the identity tenants of every
+deployment of the run that has one, and removes their `identity[]`
+entries. Those are the seeded tenants of `small` and `medium` and, at
+`large`, the churn tenants that PS-1 onboards and removes. The reverse
+order of §3.4 runs this before `tenant-identity`'s teardown. The `large`
+fleet is a fixture (P-5), and its identity tenants stay with it. With
+`--remove-fixtures`, the `tenant-identity` `teardown` destroys the
+stress identity's stack, which removes every identity tenant, so the
+`control-plane` `teardown` makes no per-tenant call then. `DeleteTenant`
+scans the whole pool in `shared-pool` (tenant-identity README), so the
+time of the per-tenant deletes is a result.
 
 ### 4.3 Result records
 
@@ -507,27 +621,46 @@ Each slice's `budget` fills its column; the runner sums per account.
 | KMS `Sign` | - | - | - | mint, tool contexts |
 | API Gateway control plane | deploy | deploy | deploy | deploy, tenant keys |
 | AgentCore Runtime sessions and TPS | - | - | - | agents |
-| Cognito (stress pool) | - | groups (2 per tenant, 10,000 cap), auth | - | - |
+| Cognito (stress pool) | - | groups (2 per tenant, 10,000 cap), including those of the control plane's tenants in `platform` mode (§3.3 step 4), auth | - | - |
 | CloudFront Functions compute, KVS size | - | - | router, route table | - |
+
+The `control-plane` driver's identity calls (§3.3 step 4) also draw on
+the Cognito user-write categories and on the platform API's stage
+throttle. They have no id in the quota catalogue, so no slice books them
+yet; W-9 adds the ids and the `control-plane` slice's `budget` draw
+(stress ADR-0017).
 
 ## 5. Scenarios
 
 ### 5.1 Platform scenarios
 
-Run in this order in `platform` mode. PS-5 and PS-7 run inside PS-2.
-At `small`, agent calls go from the edge straight to the one cell's
-ingress (§3.3, stress ADR-0016). Scenarios above `small` wait for Q-7.
+Run in this order in `platform` mode; a platform run runs these `PS-<n>`
+scenarios by default (§3.5). The runner runs scenarios one after another,
+so PS-5 runs on its own after PS-4 and PS-7 on its own after PS-6, with no
+PS-2 load beside them. Agent calls go from the edge straight to the
+ingress; at `small` that is the one cell's ingress (§3.3, stress
+ADR-0016). Scenarios above `small` wait for Q-7.
 
 | Id | Shape | What it stresses | Watch |
 |---|---|---|---|
-| PS-1 onboarding | the tier's onboarding at `buildLimit`; at `large`, where the fleet is a fixture, PS-1 is timed on PS-5's creates | control plane, CodeBuild, tenant scripts, tenant-identity platform throttle, registrar | deployments per minute; time from `CreateDeployment` to the first served request, which includes the route hook build, for every tenant but the warm-up tenant, which builds the cell before front-door phase two (§3.5); build failures by cause |
+| PS-1 onboarding | the tier's onboarding at `buildLimit`; at `large`, where the fleet is a fixture, PS-1 is timed on the churn tenants it onboards and removes | control plane, CodeBuild, tenant scripts, tenant-identity platform throttle, registrar | deployments per minute; time from `CreateDeployment` to the first served request, which includes the route hook build and the tenant's identity calls (§3.3 step 4), those timed as hops of their own (§6), for every tenant but the warm-up tenant, which builds the cell before front-door phase two (§3.5); build failures by cause |
 | PS-2 steady through the edge | runtime-isolation S1 shape through CloudFront to the cell's ingress | every hop of the agent path (§3.3) | latency per hop; edge overhead; router compute utilisation |
-| PS-3 herd through the edge | S2 shape: cold ingress instances in the cell, 0 to the peak rate in 5 s | cold starts behind the edge, per-account quotas | refusals by tenant; STS and Lambda throttles by account |
+| PS-3 herd through the edge | S2 shape: ingress instances in the cell, 0 to the peak rate in 5 s; it reuses the conversations PS-2 opens in the same run, so it runs after PS-2. In platform mode the slice has no write access to the cell accounts and cannot retire the instances, so it waits 60 s idle and starts the herd there: the cold-start share is what the instances' age allows | cold starts behind the edge, per-account quotas | refusals by tenant; STS and Lambda throttles by account |
 | PS-4 noisy neighbour | S3 shape: one tenant at 10x its limit | the per-tenant limit behind the edge: the ingress's own for agent calls | that tenant refused; every other tenant on its cell served |
-| PS-5 churn under load | during PS-2: create, suspend, resume and delete the churn count of tenants | control-plane writes reaching the edge and the cells | time to routable; time to suspended (503 at the edge); time to removed (403 at the edge); no request for a removed tenant at an origin |
+| PS-5 churn | after PS-4: create, suspend, resume and delete the churn count of tenants, each timed from its call to the first edge answer that shows it. The edge is read with an unsigned token that names the tenant, which the router accepts without checking the signature (front-door spec §3.3 step 5): the router's own answer, the body `{"status":403}`, means no route and `{"status":503}` means suspended. An answer that carries API Gateway's request id, the ingress's own 403 for this token included, means the router passed the request on to an origin. Any other answer tells nothing: CloudFront's own 403 or 503, a 404, or no answer. Suspend and resume are `UpdateTenantRouteStatus` calls to the route registrar, signed with the session's credentials, so the session holds the registrar's edge operator role | control-plane writes reaching the edge and the cells | time to routable; time to suspended (503 at the edge); time to removed (403 at the edge); no request for a removed tenant at an origin, which needs the edge's and the cells' logs joined |
 | PS-6 long streams | S5 shape through CloudFront to the ingress, with nothing between the edge and the ingress | streaming through the edge | first byte at the client against first byte at the ingress; broken streams |
-| PS-7 cross-cell probes | during PS-2: a token whose payload names another tenant (in another cell when the tier has more than one), a client route header, a direct `/api/*` call to a cell origin, a direct call to the ingress with a token whose payload names another tenant, and a direct call to the ingress with the tenant's own token | the router, the route hint check, origin access control, the ingress's own token check | every probe but the last refused at the edge, the cell, the origin or the ingress, never served; the last is served, because the ingress is public by design (front-door spec §1.2) |
+| PS-7 cross-cell probes | after PS-6: a token whose payload names another tenant (in another cell when the tier has more than one), a client route header, a direct `/api/*` call to a cell origin, a direct call to the ingress with a token whose payload names another tenant, and a direct call to the ingress with the tenant's own token | the router, the route hint check, origin access control, the ingress's own token check | every probe but the last refused at the edge, the cell, the origin or the ingress, never served; the last is served, because the ingress is public by design (front-door spec §1.2) |
 | PS-8 peak | S6 shape at the tier's peak for 60 s | the shared quotas at their limit | the first quota that gives out, per account; every refusal attributed |
+
+Each platform scenario is declared in the `slice.json` of the slice or
+slices that own it, and each of them writes its own record:
+
+| Scenarios | Owner slice | In `platformOnly` |
+|---|---|---|
+| PS-1 | `control-plane` and `tenant-identity`, each with its own record | no |
+| PS-2, PS-3, PS-4, PS-6, PS-8 | `agentic-runtime-isolation`: its S1, S2, S3, S5 and S6 load shapes sent to `<edgeUrl>/agents/<agent>/invocations` | yes |
+| PS-5 | `control-plane` | yes |
+| PS-7 | `tenant-front-door` (W-7) | yes |
 
 ### 5.2 Slice scenarios
 
@@ -570,7 +703,8 @@ only for a cell whose route names the API domain from the cell script's
 script deploys a cell API origin and writes that output (§3.3 step 2,
 W-5). The platform's load is agent calls, so the `/api/*` rows are made
 on the one `/api/*` call per tenant at onboarding (§3.3 step 4) and on
-the PS-7 probes, not under the load of PS-2 to PS-8.
+the PS-7 probes, not under the load scenarios PS-2, PS-3, PS-4, PS-6 and
+PS-8.
 
 ## 6. Observability
 
@@ -584,7 +718,7 @@ sends `x-correlation-id`, and each hop logs it (stress ADR-0005).
 | Edge to origin | CloudFront real-time or standard logs (`time-taken`, origin latency); the origin is the ingress for agent calls and the cell origin for `/api/*` |
 | Cell origin | the origin's log line (`/api/*` only) |
 | Ingress, Runtime, tools | runtime-isolation `request served` and `tool admitted` lines |
-| Onboarding | control-plane deployment status times; CodeBuild build durations |
+| Onboarding | control-plane deployment status times; CodeBuild build durations; the driver's identity calls (§3.3 step 4), each timed from its call to its answer, with the time the call waited for the driver's pace apart (W-9) |
 
 Edge overhead is client TTFB minus ingress TTFB, per request, joined on the
 correlation id.
@@ -608,11 +742,12 @@ correlation id.
 | 2 | `control-plane` exposes the concurrent build limit as a prop (default 5) | a cost guard (threat model T16, M17); the stress deployment raises it | control-plane ADR-0046 |
 | 3 | The stress test has its own `tenant-identity` deployment | one pool caps at 5,000 tenants (runtime-isolation finding F-11) and is shared by every integration run | stress ADR-0002 |
 | 4 | Cells split agents (four cells of 25 at `large`) | keeps the Runtime count flat while testing routing across cells | stress ADR-0003 |
-| 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds | stress ADR-0004 |
+| 5 | The `large` fleet is a fixture, seeded once | onboarding 4,000 tenants takes hours even at 50 builds | stress ADR-0004, stress ADR-0018 |
 | 6 | A correlation header, logged at every hop | the runtime-isolation ingress and the front door each log it; a change to both samples | stress ADR-0005 |
 | 7 | The cell script deploys runtime-isolation with the CDK from a pinned commit, through the account's role pair and a scoped cell bootstrap | the cell build would otherwise act as an account administrator; see below | stress ADR-0006, stress ADR-0011, stress ADR-0012, stress ADR-0014, stress ADR-0016, control-plane ADR-0047 |
 | 8 | The runtime-isolation `StressDriver` and k6 library move to `stress/` | they become the shared driver; its slice keeps only its own scenarios | stress ADR-0007 |
 | 9 | At `small`, the front door's one `agentIngress` is the one cell's ingress; per-cell agent routing for `medium` and `large` is Q-7 | the front door routes only `/api/*` per cell, so agent calls cannot reach a per-cell ingress through the router | stress ADR-0016 |
+| 10 | The driver of the `control-plane` slice creates each onboarded tenant's identity tenant and users, through the IAM-signed platform API of the stress identity; the tenant script keeps only the entitlement call | three components could do it, and the choice sets what PS-1 times and which role may call the identity's platform API | stress ADR-0017 |
 
 Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
 the account's CDK bootstrap roles. Each cell account carries one bootstrap,
@@ -664,7 +799,7 @@ Q-5.
 | W-6 tenant-identity slice and stress identity fixture | W-1, decision 3 | done in `samples/tenant-identity/scripts/stress/` |
 | W-7 front-door slice | the front door merged (done); its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | yes; phase two after W-11's ingress reader role |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part done; front-door part yes, now |
-| W-9 first platform run at `small` | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up and teardown order in the runner (§3.5) | no |
+| W-9 first platform run at `small`: also the control-plane driver's identity calls, timed as hops of their own (§6), with the `PutScope` before the first (§3.3 step 4) and the quota ids for the Cognito user-write categories with the slice's `budget` draw on them (§4.4), their pacing and retry rules and the `execute-api:Invoke` grant for the driver's session (stress ADR-0017), the record of the identity tenants and users in `identity[]` of `control-plane.json` and the runtime-isolation slice's read of it in place of `tenant-identity.json` for control-plane tenants (§4.2), the comment in `stress/application/scripts/tenant/create.sh` that says the identity tenant joins that script, the cleanup of those identity tenants in the `control-plane` teardown (§4.2), the interleaved set-up order in the runner (§3.5), and a check that the front door's teardown unregisters its hooks before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11 | no |
 
 ## 10. Open questions
 
@@ -677,3 +812,4 @@ Q-5.
 | Q-5 | Does the request path work in a standalone cell account with every role on `/cell/` (authoriser, TVM `sts:AssumeRole` of a `/cell/` tenant role, the model call, tools)? Proven by the first platform run at `small` | W-9 |
 | Q-6 | Does runtime-isolation's package entry export what the stress cell app needs (`RuntimeIsolationDemoStack`, `parseDemoContext`, `bundleAgent`)? The path spike imports them from `src/` by path | W-5 kept the path imports: `stress/application/cell-app.ts` loads them from the sample's `src/` with the sample's own CDK; an export is not needed for the stress test |
 | Q-7 | How do agent calls reach a per-cell ingress at `medium` and `large`, where there is more than one cell and the front door has one `agentIngress` (stress ADR-0016)? Candidates: (a) agent calls sent under `/api/*` to a per-cell origin Lambda in each stress cell, behind origin access control, that forwards to its ingress: no router change, but a different client path, the bearer mapped back from `x-tenant-token`, an extra hop, and response streaming for PS-6; (b) a front-door change for per-cell agent origins. Decided by a new stress ADR | before the first `medium` run |
+| Q-8 | What does the front door's `issuer` input hold in the stress run? It takes the SPA's client id and scopes and either a Cognito domain or the authorize, token and logout endpoints (front-door spec §3.6). The stress identity has no Cognito domain and the run signs nobody in through the SPA; `identity.json` supplies the client id only | W-7 |
