@@ -95,6 +95,8 @@ compensation stays best-effort (ADR-0011). A cancellation with every reason
 `None`, a failed condition in a position the classifier does not name, and
 any other error stay ambiguous, as ADR-0013 decides. Revisit the attempt count
 if a placement burst larger than the stress test's waves answers the 409 often.
+The `cancelled only by races` warning, one log line per race, is the early
+sign: it shows how often placements meet before any request answers the 409.
 
 `scripts/conflict-probe.sh` shows the decision on a live control plane: it
 sends one `CreateDeployment` per tenant at once onto one cell and counts each

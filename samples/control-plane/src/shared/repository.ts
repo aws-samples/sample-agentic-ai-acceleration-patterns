@@ -415,7 +415,9 @@ const RACE_TOKEN_SUFFIX_MAX = `-r${RACE_RETRY_ATTEMPTS - 1}`.length;
  * attempt (ADR-0050). The suffix keeps a 26-character ULID within the
  * 36-character limit. A token too long for the suffix is refused before the
  * first attempt, so it can never fail on a later one after a definite
- * cancellation.
+ * cancellation. That refusal is a programming-error path: every caller
+ * passes a 26-character ULID. The caller's error handling reads it as
+ * ambiguous and answers 500, although nothing was sent.
  */
 export function attemptToken(token: string, attempt: number): string {
   if (token.length > MAX_CLIENT_REQUEST_TOKEN - RACE_TOKEN_SUFFIX_MAX) {
