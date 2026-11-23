@@ -11,7 +11,7 @@
 import { StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { GetAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore-control';
 import { DescribeLogGroupsCommand, GetQueryResultsCommand, StartQueryCommand } from '@aws-sdk/client-cloudwatch-logs';
-import { DescribeTasksCommand, ListContainerInstancesCommand, ListTasksCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
+import { DescribeTaskDefinitionCommand, DescribeTasksCommand, ListContainerInstancesCommand, ListTasksCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { GetFunctionConfigurationCommand } from '@aws-sdk/client-lambda';
 import { GetMicrovmCommand, ListMicrovmsCommand, TerminateMicrovmCommand } from '@aws-sdk/client-lambda-microvms';
 import { sleep, until } from './aws';
@@ -146,10 +146,16 @@ export function evidenceLines(messages: readonly string[]): string[] {
 
 /**
  * The log groups of the runner on a backend, for evidence: on `agentcore` the runtime's own groups
- * (`/aws/bedrock-agentcore/runtimes/<runtimeName>-*`). Other backends give none: their runner lines are in
- * groups the driver does not name.
+ * (`/aws/bedrock-agentcore/runtimes/<runtimeName>-*`), on `nitro` the task log group its task definition names.
+ * `microvm` gives none: MicroVM logging is disabled.
  */
 export async function runnerGroups(c: Ctx, instance: Instance, backend: Backend): Promise<string[]> {
+  if (backend === 'nitro') {
+    const d = await c.aws.ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: c.backendOutput(instance, 'nitro', /taskDefinition/i) }));
+    return (d.taskDefinition?.containerDefinitions ?? [])
+      .map((x) => x.logConfiguration?.options?.['awslogs-group'])
+      .filter((n): n is string => !!n);
+  }
   if (backend !== 'agentcore') return [];
   const arn = runtimeArn(c, instance);
   const rt = await c.aws.agentcoreControl.send(new GetAgentRuntimeCommand({ agentRuntimeId: arn.split('/').pop() ?? arn }));

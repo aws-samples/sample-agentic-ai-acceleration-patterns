@@ -220,7 +220,7 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
   // The runner that serves this step: read after its first call, because A's session may have idled out since the
   // last step, and the first call then starts a new one.
   const row0 = await c.aws.row(table, A, backend);
-  const bootId0 = row0?.bootId;
+  let bootId0 = row0?.bootId;
   c.rec.check(`a loop returns timedOut (got ${String(loop.r.result?.timedOut)}, exit ${String(loop.r.result?.exitCode)})`, loop.r.result?.timedOut === true || (loop.r.result?.exitCode ?? 0) !== 0);
 
   const spawn = await run('setsid_spawn');
@@ -249,7 +249,24 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
     c.rec.check('the 60 % budget keeps the free-memory floor silent: memoryExceeded and timedOut are false', m?.memoryExceeded === false && m?.timedOut === false);
   } else {
     c.rec.check(`on ${backend} the memory fill returns memoryExceeded (got ${String(m?.memoryExceeded)}, timedOut ${String(m?.timedOut)})`, m?.memoryExceeded === true || m?.timedOut === true);
-    c.rec.check('on nitro and agentcore the total memory cap fires: memoryExceeded', m?.memoryExceeded === true);
+    if (backend === 'agentcore' || m?.memoryExceeded === true) {
+      c.rec.check(`on ${backend} the total memory cap fires: memoryExceeded`, m?.memoryExceeded === true);
+    } else {
+      // nitro, T-89: a fill by every process slot can stall the runner past runTimeout + 5 s. The tool then stops the
+      // tenant's task (overrun) and the next call starts a fresh one. That is the only other outcome that passes.
+      const oldTask = String(row0?.handle ?? '').split('/').pop() ?? '';
+      const lines = /^[0-9a-f]{32}$/.test(oldTask)
+        ? await logEvidence(c, () => runnerGroups(c, 'run-code', backend), since, `@logStream like /${oldTask}/`)
+        : [];
+      c.rec.note(`nitro memory fill overran; the stopped task's runner lines: ${lines.join(' | ') || 'none'}`);
+      const fresh = await run('setsid_spawn');
+      const row1 = await c.aws.row(table, A, backend);
+      c.rec.check(`on nitro a fill without memoryExceeded is a tool overrun: exit -9 and timedOut, then a fresh task with a new bootId (exit ${String(m?.exitCode)}, next sandbox ${String(fresh.r.result?.sandbox)}, bootId ${String(bootId0).slice(0, 8)} then ${String(row1?.bootId).slice(0, 8)})`,
+        m?.timedOut === true && m?.exitCode === -9 && fresh.r.result?.sandbox === 'started' && fresh.r.result?.exitCode === 0
+          && row1?.bootId !== undefined && row1.bootId !== bootId0 && row1.handle !== row0?.handle);
+      // The later checks compare against the runner that now serves A.
+      bootId0 = row1?.bootId;
+    }
   }
 
   const over = await run('over_as');
