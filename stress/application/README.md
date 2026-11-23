@@ -38,7 +38,7 @@ tenant on its cell. The control-plane slice
 | `cell-execution-policy` | the cell bootstrap's CloudFormation execution role | the services a cell deploys (API Gateway, Application Auto Scaling, AgentCore, CloudWatch, DynamoDB, KMS, Lambda, CloudWatch Logs, SSM), IAM read, read of the `cdk-cell-assets-*` bucket, IAM role writes on `role/cell/*`, `iam:CreateRole` and `iam:PutRolePermissionsBoundary` there only with the workload boundary, `iam:PassRole` of `role/cell/*` to Lambda and AgentCore only, and the two service-linked roles (`ops.apigateway.amazonaws.com`, `runtime-identity.bedrock-agentcore.amazonaws.com`) |
 | `cell-permissions-boundary` | the same execution role, as its boundary | the same deploy-time services and IAM role writes; it assumes no role and holds none of the run-time calls. It denies a role without the workload boundary, any IAM role write, `iam:PassRole` or `sts:AssumeRole` outside `role/cell/*`, `iam:PassRole` to any other service, other service-linked roles, boundary removal, users, access keys, policy writes, Lambda function URLs with `AuthType NONE`, SSM writes to `/application-plane/shared/identity/*` and `/cdk-bootstrap/cell/*`, and changes to the API Gateway account setting |
 | `cell-workload-boundary` | every role a cell creates (ADR-0011) | the run-time services, read of the cell asset bucket, `sts:AssumeRole` on `role/cell/*` only; denies every IAM action, `sts:AssumeRole` outside `role/cell/*`, resource-policy and sharing writes (Lambda permissions and function URLs, KMS key policies and grants, CloudWatch Logs resource policies, subscription filters, destinations, account policies, log deliveries and export tasks, DynamoDB resource policies and table exports, SSM, AgentCore and X-Ray resource policies), Lambda function URLs with `AuthType NONE`, the owner's parameters and the API Gateway account setting |
-| `cell-build-policy` | the role pair's cell role, through control-plane's `cellBuildManagedPolicyArns` (control-plane ADR-0047) | `sts:AssumeRole` on `cdk-cell-deploy-role-*`, `cdk-cell-file-publishing-role-*` and `cdk-cell-image-publishing-role-*` of the account and Region; not the lookup role |
+| `cell-build-policy` | the role pair's cell role, through control-plane's `cellBuildManagedPolicyArns` (control-plane ADR-0047) | `sts:AssumeRole` and `sts:TagSession` on `cdk-cell-deploy-role-*`, `cdk-cell-file-publishing-role-*` and `cdk-cell-image-publishing-role-*` of the account and Region; not the lookup role. `sts:TagSession` because the cell build's session carries a transitive `CellId` tag, and chaining with it needs that action on the caller (control-plane ADR-0051) |
 | `cell-tenant-build-policy` | the role pair's tenant role, through control-plane's `tenantBuildManagedPolicyArns` (ADR-0012) | `execute-api:Invoke` on `GET`, `PUT` and `DELETE` `/entitlements/tenants/*` of the account's APIs in the Region: a cell's tenant subscriptions, not its plans, agents or tools |
 
 The tests in [`../test/cell-policies.test.ts`](../test/cell-policies.test.ts)
@@ -146,6 +146,14 @@ export AWS_PROFILE=<cell account profile> AWS_REGION=eu-central-1
    because the stack is that sample's code. Then give the control-plane
    slice the account: its id, a profile with read access, and the stack ARNs
    of `CellPolicies` and `CellAccountBase` (the slice's README).
+
+   The pair's trust requires the build's session tags (control-plane
+   ADR-0051), so the pair and the control plane must come from versions that
+   agree on them. Before the first run on a platform deployed from a newer
+   control-plane version, run this step again in every cell account, with no
+   build between that and the platform deploy; a pair that does not match
+   fails every cell build at AssumeRole (control-plane README, "Upgrading to
+   session-tagged builds").
 
 To change a policy, edit `cell-policies.ts` and run step 1 again: the
 managed policies get a new version in place. `CELL_POLICY_SUFFIX` (for

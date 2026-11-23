@@ -25,12 +25,10 @@ application (ADR-037), so these three ids name it; there is no deployment id.
 The ids are ULIDs and `[a-z0-9-]{1,32}`, safe as session tag values.
 
 STS session tags can carry those ids on the session. Transitive tags pass
-down a role chain and cannot be replaced by a later session, so a script
-that assumes a further role (the CDK bootstrap deploy role, for example)
-keeps them. Every role in the chain must allow `sts:TagSession` in its
-trust; the current default CDK bootstrap template does. A cross-account
-AssumeRole that passes tags is checked on both sides, so the caller's
-identity policy needs `sts:TagSession` as well as the target's trust.
+down a role chain and cannot be set again by a later session. A
+cross-account AssumeRole that passes tags is checked on both sides, so the
+caller's identity policy needs `sts:TagSession` as well as the target's
+trust.
 
 The account owner widens the pair with their own managed policies
 (ADR-0022 for the tenant role, ADR-0047 for the cell role). Those policies
@@ -40,11 +38,9 @@ are where per-cell scoping of the owner's own resources would live.
 ### Option 1: Session tags on every build, required by the pair's trust
 Cell builds pass `CellId`; tenant builds pass `CellId`, `TenantId` and
 `ApplicationId`; all transitive. The pair trusts the build role only with
-exactly those keys (a `Null` condition per key and on
-`sts:TransitiveTagKeys`, and `ForAllValues:StringEquals` on `aws:TagKeys`
-and `sts:TransitiveTagKeys`), in a statement of its own. The API role keeps
-a separate `sts:AssumeRole`-only statement with no tags. The pair's own SSM
-grants name the session's own namespace with `${aws:PrincipalTag/...}`.
+exactly those keys, and keeps a separate `sts:AssumeRole`-only statement
+with no tags for the API role. The pair's own SSM grants name the session's
+own namespace with `${aws:PrincipalTag/...}`.
 Pros: one identity per cell and per deployment in every account, with no new
 role per cell; the owner can scope their policies with the same tags; the
 pair's built-in grants stop crossing cells. Cons: every pair deployed before
@@ -69,53 +65,78 @@ tenants of one cell still share the tenant role.
 
 ## Decision
 Option 1, because it gives every cell and every deployment its own identity
-in every account at the cost of one trust statement and one grant per build
-role, and it is the base Options 2 and 3 still need for tenant builds. The
-pair's trust requires the tags, so an untagged or widened build session is
-refused rather than admitted with less scoping; the API role path is
-unchanged, because the PutAccount probe passes no tags (ADR-027). Each build
-role's identity policy allows `sts:TagSession` on its half of the pair only
-with the same keys. The pair's own grants are scoped by the tags: the cell
-role manages `/application-plane/cells/${aws:PrincipalTag/CellId}` and what
-is under it, the tenant role reads the same and manages
+in every account at the cost of three trust statements and one grant per
+build role, and it is the base Options 2 and 3 still need for tenant builds.
+The pair's trust requires the tags, so an untagged or widened build session
+is refused rather than admitted with less scoping; the API role path keeps
+its untagged statement, because the PutAccount probe passes no tags
+(ADR-027).
+
+Each half's trust has three statements. The API role may `sts:AssumeRole`
+with no tags. The build role may `sts:AssumeRole` only when every tag key of
+its half is present and no other key is passed (`Null` false on each
+`aws:RequestTag/<key>`, `ForAllValues:StringEquals` on `aws:TagKeys`); this
+is the statement that refuses an untagged build, because STS checks
+`sts:TagSession` only when a request carries tags. The build role may
+`sts:TagSession` only with exactly those keys, all transitive (`Null` false
+also on `sts:TransitiveTagKeys`, `ForAllValues:StringEquals` on
+`sts:TransitiveTagKeys`). The external id is a condition of the two
+AssumeRole statements only: a TagSession statement that required it refused
+every tagged request in the integration test, so STS does not evaluate
+`sts:ExternalId` there. Each build role's identity policy allows
+`sts:TagSession` on its half of the pair with the same TagSession
+conditions.
+
+The pair's own grants are scoped by the tags: the cell role manages
+`/application-plane/cells/${aws:PrincipalTag/CellId}` and what is under it,
+the tenant role reads the same and manages
 `/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}`
 and what is under it. The shared and application namespaces stay
-account-wide, because every cell reads them. For resources the CloudFormation
-execution role creates, the owner chooses Option 2 or Option 3 for their own
-account; this record does not choose for them.
+account-wide, because every cell reads them. For resources the
+CloudFormation execution role creates, the owner chooses Option 2 or
+Option 3 for their own account; this record does not choose for them.
 
 ## Consequences
 - Breaking change for every account owner. A pair deployed before this
   change trusts the build role for `sts:AssumeRole` only and refuses the
   tagged AssumeRole, so every build in that account lands in `*_FAILED`.
-  Upgrade order: redeploy the pair (`CellAccountStack`, or the control plane
-  stack for the home account) in every registered account first, then update
-  the control plane. A new pair with the old control plane fails the same
-  way, because the build trust requires the tags, so the two steps must run
-  back to back with no build in between.
+  Upgrade order: redeploy the pair (`CellAccountStack`) in every other
+  registered account first, then deploy the control plane stack, which
+  carries the home account's pair. A new pair with the old control plane
+  fails the same way, because the build trust requires the tags, so the two
+  steps run back to back with no build in between (README, "Upgrading to
+  session-tagged builds").
 - The PutAccount handshake does not show that a pair accepts tags, because
   the API role passes none. A pair that does not allow `sts:TagSession`
   fails its first build with the AssumeRole refusal as the reason (ADR-0025).
-- Owner policy pattern: attach a policy that allows the cell's actions only
-  where `aws:ResourceTag/CellId` (or the service's own resource tag key)
-  equals `${aws:PrincipalTag/CellId}`, and requires `aws:RequestTag/CellId`
-  to equal it on create, plus a name-prefix scope for services that support
-  neither key. The same pattern with `TenantId` and `ApplicationId` applies to
-  tenant policies. Which key each service supports is listed per service in
-  the README (planned).
+- A role the script chains into inherits the tags, and a later AssumeRole
+  cannot set an inherited key again: STS answers `InvalidParameterValue`,
+  whatever the value. The chained AssumeRole needs `sts:TagSession` on both
+  sides: in the next role's trust (the current default CDK bootstrap
+  template allows it) and in the policy that lets the pair role assume it.
+  A caller policy with `sts:AssumeRole` alone is refused. Owner policies in
+  `cellBuildManagedPolicyArns` and `tenantBuildManagedPolicyArns` that
+  assume further roles need `sts:TagSession` on the same roles; the stress
+  test's `cell-build-policy` carries it.
+- Owner policy pattern: name the cell's resources from the tag, as the
+  pair's own SSM grants do, or allow an action only where
+  `aws:ResourceTag/CellId` equals `${aws:PrincipalTag/CellId}` and require
+  `aws:RequestTag/CellId` to equal it on create, for the actions that
+  support those keys (the Service Authorization Reference lists them per
+  action). The same pattern with `TenantId` and `ApplicationId` applies to
+  tenant policies. An action that supports neither a tag key nor a name the
+  owner controls cannot be scoped per cell.
 - A script that calls a service directly carries the tags. A `cdk deploy`
   hands creation to the CloudFormation execution role, which acts without
   them; an owner who needs per-cell scoping of stack-created resources takes
   Option 2 or Option 3.
-- A chained role must allow `sts:TagSession` in its trust, or the chained
-  AssumeRole fails. Whether the calling role also needs `sts:TagSession` in
-  its identity policy for inherited transitive tags is to be shown by the
-  integration test (planned); a cell build policy that only allows
-  `sts:AssumeRole` on the bootstrap roles may need it too.
-- The integration test (planned) shows: a cell build's session carries
-  exactly `CellId` and a tenant build's the three tags, through the
-  cross-account path; a build session without the tags is refused; a
-  transitive tag survives a chained AssumeRole and cannot be replaced; cell
-  1's role cannot write cell 2's parameters while it can write its own.
+- The session tag integration test (`test/integ.session-tags.ts`) shows,
+  in two accounts with real IAM: the pair refuses a build role's AssumeRole
+  untagged, with the tags not transitive, with another key, with a missing
+  key and without the external id, and admits the correct one; two cell
+  sessions in one account each write their own cell namespace and neither
+  writes the other's; a tenant session writes its own deployment namespace
+  only and reads its own cell only; a chained role sees the cell's tag and
+  writes only under it; setting the tag again on the chain is refused.
 - Revisit if STS changes how transitive tags pass, if a deployment gains an
   id of its own, or if the control plane starts creating per-cell roles.

@@ -106,7 +106,7 @@ integ.exec('bash test/integ-scripts/run-integ.sh');
 // builds in the stack's provisioning projects and calls no API operation.
 const integSessionTags = project.addTask('integ:session-tags', {
   description:
-    'Run the session tag integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~30 min)',
+    'Run the session tag integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~10 min)',
 });
 integSessionTags.exec('bash test/integ-scripts/run-integ.sh integ.session-tags.ts');
 

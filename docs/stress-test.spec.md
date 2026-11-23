@@ -507,9 +507,13 @@ policy, `cell-build-policy` or `cell-tenant-build-policy` with the
 owner's suffix, or an inline policy other than the stack's default one
 with the control plane's SSM namespace actions on
 `/application-plane/`), a role pair half whose trust is not the stack's
-(one statement allowing `sts:AssumeRole` to the platform account,
-conditioned on `aws:PrincipalArn` being the fleet's build role for that
-half or its API role, and nothing else), or a `/cell/` role trusted from
+(three statements, all to the platform account: one allowing
+`sts:AssumeRole` conditioned on `aws:PrincipalArn` being the fleet's API
+role; one allowing `sts:AssumeRole` conditioned on `aws:PrincipalArn`
+being the fleet's build role for that half and on that half's session tag
+keys; and one allowing `sts:TagSession` to the same build role only with
+exactly that half's transitive tags, control-plane ADR-0051; and nothing
+else), or a `/cell/` role trusted from
 outside (above). The stack list, `iam:ListRoles`, and for the role pair
 `iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and
 `iam:GetRolePolicy` give all of it.
@@ -786,7 +790,7 @@ The policies, the `/cell/` aspect and the scripts ship in
 | Cell permissions boundary | `cell-permissions-boundary`, on the execution role: the same services and IAM read, IAM role writes on `role/cell/*`, and the same `iam:PassRole` and `iam:CreateServiceLinkedRole` allows as the execution policy; it holds no run-time call and no `sts:AssumeRole`; it denies `iam:CreateRole` and `iam:PutRolePermissionsBoundary` unless the boundary is the cell workload boundary, any IAM role write, `iam:PassRole` or `sts:AssumeRole` on a role outside `/cell/` (the deny's `NotResource` is `role/cell/*`), `iam:PassRole` to any service but Lambda and AgentCore, `iam:CreateServiceLinkedRole` for any other service, Lambda function URLs with `AuthType NONE`, removing a boundary, users, access keys, policy writes, SSM writes to the account owner's parameters (`/application-plane/shared/identity/*`, `/cdk-bootstrap/cell/*`), and changes to the API Gateway account setting (`apigateway:PATCH`, `PUT`, `DELETE` on `/account`) |
 | Cell workload boundary | `cell-workload-boundary`, on every role a cell creates (stress ADR-0011): the run-time services (AgentCore, the Bedrock model calls, CloudWatch, DynamoDB, `execute-api`, KMS, Lambda, CloudWatch Logs, SSM, `sts:TagSession`, `sts:GetCallerIdentity`, X-Ray), read of `cdk-cell-assets-*`, and `sts:AssumeRole` on `role/cell/*` only; it denies every IAM action, `sts:AssumeRole` outside `/cell/`, resource-policy and sharing writes (Lambda permissions and function URLs, KMS key policies and grants, CloudWatch Logs resource policies, subscriptions, destinations, account policies, log deliveries and export tasks, DynamoDB resource policies and table exports, SSM, AgentCore and X-Ray resource policies), Lambda function URLs with `AuthType NONE`, SSM writes to the owner's parameters and changes to the API Gateway account setting |
 | Cell synth | `@aws-cdk/core:bootstrapQualifier` `cell` and `@aws-cdk/core:permissionsBoundary` `{"name":"cell-workload-boundary"}` as object context (`cellSynthContext` in `stress/application/cell-path.ts`, `cdk.json` or `CDK_CONTEXT_JSON`); a CLI `--context` passes the boundary as a string, which the CDK ignores |
-| Role pair | `control-plane`'s `cellBuildManagedPolicyArns` (ADR-0047); the cell account owner attaches `cell-build-policy`, which allows `sts:AssumeRole` on the deploy, file-publishing and image-publishing `cdk-cell-*` roles of its own account and Region, and nothing else (not the lookup role, which holds `ReadOnlyAccess` without the boundary) |
+| Role pair | `control-plane`'s `cellBuildManagedPolicyArns` (ADR-0047); the cell account owner attaches `cell-build-policy`, which allows `sts:AssumeRole` and `sts:TagSession` (the build's transitive `CellId` tag, control-plane ADR-0051) on the deploy, file-publishing and image-publishing `cdk-cell-*` roles of its own account and Region, and nothing else (not the lookup role, which holds `ReadOnlyAccess` without the boundary) |
 
 Three walls hold the scope together. The two boundaries keep the execution
 role and every cell role under them, and no role a cell creates holds an

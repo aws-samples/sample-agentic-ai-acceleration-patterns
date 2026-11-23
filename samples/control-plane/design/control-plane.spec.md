@@ -466,10 +466,14 @@ The provisioning scripts are the arbitrary-code surface of the system. The
 blast radius is bounded not by reviewing script content but by the IAM
 roles they run under — and the roles are deliberately **asymmetric**:
 
-- The **cell provisioning role** may write the cell parameter namespace
-  (`/application-plane/cells/*`).
+- The **cell provisioning role** may write its own cell's parameter
+  namespace (`/application-plane/cells/<cellId>/*`).
 - The **tenant provisioning role** may *read* that namespace but only
-  *write* its own (`/application-plane/tenants/*`).
+  *write* its own deployment's
+  (`/application-plane/tenants/<tenantId>/<applicationId>/*`).
+- Each build session is tagged with the cell, tenant and application it
+  acts for (R-52), and the grants name those paths by the tags, so two
+  cells in one account do not share writable state.
 
 A compromised or buggy tenant script cannot corrupt cell-owned state. The
 permission boundary — not throughput — is why there are two build projects
@@ -479,7 +483,7 @@ The pair lives **in the account that hosts the cell**, installed by that
 account's owner (the vendor, or the customer for a tenant-owned account),
 and is assumed by the matching build project before the script runs (§6.4).
 The build projects' own roles hold no application-plane permission at all:
-each may only assume its half of the pair. So the account owner — not the
+each may only assume its half of the pair and tag that session (R-52). So the account owner — not the
 control plane — decides what provisioning may do in their account, and can
 withdraw it. These roles are THE hardening point of the whole design.
 
@@ -507,7 +511,7 @@ start one (R-41).
 | R-3 | **Service** | One stateless compute function implementing all operations, including synchronous placement, the tenant registry, the application registry and the account registry. |
 | R-4 | **Store** | One database table holding all six entity types (application + account + cell + tenant + deployment + global hook) plus the idempotency record type and the hook counter, with support for multi-item ACID transactions and conditional writes. (The reference uses DynamoDB single-table design; any store with equivalent transactional conditional-write semantics qualifies.) |
 | R-5 | **Workflow** | One durable state machine executing provisioning builds and writing terminal state directly to the table. |
-| R-6 | **Build runners** | **Four** shared build projects: two provisioning projects (cell builds, tenant builds) and two hook projects (global hooks, application hooks, R-41). Per-execution overrides select the source and script; the projects themselves are never mutated per deployment, cell, account or hook. Before the script runs, each provisioning build assumes its half of the hosting account's provisioning role pair (R-25), so the script executes with that account's permissions. The provisioning projects' own roles may only assume those roles, read the source, and write their logs; each build role trusts CodeBuild only on its own project's `aws:SourceArn` and carries the R-41 deny. The hook projects' roles never assume a pair (R-41). |
+| R-6 | **Build runners** | **Four** shared build projects: two provisioning projects (cell builds, tenant builds) and two hook projects (global hooks, application hooks, R-41). Per-execution overrides select the source and script; the projects themselves are never mutated per deployment, cell, account or hook. Before the script runs, each provisioning build assumes its half of the hosting account's provisioning role pair (R-25), so the script executes with that account's permissions. The provisioning projects' own roles may only assume those roles (tagging the session, R-52), read the source, and write their logs; each build role trusts CodeBuild only on its own project's `aws:SourceArn` and carries the R-41 deny. The hook projects' roles never assume a pair (R-41). |
 | R-25 | **Account role pair** | One deployable unit (reference: a CDK stack) that installs `<fleet>-cell-provisioning` and `<fleet>-tenant-provisioning` in an account with the asymmetric permissions of §6.2, trusting the control plane's two build roles and its API role (the registration probe, R-26) — and an optional external id. The account owner deploys it; the control plane stack installs the same pair in its own account so the home account needs no extra step (P-4). |
 
 ```
@@ -1499,6 +1503,18 @@ script therefore runs *in* the cell's account with exactly the permissions
 that account's owner installed (§6.4) — the same way whether the account is
 the control plane's own or a customer's (P-4).
 
+**R-52 (session tags):** the AssumeRole MUST tag the session with what the
+build acts for, every tag transitive
+([ADR-0051](../adr/0051-tag-every-build-session-with-its-cell-tenant-and-application.md)):
+a cell build with `CellId`; a tenant build with `CellId`, `TenantId` and
+`ApplicationId`. The values MUST be the service-resolved `CELL_ID`,
+`TENANT_ID` and `APPLICATION_ID` of this table, never a `PARAM_` variable.
+A deployment is one tenant in one application (§4.4), so `TenantId` and
+`ApplicationId` together name it. Because the tags are transitive, every
+role the script chains into inherits them and no later session can set them
+again. Such a chained AssumeRole needs `sts:TagSession` on both sides: in
+the next role's trust and in the policy that lets the pair role assume it.
+
 ### 6.2 Parameter namespace contract (P-3)
 
 All four namespaces live **in the cell's account**. Each account's
@@ -1519,8 +1535,13 @@ several applications, so its namespace is keyed by both
 |---|---|---|---|
 | `/application-plane/shared/*` | read | read | infrastructure every application in that account may use, out of band |
 | `/application-plane/applications/<applicationId>/shared/*` | read | read | that application's shared infrastructure in that account, out of band. The roles' grant covers `/application-plane/applications/*` |
-| `/application-plane/cells/<cellId>/*` | read + **write/delete** | read | the **cell create script** publishes the cell's shared resource identifiers here; the cell delete script cleans them up |
-| `/application-plane/tenants/<tenantId>/<applicationId>/*` | — | read + **write/delete** | tenant scripts own their deployment's state here. The roles' grant covers `/application-plane/tenants/*` |
+| `/application-plane/cells/<cellId>/*` | read + **write/delete**, own cell only | read, own cell only | the **cell create script** publishes the cell's shared resource identifiers here; the cell delete script cleans them up. The roles' grant names the path by the session's `CellId` tag (R-52) |
+| `/application-plane/tenants/<tenantId>/<applicationId>/*` | — | read + **write/delete**, own deployment only | tenant scripts own their deployment's state here. The tenant role's grant names the path by the session's `TenantId` and `ApplicationId` tags (R-52) |
+
+The cell and deployment grants cover the namespace path itself and
+everything under it, because a delete script lists its namespace with
+`GetParametersByPath` on that path, and a deployment's own parameter may be
+the path itself. A session without the tags matches neither grant.
 
 Scripts learn their application via `APPLICATION_ID`, tenant scripts their
 tenant via `TENANT_ID` and their cell via `CELL_ID`, and resolve shared
@@ -1582,13 +1603,36 @@ The unit an account owner installs, once per account
 The trust is expressed as the control plane account plus an
 `aws:PrincipalArn` condition naming those roles, so the pair can be installed
 before the control plane exists and survives the control plane's roles being
-recreated. The two hook roles (§6.5) are deliberately absent from both
+recreated. Each trust policy has three statements
+([ADR-0051](../adr/0051-tag-every-build-session-with-its-cell-tenant-and-application.md)):
+one admits the API role for `sts:AssumeRole` with no tags (the
+registration probe passes none); one admits the build role for
+`sts:AssumeRole` only when every tag key of R-52 is present and no other
+key is passed (`Null` false on every `aws:RequestTag/<key>`,
+`ForAllValues:StringEquals` on `aws:TagKeys`); one admits the build role
+for `sts:TagSession` only with exactly those keys, all transitive (`Null`
+false also on `sts:TransitiveTagKeys`, `ForAllValues:StringEquals` on
+`sts:TransitiveTagKeys`). A build request without the tags, with another
+key or with the tags not transitive MUST be refused. The external id
+condition below is on the two AssumeRole statements only: STS does not
+evaluate `sts:ExternalId` on `sts:TagSession`, where it would refuse every
+tagged request. Each build role's own policy allows `sts:TagSession` on its
+half of the pair under the TagSession statement's conditions.
+
+A pair whose trust admits the build role for `sts:AssumeRole` alone refuses
+the tagged request, and a pair with the three statements refuses an
+untagged one. Upgrading a deployed control plane that runs untagged builds is therefore one ordered
+change with no build in between: redeploy the pair in every registered
+account, then the control plane stack (which carries the home account's
+pair). The registration probe passes no tags, so it does not show that a
+pair accepts them; a pair that does not fails its first build into
+`*_FAILED` with the refusal in `statusReason`. The two hook roles (§6.5) are deliberately absent from both
 trust policies: a hook never acts in a cell account. In the control
 plane's own account both pair roles also carry the R-41 deny, so an
 attached policy cannot grant them the denied actions.
 
 Both trust policies require `sts:ExternalId` to equal the configured
-`externalId` when one is set. The control plane presents it on every
+`externalId` on every AssumeRole statement when one is set. The control plane presents it on every
 AssumeRole into that account; without it the assume MUST be refused by the
 trust policy. This is the standard guard against the confused deputy: a
 third party who learns a customer's role ARN cannot have the control plane
@@ -3197,7 +3241,7 @@ integration test (§10) and the README's examples included, polls.
 | N-5 | Pagination tokens are unsigned (see R-10 for the invariant that makes this safe). | No signing key to provision/rotate — material simplification, valid only while R-10 holds. |
 | N-6 | Private script sources need source-credential configuration on the build projects (project-level, not per-tenant). | Accepted trade-off: per-tenant source credentials would require per-tenant build infrastructure. |
 | N-7 | The build task budget (R-23) MUST NOT exceed one hour. | Role chaining caps the script's credentials at one hour (R-27); a longer budget would let scripts fail on expired credentials instead of on the timeout. |
-| N-8 | The build roles' AssumeRole resource is the provisioning role **by fixed name in any account**; the control plane never maps account ids into IAM policy. | Accounts are registered at run time (P-10); the target role's trust policy — written by the account owner — is the gate, and `externalId` closes the confused deputy. Enumerating accounts in IAM would make registration a deployment, defeating on-demand customer accounts. |
+| N-8 | The build roles' AssumeRole and TagSession resource is the provisioning role **by fixed name in any account**; the control plane never maps account ids into IAM policy. | Accounts are registered at run time (P-10); the target role's trust policy — written by the account owner — is the gate, and `externalId` closes the confused deputy. Enumerating accounts in IAM would make registration a deployment, defeating on-demand customer accounts. |
 | N-9 | `PutAccount` probes both roles before writing (R-26); the probe makes no call under the assumed credentials. | Fail at registration, when the operator is present, not at the first build; and never touch the account during a check. |
 | N-10 | `externalId` is never returned by the API and never logged by the sample. It reaches the build as a plaintext CodeBuild environment-variable override carried in the Step Functions execution input, readable by principals with `states:DescribeExecution` or `codebuild:BatchGetBuilds` in the control plane account (the operator role, the account's administrators, and the API role, which holds `states:DescribeExecution` on the workflow's executions only to classify a record operation's start, R-51; the same input carries a create's `adminEmail`, R-8, which the API role already receives in the request). | Not a secret by AWS's definition; the guard's value is that outsiders do not hold it, and nobody outside the control plane account can read those APIs. |
 | N-11 | Deployment and cell parameter values MUST NOT be secrets. They are stored in plain text on the deployment or cell record, returned by `GetDeployment` or `GetCell` to operators and readers alike (R-36), and reach the build as CodeBuild environment-variable overrides carried in the Step Functions execution input. The service logs parameter names, never values. A script that needs a secret receives its *name* as a parameter (a Secrets Manager secret or an SSM `SecureString` under the deployment's tenant namespace or the application's shared namespace, §6.2) and reads it under its own role. | Every operator and reader, and everyone who can read the table, the execution history or `codebuild:BatchGetBuilds` in the control plane account, can read the values; secret-shaped storage would need a KMS key, extra IAM and a second read path for a concern the application plane already solves. |
@@ -3718,6 +3762,17 @@ Not tested by the steps above: a hook on an `APPLICATION_DELETE`,
 `PutAccount` rotation on an `UPDATING` account, and a workflow start
 with an unknown outcome. The unit assertions cover R-49's two writes,
 the R-50 commit replay, the rotation and the unknown start.
+
+The session tags of R-52 have a second, smaller scenario of their own in
+the same two accounts, which starts builds directly on the provisioning
+projects with the workflow's overrides: B's pair refuses a build role's
+AssumeRole untagged, with the tags not transitive, with another key, with a
+missing key, or without the external id, and admits the correct one; two
+tagged cell sessions in B each write their own cell namespace and not the
+other's; a tagged tenant session writes only its own deployment namespace
+and reads only its own cell; a role the cell session chains into sees the
+cell's tag, a caller without `sts:TagSession` cannot chain, and setting the
+tag again on the chain is refused.
 
 ---
 

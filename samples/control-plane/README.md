@@ -263,7 +263,12 @@ plane's own — installs two IAM roles, `<fleet>-cell-provisioning` and
 `<fleet>-tenant-provisioning` (ADR-025). Each trusts the control plane's
 matching build role and its API role, behind an external id (required for a
 customer's account, optional for the vendor's own), and carries only the SSM
-namespace grants below. The CodeBuild build assumes the
+namespace grants below. A build tags its session with what it acts for
+(ADR-0051): `CellId` on a cell build, and `CellId`, `TenantId` and
+`ApplicationId` on a tenant build, all transitive. The trust admits a build
+role only with exactly those tags and the API role only without tags, and
+the grants name each session's own namespace by its tags, so cell 1's
+session cannot write cell 2's parameters in the same account. The CodeBuild build assumes the
 role before your script runs, so the script executes **in** the cell's
 account with exactly what that account's owner installed. One pair serves
 every application the account admits. A customer installs
@@ -511,7 +516,8 @@ also trusts the control plane's API role, for the `PutAccount` handshake
 (ADR-0028), so the API role can use every policy attached here too. The
 platform stress test attaches one policy, which lets the cell build assume
 the deploy role and the two asset-publishing roles of a cell-only CDK
-bootstrap with the qualifier `cell`. It leaves out the bootstrap's lookup
+bootstrap with the qualifier `cell`, with `sts:TagSession` beside it because
+the build's session carries its transitive `CellId` tag (ADR-0051). It leaves out the bootstrap's lookup
 role, which holds `ReadOnlyAccess`: with it, the cell build and the API
 role could read every cell's data in the account. A cell app that needs
 context lookups commits them to `cdk.context.json` instead. Replace
@@ -522,7 +528,7 @@ context lookups commits them to `cdk.context.json` instead. Replace
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Action": "sts:AssumeRole",
+    "Action": ["sts:AssumeRole", "sts:TagSession"],
     "Resource": [
       "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-deploy-role-<ACCOUNT_ID>-<REGION>",
       "arn:<PARTITION>:iam::<ACCOUNT_ID>:role/cdk-cell-file-publishing-role-<ACCOUNT_ID>-<REGION>",
@@ -692,6 +698,41 @@ so the upgrade writes nothing to the table and needs no data migration. It
 needs no drain of its own. The drain in the previous section still applies
 when the version you run has generated project and workflow names.
 
+### Upgrading to session-tagged builds
+
+Builds tag their session with the cell, tenant and application they act for,
+and the role pair's trust requires those tags (ADR-0051). This is a breaking
+change for every account owner. A pair from an earlier version refuses the
+tagged AssumeRole, and a pair from this version refuses the untagged one an
+earlier control plane makes, so every build in that account fails into
+`*_FAILED` until both sides match. Upgrade with no build in between:
+
+1. Stop starting builds: hold off `CreateDeployment`, `UpdateDeployment`,
+   `DeleteDeployment`, `UpdateCell` and `DeleteCell`, and wait until no
+   execution of `<fleet>-workflow` is running.
+2. Redeploy `CellAccountStack` from this version in every other registered
+   account (each account's owner does this).
+3. Deploy the control plane stack from this version. It updates the build
+   roles, the buildspec and the home account's pair in one deploy.
+4. Start builds again.
+
+The `PutAccount` handshake does not show whether a pair accepts tags,
+because the API role passes none. An account whose owner skipped step 2
+fails its first build with the AssumeRole refusal as `statusReason`; the
+owner redeploys the pair, and the operator re-runs the operation
+(`UpdateCell`, `UpdateDeployment`, or delete and create again after
+`CREATE_FAILED`).
+
+A cell script that assumes a further role in its account (a CDK bootstrap
+role, for example) keeps the tags on that session, because they are
+transitive, and no later session can replace them. That chained AssumeRole
+needs `sts:TagSession` on both sides: in the next role's trust, which the
+current default CDK bootstrap template allows, and in the policy that lets
+the pair role assume it. A policy in `cellBuildManagedPolicyArns` or
+`tenantBuildManagedPolicyArns` that allows only `sts:AssumeRole` on such a
+role is refused once the builds are tagged; add `sts:TagSession` on the
+same roles, as in the example below, before step 3.
+
 ### Example: mounting tenant-identity
 
 The [`tenant-identity`](../tenant-identity/) sample is the worked consumer of
@@ -721,6 +762,14 @@ application hooks, and costs under a dollar in throwaway resources; each run
 takes its own fleet name, so two runs can share the accounts and the Region.
 See [integration-test.md](./integration-test.md) for the second account's
 bootstrap, what the run stands up in each account, its steps and its knobs.
+
+A second, smaller test checks the session tags of ADR-0051 with real IAM in
+the same two accounts, on a fleet of its own, in about 10 minutes
+(integration-test.md, "Session tags"):
+
+```bash
+npx projen integ:session-tags
+```
 
 ## Platform stress slice
 
@@ -1121,15 +1170,20 @@ generated from it (`smithy build`).
 
 - The **account role pair** in each account is the provisioning blast radius
   — it bounds what lifecycle scripts may do there, and its asymmetry is the
-  boundary: the cell role writes `/application-plane/cells/*`; the tenant
-  role reads that namespace but can only write `/application-plane/tenants/*`.
-  The sample scopes both to the demo SSM namespaces; the account owner widens
+  boundary: the cell role writes its own cell's
+  `/application-plane/cells/<cellId>/*`; the tenant role reads that
+  namespace but can only write its own deployment's
+  `/application-plane/tenants/<tenantId>/<applicationId>/*`. Both paths are
+  named by the session's tags (ADR-0051), so one pair in an account holding
+  several cells still keeps each cell's and each deployment's parameters
+  apart. The sample scopes both to the demo SSM namespaces; the account owner widens
   them deliberately for real provisioning (this is THE hardening point). The
-  CodeBuild roles themselves hold nothing but `sts:AssumeRole` on those two
+  CodeBuild roles themselves hold nothing but `sts:AssumeRole` and
+  `sts:TagSession` (with the build's tag keys only) on those two
   role names, so the owner's trust policy — not a vendor-side list — decides
   which accounts the fleet can reach (ADR-025). One pair serves every
   application an account admits, so the scripts of one application can read
-  another's namespaces in that account; they are trusted vendor code.
+  another's shared namespaces in that account; they are trusted vendor code.
 - The pair's trust policy names the control plane's build roles and API role
   by ARN; that pin is what keeps every other AWS account out. On top of it a
   tenant-owned account must carry an **external id** on every `AssumeRole`
@@ -1321,6 +1375,24 @@ application's cells (threat T5, the highest-consequence open item).
       Before a broader population connects, add finer operator roles with
       account scoping (spec §11) so a deployment of customer A's tenant
       cannot be placed into customer B's account.
+- [ ] **Scope your own pair policies by the session tags** when an account
+      holds more than one cell (T21, ADR-0051). A script's session carries
+      `CellId` (and on a tenant build `TenantId` and `ApplicationId`), and
+      every role it chains into inherits them. Name the cell's resources from
+      the tag, as the sample's own SSM grants do
+      (`arn:<PARTITION>:ssm:<REGION>:<ACCOUNT_ID>:parameter/application-plane/cells/${aws:PrincipalTag/CellId}/*`),
+      or, where the service supports it, allow an action only when
+      `aws:ResourceTag/CellId` equals `${aws:PrincipalTag/CellId}` and require
+      `aws:RequestTag/CellId` to equal it on create. Check the
+      [Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/reference_policies_actions-resources-contextkeys.html)
+      for which condition keys each action supports; an action that supports
+      neither a tag key nor a name you control cannot be scoped per cell.
+- [ ] **Know what the tags do not cover.** A `cdk deploy` (or any
+      CloudFormation stack) creates resources as the stack's execution role,
+      which acts without the build's tags, so a per-cell policy on the cell
+      role does not reach them. Where stack-created resources must be kept
+      apart per cell, give each cell its own execution role or register the
+      account with `maxCells: 1` (ADR-0051, Options 2 and 3).
 - [ ] If an owner removes the pair while cells exist there, builds in that
       account fail into `*_FAILED` and the records cannot be cleaned up
       through the API until the pair is restored (T26, accepted by design).
