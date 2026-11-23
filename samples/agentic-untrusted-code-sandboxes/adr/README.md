@@ -30,7 +30,7 @@ line and a dated trailing note saying what changed
 | [0019](0019-cap-job-memory-per-backend.md) | Cap job memory per backend | Accepted | 2026-11-19 |
 | [0020](0020-filter-job-system-calls-on-microvm.md) | Filter job system calls on microvm, and back the caps with a free-memory floor | Accepted | 2026-11-19 |
 | [0021](0021-close-socket-and-sysv-routes-and-reap-every-job.md) | Close the socket and SysV routes, watch the nitro group, and reap every job | Accepted | 2026-11-20 |
-| [0022](0022-leave-room-for-the-runner-in-the-nitro-process-cap.md) | Leave room for the runner in the nitro process cap | Proposed | 2026-11-20 |
+| [0022](0022-leave-room-for-the-runner-in-the-nitro-process-cap.md) | Leave room for the runner in the nitro process cap | Accepted | 2026-11-20 |
 | [0023](0023-ship-a-compiled-package-with-a-handler-tree-on-the-pinned-cdk-and-sdk.md) | Ship a compiled package with a handler tree on the pinned CDK and SDK | Accepted | 2026-11-20 |
 | [0024](0024-keep-the-runner-in-one-directory-and-copy-its-image-into-the-construct-repository.md) | Keep the runner in one directory and copy its image into the construct repository | Accepted | 2026-11-20 |
 | [0025](0025-pin-the-runner-wire-protocol-and-the-backend-interface.md) | Pin the runner wire protocol and the backend interface | Accepted | 2026-11-20 |

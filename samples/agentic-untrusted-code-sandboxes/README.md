@@ -338,8 +338,10 @@ of sandbox seconds. The formula per backend is in
   `agentcore` runtime role holds only its image pull, its own logs and, with
   `sessionFiles`, its own session prefix (ADR-0003, ADR-0051).
 - Every job is bound to the sandbox it was started for by a nonce the
-  sandbox only knows the hash of, so a recycled address or a replaced
-  session refuses the job (ADR-0018).
+  sandbox only knows the hash of, so a replaced session refuses the job
+  (ADR-0018). On `nitro` the nonce goes only to the address `ready` read
+  from the task's own ENI, so a task at a recycled address never receives
+  it, fails the proof and gets no job (ADR-0072).
 - The sandbox subnets have no route out; only the endpoints each backend
   needs are reachable (ADR-0012). DNS is open unless `dnsFirewall` is on.
 - Where IAM cannot hold the tenant boundary (MicroVM and AgentCore start,
