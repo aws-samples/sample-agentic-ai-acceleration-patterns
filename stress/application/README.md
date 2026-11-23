@@ -375,8 +375,9 @@ publishes and reads assets, and it holds only cell assets.
   targets are the demo's, not the tier's `agentsPerCell` and tool counts.
   The tier-sized cell is W-3's stress ingress, which W-9 composes.
 - The tenant scripts subscribe a tenant on its cell only. The tenant-identity
-  tenant and the front-door route of spec §3.3 step 3 join when those slices
-  compose (W-9, W-7).
+  tenant of spec §3.3 step 3 joins when those slices compose (W-9). The
+  tenant's front-door route is written by the front door's route hook, not
+  by the script (stress ADR-0016).
 - `cell-tenant-build-policy` reaches the tenant subscription methods of every
   API in the cell account, so a compromised tenant build can change any
   tenant's subscription on any cell there. The control plane's API role can
