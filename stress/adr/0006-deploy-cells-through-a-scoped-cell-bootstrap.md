@@ -120,6 +120,7 @@ the stress cells' ingress parameters only, for front-door phase two. It
 deploys in an owner stack tagged `stress:part=account-base`, like the
 rest of the base.
 
-Note 2026-11-23: ADR-0023 (Proposed) sets out how cells share a stress
-account once the control plane tags each build, and recommends keeping two
-cells in each `large` account.
+Note 2026-11-23: ADR-0023 (Proposed) records that two cells in one `large`
+account share the CloudFormation execution role once the control plane tags
+each build, and sets out three options for it: one cell per account, an
+execution role per cell, or keeping two cells and recording the residual.
