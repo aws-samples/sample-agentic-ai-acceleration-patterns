@@ -299,10 +299,13 @@ class NitroLinux(Base):
         _, hello = self.hello(conn, nonce)
         opened = self.fd_links(proc.pid)
         self.assertTrue(any(p.endswith("/memory.current") for p in opened), opened)
-        # The job does not get them: O_CLOEXEC and close_fds.
+        # The job does not get them: close_fds closes them, and O_CLOEXEC would too.
         links = self.post_run(conn, nonce, "r0", "import os\nfor f in os.listdir('/proc/self/fd'):\n    try:\n"
                               "        print(os.readlink('/proc/self/fd/' + f))\n    except OSError:\n        pass\n")
-        self.assertFalse([p for p in links["stdout"].split() if p.endswith(("/memory.current", "/memory.stat"))], links)
+        seen = links["stdout"].split()
+        self.assertEqual(links["exitCode"], 0, links)
+        self.assertTrue(any(p.startswith(("pipe:", "/dev/")) for p in seen), links)  # the job did list its descriptors
+        self.assertFalse([p for p in seen if p.endswith(("/memory.current", "/memory.stat"))], links)
         self.assertEqual(self.post_run(conn, nonce, "r1", "open('/work/keep', 'w').write('kept')")["exitCode"], 0)
         fill = ("import os, sys, time\n"
                 "def hog():\n    held = []\n    try:\n        while True:\n            held.append(bytearray(b'x') * (16 << 20))\n"

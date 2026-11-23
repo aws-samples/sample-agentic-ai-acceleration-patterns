@@ -78,7 +78,7 @@ class ConstantsTest(unittest.TestCase):
                 mock.patch.object(rn, "serve") as serve, mock.patch.object(rn.job, "log") as logged:
             self.assertEqual(rn.main(), 1)
         serve.assert_not_called()
-        logged.assert_any_call("start_failed", error="OSError")
+        logged.assert_any_call("start_failed", error="OSError", errno=12)
 
     def test_cpu_seconds_round_up(self):
         self.assertEqual([jb.cpu_seconds(t) for t in (1, 1000, 1001, 30000, 60000)], [1, 1, 2, 30, 60])

@@ -476,15 +476,16 @@ with `busy`. The runner:
    100 MiB and `RLIMIT_MEMLOCK` = 0 (ADR-0074), set before the drop to
    uid 1001; and `RLIMIT_NOFILE` = 256 (64 on `microvm`, which bounds
    the Unix socket buffers each process can hold) and `RLIMIT_AS` = A,
-   set last, after the drop and the filter install,
-   because the child is a fork of the runner and may hold more descriptors
-   and address space than the job may until it execs (ADR-0038). A, N and what caps the job's total memory depend
-   on the backend (memory cap, below). The runner sets the job's
-   `oom_score_adj` to 1000, which needs no capability, and tries to set
-   its own to -1000, ignoring `EACCES`. No backend grants
-   `CAP_SYS_RESOURCE`, and S-14 found the runner starting at 1000 on
-   `microvm` and `agentcore` and at -998 on `nitro`. The design relies on
-   neither score on `microvm` and `agentcore`. On `nitro` the runner's
+   set last, after the drop and the filter install, because the child
+   is a fork of the runner and may hold more descriptors and address
+   space than the job may until it execs (ADR-0038). A, N and what caps
+   the job's total memory depend on the backend (memory cap, below).
+   The runner sets the job's `oom_score_adj` to 1000, which needs no
+   capability, and tries to set its own to -1000, ignoring `EACCES`.
+   No backend grants `CAP_SYS_RESOURCE`, and S-14 found the runner
+   starting at 1000 on `microvm` and `agentcore` and at -998 on
+   `nitro`. The design relies on neither score on `microvm` and
+   `agentcore`. On `nitro` the runner's
    survival of a kernel kill was measured only at the platform's -998,
    and only with SysV IPC filtered (S-18), and it held in all 85 S-19
    fills; the watchdog is an early warning that often, not always, acts
@@ -585,19 +586,21 @@ runner wrote no `job_done` line within `runTimeout` + 5 s in 5 of 8
 such fills on a `nitro`-only stack (and in 2 of 6 integration runs of
 `runaway`), the tool stopped the task as an overrun (§4.1 step 5), and
 the tenant lost `/work`. So on `nitro` the runner locks its pages once
-it is claimed (`mlockall(MCL_CURRENT)`, then `MCL_FUTURE |
-MCL_ONFAULT`), and the task definition sets the container's `memlock`
-ulimit to unlimited (a ulimit, not a capability). Each job child and
-the SysV sweep set `RLIMIT_MEMLOCK` to 0 on every backend. A runner
-whose lock the kernel refuses ends at start. With the lock alone, the
-14 fills tried ended but took up to 23.7 s, because the watchdog opened
-its files on every poll, and an open allocates: in the full group it
-waited 6 to 19 s. So the watchdog opens `memory.current` and
-`memory.stat` and reads them once at claim, before any job, keeps them
-open and reads them with `pread`. With the lock and the open files, 0
-of 58 such fills overran; the 14 fills of the final runner answered
-`memoryExceeded` in 0.54 to 7.4 s on the same task with `/work` kept
-(ADR-0074).
+it is claimed and its TLS context is made (`mlockall(MCL_CURRENT)`,
+then `MCL_FUTURE | MCL_ONFAULT`), and the task definition sets the
+container's `memlock` ulimit to unlimited (a ulimit, not a
+capability). Each job child and the SysV sweep set `RLIMIT_MEMLOCK` to
+0 on every backend. A runner whose lock the kernel refuses ends at
+start. With the lock alone, 14 fills ended but took up to 23.7 s,
+because the watchdog opened its files on every poll, and an open
+allocates: in the full group it waited 6 to 19 s. So the watchdog
+opens `memory.current` and `memory.stat` and reads them once at claim,
+before any job, keeps them open and reads them with `pread`. On one
+stack, in one Region, at the default task size, 0 of 14 fills of the
+final runner overran: each answered `memoryExceeded` in 0.54 to 7.4 s
+on the same task with `/work` kept (0 of 58 across the runner variants
+of ADR-0074). A fill that still overran would end as before (§4.1 step
+5), with the tenant's `/work` lost and nothing crossing tenants.
 
 Mounts (S-16). On every backend `/dev/shm` is the only tmpfs uid 1001
 can write: 64 MiB on `microvm` and `agentcore`, 576 MiB on `nitro`

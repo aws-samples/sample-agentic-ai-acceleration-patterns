@@ -72,10 +72,11 @@ Option 1, with the watchdog's files kept open:
    start.
 2. The task definition sets the container's `memlock` ulimit to
    unlimited (soft and hard -1). It is a ulimit, not a capability: the
-   container still adds none (`LinuxParameters` stays unset). The runner's
-   locked size counts whole mappings, about 100 to 375 MiB of address
-   space, while only its resident pages (about 36 MiB) use memory; a fixed
-   bound could refuse a later mapping and break the runner.
+   container still adds none (`LinuxParameters` stays unset). The
+   runner's locked size (`VmLck`) counts whole mappings, about 100 to
+   375 MiB, while only its resident pages (`VmRSS`, about 36 MiB) use
+   memory; a fixed bound could refuse a later mapping and break the
+   runner.
 3. Every job child sets `RLIMIT_MEMLOCK` to 0 (soft and hard) before it
    drops to uid 1001, on every backend, and so does the runner's SysV
    sweep, the other uid 1001 process. uid 1001 holds no capability, so
@@ -93,8 +94,9 @@ Option 1, with the watchdog's files kept open:
 
 Measured on the same stack: with the lock and the open files, 0 of 58
 such fills overran. 32 of them ran with the side process, 14 of those
-with one of the two variants below; they took 0.55 to 13.9 s, and the
-slowest of them also logged each watchdog poll, which itself waited.
+with one of two variants that were not kept (below); they took 0.55 to
+13.9 s, and the slowest of them also logged each watchdog poll, which
+itself waited.
 12 ran with a runner that opened the files at the first poll instead
 of at claim, in 0.65 to 7.4 s. The last 14 are this
 decision's runner, without the side process, 4 of them as the first
@@ -102,19 +104,22 @@ call of a new sandbox: all 14 answered `memoryExceeded` true in 0.54 to
 7.4 s on the same task, and every file the tenant had written to
 `/work` before them was still there.
 
-Locking cost about 0.3 MiB of the watchdog's counted memory at idle in
-a local container (25.7 against 25.5 MiB). On the task the runner's
-resident memory (`VmRSS`) was about 36 MiB.
+The two variants were ending the job on the first `oom_kill` in
+`memory.events` before reading `memory.stat`, and running the job at
+nice 19. Neither shortened the fills measurably, so neither is kept.
 
-Two other changes were tried and not kept: ending the job on the first
-`oom_kill` in `memory.events` before reading `memory.stat`, and running
-the job at nice 19. Neither shortened the fills measurably.
+On the task, the group's `memory.current` at idle was about 40 MiB with
+the lock and 41 to 45 MiB without it (both with the side process), so
+the lock added no measurable memory. The runner's `VmRSS`, read after
+the lock, was about 36 MiB.
 
 ## Consequences
 
 The `runaway` step requires `memoryExceeded` on `nitro` again; a tool
 overrun there is a failure. The integration test has not run the step
-with this change yet. A fill from every slot still takes up to about
+with this change yet. 0 of 14 bounds the overrun rate only loosely, so
+a fill that still overran would end as before: the tool stops the task,
+the tenant loses `/work`, and nothing crosses tenants. A fill from every slot still takes up to about
 7 s on a 1 vCPU task, because the runner's own allocations wait while
 the group is full; the slowest of this runner's 14 fills took 7.4 s,
 inside the integration test's 20 s `runTimeout` and the 30 s default.

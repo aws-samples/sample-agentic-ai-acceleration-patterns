@@ -120,7 +120,7 @@ def main() -> int:
             # does not start, rather than run a runner a memory fill can stall (ADR-0074).
             job.lock_memory()
         except Exception as e:  # a nitro task that cannot claim itself ends, and the start fails
-            job.log("start_failed", error=type(e).__name__)
+            job.log("start_failed", error=type(e).__name__, errno=getattr(e, "errno", None))
             return 1
         serve(sandbox, TLS_PORT, "jobs", tls=context)
     else:
