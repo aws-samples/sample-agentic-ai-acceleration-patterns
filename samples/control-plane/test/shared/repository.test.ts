@@ -19,16 +19,20 @@ import {
   AmbiguousTransactionError,
   ApplicationGoneError,
   ApplicationNotLiveError,
+  attemptToken,
   ConditionFailedError,
   DeploymentExistsError,
   DuplicateTokenError,
   DynamoDBRepository,
+  isRaceCancellation,
   PlacementRaceLostError,
   PlacementTransactions,
+  RACE_RETRY_ATTEMPTS,
   RecordGoneError,
   StaleTransitionError,
   TenantGoneError,
   TenantNotLiveError,
+  TransactionRaceError,
 } from '../../src/shared/repository';
 import { ValidationException } from '../../src/smithy/source/typescript-ssdk-codegen/src';
 
@@ -519,6 +523,9 @@ describe('PlacementTransactions', () => {
     deploymentDataModel,
     client,
   );
+  // The race-retry jitter waits Math.random() * ceiling: 0 ms here.
+  beforeEach(() => jest.spyOn(Math, 'random').mockReturnValue(0));
+  afterEach(() => jest.restoreAllMocks());
 
   const deployment = { tenantId: 't1', applicationId: 'app-x' };
   const deploymentItem = {
@@ -654,13 +661,87 @@ describe('PlacementTransactions', () => {
       expect((error as TenantNotLiveError).status).toBe('DELETE_FAILED');
     });
 
-    test('a cancellation with no failed condition is ambiguous — never retarget', async () => {
+    test('a race-only cancellation is sent again on the same cell with a new token (ADR-0050)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejectsOnce(transactionCanceled(['None', 'TransactionConflict', 'None']))
+        .rejectsOnce(transactionCanceled(['ThrottlingError', 'None', 'None']))
+        .resolves({});
+      await transactions.placeDeploymentInCell(placement);
+      const calls = ddbMock.commandCalls(TransactWriteCommand);
+      expect(calls).toHaveLength(3);
+      expect(calls.map((call) => call.args[0].input.ClientRequestToken)).toEqual([
+        'token-t1',
+        'token-t1-r1',
+        'token-t1-r2',
+      ]);
+      // The same candidate every time: a race is not a lost slot.
+      const cellKeys = calls.map((call) => call.args[0].input.TransactItems?.[0].Update?.Key);
+      expect(new Set(cellKeys.map((key) => JSON.stringify(key))).size).toBe(1);
+    });
+
+    test('races on every attempt are a TransactionRaceError, never ambiguous (ADR-0050)', async () => {
       ddbMock
         .on(TransactWriteCommand)
         .rejects(transactionCanceled(['None', 'TransactionConflict', 'None']));
       await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        TransactionRaceError,
+      );
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(RACE_RETRY_ATTEMPTS);
+    });
+
+    test('the jitter waits stay under 50, 100 and 200 ms, and each race logs one line (ADR-0050)', async () => {
+      jest.spyOn(Math, 'random').mockReturnValue(0.9999);
+      const delays: number[] = [];
+      jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+        delays.push(ms ?? 0);
+        fn();
+        return 0;
+      }) as unknown as typeof setTimeout);
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'TransactionConflict', 'None']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        TransactionRaceError,
+      );
+      expect(delays).toHaveLength(RACE_RETRY_ATTEMPTS - 1);
+      [50, 100, 200].forEach((ceiling, i) => {
+        expect(delays[i]).toBeLessThan(ceiling);
+        expect(delays[i]).toBeGreaterThan(ceiling * 0.99);
+      });
+      expect(warn).toHaveBeenCalledTimes(RACE_RETRY_ATTEMPTS);
+      expect(warn.mock.calls[0][0]).toContain('attempt 1 of 4 (reasons None,TransactionConflict,None); sending again');
+      expect(warn.mock.calls[RACE_RETRY_ATTEMPTS - 1][0]).toContain('attempts spent');
+    });
+
+    test('a client token too long for the retry suffix is refused before the first send', async () => {
+      expect(attemptToken('x'.repeat(33), RACE_RETRY_ATTEMPTS - 1)).toHaveLength(36);
+      expect(() => attemptToken('x'.repeat(34), 0)).toThrow('race-retry suffix');
+      await expect(
+        transactions.placeDeploymentInCell({ ...placement, clientRequestToken: 'x'.repeat(34) }),
+      ).rejects.toBeInstanceOf(AmbiguousTransactionError);
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    });
+
+    test('a conflict beside a failed condition is classified by the condition, not retried', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['ConditionalCheckFailed', 'TransactionConflict', 'None']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        PlacementRaceLostError,
+      );
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+    });
+
+    test('a cancellation with every reason None is ambiguous — never retarget', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'None', 'None']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
         AmbiguousTransactionError,
       );
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
     });
 
     test('non-cancellation transaction errors are ambiguous — never retarget', async () => {
@@ -827,6 +908,26 @@ describe('PlacementTransactions', () => {
         AmbiguousTransactionError,
       );
     });
+
+    test('a race-only cancellation is sent again, then succeeds (ADR-0050)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejectsOnce(transactionCanceled(['TransactionConflict', 'None', 'None', 'ProvisionedThroughputExceeded', 'None']))
+        .resolves({});
+      await transactions.createCellWithDeployment(newCell);
+      const tokens = ddbMock.commandCalls(TransactWriteCommand).map((call) => call.args[0].input.ClientRequestToken);
+      expect(tokens).toEqual(['token-t1', 'token-t1-r1']);
+    });
+
+    test('races on every attempt are a TransactionRaceError (ADR-0050)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['TransactionConflict', 'None', 'None', 'None', 'None']));
+      await expect(transactions.createCellWithDeployment(newCell)).rejects.toBeInstanceOf(
+        TransactionRaceError,
+      );
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(RACE_RETRY_ATTEMPTS);
+    });
   });
 
   describe('CreateDeployment idempotency (ADR-017, §7.3)', () => {
@@ -864,6 +965,20 @@ describe('PlacementTransactions', () => {
       await expect(
         transactions.placeDeploymentInCell({ ...placement, idempotencyItem }),
       ).rejects.toBeInstanceOf(DuplicateTokenError);
+    });
+
+    test('a race, then a failed idempotency condition on the next attempt, is DuplicateTokenError (ADR-0050)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejectsOnce(transactionCanceled(['None', 'None', 'None', 'TransactionConflict']))
+        .rejects(transactionCanceled(['None', 'None', 'None', 'ConditionalCheckFailed']));
+      await expect(
+        transactions.placeDeploymentInCell({ ...placement, idempotencyItem }),
+      ).rejects.toBeInstanceOf(DuplicateTokenError);
+      const calls = ddbMock.commandCalls(TransactWriteCommand);
+      expect(calls).toHaveLength(2);
+      // The retry still carries the idempotency Put, last.
+      expect(calls[1].args[0].input.TransactItems?.[3].Put?.Item).toEqual(idempotencyItem);
     });
 
     test('a lost race with a clean idempotency condition is still a lost race', async () => {
@@ -956,6 +1071,40 @@ describe('PlacementTransactions', () => {
       await expect(transactions.failCreatingCellAndDeployment(compensation)).rejects.toBeInstanceOf(
         AmbiguousTransactionError,
       );
+    });
+
+    test('a race-only cancellation is sent again, so the records do not stay CREATING (ADR-0050)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejectsOnce(transactionCanceled(['TransactionConflict', 'None']))
+        .rejectsOnce(transactionCanceled(['None', 'TransactionConflict']))
+        .resolves({});
+      await transactions.failCreatingCellAndDeployment(compensation);
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(3);
+    });
+
+    test('races on every attempt are a TransactionRaceError', async () => {
+      ddbMock.on(TransactWriteCommand).rejects(transactionCanceled(['TransactionConflict', 'None']));
+      await expect(transactions.failCreatingCellAndDeployment(compensation)).rejects.toBeInstanceOf(
+        TransactionRaceError,
+      );
+    });
+  });
+
+  describe('isRaceCancellation (ADR-0050)', () => {
+    test.each([
+      [['None', 'TransactionConflict', 'None'], true],
+      [['ThrottlingError'], true],
+      [['ProvisionedThroughputExceeded', 'TransactionConflict'], true],
+      [['None', 'None'], false],
+      [['ConditionalCheckFailed', 'TransactionConflict'], false],
+      [['ValidationError', 'TransactionConflict'], false],
+    ])('%j is a race: %s', (codes, expected) => {
+      expect(isRaceCancellation(codes)).toBe(expected);
+    });
+
+    test('no cancellation reasons is not a race', () => {
+      expect(isRaceCancellation(undefined)).toBe(false);
     });
   });
 });

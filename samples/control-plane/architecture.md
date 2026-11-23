@@ -6,6 +6,7 @@ This sample has been verified as working via automated integration tests and end
 
 | Date | Commit | Test accounts | Region | Verified by | Notes |
 |------|--------|---------------|--------|-------------|-------|
+| 2026-11-23 | c0647e9 | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6240s`: every step of spec §10 passed with the race retry of ADR-0050 in every API transaction. Deploy about 5 min, assertions about 64 min, teardown about 35 min; nothing of the run left in either account apart from the harness's default Lambda log groups (README Known issues). The same day, `scripts/conflict-probe.sh` against a control plane from the same commit (eu-west-1): three bursts of 19 CreateDeployment calls at once onto one cell, every first answer 202 and every deployment `ACTIVE`; the API logged 10 placements cancelled only by races, each sent again and committed on its second attempt. The later commits change docs only |
 | 2026-11-19 | 93e7ae4 | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6359s`: every step of spec §10 passed, with the vendor hooks of ADR-044 in step 16 (global and application pre and post hooks around cell and deployment scripts, `SCRIPT_OUTPUTS` through the outputs guard, a failing pre and post hook, a skipped delete hook, the deny on the hook roles) and the asynchronous record operations of ADR-045 (202 and polling on every application, tenant and account call, hooks on tenant, application and account events in step 17, teardown through the API in step 18). Deploy about 5 min, assertions about 64 min, teardown about 37 min; nothing of the run left in either account apart from the harness's default Lambda log groups (README Known issues). The later commits change docs and comments only |
 | 2026-11-18 | 255aa7b | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3115s`: every step of spec §10 passed, with the deployment inputs in step 1: both CodeBuild projects carried the stack's `concurrentBuildLimit` of 50 (ADR-0046), and B's cell provisioning role carried exactly the policy its stack attached through `cellBuildManagedPolicyArns` (ADR-0047). Nothing left in the control plane account. The later commits change docs, a comment, and the assertion that names B's cell role, which now derives the name from the fleet name and gets the same name the run used; the deployed templates are those of the run |
 | 2026-11-16 | aa1221a | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3071s`: every step of spec §10 passed, with the required scope (R-38) in step 1: the listed machine client's `control-plane/read` token read and was refused on a write, its `control-plane/other` token was refused, and the unlisted client was refused. Deploy about 4 min, assertions 23 min, teardown about 24 min; nothing left in either account |
@@ -611,7 +612,7 @@ is started and compensated is in §7, Record events.
 
 | Operation | HTTP | Status | Sync/Async | Behaviour |
 |---|---|---|---|---|
-| `CreateDeployment` | `POST /tenants/{tenantId}/deployments` | **202** | Async | Input: `{applicationId, adminEmail, accountId?, clientToken?}` — **no resource definition**. 404 for an unknown tenant or an unregistered application. Placement (§6): in **one transaction**, claim a slot in an `ACTIVE` cell of the application with capacity — or claim a cell slot on an eligible account, count the cell on the application, and create a new cell record (`CREATING`, deployment slot pre-claimed, `applicationId` and `accountId` set, definition stamped) — count the deployment on the tenant, and persist the deployment `CREATING` with `cellId`; then start the workflow (tenant create build, preceded by the cell create build if a new cell was needed). `accountId` pins the deployment to one registered account (the only way into a tenant-owned one; 404 if unregistered; 400 if it does not admit the application, ADR-033); absent, vendor-owned accounts that admit the application only. 409 `ConflictError` when the tenant already has a deployment of the application; 409 `InsufficientCapacityError` when no eligible account has cell capacity (ADR-026). Returns the deployment including `cellId`. `adminEmail` is pass-through bootstrap input, never persisted (ADR-004). `clientToken` makes the call idempotent (ADR-017): a retry with the same token returns the original deployment; reuse with different parameters is a 409 |
+| `CreateDeployment` | `POST /tenants/{tenantId}/deployments` | **202** | Async | Input: `{applicationId, adminEmail, accountId?, clientToken?}` — **no resource definition**. 404 for an unknown tenant or an unregistered application. Placement (§6): in **one transaction**, claim a slot in an `ACTIVE` cell of the application with capacity — or claim a cell slot on an eligible account, count the cell on the application, and create a new cell record (`CREATING`, deployment slot pre-claimed, `applicationId` and `accountId` set, definition stamped) — count the deployment on the tenant, and persist the deployment `CREATING` with `cellId`; then start the workflow (tenant create build, preceded by the cell create build if a new cell was needed). `accountId` pins the deployment to one registered account (the only way into a tenant-owned one; 404 if unregistered; 400 if it does not admit the application, ADR-033); absent, vendor-owned accounts that admit the application only. 409 `ConflictError` when the tenant already has a deployment of the application, or, with the retry hint, when the placement transaction met concurrent writes on every attempt and wrote nothing (ADR-0050); 409 `InsufficientCapacityError` when no eligible account has cell capacity (ADR-026). Returns the deployment including `cellId`. `adminEmail` is pass-through bootstrap input, never persisted (ADR-004). `clientToken` makes the call idempotent (ADR-017): a retry with the same token returns the original deployment; reuse with different parameters is a 409 |
 | `GetDeployment` | `GET /tenants/{tenantId}/deployments/{applicationId}` | 200 | Sync | The polling endpoint — `status`, `statusReason`, `lastBuildId`, `lastGlobalHooks`, `cellId`, `createdAt`, `updatedAt` (RFC 3339 `date-time` in UTC with milliseconds; the serializer drops a `.000` fraction, so parse before comparing), plus the **effective definition** (`source`, `scripts` and the application hooks resolved from the cell's stamped definition) and the cell's `accountId`. 404 if missing |
 | `UpdateDeployment` | `PUT /tenants/{tenantId}/deployments/{applicationId}` | **202** | Async | Re-apply the deployment: **no body** — runs the cell's stamped **tenant update** script. Allowed when the deployment is `ACTIVE`/`UPDATE_FAILED` **and** the cell is `ACTIVE`; 409 otherwise. 404 if missing |
 | `DeleteDeployment` | `DELETE /tenants/{tenantId}/deployments/{applicationId}` | **202** | Async | 409 if the deployment is in-flight. Allowed from `ACTIVE` and all `*_FAILED` states **regardless of cell status** — the delete script is the cleanup path, including when the cell itself is `CREATE_FAILED`. Sets `DELETING`; the workflow runs the **tenant delete** script, then in one transaction removes the record, decrements the cell's `tenantCount` and the tenant's `deploymentCount` |
@@ -658,10 +659,10 @@ operation runs a hook on demand.
 
 | Operation | HTTP | Status | Behaviour |
 |---|---|---|---|
-| `PutHook` | `PUT /hooks/{hookId}` | 200 | Create-or-replace a global hook. Input `{events, phase, source, script, timeoutMinutes?}`, validated per §4 (400). The path is chosen from a strongly consistent read: a create claims a `hookCount` slot in the same transaction (a sixth hook → 409 without a retry hint: delete a hook first); a replace increments `revision`. A create or replace that raced a create or delete of the same hook → 409, retry. Applies to operations accepted afterwards; an unpinned source is accepted with a warning naming the hook |
+| `PutHook` | `PUT /hooks/{hookId}` | 200 | Create-or-replace a global hook. Input `{events, phase, source, script, timeoutMinutes?}`, validated per §4 (400). The path is chosen from a strongly consistent read: a create claims a `hookCount` slot in the same transaction (a sixth hook → 409 without a retry hint: delete a hook first); a replace increments `revision`. A create or replace that raced a create or delete of the same hook → 409, retry; a create transaction that met concurrent writes on every attempt → 409, retry (ADR-0050). Applies to operations accepted afterwards; an unpinned source is accepted with a warning naming the hook |
 | `GetHook` | `GET /hooks/{hookId}` | 200 | The definition, `revision`, timestamps. 404 if unregistered |
 | `ListHooks` | `GET /hooks` | 200 | Paginated, in `hookId` order, the order global hooks run in |
-| `DeleteHook` | `DELETE /hooks/{hookId}` | 200 | Deletes the hook and releases its `hookCount` slot in one transaction; 404 if unregistered. Executions already accepted keep the snapshot they hold; `StopExecution` is the only stop for them, and it strands their records |
+| `DeleteHook` | `DELETE /hooks/{hookId}` | 200 | Deletes the hook and releases its `hookCount` slot in one transaction; 404 if unregistered; 409, retry, when the transaction met concurrent writes on every attempt (ADR-0050). Executions already accepted keep the snapshot they hold; `StopExecution` is the only stop for them, and it strands their records |
 
 Twenty-six operations: five tenant, five deployment, four cell, four
 account, four application, four hook. Twelve are `GET` reads, the ones the
@@ -753,7 +754,10 @@ flight or being deleted, or one accepted since the request read it — retry;
 a `CreateDeployment` that lost every bounded claim on candidate cells while
 no account had a free cell slot — retry, ADR-031; `clientToken` reuse with
 different parameters, ADR-017; a `PutHook` that raced a create or delete of
-the same hook — retry; a sixth global hook — delete one first),
+the same hook — retry; a `CreateDeployment` placement, a `PutHook` create
+or a `DeleteHook` whose transaction met concurrent writes on every attempt
+— nothing written, retry, ADR-0050; a sixth global hook — delete one
+first),
 `InsufficientCapacityError` 409 (no eligible account has cell capacity;
 nothing was written; the remedy is an operator act — raise `maxCells`,
 register an account, or admit the application in one — ADR-026),
@@ -807,6 +811,12 @@ workflow starts:
      tenant condition cancelled → the tenant was deleted meanwhile → 404,
        or is not live → 409; stop
      capacity/status condition cancelled (lost a race) → try next candidate
+     cancelled by races only (every reason None, TransactionConflict,
+       ThrottlingError or ProvisionedThroughputExceeded, at least one of
+       the last three) → nothing applied;
+       send again on the same candidate, at most 4 attempts with jitter;
+       every attempt raced → 409 with the retry hint, nothing written
+       (ADR-0050)
      any other cancellation or transaction error → fail the request; never
        retarget the same deployment after an ambiguous transaction outcome
 3. No candidate claimed (none found, or the candidate budget is exhausted):
@@ -829,7 +839,8 @@ workflow starts:
        (read from the returned item); next account, or 409 when targeted
      application condition cancelled → application deleted meanwhile → 404,
        or not live → 409
-     tenant / deployment / idempotency conditions → as in step 2
+     tenant / deployment / idempotency conditions, and races only → as in
+       step 2
      every eligible account refused (or none) → 409 InsufficientCapacityError,
        nothing written (ADR-026)
      → workflow will run the cell create build before the tenant create build

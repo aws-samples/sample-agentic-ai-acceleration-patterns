@@ -274,8 +274,9 @@ export class AccountNotLiveError extends ConditionFailedError {
 
 /**
  * A placement transaction failed for any reason other than a classified
- * cancellation. The outcome is ambiguous — the request must fail; the same
- * deployment must NEVER be retargeted at another cell (§7 step 2).
+ * cancellation or a cancellation by races alone ({@link TransactionRaceError}).
+ * The outcome is ambiguous — the request must fail; the same deployment must
+ * NEVER be retargeted at another cell (§7 step 2).
  */
 export class AmbiguousTransactionError extends Error {
   constructor(
@@ -350,6 +351,122 @@ export function cancellationCodes(error: unknown): string[] | undefined {
     return reasons?.map((reason) => reason?.Code ?? 'None');
   }
   return undefined;
+}
+
+/**
+ * The cancellation codes of a member that lost a race and failed no check:
+ * another transaction held the item, or the table refused the write for
+ * capacity. A cancellation applies nothing, so these say nothing about the
+ * outcome but "not yet" (ADR-0050).
+ */
+const RACE_CODES: ReadonlySet<string> = new Set([
+  'TransactionConflict',
+  'ThrottlingError',
+  'ProvisionedThroughputExceeded',
+]);
+
+/**
+ * Whether a cancelled `TransactWriteItems` was cancelled only by races: at
+ * least one member carries a race code and every other member `None`. Such
+ * a transaction applied nothing and failed no condition, so it is safe to
+ * send again; it is never an ambiguous outcome (ADR-0050).
+ */
+export function isRaceCancellation(codes: string[] | undefined): boolean {
+  return (
+    codes !== undefined &&
+    codes.some((code) => RACE_CODES.has(code)) &&
+    codes.every((code) => code === 'None' || RACE_CODES.has(code))
+  );
+}
+
+/**
+ * A `TransactWriteItems` was cancelled only by races on every one of its
+ * {@link RACE_RETRY_ATTEMPTS} attempts. Nothing was written, so the caller
+ * may retry the whole request: the service maps it to a 409 with the retry
+ * hint, never a 500 (ADR-0050).
+ */
+export class TransactionRaceError extends Error {
+  constructor(
+    message: string,
+    readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = 'TransactionRaceError';
+  }
+}
+
+/**
+ * Attempts of one transaction against a race-only cancellation (ADR-0050).
+ * With full jitter doubling from {@link RACE_RETRY_BASE_MS} the waits add up
+ * to at most 50 + 100 + 200 ms, far inside the API's 29 s window.
+ */
+export const RACE_RETRY_ATTEMPTS = 4;
+const RACE_RETRY_BASE_MS = 50;
+
+/** DynamoDB's `ClientRequestToken` limit, and the longest suffix {@link attemptToken} adds. */
+const MAX_CLIENT_REQUEST_TOKEN = 36;
+const RACE_TOKEN_SUFFIX_MAX = `-r${RACE_RETRY_ATTEMPTS - 1}`.length;
+
+/**
+ * The `ClientRequestToken` of attempt `attempt`: the caller's token first,
+ * then a suffixed one. A race-only cancellation is a definite answer that
+ * applied nothing, so a new token on the next attempt cannot apply the
+ * transaction twice, and it never meets a recorded outcome of the cancelled
+ * attempt (ADR-0050). The suffix keeps a 26-character ULID within the
+ * 36-character limit. A token too long for the suffix is refused before the
+ * first attempt, so it can never fail on a later one after a definite
+ * cancellation. That refusal is a programming-error path: every caller
+ * passes a 26-character ULID. The caller's error handling reads it as
+ * ambiguous and answers 500, although nothing was sent.
+ */
+export function attemptToken(token: string, attempt: number): string {
+  if (token.length > MAX_CLIENT_REQUEST_TOKEN - RACE_TOKEN_SUFFIX_MAX) {
+    throw new Error(
+      `ClientRequestToken of ${token.length} characters leaves no room for the race-retry suffix (at most ${
+        MAX_CLIENT_REQUEST_TOKEN - RACE_TOKEN_SUFFIX_MAX
+      })`,
+    );
+  }
+  return attempt === 0 ? token : `${token}-r${attempt}`;
+}
+
+/**
+ * Sends a `TransactWriteItems` built for each attempt, and sends it again
+ * after a short full-jitter wait while it is cancelled only by races
+ * ({@link isRaceCancellation}). Gives up with {@link TransactionRaceError}
+ * after {@link RACE_RETRY_ATTEMPTS} attempts. Any other error is rethrown
+ * as it is, for the caller to classify.
+ */
+export async function sendTransactionWithRaceRetry(
+  client: DynamoDBDocumentClient,
+  what: string,
+  command: (attempt: number) => TransactWriteCommand,
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await client.send(command(attempt));
+      return;
+    } catch (error) {
+      const codes = cancellationCodes(error);
+      if (!isRaceCancellation(codes)) {
+        throw error;
+      }
+      const exhausted = attempt + 1 >= RACE_RETRY_ATTEMPTS;
+      // One line per race, so how often placements meet (the ADR-0050 revisit
+      // trigger) shows in the logs before any request answers the 409.
+      console.warn(
+        `${what}: cancelled only by races on attempt ${attempt + 1} of ${RACE_RETRY_ATTEMPTS} ` +
+          `(reasons ${codes?.join(',')}); ${exhausted ? 'attempts spent' : 'sending again'}`,
+      );
+      if (exhausted) {
+        throw new TransactionRaceError(
+          `${what} was cancelled by concurrent writes on ${RACE_RETRY_ATTEMPTS} attempts; nothing was written`,
+          error,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.random() * RACE_RETRY_BASE_MS * 2 ** attempt));
+    }
+  }
 }
 
 /**
@@ -840,7 +957,9 @@ export class PlacementTransactions<
    * classification. Throws {@link PlacementRaceLostError} ONLY when the
    * cell's status/capacity check is the sole failed condition (safe to try
    * the next candidate); {@link DeploymentExistsError} and
-   * {@link TenantGoneError} by position; every other failure is an
+   * {@link TenantGoneError} by position. A cancellation by races alone is
+   * sent again on the same candidate and, once the attempts are spent, is a
+   * {@link TransactionRaceError} (ADR-0050). Every other failure is an
    * {@link AmbiguousTransactionError} — never retarget the same deployment
    * after an ambiguous outcome.
    */
@@ -859,7 +978,7 @@ export class PlacementTransactions<
     readonly idempotencyItem?: DynamoDBItem;
   }): Promise<void> {
     try {
-      await this.client.send(
+      await sendTransactionWithRaceRetry(this.client, 'Placement transaction', (attempt) =>
         new TransactWriteCommand({
           TransactItems: [
             {
@@ -892,10 +1011,13 @@ export class PlacementTransactions<
             },
             ...idempotencyPut(this.tableName, params.idempotencyItem),
           ],
-          ClientRequestToken: params.clientRequestToken,
+          ClientRequestToken: attemptToken(params.clientRequestToken, attempt),
         }),
       );
     } catch (error) {
+      if (error instanceof TransactionRaceError) {
+        throw error;
+      }
       const codes = cancellationCodes(error);
       throwIfDuplicateToken(codes, params.idempotencyItem);
       const classified =
@@ -936,8 +1058,9 @@ export class PlacementTransactions<
    * (ADR-017). A failed account condition alone throws
    * {@link AccountFullError} (try the next eligible account);
    * {@link DeploymentExistsError}, {@link TenantGoneError} and
-   * {@link ApplicationGoneError} by position; anything else is ambiguous:
-   * fail the request, never retarget.
+   * {@link ApplicationGoneError} by position; a cancellation by races alone
+   * is sent again and then is a {@link TransactionRaceError} (ADR-0050);
+   * anything else is ambiguous: fail the request, never retarget.
    */
   async createCellWithDeployment(params: {
     /** Base-table key of the account the cell is created in. */
@@ -979,7 +1102,7 @@ export class PlacementTransactions<
       },
     });
     try {
-      await this.client.send(
+      await sendTransactionWithRaceRetry(this.client, 'New-cell placement transaction', (attempt) =>
         new TransactWriteCommand({
           TransactItems: [
             countCells(params.accountKey, 'attribute_exists(PK) AND #cellCount < #maxCells'),
@@ -1001,10 +1124,13 @@ export class PlacementTransactions<
             },
             ...idempotencyPut(this.tableName, params.idempotencyItem),
           ],
-          ClientRequestToken: params.clientRequestToken,
+          ClientRequestToken: attemptToken(params.clientRequestToken, attempt),
         }),
       );
     } catch (error) {
+      if (error instanceof TransactionRaceError) {
+        throw error;
+      }
       const codes = cancellationCodes(error);
       throwIfDuplicateToken(codes, params.idempotencyItem);
       const classified =
@@ -1075,12 +1201,18 @@ export class PlacementTransactions<
       },
     });
     try {
-      await this.client.send(
+      // A race-only cancellation is sent again (ADR-0050): the start was
+      // refused, so a lost race here would strand both records in CREATING
+      // with no execution to move them.
+      await sendTransactionWithRaceRetry(this.client, 'Paired compensation transaction', () =>
         new TransactWriteCommand({
           TransactItems: [compensate(params.cellKey), compensate(params.deploymentKey)],
         }),
       );
     } catch (error) {
+      if (error instanceof TransactionRaceError) {
+        throw error;
+      }
       const codes = cancellationCodes(error);
       if (codes !== undefined && codes.some((code) => code === 'ConditionalCheckFailed')) {
         throw new StaleTransitionError(

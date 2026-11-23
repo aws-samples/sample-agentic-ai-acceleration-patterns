@@ -9,6 +9,8 @@ import {
   ConditionFailedError,
   defaultDocumentClient,
   ItemKey,
+  sendTransactionWithRaceRetry,
+  TransactionRaceError,
 } from './repository';
 
 /**
@@ -81,7 +83,10 @@ export class HookTransactions<THookSchema, THookItem extends DynamoDBItem> {
    * A failed hook condition throws {@link HookExistsError} (a concurrent
    * create won; it takes precedence over the counter, because the retry is
    * then a replace); a failed counter condition alone throws
-   * {@link HookLimitError}. Anything else is an {@link AmbiguousTransactionError}.
+   * {@link HookLimitError}. A cancellation by races alone (concurrent writes
+   * on the shared counter) is sent again and then is a
+   * {@link TransactionRaceError} (ADR-0050). Anything else is an
+   * {@link AmbiguousTransactionError}.
    */
   async createHook(params: {
     readonly hook: THookSchema;
@@ -91,7 +96,7 @@ export class HookTransactions<THookSchema, THookItem extends DynamoDBItem> {
     readonly updatedAt: string;
   }): Promise<void> {
     try {
-      await this.client.send(
+      await sendTransactionWithRaceRetry(this.client, 'Hook create transaction', () =>
         new TransactWriteCommand({
           TransactItems: [
             {
@@ -120,6 +125,9 @@ export class HookTransactions<THookSchema, THookItem extends DynamoDBItem> {
         }),
       );
     } catch (error) {
+      if (error instanceof TransactionRaceError) {
+        throw error;
+      }
       const codes = cancellationCodes(error);
       if (codes?.[0] === 'ConditionalCheckFailed') {
         throw new HookExistsError('The hook was created concurrently');
@@ -141,7 +149,8 @@ export class HookTransactions<THookSchema, THookItem extends DynamoDBItem> {
    * A failed hook condition throws {@link HookGoneError}. A failed counter
    * condition alone means a hook exists that the counter does not count, an
    * invariant violation: an {@link AmbiguousTransactionError}, never a silent
-   * success.
+   * success. A cancellation by races alone is sent again and then is a
+   * {@link TransactionRaceError} (ADR-0050).
    */
   async deleteHook(params: {
     readonly hookKey: ItemKey;
@@ -149,7 +158,7 @@ export class HookTransactions<THookSchema, THookItem extends DynamoDBItem> {
     readonly updatedAt: string;
   }): Promise<void> {
     try {
-      await this.client.send(
+      await sendTransactionWithRaceRetry(this.client, 'Hook delete transaction', () =>
         new TransactWriteCommand({
           TransactItems: [
             {
@@ -173,6 +182,9 @@ export class HookTransactions<THookSchema, THookItem extends DynamoDBItem> {
         }),
       );
     } catch (error) {
+      if (error instanceof TransactionRaceError) {
+        throw error;
+      }
       const codes = cancellationCodes(error);
       if (codes?.[0] === 'ConditionalCheckFailed') {
         throw new HookGoneError('The hook is not registered');

@@ -113,8 +113,9 @@ list DeploymentList {
 /// immediately; poll GetDeployment for the terminal status (ACTIVE or
 /// CREATE_FAILED). ResourceNotFoundError for an unknown tenant, application
 /// or accountId; ConflictError when the tenant already has a deployment of
-/// the application; InsufficientCapacityError when no eligible account has
-/// cell capacity.
+/// the application, or to retry when the placement transaction met
+/// concurrent writes on every attempt and nothing was written;
+/// InsufficientCapacityError when no eligible account has cell capacity.
 @authorizer("vendor-authorizer")
 @http(method: "POST", uri: "/tenants/{tenantId}/deployments", code: 202)
 operation CreateDeployment {

@@ -17,6 +17,7 @@ import {
   RecordGoneError,
   StaleTransitionError,
   TenantGoneError,
+  TransactionRaceError,
 } from '../../src/shared/repository';
 import { CallerContext } from '../../src/shared/service-config';
 import {
@@ -637,9 +638,38 @@ describe('CreateDeployment placement into an existing cell (§7.1 steps 0-2)', (
     expect(createCellWithDeployment).not.toHaveBeenCalled();
     expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
   });
+
+  test('a claim cancelled by races alone is a retryable 409, never a 500, and never moves on (ADR-0050)', async () => {
+    const placeDeploymentInCell = jest.fn().mockRejectedValue(new TransactionRaceError('races'));
+    const createCellWithDeployment = jest.fn();
+    const service = makeService({
+      cellRepo: { queryIndex: cellPage(cellRecord(), cellRecord({ cellId: OTHER_CELL_ID })) },
+      placement: { placeDeploymentInCell, createCellWithDeployment },
+    });
+
+    const error = await service.CreateDeployment(createInput, context).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect((error as ConflictError).message).toContain('retry the request');
+    expect(placeDeploymentInCell).toHaveBeenCalledTimes(1);
+    expect(createCellWithDeployment).not.toHaveBeenCalled();
+    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
+  });
 });
 
 describe('CreateDeployment into a new cell (§7.1 step 3, ADR-032)', () => {
+  test('a new-cell transaction cancelled by races alone is a retryable 409 (ADR-0050)', async () => {
+    const createCellWithDeployment = jest.fn().mockRejectedValue(new TransactionRaceError('races'));
+    const service = makeService({
+      cellRepo: { queryIndex: cellPage() },
+      placement: { createCellWithDeployment },
+    });
+    const error = await service.CreateDeployment(createInput, context).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect((error as ConflictError).message).toContain('retry the request');
+    expect(createCellWithDeployment).toHaveBeenCalledTimes(1);
+    expect(sfnMock.commandCalls(StartExecutionCommand)).toHaveLength(0);
+  });
+
   test('no eligible candidate creates a cell stamped from the application record', async () => {
     const createCellWithDeployment = jest.fn().mockResolvedValue(undefined);
     const service = makeService({
