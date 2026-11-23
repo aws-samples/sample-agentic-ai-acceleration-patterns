@@ -370,6 +370,10 @@ export class UntrustedCodeSandboxes extends Construct {
     // The drain itself must be deleted before the registry and the roles it reads, and the reaper schedule before the drain
     // so the two never sweep at once.
     this.drainResource.node.addDependency(table);
+    // The drain runs outside the VPC (ADR-0071), so nothing else keeps the tool subnets' way out until it ends. The `nitro`
+    // instances reach ECS through it: without it a stopped task never reports STOPPED and the drain times out. The drain
+    // therefore goes before the NAT gateway and its default routes (integration run 15).
+    this.drainResource.node.addDependency(this.vpc.selectSubnets(this.toolSubnets).internetConnectivityEstablished);
     schedule.node.addDependency(this.drainResource);
     this.logDrain.writer(this.drainResource);
 

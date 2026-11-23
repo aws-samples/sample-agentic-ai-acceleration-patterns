@@ -234,6 +234,16 @@ describe('functions (spec 3.1, 3.3, 3.7)', () => {
     }
   });
 
+  test('the drain resource waits for the tool subnets\' default routes, so the NAT outlives the drain (ADR-0071)', () => {
+    const all = base.t.toJSON().Resources as Record<string, Json>;
+    const drain = Object.values(all).find((r) => r.Type === 'AWS::CloudFormation::CustomResource' && pathOf(r).endsWith('/DrainResource/Default'))!;
+    const toolRoutes = Object.entries(all)
+      .filter(([, r]) => r.Type === 'AWS::EC2::Route' && /\/ToolSubnet\d\/DefaultRoute$/.test(pathOf(r)))
+      .map(([id]) => id);
+    expect(toolRoutes).toHaveLength(2);
+    expect(drain.DependsOn).toEqual(expect.arrayContaining(toolRoutes));
+  });
+
   test('every function has the shared environment and JSON logs', () => {
     for (const name of ['RunCode', 'Reaper', 'Offboard', 'Drain']) {
       const fn = base.t.findResources('AWS::Lambda::Function')[fnId(base.t, name)] as Json;

@@ -63,3 +63,12 @@ function outside a VPC calls AWS; the API calls carry no tenant code or
 bytes. If a vendor's account requires every function in a VPC (an SCP or
 a Config rule), the three functions would need the tool subnets back and
 Option 2's cleanup with them.
+
+Note 2026-11-23: integration run 15 found the cost of this change. A
+function in the tool subnets waits, in CDK, for the subnets' default
+routes, so the VPC-attached drain used to keep the NAT gateway up until it
+ended. Outside the VPC nothing did: the stack deleted the NAT gateway
+while the drain ran, the `nitro` instance lost its way to ECS, two stopped
+tasks never reported `STOPPED`, and the drain failed at its deadline. The
+drain resource now depends on the tool subnets' default routes, so the
+NAT gateway goes after it.
