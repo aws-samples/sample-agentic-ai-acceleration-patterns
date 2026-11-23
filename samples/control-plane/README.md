@@ -1360,3 +1360,11 @@ application's cells (threat T5, the highest-consequence open item).
   queue. Until the workflow waits for a free slot, keep a client's in-flight
   creates, updates and deletes at or below the limit; the platform stress
   slice paces its waves this way (stress ADR-0013).
+- **A workflow's terminal write cancelled by a transaction conflict fails
+  the record.** A terminal `TransactWriteItems` cancelled with
+  `TransactionConflict` and no failed condition leaves the record
+  `CREATE_FAILED` or `DELETE_FAILED` although its build succeeded. A new
+  create after a delete, or another delete, clears it (stress ADR-0013).
+  The API's own transactions send a race-only cancellation again and then
+  answer a retryable 409
+  ([ADR-0050](./adr/0050-retry-a-transaction-cancelled-only-by-races.md)).

@@ -51,7 +51,10 @@ function canceled(codes: string[]): Error {
 beforeEach(() => {
   ddbMock.reset();
   ddbMock.on(TransactWriteCommand).resolves({});
+  // The race-retry jitter waits Math.random() * ceiling: 0 ms here.
+  jest.spyOn(Math, 'random').mockReturnValue(0);
 });
+afterEach(() => jest.restoreAllMocks());
 
 describe('createHook', () => {
   const params = { hook: { hookId: 'g' }, counterKey: COUNTER, maxHooks: 5, updatedAt: '2026-01-01T00:00:00.000Z' };

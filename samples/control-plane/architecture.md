@@ -808,7 +808,8 @@ workflow starts:
        or is not live → 409; stop
      capacity/status condition cancelled (lost a race) → try next candidate
      cancelled by races only (every reason None, TransactionConflict,
-       ThrottlingError or ProvisionedThroughputExceeded) → nothing applied;
+       ThrottlingError or ProvisionedThroughputExceeded, at least one of
+       the last three) → nothing applied;
        send again on the same candidate, at most 4 attempts with jitter;
        every attempt raced → 409 with the retry hint, nothing written
        (ADR-0050)

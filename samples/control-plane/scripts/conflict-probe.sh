@@ -26,7 +26,7 @@
 # Environment: PROBE_PREFIX (names the stacks and the fleet), AWS_REGION, credentials for the
 # account (AWS_PROFILE), PROBE_TENANTS (default 20: one warm-up tenant and 19 racers),
 # PROBE_HOME (default ~/.conflict-probe), INTEG_DEPLOY_CONCURRENCY (default 2). It needs bash,
-# curl, git, jq, zip, node and the AWS CLI. It prints ids, statuses and counts only, never a
+# curl, git, jq, openssl, zip, node and the AWS CLI. It prints ids, statuses and counts only, never a
 # token or a password, and never runs `set -x` (scripts/CONVENTIONS.md).
 #
 # shortcut: one cell, one Region and the no-op scripts; enough to make placements meet on one
@@ -57,6 +57,10 @@ CP_STACK="${PROBE_PREFIX}-control-plane"
 HOME_DIR="${PROBE_HOME:-${HOME}/.conflict-probe}/${PROBE_PREFIX}"
 mkdir -p -m 700 "$HOME_DIR"
 TENANTS_FILE="${HOME_DIR}/tenants"
+if { [ "$verb" = burst ] || [ "$verb" = reset ]; } && [ "$(wc -l 2> /dev/null < "$TENANTS_FILE" || echo 0)" -lt 2 ]; then
+  echo "conflict-probe.sh ${verb}: no tenants to race with; run setup first" >&2
+  exit 2
+fi
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
@@ -65,16 +69,18 @@ output() {
     --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue | [0]" --output text
 }
 
-# An operator ID token from the setup stack's vendor IdP, in memory only. The password goes to
-# the CLI in an input file readable by this user alone, removed at once.
-TOKEN=""
+# An operator ID token from the setup stack's vendor IdP. The password goes to the CLI, and the
+# token to curl, in files readable by this user alone (never on a command line), removed on exit.
+AUTH_HEADER=""
+cleanup() { [ -z "$AUTH_HEADER" ] || rm -f "$AUTH_HEADER"; }
+trap cleanup EXIT
 sign_in() {
-  local pool client secret input
+  local pool client secret input token
   pool="$(output "$SETUP_STACK" UserPoolId)"
   client="$(output "$SETUP_STACK" OperatorClientId)"
   aws cognito-idp admin-create-user --user-pool-id "$pool" --username probe-operator \
     --message-action SUPPRESS > /dev/null 2>&1 || true
-  secret="Aa1!$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
+  secret="Aa1!$(openssl rand -hex 12)"
   input="$(mktemp)"
   chmod 600 "$input"
   jq -n --arg p "$pool" --arg u probe-operator --arg s "$secret" \
@@ -82,9 +88,12 @@ sign_in() {
   aws cognito-idp admin-set-user-password --cli-input-json "file://${input}" > /dev/null
   jq -n --arg p "$pool" --arg c "$client" --arg u probe-operator --arg s "$secret" \
     '{UserPoolId: $p, ClientId: $c, AuthFlow: "ADMIN_USER_PASSWORD_AUTH", AuthParameters: {USERNAME: $u, PASSWORD: $s}}' > "$input"
-  TOKEN="$(aws cognito-idp admin-initiate-auth --cli-input-json "file://${input}" \
+  token="$(aws cognito-idp admin-initiate-auth --cli-input-json "file://${input}" \
     --query AuthenticationResult.IdToken --output text)"
   rm -f "$input"
+  AUTH_HEADER="$(mktemp)"
+  chmod 600 "$AUTH_HEADER"
+  printf 'Authorization: Bearer %s\nContent-Type: application/json\n' "$token" > "$AUTH_HEADER"
   API_URL="$(output "$CP_STACK" ApiUrl)"
   API_URL="${API_URL%/}"
 }
@@ -99,8 +108,7 @@ call() {
   out="$(mktemp)"
   BODY=""
   STATUS="$(curl -s -o "$out" -w '%{http_code}' -X "$1" "${API_URL}$2" \
-    -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
-    ${data[@]+"${data[@]}"})" || STATUS=000
+    -H "@${AUTH_HEADER}" ${data[@]+"${data[@]}"})" || STATUS=000
   BODY="$(cat "$out")"
   rm -f "$out"
 }
@@ -111,14 +119,16 @@ deployment_body() {
   jq -cn --arg a "$APP_ID" '{applicationId: $a, adminEmail: "success@simulator.amazonses.com"}'
 }
 
-# wait_for PATH FIELD PATTERN SECONDS: polls GET PATH until .FIELD.status matches PATTERN, or
-# until 404 when PATTERN is `gone`. Prints the last status; fails on timeout.
+# wait_for PATH FIELD PATTERN SECONDS: polls GET PATH until .FIELD.status matches PATTERN (an
+# alternation such as `ACTIVE|[A-Z]+_FAILED`); a 404 ends the wait as `gone` when PATTERN
+# includes `gone`. Prints the last status; fails on timeout.
 wait_for() {
   local path="$1" field="$2" want="$3" until=$((SECONDS + $4)) status
   while [ "$SECONDS" -lt "$until" ]; do
     call GET "$path"
-    if [ "$want" = gone ]; then
-      [ "$STATUS" != 404 ] || { echo gone; return 0; }
+    if [ "$STATUS" = 404 ] && [[ gone =~ ^(${want})$ ]]; then
+      echo gone
+      return 0
     elif [ "$STATUS" = 200 ]; then
       status="$(jq -r ".${field}.status" <<< "$BODY")"
       if [[ "$status" =~ ^(${want})$ ]]; then
@@ -197,8 +207,8 @@ case "$verb" in
     log "burst: $(wc -l <<< "$racers") CreateDeployment calls at once onto one cell"
     while read -r t; do
       curl -s -o "${run}/${t}.body" -D "${run}/${t}.headers" -w '%{http_code}' -X POST \
-        "${API_URL}/tenants/${t}/deployments" -H "Authorization: Bearer ${TOKEN}" \
-        -H 'Content-Type: application/json' --data "$body" > "${run}/${t}.code" 2> /dev/null &
+        "${API_URL}/tenants/${t}/deployments" -H "@${AUTH_HEADER}" --data "$body" \
+        > "${run}/${t}.code" 2> /dev/null &
     done <<< "$racers"
     wait
     echo "first answers (status error-type count):"
@@ -219,9 +229,11 @@ case "$verb" in
       fi
     done <<< "$racers"
     echo "409s with the retry hint: ${hint}; 409s without: ${other}"
-    grep -l '^500$' "${run}"/*.code 2> /dev/null | while read -r f; do
-      printf '  500 %s: %s\n' "$(basename "$f" .code)" "$(jq -r '.message' "${f%.code}.body" 2> /dev/null | cut -c1-160)"
-    done
+    while read -r t; do
+      if [ "$(cat "${run}/${t}.code")" = 500 ]; then
+        printf '  500 %s: %s\n' "$t" "$(jq -r '.message' "${run}/${t}.body" 2> /dev/null | cut -c1-160 || true)"
+      fi
+    done <<< "$racers"
     log "burst: waiting for every created deployment to leave CREATING"
     : > "${run}/end"
     while read -r t; do
@@ -254,7 +266,7 @@ case "$verb" in
       done
       for t in "${wave[@]}"; do
         for attempt in 1 2 3; do
-          s="$(wait_for "/tenants/${t}/deployments/${APP_ID}" deployment 'DELETE_FAILED' 900 || true)"
+          s="$(wait_for "/tenants/${t}/deployments/${APP_ID}" deployment 'gone|DELETE_FAILED' 900 || true)"
           [ "$s" != gone ] || break
           call GET "/tenants/${t}/deployments/${APP_ID}"
           [ "$STATUS" != 404 ] || break
@@ -281,7 +293,7 @@ case "$verb" in
         call DELETE "/tenants/${t}/deployments/${APP_ID}"
       done < "$TENANTS_FILE"
       while read -r t; do
-        [ "$(wait_for "/tenants/${t}/deployments/${APP_ID}" deployment 'DELETE_FAILED' 900 || true)" = gone ] || {
+        [ "$(wait_for "/tenants/${t}/deployments/${APP_ID}" deployment 'gone|DELETE_FAILED' 900 || true)" = gone ] || {
           log "deployment of ${t} is still there"
           status=1
         }
@@ -290,18 +302,18 @@ case "$verb" in
     call GET "/cells?applicationId=${APP_ID}"
     for c in $(jq -r '.cells[]?.cellId' <<< "$BODY"); do
       call DELETE "/cells/${c}"
-      [ "$(wait_for "/cells/${c}" cell 'DELETE_FAILED' 1200 || true)" = gone ] || { log "cell ${c} is still there"; status=1; }
+      [ "$(wait_for "/cells/${c}" cell 'gone|DELETE_FAILED' 1200 || true)" = gone ] || { log "cell ${c} is still there"; status=1; }
     done
     if [ -s "$TENANTS_FILE" ]; then
       while read -r t; do call DELETE "/tenants/${t}"; done < "$TENANTS_FILE"
       while read -r t; do
-        [ "$(wait_for "/tenants/${t}" tenant 'DELETE_FAILED' 300 || true)" = gone ] || { log "tenant ${t} is still there"; status=1; }
+        [ "$(wait_for "/tenants/${t}" tenant 'gone|DELETE_FAILED' 300 || true)" = gone ] || { log "tenant ${t} is still there"; status=1; }
       done < "$TENANTS_FILE"
     fi
     call DELETE "/accounts/${account}"
-    [ "$(wait_for "/accounts/${account}" account 'DELETE_FAILED' 300 || true)" = gone ] || { log "the account is still registered"; status=1; }
+    [ "$(wait_for "/accounts/${account}" account 'gone|DELETE_FAILED' 300 || true)" = gone ] || { log "the account is still registered"; status=1; }
     call DELETE "/applications/${APP_ID}"
-    [ "$(wait_for "/applications/${APP_ID}" application 'DELETE_FAILED' 300 || true)" = gone ] || { log "the application is still registered"; status=1; }
+    [ "$(wait_for "/applications/${APP_ID}" application 'gone|DELETE_FAILED' 300 || true)" = gone ] || { log "the application is still registered"; status=1; }
     [ "$status" -ne 0 ] || : > "$TENANTS_FILE"
     log "clean: records $([ "$status" -eq 0 ] && echo removed || echo LEFT)"
     echo "Remove the stacks by hand, control plane first: ${CP_STACK}, then ${SETUP_STACK}."

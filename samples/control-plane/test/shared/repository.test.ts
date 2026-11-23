@@ -522,6 +522,9 @@ describe('PlacementTransactions', () => {
     deploymentDataModel,
     client,
   );
+  // The race-retry jitter waits Math.random() * ceiling: 0 ms here.
+  beforeEach(() => jest.spyOn(Math, 'random').mockReturnValue(0));
+  afterEach(() => jest.restoreAllMocks());
 
   const deployment = { tenantId: 't1', applicationId: 'app-x' };
   const deploymentItem = {
@@ -927,6 +930,20 @@ describe('PlacementTransactions', () => {
       await expect(
         transactions.placeDeploymentInCell({ ...placement, idempotencyItem }),
       ).rejects.toBeInstanceOf(DuplicateTokenError);
+    });
+
+    test('a race, then a failed idempotency condition on the next attempt, is DuplicateTokenError (ADR-0050)', async () => {
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejectsOnce(transactionCanceled(['None', 'None', 'None', 'TransactionConflict']))
+        .rejects(transactionCanceled(['None', 'None', 'None', 'ConditionalCheckFailed']));
+      await expect(
+        transactions.placeDeploymentInCell({ ...placement, idempotencyItem }),
+      ).rejects.toBeInstanceOf(DuplicateTokenError);
+      const calls = ddbMock.commandCalls(TransactWriteCommand);
+      expect(calls).toHaveLength(2);
+      // The retry still carries the idempotency Put, last.
+      expect(calls[1].args[0].input.TransactItems?.[3].Put?.Item).toEqual(idempotencyItem);
     });
 
     test('a lost race with a clean idempotency condition is still a lost race', async () => {

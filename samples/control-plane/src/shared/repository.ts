@@ -397,12 +397,11 @@ export class TransactionRaceError extends Error {
 
 /**
  * Attempts of one transaction against a race-only cancellation (ADR-0050).
- * With full jitter capped at {@link RACE_RETRY_CAP_MS} the waits add up to at
- * most 50 + 100 + 200 ms, far inside the API's 29 s window.
+ * With full jitter doubling from {@link RACE_RETRY_BASE_MS} the waits add up
+ * to at most 50 + 100 + 200 ms, far inside the API's 29 s window.
  */
 export const RACE_RETRY_ATTEMPTS = 4;
 const RACE_RETRY_BASE_MS = 50;
-const RACE_RETRY_CAP_MS = 400;
 
 /**
  * The `ClientRequestToken` of attempt `attempt`: the caller's token first,
@@ -442,8 +441,7 @@ export async function sendTransactionWithRaceRetry(
           error,
         );
       }
-      const ceiling = Math.min(RACE_RETRY_CAP_MS, RACE_RETRY_BASE_MS * 2 ** attempt);
-      await new Promise((resolve) => setTimeout(resolve, Math.random() * ceiling));
+      await new Promise((resolve) => setTimeout(resolve, Math.random() * RACE_RETRY_BASE_MS * 2 ** attempt));
     }
   }
 }

@@ -90,3 +90,8 @@ compensation stays best-effort (ADR-011). A cancellation with every reason
 `None`, a failed condition in a position the classifier does not name, and
 any other error stay ambiguous, as ADR-0013 decides. Revisit the attempt count
 if a placement burst larger than the stress test's waves answers the 409 often.
+
+`scripts/conflict-probe.sh` shows the decision on a live control plane: it
+sends one `CreateDeployment` per tenant at once onto one cell and counts each
+call's first answer (no 500; any 409 carries the retry hint), the end state
+of every accepted deployment, and any record a refused call left behind.
