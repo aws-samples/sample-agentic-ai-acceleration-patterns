@@ -160,7 +160,7 @@ Never a tenant id, user name, agent id, token, host name or address.
 | `Requests` | Count | `RunId`, `Scenario`, `StatusClass` | host relay |
 | `RefusalsSeen`, `RefusalsNamed` | Count | `RunId`, `Scenario` | host relay: every refusal the driver counted (4xx, 5xx, and a refusal inside a 200), and those whose line names a tenant and a status or a reason |
 | `RefusalsByReason` | Count | `RunId`, `Scenario`, `Reason` | host relay |
-| `RefusalsUnattributed` | Count | `RunId`, `Slice`, `Scenario` | runner, once per k6 scenario record after the slice's `collect` (spec P-7), stamped at the scenario's window end, or at the publish time when that end is more than 3 hours old (§3.1) |
+| `RefusalsUnattributed` | Count | `RunId`, `Slice`, `Scenario` | runner, once per k6 scenario record after the slice's `collect` (spec P-7), stamped at the scenario's window end, or at the publish time when that end is more than 3 hours old (the age rule below) |
 | `ClientLatencyMs` | Milliseconds | `RunId`, `Scenario` | host relay, as a histogram (`Values` and `Counts`): at most 150 buckets a datum, so the percentiles are bucket-resolution, not the exact figures of the record |
 | `OnboardReadySeconds` | Seconds | `RunId` | control-plane driver: one value per tenant (PS-1, spec §5.1) |
 | `BuildsInFlight` | Count | `RunId` | control-plane driver: the builds it has started and not seen end, every 15 s (it already paces waves at the build limit, stress ADR-0013) |
@@ -195,18 +195,19 @@ day at least 48 hours. So the runner stamps `RefusalsUnattributed` with its
 publish time instead of the window end when the window end is more than 3 hours
 old at publish time, and the dashboard shows the number once, after `collect`. The
 age rule rests on the PutMetricData documentation; it is unproven here (§14), and
-a `small` run is shorter than 3 hours, so it only matters at `large`. The runner
+a `small` run is shorter than 3 hours, so it matters only for a tier whose scenario phase exceeds 3 hours (spec §4.1 has the scenario lengths). The runner
 never backfills a finished run.
 
 ### 3.2 `StressCell`, published in each cell account
 
 Metric filters on the cell's own structured log lines (the field names are the
 ones `collect.sh` queries today). The stress cell app adds them, which is new
-code in `stress/application/cell-app.ts`: it can reach the three log groups
-through the stack's ingress construct the way the sample's own Contributor
-Insights rules do (`demo.cdk.ts`, `findChild('ApiAccessLogs')` and
+code in `stress/application/cell-app.ts`: it can reach the access, ingress and
+authoriser log groups through the stack's ingress construct the way the sample's own
+Contributor Insights rules do (`demo.cdk.ts`, `findChild('ApiAccessLogs')` and
 `findChild('IngressLogs')`; the authoriser's group is the construct
-`AuthorizerLogs`, `shared-ingress.cdk.ts`). The runtime-isolation sample does not
+`AuthorizerLogs`, `shared-ingress.cdk.ts`), and each tools gateway's interceptor log
+group through `ingress.toolsGateways` (`tools-gateway.cdk.ts`). The runtime-isolation sample does not
 change. The stress cell is on the `api-gateway` ingress, which is the one that has
 the access log and the four Contributor Insights rules. A metric filter takes up
 to three dimensions from JSON fields, so it publishes a tenant dimension only if
@@ -219,7 +220,7 @@ its author writes one; the cell app's unit test asserts none does.
 | `IngressRefused` | Count | `Reason`, `Status`, and a total with none | ingress log, `request refused`, value 1 |
 | `AuthorizerRefused` | Count | `Reason`, and a total with none | authoriser log, `request refused`, value 1. Two of the authoriser's three `request refused` lines carry a `status` and one (a backend-registry refusal, `api-gateway-authorizer.function.ts`) does not; a filter with a `Status` dimension publishes nothing for a line that lacks the field, so this filter takes `Reason` only |
 | `AuthorizerTokenRefused` | Count | none | authoriser log, `token refused`, value 1 |
-| `SdkRetryLines` | Count | `Service` (`$.service`), and a total with none | `sdk retried` lines of the ingress log and of the authoriser log, both into the same metric, value 1 |
+| `SdkRetryLines` | Count | `Service` (`$.service`), and a total with none | `sdk retried` lines of the ingress log, the authoriser log and the log group of each tools gateway's interceptor (two in the demo stack), all into the same metric, value 1 |
 | `MintLookups` | Count | `Mint` (`$.mint`) | ingress log, `request served`, value 1 |
 
 The dashboard names the `Status`, `Reason`, `Service` and `Mint` values it
@@ -381,12 +382,15 @@ the live gap; the dashboard serves platform runs, so that case is not drawn.
 
 The relay is a short script, run with `bash` (the host script `k6.sh` generates
 runs under `sh`), that `stress/driver/k6.sh` starts on the host before k6 and stops
-after it. It reads the file `k6.sh` already keeps (`/opt/stress/out/k6-stdout.txt`),
+after it, only when `K6_COMMAND` is `run`, `STRESS_MODE` is `platform` and
+`RECORD_SCENARIO` is set (`k6.sh` exports `STRESS_MODE`; a slice-mode run or a
+`k6 inspect` starts no relay). It reads the file `k6.sh` already keeps (`/opt/stress/out/k6-stdout.txt`),
 needs `jq` (installed on the host), and reads the scenario and the run id from the
 host's environment: `k6.sh` already exports every `NAME=value` argument and the
 runtime-isolation slice's `slice.sh` already passes `RECORD_SCENARIO` in platform
-mode, and `STRESS_RUN_ID` is exported too. The slice is the constant
-`agentic-runtime-isolation`, the only caller of `k6.sh`. It needs three changes to
+mode, and `STRESS_RUN_ID` is exported too. The relay sets `Slice` to the constant
+`agentic-runtime-isolation`, the only slice that calls `k6.sh` in platform mode; a
+second caller would need a `STRESS_SLICE` variable. It needs three changes to
 existing code. The runtime-isolation sample's
 `edge-refusals.js` is not one of them: the relay reads its lines as they are.
 
@@ -493,7 +497,7 @@ this design does not change that.
 | Link in each cell account's account base | the cell account owner (the same step as the ingress reader role, spec §3.7, W-11) | once per cell account and Region | the owner, with the account base |
 | Dashboard stack `<prefix>-dashboard`, one `AWS::CloudWatch::Dashboard` named `<prefix>-run` | the runner, with the platform account credentials the run already holds | after `budget` passes, before the first slice `deploy` | the runner, after the last slice `teardown`, unless `--keep-dashboard`; `--remove-fixtures` removes a kept one |
 | Metric filters | the cell stack, built by the cell script | with each cell | the cell's own delete |
-| Relay | `stress/driver/k6.sh`, on the driver host | for the length of one k6 run | `k6.sh`, when the remote script ends |
+| Relay | started and stopped by `stress/driver/k6.sh`; the script is in `stress/k6/`; it runs on the driver host | for the length of one k6 run | `k6.sh`, when the remote script ends |
 | Host role statement | the driver stack | with the driver | the driver's teardown |
 
 The dashboard stack has no function, role, API, log group or custom resource, so
@@ -672,14 +676,14 @@ to the spec's work table (spec §9) when ADR-0022 is accepted.
 | W-12a | Emitter and runner publishing: `ScenarioActive`, `LifecycleSeconds` (and the `dashboard` entry in `result.ts` and `runner.ts`, §8), the `...Final` and `RefusalsUnattributed` totals from records, `QuotaPlannedDraw`, `QuotaLimit`; the dimension allowlist; `run.sh emit` for slices; `--keep-dashboard` | `stress/src/` | §3.1 table. Input: records, budget sums, limits file. Output: `PutMetricData` calls. Test: allowlist refuses any other dimension | ready |
 | W-12b | The dashboard CDK app: one stack, one dashboard, widgets A to E as data | `stress/dashboard/` (its own app, like the driver, stress ADR-0009) | Input: run id, tier, commits, cell account ids, prefix, the plan's slices and scenarios, the Region. Output: one dashboard `<prefix>-run`. Test: synth has no resource but the dashboard, and every `StressRun` series is named, none searched | ready (the metric contract is fixed here); widgets marked unproven wait for SD-3 |
 | W-12c | Host relay (bash), started and stopped by `k6.sh`, and the k6 library's minute line. The relay reads `RECORD_SCENARIO` and `STRESS_RUN_ID` from the host environment and the `edge_refusal` lines of the runtime-isolation sample's `edge-refusals.js` as they are | the relay and the minute line in `stress/k6/`; the start and stop in `stress/driver/k6.sh` | Input: k6's output file. Output: `Requests`, `IsolationAssertions`, `IsolationMismatches`, `RefusalsSeen`, `RefusalsNamed`, `RefusalsByReason`, `ClientLatencyMs`. Test: a recorded output file in, the expected calls out | ready; needs spike SD-2 for the lag |
-| W-12d | Cell metric filters of §3.2, on the ingress, authoriser and access log groups | `stress/application/cell-app.ts` | §3.2 table. Test: synth holds the filters, none with a tenant dimension, and the `sdk retried` filter exists on the ingress, authoriser and both interceptor log groups | ready |
+| W-12d | Cell metric filters of §3.2, on the access, ingress, authoriser and interceptor log groups | `stress/application/cell-app.ts` | §3.2 table. Test: synth holds the filters, none with a tenant dimension, and the `sdk retried` filter exists on the ingress, authoriser and both interceptor log groups | ready |
 | W-12e | Sink fixture, the link in `CellAccountBaseStack`, and the deploy scripts | `stress/application/`, `stress/dashboard/` | sink ARN in, link out; the sink policy names the cell account ids | blocked: the maintainer's decision on ADR-0022, the cell owners' step, and spike SD-1 |
 | W-12f | Slice emitters in the control-plane slice: `BuildsInFlight`, `OnboardReadySeconds` and the PS-5 times. No other slice emits: the runner reads their records | `samples/control-plane/scripts/stress/` and its driver | `run.sh emit <metric> <value> [dim=value]` from W-12a | ready after W-12a's CLI is merged |
 | W-12g | The runner's dashboard step (platform runs only): deploy and remove the stack, `run.sh dashboard up --run <id>`, removal of a kept dashboard by `--remove-fixtures`, the snapshots, the results file's "Dashboard window" line, the new leftover check (§8), and `cost.sh` for the platform run | `stress/src/`, runtime-isolation `cost.sh` | §8, §9, §10 | ready after W-12a and W-12b |
 | W-12h | Host role statement for `PutMetricData` | `stress/driver/stress-driver.cdk.ts` | one statement, namespace-conditioned | ready |
 | SD-1 | Spike: link and sink between two test accounts; a dashboard widget reads a cell metric by account id; run the account check with the link | a non-production test setup | pass if the widget shows data and the check passes | open; blocks W-12e |
 | SD-2 | Spike: relay lag and k6 output buffering at the `small` rate; whether a named series of a new run shows at once | driver host | pass if a minute's counts reach CloudWatch within 3 minutes of the minute's end | open |
-| SD-3 | Spike: check each unproven metric of §3.3 and §6 exists as assumed; time the dashboard deploy and destroy | platform account | list of present and absent metrics; two timings | open |
+| SD-3 | Spike: check each unproven metric of §3.3 and §6 exists as assumed; an `sdk retried` line from the authoriser and from each interceptor reaches `SdkRetryLines`; a `SEARCH` widget finds a metric created in the same run; time the dashboard deploy and destroy | platform account and a cell account | list of present and absent metrics; the two checks; two timings | open |
 
 The spike ids differ from the spec's `S1` to `S7` (runtime-isolation scenarios) and the
 front door's spikes `S-2`, `S-3`, `S-5` and `S-7`.
@@ -705,7 +709,8 @@ front door's spikes `S-2`, `S-3`, `S-5` and `S-7`.
 | A dashboard `RunId` variable can switch a dimension | not run | SD-3 |
 | A point stamped more than 3 hours back becomes readable only after up to two hours, which is why `RefusalsUnattributed` is stamped with its publish time past that age | from the PutMetricData documentation; not tried | the first `large` run |
 | The live view trails a minute of load by under 3 minutes, and a 60-second period shows a 5-second herd as one point | not measured; the period is CloudWatch's standard resolution | SD-2 |
-| Searched widgets (B1 to B4, C1 to C3) show data from the first minute of PS-1 | a new metric can take up to 15 minutes to be listed | SD-2 |
+| Searched widgets (B1 to B4, C1 to C3) show data from the first minute of PS-1 | a new metric can take up to 15 minutes to be listed | SD-3 |
+| `sdk retried` lines of the authoriser and the interceptors reach the `SdkRetryLines` metric | the code logs them (`jws.ts`); no filter exists yet | SD-3 |
 | `GetMetricWidgetImage` renders cross-account widgets | not run | SD-3 |
 | Deploy and destroy under a minute, and a run under $0.50 | estimates | SD-3 and the first run |
 | The k6 library can flush a per-minute histogram line without changing k6's request pacing | the existing ledger flushes the same way; the histogram is new | W-12c |
