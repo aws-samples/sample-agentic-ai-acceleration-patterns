@@ -24,7 +24,7 @@ You need AWS credentials for a non-production account, with the rights to
 create the stacks (an IAM role, a CloudFront distribution and web ACL, Lambda
 functions, API Gateway, DynamoDB, Cognito); that account bootstrapped for the
 CDK in the Region you choose and in `us-east-1`; a public hosted zone in it for
-a test subdomain; and the `tenant-identity` shared-pool deployment's published
+a test subdomain; the `tenant-identity` shared-pool deployment's published
 parameters (`/application-plane/shared/identity/*`) in some Region; and the
 account-wide API Gateway CloudWatch Logs role in the front door's Region (the
 registrar's stage writes access logs through it; set it once with `aws
