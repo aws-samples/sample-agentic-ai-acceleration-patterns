@@ -421,17 +421,17 @@ export class UntrustedCodeSandboxes extends Construct {
    * carries the SQS, Kinesis, DynamoDB or MSK execution policy is refused,
    * because they allow the same writes and also event source rights the core
    * cannot replace: grant the event source with its L2 grant. Attach any
-   * other managed policy before binding, and give the function a role of its
-   * own, because a role shared with another function loses the two policies
-   * for both. Rights on a function in the tool subnets (`runCodeFunction` or
-   * another bound function) go through its L2 grant or a policy created with
-   * `roles: [role]`, never through the role's inline policies or a managed
-   * policy the app creates, which the role itself would then wait for: a cycle. The role
-   * must be in the same stack as the construct. The network interface
-   * actions go in a policy of their own on the role; on stack delete the
-   * function goes before the log drain's 90 s wait and the role and that
-   * policy after it, so Lambda can release the function's network
-   * interfaces (ADR-0073).
+   * other managed policy before binding. The role is `toolRole` or a role
+   * of the function's own, created in the construct's stack; a role shared
+   * with another function of the app loses the two policies for both.
+   * Rights on a function in the tool subnets (`runCodeFunction` or another
+   * bound function) go through its L2 grant or a policy created with
+   * `roles: [role]`, never through the role's `inlinePolicies`, its
+   * `managedPolicies` prop or `role.addManagedPolicy`: the role would then
+   * wait for that function on delete, a cycle. The network interface actions
+   * go in a policy of their own on the role; on stack delete the function
+   * goes before the log drain's 90 s wait and the role and that policy after
+   * it, so Lambda can release the function's network interfaces (ADR-0073).
    */
   public bindRunCode(fn: lambda.IFunction): void {
     if (!(fn instanceof lambda.Function)) {

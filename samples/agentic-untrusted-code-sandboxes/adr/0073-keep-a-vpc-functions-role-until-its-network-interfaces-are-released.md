@@ -9,7 +9,7 @@
 
 ## Context
 
-Integration runs 5 to 14 ended `DELETE_FAILED` in all but one stack: two
+Integration runs 12 to 14 ended `DELETE_FAILED` in 8 of 9 stacks: two
 Lambda-managed network interfaces stayed `available` in the tool subnets
 and held the subnets and the tool security group. ADR-0071 took the
 reaper, offboard and drain functions out of the VPC. Run 17 then left the
@@ -60,12 +60,13 @@ role was never deployable, because each stack would depend on the other.
 
 A delete takes a few seconds longer: the log drain already waited 90 s
 for its other writers, the run function among them. The 90 s rests on one
-observation (about 45 s in run 14); a miss
-shows as the same `DELETE_FAILED` on the tool subnets. The integration
-test's `teardown` step is the proof; unit tests pin the order for the
-standalone function, bound functions and a function bound with the tool
-role, and that a bound function granted to invoke another, or the
-standalone function, still synthesises.
+observation (about 45 s in run 14); a miss shows as the same
+`DELETE_FAILED` on the tool subnets. The integration test's `teardown`
+step is the proof; unit tests pin the order for the standalone function,
+bound functions and a function bound with the tool role, and that a bound
+function granted to invoke another, or the standalone function, still
+synthesises.
+
 A stack update that removes a bound function, or replaces its role,
 deletes the role at once with no wait, and can leave that function's
 interfaces behind. A function an app builds in the tool subnets without

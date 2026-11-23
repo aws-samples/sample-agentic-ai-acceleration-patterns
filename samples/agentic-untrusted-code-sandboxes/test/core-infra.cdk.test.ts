@@ -1100,7 +1100,7 @@ describe('known wildcards (ADR-0030)', () => {
     expect(iam5).toHaveLength(1);
     expect(iam5[0]).toMatch(/network interfaces/);
     expect(iam5[0]).toMatch(/take no resource/);
-    expect(iam5[0].match(/manages its own network interfaces/g)).toHaveLength(1);
+    expect(iam5[0].match(/deletes a VPC function's network interfaces/g)).toHaveLength(1);
   });
 });
 

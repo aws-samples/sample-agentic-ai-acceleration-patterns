@@ -96,3 +96,5 @@ A synth test asserts the exact set of statements on the role, that none of
 the L2's grants is present, and that the only wildcard resource is the ECR
 token action. The integration test's `no-egress` step proves the network
 side.
+
+Note 2026-11-20: amended by ADR-0067. A backend no longer writes endpoint statements; the core writes every endpoint policy from its own resources and each backend's `endpoints()` and `logCleanup()`. The runtime role decision stands.

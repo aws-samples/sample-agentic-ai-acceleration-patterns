@@ -69,7 +69,7 @@ export function stackPrefix(env: NodeJS.ProcessEnv = process.env): string {
   return prefix;
 }
 
-/** `INTEG_DEPLOY_CONCURRENCY`: a positive integer, default 2 (the API Gateway control-plane throttle, testing rules). */
+/** `INTEG_DEPLOY_CONCURRENCY`: a positive integer, default 2 (the API Gateway control-plane throttle). */
 export function deployConcurrency(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env[ENV.concurrency];
   if (raw === undefined || raw === '') return DEFAULT_DEPLOY_CONCURRENCY;

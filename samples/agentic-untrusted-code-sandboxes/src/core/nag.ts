@@ -105,7 +105,7 @@ export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
     {
       matches: re(/^\*$/),
       actions: /^ec2:(CreateNetworkInterface|DescribeNetworkInterfaces|DescribeSubnets|DeleteNetworkInterface|AssignPrivateIpAddresses|UnassignPrivateIpAddresses)$/,
-      reason: 'A function in a VPC manages its own network interfaces, which have no id before they exist; these six actions are the managed VPC access policy minus its log writes, so no role here can write another function\'s log group (spec 3.6, ADR-0029).',
+      reason: 'Lambda creates, attaches and deletes a VPC function\'s network interfaces with the function\'s role; a new interface has no id to name, and these six actions are the managed VPC access policy minus its log writes, so no role here can write another function\'s log group. Residual: the role may act on any network interface in the account (spec 3.6, threat model, ADR-0029, ADR-0073).',
     },
     {
       matches: (r) => r === `${bucket}/inputs/<aws:PrincipalTag/TenantId>/*`,

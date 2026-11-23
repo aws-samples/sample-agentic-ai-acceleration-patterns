@@ -116,7 +116,7 @@ ADR-0050).
 | Reaper | Lambda, 256 MiB, 4 min, EventBridge `rate(5 minutes)` | Runs as the reaper role (ADR-0011, ADR-0034) |
 | Offboard | Lambda `offboardTenant`, 256 MiB, 2 min | Runs as the reaper role (ADR-0035) |
 | Drain | Lambda, 15 min, behind a custom resource provider | Runs as the drain role; the only role with instance actions (ADR-0011, ADR-0049) |
-| Log drain, log cleanup | Custom resources | Wait 90 s on delete before log groups go; delete groups the services create (ADR-0029, ADR-0054) |
+| Log drain, log cleanup | Custom resources | Wait 90 s on delete before log groups go, and before the roles and network interface policies of functions in the tool subnets go; delete groups the services create (ADR-0029, ADR-0054, ADR-0073) |
 | Contributor Insights | Three `CfnInsightRule`s | Runs by tenant, sandbox seconds by tenant, and with the firewall blocked lookups by source address (ADR-0031) |
 | DNS Firewall | Optional, see Network | `dnsFirewall` (ADR-0016) |
 
@@ -133,7 +133,7 @@ SSM parameter; the demo stack writes one JSON parameter,
 
 | Role | Holds | Does not hold |
 | --- | --- | --- |
-| Tool role | `sts:AssumeRole` and `sts:TagSession` on the tool tenant role; per backend: MicroVM run, get, terminate and auth token on the image, `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only; `ecs:DescribeTasks` on the cluster's tasks; `InvokeAgentRuntime` and `StopRuntimeSession` on the runtime | Direct access to the bucket or the registry; `ecs:RunTask` and `ecs:StopTask` |
+| Tool role | `sts:AssumeRole` and `sts:TagSession` on the tool tenant role; per backend: MicroVM run, get, terminate and auth token on the image, `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only; `ecs:DescribeTasks` on the cluster's tasks; `InvokeAgentRuntime` and `StopRuntimeSession` on the runtime; in a policy of its own, the six network interface actions on `*` a VPC function needs (ADR-0073) | Direct access to the bucket or the registry; `ecs:RunTask` and `ecs:StopTask` |
 | Tool tenant role | `inputs/${TenantId}/*` read, `outputs/${TenantId}/*` write, registry `GetItem`, `PutItem`, `UpdateItem` on `TENANT#${TenantId}` rows; `nitro`: `RunTask` on the pinned task definition revision with the request tag and cluster conditions, `TagResource` at `RunTask`, `StopTask` with the resource tag condition, `PassRole` on the execution role | Any key without its own tag; `DeleteItem` |
 | Reaper role | Registry `GetItem`, `Scan`, `UpdateItem`, `DeleteItem`; stop actions per backend (`ListTasks`, `DescribeTasks`, `StopTask`; `ListMicrovms`, `GetMicrovm`, `TerminateMicrovm`; `StopRuntimeSession`) | The input bucket; every instance action |
 | Drain role | The reaper role, plus `ecs:ListContainerInstances`, `DeregisterContainerInstance`, `DescribeContainerInstances` and `ec2:DescribeInstances` | The input bucket |
@@ -433,8 +433,11 @@ resource deletes the groups the services create (the runtime's groups under
 its prefix and the MicroVM build group) after the resources that write
 them (ADR-0029, ADR-0054). A delete with sandboxes live takes 23 to 32 minutes
 on one backend (spec §7.8, S-21), and the integration stack's destroy took 3500 to
-3800 s in the runs that ended `DELETE_FAILED` with a recorded time. The network interfaces of the functions in the tool
-subnets release late and are the open defect named in Status.
+3800 s in the runs that ended `DELETE_FAILED` with a recorded time. Lambda
+releases the network interfaces of the functions in the tool subnets with
+each function's role, about a minute after the function is gone, so the
+log drain holds each such role and its network interface policy for its
+90 s (ADR-0073).
 
 ## Observability
 
@@ -561,7 +564,7 @@ sandboxes still running. The 28 steps, the step by backend matrix, the
 tenants, the test-only shortcuts and the run budget are in
 `integration-test.md`.
 
-On 2026-11-22 the build ran 1064 tests, all passing.
+On 2026-11-23 the build ran 1071 tests, all passing.
 
 **Scans.** The threat model's Security review section records the scan
 tools, their findings and the suppressions: on 2026-11-22, ASH with no

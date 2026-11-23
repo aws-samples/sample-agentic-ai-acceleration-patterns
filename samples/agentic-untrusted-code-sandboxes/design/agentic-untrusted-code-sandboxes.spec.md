@@ -244,7 +244,10 @@ Insights rules. A function that runs as `toolRole`, as the one
 `RunCodeToolTarget` builds does, already holds the actions and the
 trust. A function with a role of its own gets the same statements, a
 place in the tool tenant role's trust policy, and loses the basic and VPC
-managed policies, which allow log writes on every group. A function built
+managed policies, which allow log writes on every group. The role must be
+in the construct's stack (`bindRunCode` refuses another), gets the
+network interface actions in a policy of its own, and outlives the
+function on delete behind the log drain (ADR-0073). A function built
 with its own `logGroup` keeps it; otherwise the core sets a group it owns
 (retention set, deleted on destroy). It names the producer, which standard §1.1
 allows only in demo apps and tests; ADR-0017 records this adapter as the
@@ -693,7 +696,7 @@ to its own stdout through the runner.
 
 | Role | May | May not |
 |---|---|---|
-| Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image (every MicroVM action authorizes against the image ARN; there is no MicroVM ARN), `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only, so a start without the connector, which would get `INTERNET_EGRESS`, is refused; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime and its endpoints; `ecs:DescribeTasks` on the cluster. One role, shared: `runCodeFunction` and the `RunCodeToolTarget` function run as it; a function with its own role gets the same statements through `bindRunCode`; `ToolTarget` adds `kms:GetPublicKey` on the context key when a gateway function is bound | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
+| Tool role (function) | assume the tool tenant role with a `TenantId` tag; `lambda:RunMicrovm`, `GetMicrovm`, `TerminateMicrovm`, `CreateMicrovmAuthToken` on the sample's image (every MicroVM action authorizes against the image ARN; there is no MicroVM ARN), `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only, so a start without the connector, which would get `INTERNET_EGRESS`, is refused; `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on the sample's runtime and its endpoints; `ecs:DescribeTasks` on the cluster. One role, shared: `runCodeFunction` and the `RunCodeToolTarget` function run as it; a function with its own role gets the same statements through `bindRunCode`; `ToolTarget` adds `kms:GetPublicKey` on the context key when a gateway function is bound. Each role of a function in the tool subnets also holds, in a policy of its own (`VpcNetworkInterfaces`), the six network interface actions on `*` that the managed VPC access policy grants (create, describe, delete, assign and unassign addresses, describe subnets), because Lambda manages the function's interfaces with its role (ADR-0029, ADR-0073) | read the bucket or the registry directly; `ecs:RunTask` or `StopTask` |
 | Standalone invokers (with `standalone`) | `lambda:InvokeFunction` on `runCodeFunction`, through `grantInvokeRunCode(principal)` in the app, or an identity policy on the published `runCodeFunctionArn` in another app | the gateway path; see T-82 for same-account identity policies |
 | Tool tenant role | `s3:GetObject` on `inputs/${TenantId}/*`, `s3:PutObject` on `outputs/${TenantId}/*`, registry items with `dynamodb:LeadingKeys` = `TENANT#${TenantId}`, `ecs:RunTask` on the pinned task definition revision ARN only, with the request tag condition and `ecs:cluster` = the sample's cluster; `ecs:TagResource` on `task/<cluster>/*` with the request tag condition and `ecs:CreateAction` = `RunTask` (the action has no `ecs:cluster` key, and this stops the role retagging existing tasks); `ecs:StopTask` with the resource tag condition and `ecs:cluster`; `iam:PassRole` on the task execution role | anything without its own tag; any other task definition or cluster |
 | Task execution role | trust `ecs-tasks.amazonaws.com` with `aws:SourceAccount`; `ecr:GetAuthorizationToken` on `*` (the action takes no resource), `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the runner repository, Logs write on the task log group | everything else; never reachable by code (S-5) |
@@ -1159,9 +1162,13 @@ keeps no warm instance. The `synth` test checks that the drain role may
 deregister on the cluster and the reaper role may not, and that the
 offboard function runs as the reaper role. With sandboxes live, the whole
 stack delete takes 23 to 32 minutes (§7 S-21). In the `nitro` and
-`agentcore` runs most of it was the late release of the network interfaces
-of the VPC-attached drain and reaper functions; the `microvm` run's cause
-was not isolated. Plan 30 to 40 minutes for a destroy. A
+`agentcore` runs most of it was the late release of Lambda network
+interfaces, then of the drain and reaper functions, which ADR-0071 took
+out of the VPC; the `microvm` run's cause was not isolated. The run
+function and bound functions keep their interfaces in the tool subnets,
+and Lambda releases them with the function's role about a minute after
+the function is gone, so the log drain holds each such role and its
+network interface policy for its 90 s (ADR-0073). Plan 30 to 40 minutes for a destroy. A
 `StopTask` takes 45 to 78 s, so the runner
 exits at once on `SIGTERM`. AgentCore sessions in rows are stopped with
 `StopRuntimeSession`; sessions with no row end within about 20 s of the

@@ -60,7 +60,7 @@ delivery policy; a change delivery makes there is a stated leftover.
 
 C-3 reads per setting. The integration test runs `run-code` with the
 firewall on and `run-code-files` with it off, checks both outcomes, and
-fails if any platform name other than the NTP pool, or a sandbox's PTR for its own address, was blocked. Running
+fails if any platform name other than the NTP pool was blocked. Running
 an `agentcore` runtime in each instance also gives the with-and-without
 control for the ready-time question. Names under the allowed AWS zones
 still resolve; a narrower list of exact names is a later option. The
@@ -71,3 +71,5 @@ default once the allow list has held through several runs.
 Note 2026-11-19: amended by ADR-0019. S-14 measured the same AgentCore ready time (552 s) without the firewall, so the firewall does not cause it and the README needs no note next to the prop; the cause of the difference from S-9 is unknown. The default stays off for the allow-list upkeep.
 
 Note 2026-11-21: the allow list also has `*.ec2.internal`. In us-east-1 the VPC's private host names are `ip-*.ec2.internal`, not `*.compute.internal`, and the integration test's `dns-platform` step found sandboxes looking them up there. The VPC resolver answers both zones.
+
+Note 2026-11-21: the `dns-platform` step also accepts a blocked PTR query from a sandbox for the reverse name of its own address.
