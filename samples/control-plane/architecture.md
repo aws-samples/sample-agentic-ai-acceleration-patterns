@@ -1078,7 +1078,9 @@ transaction releases.
      hook (Catch):
        compare-and-set deployment from the operation's in-flight status to
          tenantBuild.failedStatus + statusReason + lastGlobalHooks
-3. Every terminal DynamoDB task retries transient failures. Retry exhaustion
+3. Every terminal DynamoDB task retries transient failures, and retries a
+   transaction cancelled by a concurrent one five times with jitter; a failed
+   condition is never retried (ADR-0049). Retry exhaustion
    is caught and routed through the same conditional *_FAILED transition when
    the record still exists; an already-absent record means the terminal delete
    committed and the workflow ends successfully.
@@ -1105,7 +1107,10 @@ Design points:
   environment variables, the execution input, or the log (M21).
 - **Threat-model hardening (ADR-019/020/021, ADR-0046):** all four projects cap
   `concurrentBuildLimit` at the deployer's value, 5 by default, so a leaked
-  token's amplification queues instead of fanning out, and log to explicit one-month-retention log
+  token's amplification cannot fan out. CodeBuild refuses a start over the
+  cap; a script build's start is retried every 30 seconds or less (full
+  jitter) for about 10 minutes, at most 20, then the operation fails with a
+  reason that names the refusal (ADR-0049). The projects log to explicit one-month-retention log
   groups. Every build receives `OPERATOR_ID` (the verified JWT `sub`) so
   application-plane changes attribute to the initiating operator, not just
   the shared fleet role. A stamped `sourceVersion` commit SHA pins what the
@@ -1158,14 +1163,16 @@ Design points:
   invariant violation (present becomes `DELETE_FAILED` with a reason). The
   account and application records always exist here, because
   `DeleteAccount` and `DeleteApplication` refuse while `cellCount > 0`.
-- Each script build Task has a catchable task-level timeout of one hour; a
+- Each script build Task has a catchable task-level timeout of one hour,
+  counted again on each attempt, so the build-slot wait is outside it; a
   hook attempt is bounded by its own deadline (Vendor hooks, below). The
   state-machine execution timeout, 26 hours, is greater than every build and
   hook budget an execution can run at the caps plus terminal-write recovery
   margin (a delete with ten hooks at 30 minutes, each spending its three
-  attempts, runs about 25 hours); it is a final safety net, not the normal
+  attempts, and a script build that waits 20 minutes for its slot runs
+  about 25.3 hours); it is a final safety net, not the normal
   timeout path, and costs nothing on a Standard workflow. Terminal writes
-  retry transient failures, and retry exhaustion is caught so records do not
+  retry transient failures and transaction conflicts, and retry exhaustion is caught so records do not
   remain indefinitely in an in-flight state. `StartExecution` rejection is
   compensated as in §6.
 - The **account role pair** (`CellAccountRoles`, installed per account) carries

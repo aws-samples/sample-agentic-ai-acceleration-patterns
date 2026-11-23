@@ -69,11 +69,36 @@ export interface ProvisioningWorkflowProps {
 const BUILD_TIMEOUT = Duration.hours(1);
 
 /**
+ * A script build's `StartBuild` refused at the project's
+ * `concurrentBuildLimit` (`CodeBuild.AccountLimitExceededException`, spec
+ * H-9) waits for a free slot (ADR-0049): a retry every 30 seconds or less
+ * (full jitter, so waiting executions do not poll CodeBuild in step), 40
+ * times, about 10 minutes in all and never more than 20. A refused start
+ * creates no build, so the retry sends no idempotency token. The task's
+ * `TimeoutSeconds` applies to each attempt, so the wait is outside the
+ * build budget (R-23).
+ */
+export const BUILD_SLOT_WAIT = {
+  error: 'CodeBuild.AccountLimitExceededException',
+  intervalSeconds: 30,
+  maxAttempts: 40,
+} as const;
+
+/** A terminal transaction cancelled by a concurrent one (ADR-0049): retried with jitter, at most 31 s of waits. */
+export const TRANSACTION_CANCELED_RETRY = {
+  error: 'DynamoDb.TransactionCanceledException',
+  intervalSeconds: 1,
+  backoffRate: 2,
+  maxAttempts: 5,
+} as const;
+
+/**
  * Execution timeout (R-23): greater than every build budget an execution can
  * run at the caps, queue time and hook backoff included, plus terminal-write
  * margin. A delete at the caps is the longest: 10 hooks at 144 minutes each
- * (3 attempts of 47 and 3 of backoff) plus a 60-minute script is 1,500
- * minutes (25 h); a new-cell create is 1,060 (17.7 h). It is a final safety
+ * (3 attempts of 47 and 3 of backoff) plus a 60-minute script and its
+ * 20-minute build-slot wait (BUILD_SLOT_WAIT) is 1,520 minutes (25.3 h); a
+ * new-cell create is 1,100 (18.3 h). It is a final safety
  * net, not the normal timeout path: that is the catchable task-level timeout
  * above and the hook attempt's own deadline (R-46). A tripped execution
  * timeout bypasses the Catch and strands records.
@@ -288,8 +313,10 @@ export class ProvisioningWorkflow extends Construct {
       // M17 (T16): each CreateDeployment, UpdateDeployment, UpdateCell and
       // DeleteCell fans out to CodeBuild, so a leaked token or a runaway
       // client is a cost amplification vector. The cap bounds the parallel
-      // spend; excess builds queue, they do not fan out. The deployer sets
-      // it (ADR-0046, default 5).
+      // spend: CodeBuild refuses a start over it, and the workflow waits
+      // for a free slot for about 10 minutes before it fails the operation
+      // (BUILD_SLOT_WAIT, ADR-0049). The deployer sets it (ADR-0046,
+      // default 5).
       concurrentBuildLimit: props.concurrentBuildLimit,
       logging: { cloudWatch: { logGroup: cellProjectLogs } },
     });
@@ -390,7 +417,7 @@ export class ProvisioningWorkflow extends Construct {
     // write keyed off $.error.Error.
     const {
       entry: tenantBuildFailure,
-    } = this.buildFailureEvidenceChain('Tenant', failTenantWithBuild, failTenant);
+    } = this.buildFailureEvidenceChain('Tenant', failTenantWithBuild, failTenant, failTenantWithReason);
 
     // Tenant-delete transaction cancellation / retry exhaustion outcome:
     // read the tenant — absence proves the prior delete committed (§7).
@@ -611,7 +638,7 @@ export class ProvisioningWorkflow extends Construct {
     // Build-failure evidence extraction (cell) — see the tenant chain.
     const {
       entry: cellBuildFailure,
-    } = this.buildFailureEvidenceChain('Cell', cellFailureRouterWithBuild, cellFailureRouter);
+    } = this.buildFailureEvidenceChain('Cell', cellFailureRouterWithBuild, cellFailureRouter, cellFailureRouterWithReason);
 
     // Cell-delete condition failure / retry exhaustion outcome: read the
     // cell — absence proves the prior delete committed (§7, ADR-014).
@@ -919,14 +946,24 @@ export class ProvisioningWorkflow extends Construct {
    * which echo the build's environment and so every parameter value
    * (§8.1 payload budget). With the evidence the failure write names the
    * build (`withBuild`); without it (task timeout, an unexpected shape) the
-   * generic write keyed off `$.error.Error` runs (`fallback`).
+   * generic write keyed off `$.error.Error` runs (`fallback`). A start still
+   * refused at the build limit when its wait ended (ADR-0049) started no
+   * build: `$.failureReason` names the refusal and the reason write runs
+   * (`withReason`).
    */
   private buildFailureEvidenceChain(
     prefix: string,
     withBuild: sfn.IChainable,
     fallback: sfn.IChainable,
+    withReason: sfn.IChainable,
   ): { entry: sfn.Choice } {
+    const refused = new sfn.Pass(this, `${prefix}BuildStartRefused`, {
+      result: sfn.Result.fromString(buildStartRefusedReason(prefix)),
+      resultPath: '$.failureReason',
+    });
+    refused.next(withReason);
     const entry = new sfn.Choice(this, `${prefix}BuildFailureShape`)
+      .when(sfn.Condition.stringEquals('$.error.Error', BUILD_SLOT_WAIT.error), refused)
       .when(
         sfn.Condition.and(
           sfn.Condition.isPresent('$.failure.buildArn'),
@@ -963,7 +1000,8 @@ export class ProvisioningWorkflow extends Construct {
    * commit; the empty string (unpinned) omits the parameter entirely -
    * CodeBuild's behaviour for an empty-string override is undefined, so it
    * is never sent. Callers wire Catch/Next on BOTH variants and route into
-   * `entry`; the Catch takes {@link BUILD_FAILURE_OUTPUT}.
+   * `entry`; the Catch takes {@link BUILD_FAILURE_OUTPUT}. Both variants
+   * carry the build-slot wait ({@link BUILD_SLOT_WAIT}, ADR-0049).
    *
    * The task states use JSONata, the rest of the machine JSONPath. Only
    * JSONata can append one `PARAM_<NAME>` variable per entry of the phase's
@@ -1004,6 +1042,16 @@ export class ProvisioningWorkflow extends Construct {
       });
     const unpinned = makeVariant(id, false);
     const pinned = makeVariant(`${id}Pinned`, true);
+    // ADR-0049: a start refused at the build limit waits for a free slot; the only retrier, so no `States.ALL` can match first.
+    for (const variant of [unpinned, pinned]) {
+      variant.addRetry({
+        errors: [BUILD_SLOT_WAIT.error],
+        interval: Duration.seconds(BUILD_SLOT_WAIT.intervalSeconds),
+        backoffRate: 1,
+        maxAttempts: BUILD_SLOT_WAIT.maxAttempts,
+        jitterStrategy: sfn.JitterType.FULL,
+      });
+    }
     const entry = new sfn.Choice(this, `${id}SourcePin`)
       .when(
         sfn.Condition.and(
@@ -1306,6 +1354,13 @@ function attrReason(prefix: string): tasks.DynamoAttributeValue {
   );
 }
 
+/** The statusReason of a build whose start was refused for its whole wait (ADR-0049). */
+export function buildStartRefusedReason(prefix: string): string {
+  const minutes = (BUILD_SLOT_WAIT.intervalSeconds * BUILD_SLOT_WAIT.maxAttempts) / 60;
+  return `${prefix} provisioning failed: the build never started, CodeBuild refused it at the concurrent build limit `
+    + `for ${BUILD_SLOT_WAIT.maxAttempts} tries over at most ${minutes} minutes (${BUILD_SLOT_WAIT.error})`;
+}
+
 /**
  * DynamoDB string attribute naming the failed build from the normalized
  * evidence fields. Formatting only the ARN and status (never the raw Cause)
@@ -1428,18 +1483,30 @@ export const BUILD_FAILURE_OUTPUT = jsonata([
 ].join(' '));
 
 /**
- * Terminal-write retry policy (§7 point 3): retry transient failures, but
- * never a condition failure or transaction cancellation — those are
- * definitive outcomes routed by the task's Catch.
+ * Terminal-write retry policy (§7 point 3, ADR-0049): a condition failure is
+ * a definitive outcome routed by the task's Catch, never retried. A
+ * transaction cancellation is retried a few times with jitter: a `Retry`
+ * matches the error name only, and the name is the same for a cancellation
+ * by a concurrent transaction on the cell (`TransactionConflict`, which
+ * applied nothing and clears on its own) and by a failed condition (which
+ * fails the same way each time and then reaches the Catch). Every
+ * transaction carries a stable token and item-state conditions, so a retry
+ * is safe (ADR-013). Other failures get the transient retry.
  */
 function addTerminalWriteRetries(state: { addRetry(props: sfn.RetryProps): unknown }): void {
   state.addRetry({
     errors: [
       'DynamoDB.ConditionalCheckFailedException',
       'DynamoDb.ConditionalCheckFailedException',
-      'DynamoDb.TransactionCanceledException',
     ],
     maxAttempts: 0,
+  });
+  state.addRetry({
+    errors: [TRANSACTION_CANCELED_RETRY.error],
+    interval: Duration.seconds(TRANSACTION_CANCELED_RETRY.intervalSeconds),
+    backoffRate: TRANSACTION_CANCELED_RETRY.backoffRate,
+    maxAttempts: TRANSACTION_CANCELED_RETRY.maxAttempts,
+    jitterStrategy: sfn.JitterType.FULL,
   });
   state.addRetry(transientRetry());
 }

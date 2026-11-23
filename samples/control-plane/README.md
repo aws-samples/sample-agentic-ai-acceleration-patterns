@@ -550,7 +550,11 @@ warning that it could not assume it and goes on with the deploy role.
 CodeBuild project the control plane creates. It bounds what a leaked
 operator token or a runaway client can spend (T16, M17). A tenant build takes
 one to two minutes, so at 5 the control plane onboards about three tenants a
-minute. Raise it for a large onboarding wave. The value must be an integer
+minute. CodeBuild refuses a build over the limit; the workflow retries the
+start for about 10 minutes (at most 20) and then fails the operation with a
+reason that names the refusal (ADR-0049). That holds a burst of a few times
+the limit, not an unbounded queue: keep larger waves near the limit, or
+raise it for a large onboarding wave. The value must be an integer
 from 1 to 100, or synth fails; above 20 the synth warns. Raise the account's
 CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds first, to at
 least the value times the number of CodeBuild projects the stack creates
@@ -1352,14 +1356,6 @@ application's cells (threat T5, the highest-consequence open item).
   keeps it in `$STRESS_HOME/<STRESS_PREFIX>/cloudwatch-roles` across runs,
   then lists it and does not count it. Delete one only when the account
   setting names another role.
-- **Builds over the concurrent build limit are refused, not queued.**
-  CodeBuild refuses a `StartBuild` above a project's `concurrentBuildLimit`
-  (`AccountLimitExceededException`), and the workflow retries it a few times
-  about 30 seconds apart and then fails the operation (`CREATE_FAILED`,
-  `DELETE_FAILED`). ADR-0046 and the stack's comment say that excess builds
-  queue. Until the workflow waits for a free slot, keep a client's in-flight
-  creates, updates and deletes at or below the limit; the platform stress
-  slice paces its waves this way (stress ADR-0013).
 - **A transaction conflict between concurrent operations on one cell
   surfaces as a failure.** A placement whose `TransactWriteItems` is
   cancelled with `TransactionConflict` and no failed condition answers 500

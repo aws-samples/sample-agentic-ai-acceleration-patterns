@@ -31,3 +31,5 @@ the retention bound is the backstop.
 **Amended by ADR-0044 (2026-11-17):** the concurrent build cap of M17 and the one-month log retention cover the two hook projects as well as the two provisioning projects. A hook start refused at the cap is tried again for at most 5 minutes; a delete hook skipped after its retries is counted in a metric with an alarm (no actions).
 
 **Amended by ADR-0046 (2026-11-18):** the concurrent build cap of M17 is the construct prop `concurrentBuildLimit`, an integer from 1 to 100, default 5, applied to every CodeBuild project the control plane creates; above 20 the synth warns.
+
+**Amended by ADR-0049 (2026-11-23):** CodeBuild refuses a build over the cap rather than queueing it. A script build's refused start waits for a free slot for about 10 minutes (at most 20) and then fails the operation with a reason that names the refusal.
