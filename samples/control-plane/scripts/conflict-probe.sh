@@ -27,8 +27,9 @@
 # account (AWS_PROFILE), PROBE_TENANTS (default 20: one warm-up tenant and 19 racers),
 # PROBE_HOME (default ~/.conflict-probe), INTEG_DEPLOY_CONCURRENCY (default 2). It needs bash 4
 # or newer, curl, git, jq, openssl, zip, node and the AWS CLI; before `deploy`, run `npm ci`
-# and `npx projen pre-compile` (the generated Smithy code) in the sample. It prints ids, statuses and counts only, never a
-# token or a password, and never runs `set -x` (scripts/CONVENTIONS.md).
+# and `npx projen pre-compile` (the generated Smithy code) in the sample. It prints ids,
+# statuses and counts only, never a token or a password, and never runs `set -x`
+# (scripts/CONVENTIONS.md).
 #
 # shortcut: one cell, one Region and the no-op scripts; enough to make placements meet on one
 # cell item, not a load test (the platform stress slice is that).
