@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import { execFile } from 'node:child_process';
-import { Aws } from './aws';
+import { Aws, redact } from './aws';
 import { unavailableReason } from './leftovers';
 
 jest.mock('node:child_process', () => ({ execFile: jest.fn() }));
@@ -48,5 +48,39 @@ describe('aws.cli', () => {
     expect(e.stderr).not.toContain(id);
     expect(e.stderr).not.toContain(key);
     expect(unavailableReason(e)).toBe('access denied');
+  });
+
+  test('a process stopped by a signal, with no stderr, is described without its command line', async () => {
+    (execFile as unknown as jest.Mock).mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Callback) => {
+      cb(Object.assign(new Error('Command failed: aws route53resolver get-firewall-rule-group --firewall-rule-group-id rslvr-frg-1'), { code: null, signal: 'SIGKILL', stderr: '' }));
+    });
+    const e = await failure(['route53resolver', 'get-firewall-rule-group', '--firewall-rule-group-id', 'rslvr-frg-1']);
+    expect(e.message).toBe('aws route53resolver get-firewall-rule-group failed: the aws CLI exited with signal SIGKILL');
+  });
+
+  test('the cause is read from the whole stderr, and the message carries its first 2000 characters', async () => {
+    failWith(`${'Traceback line\n'.repeat(200)}An error occurred (ExpiredToken) when calling the GetServiceQuota operation`, 255);
+    const e = await failure(['service-quotas', 'get-service-quota']);
+    expect(e.message.length).toBe('aws service-quotas get-service-quota failed: '.length + 2000);
+    expect(e.message).not.toContain('ExpiredToken');
+    expect(unavailableReason(e)).toBe('the credentials expired');
+  });
+});
+
+describe('redact', () => {
+  const id = '1'.repeat(12);
+  test.each([
+    ['an ASIA access key id', `key ASIA${'C'.repeat(16)} used`, 'key <key> used'],
+    ['an aws-cn ARN', `on arn:aws-cn:iam::${id}:role/R.`, 'on <arn>'],
+    ['a session token', `token IQoJ${'b'.repeat(60)} sent`, 'token <token> sent'],
+    ['the X-Amz query values of a presigned URL', 'https://h/?X-Amz-Security-Token=abc%2F&X-Amz-Signature=def', 'https://h/?X-Amz-Security-Token=<redacted>&X-Amz-Signature=<redacted>'],
+    ['a secret key', `secret ${'A'.repeat(20)}/${'b'.repeat(19)} end`, 'secret <secret> end'],
+    ['an account id glued to a word', `Role_${id}x`, 'Role_<account>x'],
+  ])('replaces %s', (_shape, text, expected) => {
+    expect(redact(text)).toBe(expected);
+  });
+
+  test('leaves a 13-digit number alone', () => {
+    expect(redact(`${id}3`)).toBe(`${id}3`);
   });
 });

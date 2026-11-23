@@ -103,10 +103,10 @@ async function exists<T>(fn: () => Promise<T>): Promise<boolean> {
 }
 
 const UNAVAILABLE: ReadonlyArray<{ readonly pattern: RegExp; readonly reason: string }> = [
-  { pattern: /Unable to locate credentials|CredentialsProviderError|Could not load credentials|Error when retrieving credentials|config profile .* could not be found/i, reason: 'no credentials found' },
-  { pattern: /ExpiredToken|RequestExpired|security token included in the request is expired|SSO session .* (expired|invalid)|Error when retrieving token from sso/i, reason: 'the credentials expired' },
-  { pattern: /InvalidClientTokenId|InvalidAccessKeyId|UnrecognizedClientException|AuthFailure|SignatureDoesNotMatch|security token included in the request is invalid/i, reason: 'the credentials were refused' },
-  { pattern: /AccessDenied|UnauthorizedOperation/i, reason: 'access denied' },
+  { pattern: /Unable to locate credentials|CredentialsProviderError|Could not load credentials|Error when retrieving credentials|config profile .* could not be found|Error loading SSO Token|SSOTokenLoadError|Token for .* does not exist/i, reason: 'no credentials found' },
+  { pattern: /ExpiredToken|RequestExpired|TokenRefreshRequired|security token included in the request is expired|SSO session .* (expired|invalid)|SSO access token has (either )?expired|Error when retrieving token from sso/i, reason: 'the credentials expired' },
+  { pattern: /InvalidClientTokenId|InvalidAccessKeyId|UnrecognizedClientException|AuthFailure|SignatureDoesNotMatch|IncompleteSignature|MissingAuthenticationToken|InvalidSignatureException|security token included in the request is invalid/i, reason: 'the credentials were refused' },
+  { pattern: /AccessDenied|UnauthorizedOperation|UnauthorizedException|NotAuthorized/i, reason: 'access denied' },
   { pattern: /spawn aws (ENOENT|EACCES)/, reason: 'the aws CLI could not be started' },
 ];
 
@@ -124,7 +124,7 @@ export function unavailableReason(e: unknown): string | undefined {
 function errorCode(e: unknown): string {
   if (!(e instanceof Error)) return 'error';
   if (e.name !== 'Error') return e.name;
-  return /An error occurred \((\w+)\)/.exec(String((e as { stderr?: unknown }).stderr ?? e.message))?.[1] ?? 'the call failed without an AWS error code';
+  return /An error occurred \(([\w.]+)\)/.exec(String((e as { stderr?: unknown }).stderr ?? e.message))?.[1] ?? 'the call failed without an AWS error code';
 }
 
 /**
@@ -179,7 +179,8 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
     }
   };
 
-  // Stacks, including any in DELETE_FAILED. With no credentials nothing after this can run either, so it stops here.
+  // Stacks, including any in DELETE_FAILED. A stack list that cannot run ends the check with one finding: the report
+  // says to repeat it. This also covers an access denied on this call alone; the rest is not tried.
   const stacksListed = await unlessUnavailable('stacks', async () => {
     let token: string | undefined;
     do {
@@ -279,6 +280,9 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
   }
   return findings;
 }
+
+/** The exit status of `leftovers` and `destroy`: 1 for any finding that is not the known leftover, a check that could not run included. */
+export const leftoverExitCode = (findings: readonly Finding[]): number => (findings.some((f) => !f.known) ? 1 : 0);
 
 /**
  * One line per finding. A check that could not run is not a leftover: it is listed apart, and a closing line says

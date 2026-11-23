@@ -188,7 +188,8 @@ endpoints and DNS Firewall resources.
 
 A line that starts with `LEFT` is something the run left, or a resource the
 check could not read because AWS answered with an error (`LEFT check-failed`,
-with the AWS error code or a reason). Both exit 1.
+with the AWS error code or a reason). Any `LEFT` line sets the exit status
+to 1.
 
 When the credentials or the AWS CLI fail (no credentials, an expired or
 refused token, access denied, no `aws` binary), the check cannot tell whether
@@ -198,15 +199,15 @@ AWS CLI work, never prints `nothing left`, and exits 1. Fix them and run the
 check again. In the `teardown` step the same case fails the check
 `the leftover check could run`.
 
-Known limitation: the lookups of container instances, task definitions and
-MicroVMs read any other error (a throttle, a network error) as "nothing
-there", so those three can miss a leftover without a line.
-
 Remove by hand what the `LEFT` lines list: the construct's own log groups with
 `aws logs delete-log-group`, a leftover runtime log group under
 `/aws/bedrock-agentcore/runtimes/` the same way, and an ACTIVE task definition
 revision with `aws ecs deregister-task-definition` (a revision cannot be
 deleted). The tenant-identity `shared-pool` stays.
+
+Known limitation: the lookups of container instances, task definitions and
+MicroVMs read any other error (a throttle, a network error) as "nothing
+there", so those three can miss a leftover without a line.
 
 ## Test-only shortcuts
 

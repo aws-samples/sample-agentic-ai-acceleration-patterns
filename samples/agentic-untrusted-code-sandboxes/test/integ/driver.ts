@@ -24,7 +24,7 @@ import { Aws } from './aws';
 import { deployConcurrency, runRegion, stackPrefix } from './common';
 import { Ctx } from './ctx';
 import { deployStacks, destroyStack, serviceNames, snapshotResources, synth } from './deploy';
-import { checkLeftovers, formatFindings } from './leftovers';
+import { checkLeftovers, formatFindings, leftoverExitCode } from './leftovers';
 import { formatRecord, Recorder } from './record';
 import { runPhase, skipPhase } from './runner';
 import { readState, stateDir, withState, writeState, type RunState } from './state';
@@ -184,8 +184,8 @@ async function destroyOnly(): Promise<number> {
   process.stdout.write(`stack ${prefix}: ${r.status}${r.failures.length > 0 ? ` (${r.failures.join(' | ')})` : ''}\n`);
   const findings = await checkLeftovers(aws, prefix, state);
   process.stdout.write(`${formatFindings(findings)}\n`);
-  if (state) writeState(withState(state, { destroyed: findings.every((f) => f.known) }));
-  return findings.some((f) => !f.known) ? 1 : 0;
+  if (state) writeState(withState(state, { destroyed: leftoverExitCode(findings) === 0 }));
+  return leftoverExitCode(findings);
 }
 
 async function leftoversOnly(): Promise<number> {
@@ -193,7 +193,7 @@ async function leftoversOnly(): Promise<number> {
   const prefix = stackPrefix();
   const findings = await checkLeftovers(new Aws(region), prefix, readState(prefix, region));
   process.stdout.write(`${formatFindings(findings)}\n`);
-  return findings.some((f) => !f.known) ? 1 : 0;
+  return leftoverExitCode(findings);
 }
 
 async function main(): Promise<void> {

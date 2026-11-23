@@ -12,7 +12,7 @@ import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix }
 import { Ctx, TOKEN_REUSE_MS } from './ctx';
 import { imageNameOf } from './deploy';
 import { HOSTILE_DIR, MAX_CODE_BYTES, PROBES, probeCode } from './hostile';
-import { checkLeftovers, formatFindings, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes } from './leftovers';
+import { checkLeftovers, formatFindings, leftoverExitCode, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes } from './leftovers';
 import { claimsFor, mint, signJws } from './mint.function';
 import { formatRecord, median, Recorder } from './record';
 import { runPhase } from './runner';
@@ -195,6 +195,13 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     const text = formatFindings(found);
     expect(text).not.toMatch(/LEFT|nothing left/);
     expect(text).toMatch(/could not run.*Repeat it once the credentials and the aws CLI work/);
+    expect(found[0].known).toBeUndefined();
+    expect(leftoverExitCode(found)).toBe(1);
+  });
+
+  test('only the known leftover exits 0', () => {
+    expect(leftoverExitCode([{ kind: 'logs-resource-policy', id: 'p', detail: 'd', known: true }])).toBe(0);
+    expect(leftoverExitCode([])).toBe(0);
   });
 
   test('a resource that is still there is reported as LEFT', async () => {
@@ -222,6 +229,14 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     ['RequestExpired', 'the credentials expired'],
     ['InvalidAccessKeyId', 'the credentials were refused'],
     ['CredentialsProviderError', 'no credentials found'],
+    ['TokenRefreshRequired', 'the credentials expired'],
+    ['AuthFailure', 'the credentials were refused'],
+    ['SignatureDoesNotMatch', 'the credentials were refused'],
+    ['IncompleteSignature', 'the credentials were refused'],
+    ['MissingAuthenticationToken', 'the credentials were refused'],
+    ['InvalidSignatureException', 'the credentials were refused'],
+    ['UnauthorizedException', 'access denied'],
+    ['NotAuthorized', 'access denied'],
   ])('an SDK client error named %s is a check that could not run (%s)', async (name, reason) => {
     const aws = fake({ ec2: { send: async () => { throw sdkError(name); } } });
     const found = await checkLeftovers(aws as never, 'P', stateOf([{ type: 'AWS::EC2::VPC', physicalId: 'vpc-1' }]));
@@ -236,6 +251,9 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     ['no credentials found', 'The config profile (work) could not be found'],
     ['the credentials expired', 'Error when retrieving token from sso: Token has expired and refresh failed'],
     ['the aws CLI could not be started', 'aws route53resolver get-firewall-rule-group failed: spawn aws EACCES'],
+    ['no credentials found', 'Error loading SSO Token: Token for https://example.com/start does not exist'],
+    ['the credentials expired', 'The SSO session associated with this profile has expired or is otherwise invalid. To refresh this SSO session run aws sso login with the corresponding profile.'],
+    ['the credentials expired', 'Error when calling the operation: The SSO access token has either expired or is otherwise invalid.'],
   ])('a CLI failure is a check that could not run: %s', async (reason, stderr) => {
     const aws = fake({ cli: async () => { throw cliError(stderr); } });
     expect((await checkLeftovers(aws as never, 'P', stateOf([FRG])))[0]).toEqual({ kind: 'check-unavailable', id: FRG_ID, detail: reason });
@@ -266,7 +284,7 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-unavailable', id: FRG_ID, detail: 'access denied' }]);
   });
 
-  test('a stack list that cannot run ends the check with one finding, with or without a state file', async () => {
+  test('a stack list that cannot run ends the check with one finding (the rest is not tried), with or without a state file', async () => {
     const send = jest.fn(async () => { throw sdkError('ExpiredTokenException'); });
     const aws = fake({ cfn: { send }, cli: async () => '{}' });
     const expected = [{ kind: 'check-unavailable', id: 'stacks', detail: 'the credentials expired' }];
@@ -288,6 +306,11 @@ describe('the leftover check when the credentials or the CLI fail', () => {
   test('any other CLI failure is a check-failed that names the AWS error code', async () => {
     const aws = fake({ cli: async () => { throw cliError('An error occurred (ThrottlingException) when calling the GetFirewallRuleGroup operation: Rate exceeded'); } });
     expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-failed', id: FRG_ID, detail: 'ThrottlingException' }]);
+  });
+
+  test('a dotted AWS error code is named whole', async () => {
+    const aws = fake({ cli: async () => { throw cliError('An error occurred (InvalidParameterValue.Range) when calling the GetFirewallRuleGroup operation: bad'); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-failed', id: FRG_ID, detail: 'InvalidParameterValue.Range' }]);
   });
 
   test('a CLI failure with no AWS error code is a check-failed with a fixed phrase', async () => {
