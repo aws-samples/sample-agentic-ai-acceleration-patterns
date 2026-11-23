@@ -469,12 +469,14 @@ publishes and reads assets, and it holds only cell assets.
   tenant's subscription on any cell there. The control plane's API role can
   assume the tenant role too (control-plane ADR-0028), so it holds the same
   reach (ADR-0012).
-- Two control-plane defects shape the slice (ADR-0013): a build over a
+- Two control-plane defects shaped the slice (ADR-0013). A build over a
   project's concurrent build limit is refused, not queued, so every wave is
-  paced at the limit; and a transaction conflict between concurrent
-  operations on one cell surfaces as a 500 or a `*_FAILED` record, which the
-  driver retries and counts. Both are in the control-plane README, Known
-  issues, until the control plane fixes them.
+  paced at the limit; the control plane now waits for a free slot
+  (control-plane ADR-0049), and `STRESS_UNPACED=1` sends a wave at once. A
+  transaction conflict between concurrent operations on one cell surfaces
+  as a 500 or a `*_FAILED` record, which the driver retries and counts; it
+  is in the control-plane README, Known issues, until the control plane
+  fixes it.
 - A cell is stamped with its source when it is created: a fixed cell or
   tenant script reaches an existing cell only after it is deleted and created
   again (ADR-0014).

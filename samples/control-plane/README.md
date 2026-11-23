@@ -757,9 +757,9 @@ cd ../../stress
 `STRESS_REGIONS` (comma-separated, default `AWS_REGION`) names the Regions the
 account check lists stacks in: every Region the run uses (spec §3.7).
 `STRESS_UNPACED=1` sends every wave of creates and deletes at once instead of
-at the build limit (below). A
-record's `quotas` holds the peak of operations the driver's paced waves kept in
-flight (onboarding and every removal), which bounds its draw on the platform
+at the build limit (below). A record's `quotas` holds the peak of operations
+the driver's paced waves kept in flight (onboarding and every removal, capped
+at the build limit when unpaced), which bounds its draw on the platform
 account's concurrent Linux/Small builds. The unpaced bursts, the placement
 race's racers and the read-rate churn, are not counted, so those two records
 show the peak of their paced removals only. Lambda concurrency and STS are
@@ -803,14 +803,14 @@ seeded tenant left `CREATE_FAILED` stops every later seed with that status: run
 
 The driver keeps every wave of creates and deletes at the build limit, unless
 `STRESS_UNPACED=1`: the workflow then holds the excess in its build-slot wait
-(ADR-0049). Concurrent placements and deletes on one
-cell also meet each other in DynamoDB: the control plane answers a cancelled
-placement transaction with a 500 "Deployment placement failed ambiguously", and
-the workflow retries a cancelled terminal write five times before it leaves
-`CREATE_FAILED` or `DELETE_FAILED`. The driver
-retries them, a placement with its client token, and the records show them as
-`500:internal-server` requests with `ambiguous-placement` refusals and as
-`CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts
+(ADR-0049). Concurrent placements and deletes on one cell also meet each other
+in DynamoDB: the control plane answers a cancelled placement transaction with a
+500 "Deployment placement failed ambiguously", and the workflow retries a
+cancelled terminal write five times before it leaves `CREATE_FAILED` or
+`DELETE_FAILED`. The driver retries what is left, a placement with its client
+token, and the records show them as `500:internal-server` requests with
+`ambiguous-placement` refusals and as `CREATE_FAILED:retried` and
+`DELETE_FAILED:retried` counts
 ([stress ADR-0013](../../stress/adr/0013-pace-waves-at-the-build-limit-and-retry-conflicts.md)).
 
 ## End-to-end demo
@@ -1362,8 +1362,9 @@ application's cells (threat T5, the highest-consequence open item).
 - **A transaction conflict between concurrent operations on one cell
   surfaces as a failure.** A placement whose `TransactWriteItems` is
   cancelled with `TransactionConflict` and no failed condition answers 500
-  "Deployment placement failed ambiguously", and a workflow's terminal
-  write cancelled the same way leaves the record `CREATE_FAILED` or
-  `DELETE_FAILED` although its build succeeded. A `CreateDeployment` retry
-  with the same `clientToken`, a new create after a delete, or another
-  delete clears it (stress ADR-0013).
+  "Deployment placement failed ambiguously". A workflow's terminal write
+  cancelled the same way is retried five times (ADR-0049) and, when every
+  try is cancelled, leaves the record `CREATE_FAILED` or `DELETE_FAILED`
+  although its build succeeded. A `CreateDeployment` retry with the same
+  `clientToken`, a new create after a delete, or another delete clears it
+  (stress ADR-0013).

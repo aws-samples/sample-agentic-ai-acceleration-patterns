@@ -103,3 +103,5 @@ zero and the special case can go.
 
 The platform run at `small` (W-9) placed 19 tenants under a build limit of 50 and met no
 conflict, so pacing and retry are proven by the slice run only.
+
+**Amended by control-plane ADR-0049 (2026-11-23):** the control plane's workflow now waits for a free build slot, and retries a terminal transaction cancelled by a conflict five times. The finding on the refused `StartBuild` is closed. Pacing stays the default, because it measures the onboarding rate at each limit; `STRESS_UNPACED=1` sends every wave at once to show how the control plane handles a wave over the limit.

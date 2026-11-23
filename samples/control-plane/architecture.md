@@ -1081,10 +1081,10 @@ transaction releases.
          tenantBuild.failedStatus + statusReason + lastGlobalHooks
 3. Every terminal DynamoDB task retries transient failures, and retries a
    transaction cancelled by a concurrent one five times with jitter; a failed
-   condition is never retried (ADR-0049). Retry exhaustion
-   is caught and routed through the same conditional *_FAILED transition when
-   the record still exists; an already-absent record means the terminal delete
-   committed and the workflow ends successfully.
+   condition is never retried (ADR-0049). Retry exhaustion is caught and
+   routed through the same conditional *_FAILED transition when the record
+   still exists; an already-absent record means the terminal delete committed
+   and the workflow ends successfully.
 ```
 
 Design points:
@@ -1113,12 +1113,12 @@ Design points:
   jitter) for about 10 minutes, at most 20, then the operation fails with a
   reason that names the refusal (ADR-0049). The projects log to explicit
   one-month-retention log groups. Every build receives `OPERATOR_ID` (the
-  verified JWT `sub`) so
-  application-plane changes attribute to the initiating operator, not just
-  the shared fleet role. A stamped `sourceVersion` commit SHA pins what the
-  build fetches. Action-less CloudWatch alarms watch execution-start rate
-  and API 4XX rate. Provisioning scripts follow `scripts/CONVENTIONS.md`:
-  log parameter names, never values.
+  verified JWT `sub`) so application-plane changes attribute to the
+  initiating operator, not just the shared fleet role. A stamped
+  `sourceVersion` commit SHA pins what the build fetches. Action-less
+  CloudWatch alarms watch execution-start rate and API 4XX rate.
+  Provisioning scripts follow `scripts/CONVENTIONS.md`: log parameter names,
+  never values.
 - The inline buildspec assumes the account's provisioning role and then runs
   `bash "$SCRIPT_PATH"`. Lifecycle scripts must be idempotent and safe to rerun after
   partial completion; explicit no-op scripts represent empty deployments.
@@ -1172,12 +1172,11 @@ Design points:
   hook budget an execution can run at the caps plus terminal-write recovery
   margin (a delete with ten hooks at 30 minutes, each spending its three
   attempts, and a script build that waits 20 minutes for its slot runs
-  about 25.3 hours); it is a final safety net, not the normal
-  timeout path, and costs nothing on a Standard workflow. Terminal writes
-  retry transient failures and transaction conflicts, and retry exhaustion
-  is caught so records do not
-  remain indefinitely in an in-flight state. `StartExecution` rejection is
-  compensated as in §6.
+  about 25.3 hours); it is a final safety net, not the normal timeout path,
+  and costs nothing on a Standard workflow. Terminal writes retry transient
+  failures and transaction conflicts, and retry exhaustion is caught so
+  records do not remain indefinitely in an in-flight state. `StartExecution`
+  rejection is compensated as in §6.
 - The **account role pair** (`CellAccountRoles`, installed per account) carries
   the asymmetry: `<fleet>-cell-provisioning` reads `/application-plane/shared/*`
   and `/application-plane/applications/*` and gets/puts/deletes

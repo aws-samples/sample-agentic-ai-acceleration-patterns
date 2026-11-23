@@ -232,6 +232,10 @@ describe('the terminal-write retry (ADR-0049, issue #96)', () => {
     });
     expect(result.stoppedAt).toBe('Done');
     expect(calls.map((c) => c.args.token)).toEqual(['stable', 'stable', 'stable']);
+    // The cancellation entry waited 1 s then 2 s. Without it the transient entry (2 s, 4 s) would
+    // also commit on the third try, after 6 s, so the count alone does not pin the path.
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(3000);
+    expect(result.elapsedMs).toBeLessThan(6000);
   });
 
   test('a cancellation that persists (a failed condition) reaches the Catch after 6 tries', async () => {

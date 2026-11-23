@@ -2520,7 +2520,9 @@ create.
   in-flight status to the resolved `*_FAILED` status + `statusReason` +
   `lastGlobalHooks`; a failed create or update hook is a build failure
   here (R-46), and so are script outputs the workflow rejects (R-43);
-  a hook build assumes nothing (R-41). For
+  a hook build assumes nothing (R-41). A script build start still refused at
+  the project's concurrent build limit when its wait ends (R-23) is a
+  build failure whose `statusReason` names the refusal. For
   a failed **cell create with a pending deployment create**, one
   transaction moves *both* records to `CREATE_FAILED` (the deployment's
   reason: "cell provisioning failed").
