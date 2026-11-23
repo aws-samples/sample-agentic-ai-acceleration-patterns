@@ -92,8 +92,9 @@ project.tasks.tryFind('synth')?.reset(`cdk synth ${buildOnlyPlaceholderContext}`
 // when AWS_REGION (the single Region integ-runner's multi-Region defaults must
 // never replace, integration-test.md) or the second account is unset; takes
 // this run's id (CP_INTEG_RUN_ID, generated when unset), which names the fleet
-// `cp-integ-<run id>` and every stack, so two runs can share both accounts and
-// a Region; refuses to start while a stack of THIS run exists; runs
+// `cp-integ-<run id>` and every stack (only one control plane stack fits in
+// an account and Region at a time, integration-test.md, "Sharing accounts
+// between runs"); refuses to start while a stack of THIS run exists; runs
 // integ-runner; and checks what of this run's fleet is left in account A.
 const integ = project.addTask('integ', {
   description:

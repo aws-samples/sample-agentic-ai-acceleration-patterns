@@ -226,7 +226,7 @@ scripts read and write only the namespaces of the account the cell lives in.
 | `/application-plane/applications/<applicationId>/shared/front-door-hook` | `tenant-front-door` `RouteHookAccess` stack, in the control plane's account | one JSON document (`version`, `registrarUrl`, `appDomain`, `addressing`) that the route hook reads; kept when the stack is deleted |
 | `/application-plane/shared/code-sandbox/*` | `agentic-untrusted-code-sandboxes` demo stack | `sandboxes`, one JSON document (`version`, `toolTarget`, `runCodeFunctionArn`, `backends`, `defaultBackend`, `registryTableName`, `inputBucketName`, `offboardFunctionArn`, and per backend `imageArn`, `clusterArn` and `taskDefinitionArn`, or `runtimeArn`) |
 | `/application-plane/cells/<cellId>/*` | the cell create script | a cell's shared deployment |
-| `/application-plane/tenants/<tenantId>` | the tenant create script | a tenant's own deployment state |
+| `/application-plane/tenants/<tenantId>/<applicationId>` | the tenant create script | a tenant's own deployment state |
 
 A new shared component takes a new sub-path under
 `/application-plane/shared/<component>/*` and records it here. A sample
@@ -247,7 +247,7 @@ sequenceDiagram
   V->>CP: POST /tenants (optionally naming the account)
   CP->>CB: cell create (if no free cell; claims the account's cell slot), then tenant create
   CB->>CB: assume the account's provisioning role
-  CB->>CB: provision tenant resources, write /application-plane/tenants/<tenantId>
+  CB->>CB: provision tenant resources, write /application-plane/tenants/<tenantId>/<applicationId>
   V->>ID: CreateTenant, create first tenant admin (IAM)
   ID-->>V: tenant registered in the identity provider
 ```

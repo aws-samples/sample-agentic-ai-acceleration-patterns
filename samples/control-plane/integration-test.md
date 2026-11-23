@@ -96,20 +96,20 @@ sample. Because the task always runs with `--force`, no workflow depends on a
 committed snapshot; your local snapshot is kept (gitignored) to speed up
 repeated runs.
 
-### Parallel runs
+### Sharing accounts between runs
 
 Only one run, of this test or of the session tag test below, fits in
 account A and a Region at a time: every control plane stack creates the
 fixed `/control-plane/tenant-api-url` parameter (README, Deploy), so a
 second stack under test fails early validation. Runs in other Regions, or
-with another account A, can share account B. Apart from that parameter,
-the run's fleet name
-is in every stack name, the assertion stack's test name included, is the
-`fleetName` of the stack under test and of the role pair the account B
-stack installs, and is in every other name the test creates that must be
-unique in an account or a Region: the probe role in B, the test policy on
-B's cell role (`<fleet>-cell-extra`), the hook test paths and policies, and
-the user pool domain prefix. The stack under test names
+with another account A, can share account B.
+
+The run's fleet name is in every stack name, the assertion stack's test
+name included, is the `fleetName` of the stack under test and of the role
+pair the account B stack installs, and is in every other name the test
+creates that must be unique in an account or a Region: the probe role in
+B, the test policy on B's cell role (`<fleet>-cell-extra`), the hook test
+paths and policies, and the user pool domain prefix. The stack under test names
 its roles, build projects and workflow after the fleet (spec R-41), so
 those differ per run as well. The application ids carry the run id because
 an application id is at most 32 characters, too short for the fleet name
@@ -127,8 +127,9 @@ every run's script builds and hook builds draw on, and the API Gateway
 control plane request rate, which a deploy of several REST APIs at once can
 exceed.
 
-Runs one after another also share state that per-run names do not separate. The stack under
-test's REST API creates the API Gateway CloudWatch role and the
+Runs one after another also share state that per-run names do not
+separate. The stack under test's REST API creates the API Gateway
+CloudWatch role and the
 `AWS::ApiGateway::Account` setting that names it. That setting is one per
 account and Region, goes to whichever run deployed last, and CDK retains
 both when the stack is deleted. The role and the setting are expected
@@ -301,11 +302,12 @@ The same prerequisites, guards and leftover check as the main test apply
 (How to run it, After an interruption). It cannot run while another control
 plane stack exists in account A and the Region (from the main test, from
 this test, or a real deployment): every stack creates the fixed
-`/control-plane/tenant-api-url` parameter (Parallel runs). The last green
-run is in the [`architecture.md` status
-block](./architecture.md#verification-status); the run's cost is a few
-cents of short CodeBuild builds, Lambda calls and SSM parameters (estimate). A run takes about 10 minutes:
-about 4 to deploy, 2 for the builds and 3 to tear down.
+`/control-plane/tenant-api-url` parameter (Sharing accounts between runs).
+
+A run takes about 10 minutes: about 4 to deploy, 2 for the builds and 3 to
+tear down. It costs a few cents of short CodeBuild builds, Lambda calls and
+SSM parameters (estimate). The last green run is in the
+[`architecture.md` status block](./architecture.md#verification-status).
 
 | Build | Project | Buildspec | What it checks |
 |---|---|---|---|

@@ -483,8 +483,9 @@ The pair lives **in the account that hosts the cell**, installed by that
 account's owner (the vendor, or the customer for a tenant-owned account),
 and is assumed by the matching build project before the script runs (§6.4).
 The build projects' own roles hold no application-plane permission at all:
-each may only assume its half of the pair and tag that session (R-52). So the account owner — not the
-control plane — decides what provisioning may do in their account, and can
+each may only assume its half of the pair and tag that session (R-52). So
+the account owner — not the control plane — decides what provisioning may
+do in their account, and can
 withdraw it. These roles are THE hardening point of the whole design.
 
 Vendor hooks (§6.5) are the second arbitrary-code surface, and they sit
@@ -1615,8 +1616,9 @@ transitive and no other key transitive (`Null` false also on
 `sts:TransitiveTagKeys`, `ForAllValues:StringEquals` on
 `sts:TransitiveTagKeys`). A build request without the tags, with another
 key or with none of the tags transitive MUST be refused. The build passes
-every key transitive (R-52); the trust does not require that of each key. The external id
-condition below is on the two AssumeRole statements only: STS does not
+every key transitive (R-52); the trust does not require that of each key.
+The external id condition below is on the two AssumeRole statements only:
+STS does not
 evaluate `sts:ExternalId` on `sts:TagSession`, where it would refuse every
 tagged request. Each build role's own policy allows `sts:TagSession` on its
 half of the pair under the TagSession statement's conditions.
@@ -1635,8 +1637,9 @@ plane's own account both pair roles also carry the R-41 deny, so an
 attached policy cannot grant them the denied actions.
 
 Both trust policies require `sts:ExternalId` to equal the configured
-`externalId` on every AssumeRole statement when one is set. The control plane presents it on every
-AssumeRole into that account; without it the assume MUST be refused by the
+`externalId` on every AssumeRole statement when one is set. The control
+plane presents it on every AssumeRole into that account; without it the
+assume MUST be refused by the
 trust policy. This is the standard guard against the confused deputy: a
 third party who learns a customer's role ARN cannot have the control plane
 act in that account by registering it, because they do not hold the

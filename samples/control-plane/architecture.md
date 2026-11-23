@@ -7,7 +7,7 @@ This sample has been verified as working via automated integration tests and end
 | Date | Commit | Test accounts | Region | Verified by | Notes |
 |------|--------|---------------|--------|-------------|-------|
 | 2026-11-23 | fb9400a | two non-production test accounts | eu-central-1 | `npx projen integ:session-tags` (integ-runner) | `SUCCESS integ.session-tags 581s`: the session tags of ADR-0051 with real IAM (integration-test.md, "Session tags"). The pair refused every build-role AssumeRole a correct build never makes (untagged, not transitive, another key, a missing key, no external id) and admitted the correct one, for both halves; two cell sessions in one account each wrote their own cell namespace and neither wrote the other's; the tenant session wrote only its own deployment namespace and read only its own cell; a chained role saw the cell's tag; a caller without `sts:TagSession` could not chain; setting the tag again was refused (`InvalidParameterValue`). Deploy about 4 min, assertions about 2 min, teardown about 3 min; nothing left in either account apart from the harness's default Lambda log groups. The run before it, on the previous trust shape, found that a TagSession statement with the external id condition refuses every tagged request, which is why the trust splits AssumeRole and TagSession |
-| 2026-11-23 | 7f52d8f | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6031s`: every step of spec §10 passed with the build-slot wait and the terminal-write retry of ADR-0049 and the race retry of ADR-0050 in the same stack. This is the merge of the build-slot wait with `main` at `a05c72d`. Deploy about 5 min, assertions about 62 min, teardown about 34 min; nothing of the run left in either account apart from the harness's default Lambda log groups (README Known issues). The scenario runs one build at a time under `concurrentBuildLimit` 50, so it does not meet a refused start or a transaction conflict: the build-slot wait and the terminal-write retry stay covered by the unit tests and by the stress run in the next row. The later commits up to `cce27a1` change docs only |
+| 2026-11-23 | 7f52d8f | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6031s`: every step of spec §10 passed with the build-slot wait and the terminal-write retry of ADR-0049 and the race retry of ADR-0050 in the same stack. This is the merge of the build-slot wait with `main` at `a05c72d`. Deploy about 5 min, assertions about 62 min, teardown about 34 min; nothing of the run left in either account apart from the harness's default Lambda log groups (README Known issues). The scenario runs one build at a time under `concurrentBuildLimit` 50, so it does not meet a refused start or a transaction conflict: the build-slot wait and the terminal-write retry stay covered by the unit tests and by the stress run in the next row. The later commits up to `cce27a1` change docs and the stress test harness only, nothing in `src/` or the integration test |
 | 2026-11-23 | f0f4214 | two non-production test accounts (platform, one cell account) | eu-central-1 | control-plane stress slice (`scripts/stress/slice.sh`, tier `small`, `concurrentBuildLimit` 5, `STRESS_UNPACED=1`) | Build-slot wait (ADR-0049), every wave sent at once: a teardown (the 15 `DELETE_FAILED` deployments of the control run below deleted again, the cell, the tenants), `PS-1` (the cell, then 19 creates), two `build-limit-scaling` runs (20 deletes, then 20 creates) and a second teardown (20 deletes, the cell, the tenants). Every wave ended with 0 findings, 0 `*_FAILED` records and 0 isolation mismatches; 361 refused starts in 104 executions were retried, at most 11 in one execution. The deployed definition carried the refusal reason of this commit (read back from the live state machine). Control run on the code before ADR-0049, same stacks: one unpaced delete wave of 20 left 15 `DELETE_FAILED` (`CodeBuild.AccountLimitExceededException`, one try each). No transaction conflict occurred in these runs, so the terminal-write retry is covered by unit tests only. The later commits change docs, comments and tests, and in `src/` only the wording of the refusal reason (it names the project's or the account's limit); the integ-runner run of the head is the row above. Deploy of both stacks (the control run) 232 s, the redeploy with this commit 75 s; the teardowns 727 s and 772 s; the two stacks stay, for a destroy outside the run |
 | 2026-11-23 | c0647e9 | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6240s`: every step of spec §10 passed with the race retry of ADR-0050 in every API transaction. Deploy about 5 min, assertions about 64 min, teardown about 35 min; nothing of the run left in either account apart from the harness's default Lambda log groups (README Known issues). The same day, `scripts/conflict-probe.sh` against a control plane from the same commit (eu-west-1): three bursts of 19 CreateDeployment calls at once onto one cell, every first answer 202 and every deployment `ACTIVE`; the API logged 10 placements cancelled only by races, each sent again and committed on its second attempt. The later commits change docs only |
 | 2026-11-19 | 93e7ae4 | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6359s`: every step of spec §10 passed, with the vendor hooks of ADR-044 in step 16 (global and application pre and post hooks around cell and deployment scripts, `SCRIPT_OUTPUTS` through the outputs guard, a failing pre and post hook, a skipped delete hook, the deny on the hook roles) and the asynchronous record operations of ADR-045 (202 and polling on every application, tenant and account call, hooks on tenant, application and account events in step 17, teardown through the API in step 18). Deploy about 5 min, assertions about 64 min, teardown about 37 min; nothing of the run left in either account apart from the harness's default Lambda log groups (README Known issues). The later commits change docs and comments only |
@@ -312,8 +312,9 @@ probe, ADR-028) by `aws:PrincipalArn`, optionally behind `sts:ExternalId`,
 admitting the build role only with its session tags (ADR-0051, spec §6.4),
 and carries the cell-script/tenant-script asymmetry (§7). The build roles may
 only assume, and tag a session for, their half of the pair, by name, in any
-account; the buildspec does so before the script runs. The pair in each account is the provisioning blast
-radius and the hardening point; the account owner decides what it may do.
+account; the buildspec does so before the script runs. The pair in each
+account is the provisioning blast radius and the hardening point; the
+account owner decides what it may do.
 One pair serves every application the account admits.
 
 The hook projects run in the control plane account under two roles of their
@@ -1117,8 +1118,9 @@ Design points:
   `<fleet>-cell-build` and `<fleet>-tenant-build`, hold no application-plane
   permission: each may only `sts:AssumeRole` on its half of the account role
   pair, by name, in any account (ADR-025; spec N-8), and `sts:TagSession` on
-  it with exactly its half's tag keys (ADR-0051, spec R-52). The target role's trust
-  policy, written by the account owner, is the gate; the AssumeRole session
+  it with exactly its half's tag keys (ADR-0051, spec R-52). The target
+  role's trust policy, written by the account owner, is the gate; the
+  AssumeRole session
   name is the operator id, so the owner's CloudTrail attributes every
   provisioning call (M23). Role chaining caps the script's credentials at one
   hour, which is also the build task budget (N-7). The credentials are read
@@ -1212,8 +1214,9 @@ Design points:
   the API role, for `sts:AssumeRole` with no tags; two narrowed to the
   matching build role, one for `sts:AssumeRole` only with that half's tag
   keys and one for `sts:TagSession` only with exactly that half's tag
-  keys, at least one of them transitive (spec §6.4). The two AssumeRole statements require
-  `sts:ExternalId` when the owner set one; STS does not evaluate it on
+  keys, at least one of them transitive (spec §6.4). The two AssumeRole
+  statements require `sts:ExternalId` when the owner set one; STS does not
+  evaluate it on
   TagSession. The pair
   is installed by the account owner (the control plane stack for its own
   account, the `CellAccountStack` elsewhere), so provisioning source remains
