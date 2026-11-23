@@ -1095,10 +1095,11 @@ describe('parameters in the workflow (ADR-039, ADR-040, spec §6.1, §8.1)', () 
     const tenant = definition.States.TenantBuildFailureShape;
     expect(tenant.Type).toBe('Choice');
     expect(JSON.stringify(tenant.Choices)).toContain('$.failure.buildArn');
-    expect(tenant.Choices[0].Next).toBe('FailTenantWithBuild');
+    // Choices[0] is the refused start (ADR-0049, test/tenant/build-slot-wait.test.ts).
+    expect(tenant.Choices[1].Next).toBe('FailTenantWithBuild');
     expect(tenant.Default).toBe('FailTenant');
     const cell = definition.States.CellBuildFailureShape;
-    expect(cell.Choices[0].Next).toBe('CellFailureHasTenantWithBuild');
+    expect(cell.Choices[1].Next).toBe('CellFailureHasTenantWithBuild');
     expect(cell.Default).toBe('CellFailureHasTenant');
     // The parse-in-state chain is gone: nothing re-materialises the Cause.
     expect(JSON.stringify(definition)).not.toContain('StringToJson');

@@ -22,6 +22,12 @@ export interface FleetEnv {
   readonly cellAccounts: readonly CellAccountInput[];
   readonly region: string;
   readonly log: (line: string) => void;
+  /**
+   * `STRESS_UNPACED=1`: every wave goes out at once instead of at the build limit
+   * (`paced`), so a run shows how the control plane itself handles a wave over the limit
+   * (control-plane ADR-0049).
+   */
+  readonly unpaced?: boolean;
 }
 
 export type Placement = 'accepted' | 'exists' | 'full' | 'failed';
@@ -220,11 +226,9 @@ const WAVE_POLL_MS = 10_000;
 
 /**
  * Runs `start` for each tenant with at most `limit` operations in flight, an operation
- * being in flight until `settled` says its deployment is. The control plane's builds do
- * not queue past the concurrent build limit: CodeBuild refuses a `StartBuild` over it, and
- * the workflow fails the operation after its retries (control-plane finding, stress
- * ADR-0013). So the driver keeps every wave at the limit, as a client of the control plane
- * must. Returns the tenants `start` refused.
+ * being in flight until `settled` says its deployment is (stress ADR-0013). With
+ * `f.unpaced` every tenant starts at once and the control plane's own build-slot wait
+ * (control-plane ADR-0049) holds the excess. Returns the tenants `start` refused.
  */
 export async function paced(
   f: FleetEnv,
@@ -238,15 +242,17 @@ export async function paced(
   const inflight = new Set<string>();
   const refused: string[] = [];
   const deadline = Date.now() + timeoutSeconds * 1000;
+  const cap = f.unpaced === true ? Number.POSITIVE_INFINITY : limit;
   while (queue.length > 0 || inflight.size > 0) {
-    while (inflight.size < limit && queue.length > 0) {
+    while (inflight.size < cap && queue.length > 0) {
       const t = queue.shift()!;
       if (await start(t)) inflight.add(t);
       else refused.push(t);
     }
     // One operation runs one build at a time, so the operations in flight are the slice's
     // draw on the platform account's concurrent Linux/Small builds (spec §4.4).
-    f.rec.quotaPeak('platform', 'codebuild-linux-small', inflight.size);
+    // Unpaced, the operations past the limit wait in the workflow without a build.
+    f.rec.quotaPeak('platform', 'codebuild-linux-small', Math.min(inflight.size, limit));
     if (inflight.size === 0) continue;
     if (Date.now() > deadline) {
       f.rec.finding(`${inflight.size + queue.length} operations not settled within ${timeoutSeconds} s`);

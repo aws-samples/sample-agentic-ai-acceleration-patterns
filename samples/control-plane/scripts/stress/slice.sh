@@ -28,9 +28,11 @@
 # STRESS_BUILD_LIMIT (default 50, ADR-0046), STRESS_CELL_POLICY_SUFFIX (the cell policy
 # suffix of the cell accounts, default none), STRESS_REGIONS (comma-separated Regions the
 # account check lists stacks in, default AWS_REGION; spec §3.7 asks for every Region the run
-# uses) and AWS_REGION, with credentials for the platform account and the cell accounts
-# file's read profiles; in a platform run also STRESS_HOOK_COMMIT (the full SHA of the commit,
-# in the public repository, whose `samples/tenant-front-door/hooks/route-hook.sh` the hooks run).
+# uses), STRESS_UNPACED (1 sends every wave of creates and deletes at once instead of at the
+# build limit, control-plane ADR-0049; read by the driver) and AWS_REGION, with credentials
+# for the platform account and the cell accounts file's read profiles; in a platform run
+# also STRESS_HOOK_COMMIT (the full SHA of the commit, in the public repository, whose
+# `samples/tenant-front-door/hooks/route-hook.sh` the hooks run).
 # It needs bash, git, jq, node, zip, the AWS CLI and the Smithy CLI
 # (the source zip builds runtime-isolation's generated code), and runs the sample's
 # `npm ci` and `smithy build` when they are missing. It prints ids and counts only, never a

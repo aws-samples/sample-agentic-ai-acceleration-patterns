@@ -550,7 +550,11 @@ warning that it could not assume it and goes on with the deploy role.
 CodeBuild project the control plane creates. It bounds what a leaked
 operator token or a runaway client can spend (T16, M17). A tenant build takes
 one to two minutes, so at 5 the control plane onboards about three tenants a
-minute. Raise it for a large onboarding wave. The value must be an integer
+minute. CodeBuild refuses a build over the limit; the workflow retries the
+start for about 10 minutes (at most 20) and then fails the operation with a
+reason that names the refusal (ADR-0049). That holds a burst of a few times
+the limit, not an unbounded queue: keep larger waves near the limit, or
+raise it for a large onboarding wave. The value must be an integer
 from 1 to 100, or synth fails; above 20 the synth warns. Raise the account's
 CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds first, to at
 least the value times the number of CodeBuild projects the stack creates
@@ -751,9 +755,11 @@ cd ../../stress
 ```
 
 `STRESS_REGIONS` (comma-separated, default `AWS_REGION`) names the Regions the
-account check lists stacks in: every Region the run uses (spec §3.7). A
-record's `quotas` holds the peak of operations the driver's paced waves kept in
-flight (onboarding and every removal), which bounds its draw on the platform
+account check lists stacks in: every Region the run uses (spec §3.7).
+`STRESS_UNPACED=1` sends every wave of creates and deletes at once instead of
+at the build limit (below). A record's `quotas` holds the peak of operations
+the driver's paced waves kept in flight (onboarding and every removal, capped
+at the build limit when unpaced), which bounds its draw on the platform
 account's concurrent Linux/Small builds. The unpaced bursts, the placement
 race's racers and the read-rate churn, are not counted, so those two records
 show the peak of their paced removals only. Lambda concurrency and STS are
@@ -795,17 +801,18 @@ also deregisters the accounts and the application and destroys both stacks. A
 seeded tenant left `CREATE_FAILED` stops every later seed with that status: run
 `slice.sh teardown --fixtures`, which deletes it, then seed again.
 
-The driver keeps every wave of creates and deletes at the build limit:
-CodeBuild refuses a build over a project's limit rather than queueing it, and
-the workflow then fails the operation. Concurrent placements and deletes on one
-cell also meet each other in DynamoDB. The control plane sends a placement
-transaction cancelled only by such races again, and answers a 409 with the
-retry hint when every attempt raced
-([ADR-0050](./adr/0050-retry-a-transaction-cancelled-only-by-races.md)); it
-answers a cancelled terminal write with `CREATE_FAILED` or `DELETE_FAILED`. The
-driver retries them, a placement with its client token, and the records show
-them as `409:conflict` requests with `conflict` refusals and as
-`CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts
+The driver keeps every wave of creates and deletes at the build limit, unless
+`STRESS_UNPACED=1`: the workflow then holds the excess in its build-slot wait
+(ADR-0049). Concurrent placements and deletes on one cell also meet each other
+in DynamoDB. The control plane sends a placement transaction cancelled only by
+such races again, and answers a 409 with the retry hint when every attempt
+raced
+([ADR-0050](./adr/0050-retry-a-transaction-cancelled-only-by-races.md)). The
+workflow retries a cancelled terminal write five times (ADR-0049) before it
+leaves `CREATE_FAILED` or `DELETE_FAILED`. The driver retries what is left, a
+placement with its client token, and the records show them as `409:conflict`
+requests with `conflict` refusals and as `CREATE_FAILED:retried` and
+`DELETE_FAILED:retried` counts
 ([stress ADR-0013](../../stress/adr/0013-pace-waves-at-the-build-limit-and-retry-conflicts.md)).
 
 To check that race handling without the whole slice, run
@@ -1365,17 +1372,10 @@ application's cells (threat T5, the highest-consequence open item).
   keeps it in `$STRESS_HOME/<STRESS_PREFIX>/cloudwatch-roles` across runs,
   then lists it and does not count it. Delete one only when the account
   setting names another role.
-- **Builds over the concurrent build limit are refused, not queued.**
-  CodeBuild refuses a `StartBuild` above a project's `concurrentBuildLimit`
-  (`AccountLimitExceededException`), and the workflow retries it a few times
-  about 30 seconds apart and then fails the operation (`CREATE_FAILED`,
-  `DELETE_FAILED`). ADR-0046 and the stack's comment say that excess builds
-  queue. Until the workflow waits for a free slot, keep a client's in-flight
-  creates, updates and deletes at or below the limit; the platform stress
-  slice paces its waves this way (stress ADR-0013).
-- **A workflow's terminal write cancelled by a transaction conflict fails
-  the record.** A terminal `TransactWriteItems` cancelled with
-  `TransactionConflict` and no failed condition leaves the record
+- **A workflow's terminal write cancelled by a transaction conflict on
+  every try fails the record.** A terminal `TransactWriteItems` cancelled
+  with `TransactionConflict` and no failed condition is retried five times
+  (ADR-0049). When every try is cancelled, it leaves the record
   `CREATE_FAILED` or `DELETE_FAILED` although its build succeeded. A new
   create after a delete, or another delete, clears it (stress ADR-0013).
   The API's own transactions send a race-only cancellation again and then

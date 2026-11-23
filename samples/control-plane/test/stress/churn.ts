@@ -101,8 +101,8 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
       }
     }
   };
-  // The control plane's builds do not queue past the build limit (stress ADR-0013): the
-  // workers never run more cycles at once than it allows.
+  // At most the build limit of cycles at once (stress ADR-0013): a cycle never waits in the
+  // control plane's build-slot wait (control-plane ADR-0049), so each one's times are its own.
   await Promise.all(Array.from({ length: Math.min(s.buildLimit, tenants.length) }, worker));
   s.log(`PS-5: ${completed} of ${tenants.length} churn tenants completed a deployment cycle`);
 }

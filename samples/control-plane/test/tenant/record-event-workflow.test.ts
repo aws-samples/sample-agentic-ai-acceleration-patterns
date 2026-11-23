@@ -280,7 +280,9 @@ describe('the record event branch of the workflow (R-50, ADR-045)', () => {
       // The update commit hands its allowlist error to the Catch list at once, ahead of R-22's retriers.
       const retry = name === 'CommitRecordUpdate' ? states[name].Retry.slice(1) : states[name].Retry;
       expect(retry).toEqual([
-        { ErrorEquals: ['DynamoDB.ConditionalCheckFailedException', 'DynamoDb.ConditionalCheckFailedException', 'DynamoDb.TransactionCanceledException'], MaxAttempts: 0 },
+        { ErrorEquals: ['DynamoDB.ConditionalCheckFailedException', 'DynamoDb.ConditionalCheckFailedException'], MaxAttempts: 0 },
+        // ADR-0049: inert on these single-item writes, which raise no TransactionCanceledException.
+        { ErrorEquals: ['DynamoDb.TransactionCanceledException'], IntervalSeconds: 1, BackoffRate: 2, MaxAttempts: 5, JitterStrategy: 'FULL' },
         { ErrorEquals: ['States.ALL'], IntervalSeconds: 2, BackoffRate: 2, MaxAttempts: 6 },
       ]);
       // Every write but the absence probe, which can only pass on a missing item, is conditioned on this operation.

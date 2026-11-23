@@ -2547,22 +2547,41 @@ create.
   in-flight status to the resolved `*_FAILED` status + `statusReason` +
   `lastGlobalHooks`; a failed create or update hook is a build failure
   here (R-46), and so are script outputs the workflow rejects (R-43);
-  a hook build assumes nothing (R-41). For
+  a hook build assumes nothing (R-41). A script build start still refused at
+  a concurrent build limit (the project's or the account's) when its wait
+  ends (R-23) is a build failure whose `statusReason` names the refusal. For
   a failed **cell create with a pending deployment create**, one
   transaction moves *both* records to `CREATE_FAILED` (the deployment's
   reason: "cell provisioning failed").
 
 **R-22:** every terminal write retries transient failures (reference: a
 2-second interval, backoff rate 2, `MaxAttempts` 6 (six retries after
-the first try), 126 s of waits); retry exhaustion is caught and routed
-through the same conditional `*_FAILED` transition when
-the record still exists. This shrinks — but does not eliminate — the
-stranding window, because the failure write is itself a write that can
-exhaust retries (documented residual, §7.4).
+the first try), 126 s of waits); a failed condition is never retried. A
+cancelled transaction (`TransactionCanceledException`) is retried 5
+times from 1 second, backoff rate 2, full jitter, at most 31 s of waits
+(ADR-0049): a cancellation by a concurrent transaction on the same item
+(`TransactionConflict`) applied nothing and is expected to succeed on a
+later try, and a `Retry` matches the error name only, so a cancellation
+by a failed condition is retried too and reaches the Catch up to 31 s
+later. The stable token and the item-state conditions make each try
+safe. That a try resent under the token of a cancelled call runs again
+is unverified (H-13); if DynamoDB repeats the cancellation instead, the
+record ends `*_FAILED` as before, 31 s later. Retry
+exhaustion is caught and routed through the same conditional `*_FAILED`
+transition when the record still exists. This shrinks — but does not
+eliminate — the stranding window, because the failure write is itself a
+write that can exhaust retries (documented residual, §7.4).
 
 **R-23 (timeouts):** each script build task MUST have a catchable
-task-level timeout routed to the failure path. A hook attempt is bounded
-on both sides instead (R-46): CodeBuild stops the run at
+task-level timeout routed to the failure path. Its `StartBuild`, refused
+at a concurrent build limit (the project's `concurrentBuildLimit` or the
+account's, H-9), is retried every 30
+seconds or less (full jitter) 40 times, about 10 minutes and at most 20,
+before the refusal reaches the failure path with a reason that names it
+(ADR-0049). Step Functions starts the task timeout again on each attempt
+(it counts from the attempt's `TaskStarted` event, H-12), so the wait is
+not part of the 60-minute build. A hook attempt is bounded on both sides
+instead (R-46): CodeBuild stops the run at
 `timeoutMinutes`, refused starts end after 5 minutes, and CodeBuild
 stops a queued build at 10 minutes less the minutes its start was
 refused, never below 5, so refusals and queue together take at most
@@ -2577,13 +2596,14 @@ net, never the normal timeout path: a tripped execution timeout
 bypasses the Catch and strands records. At the caps (ten hooks per
 event, R-39) one hook attempt takes at most 47 minutes (its deadline of
 30 run, 10 refused or queued and 5 margin, plus 2 for `StopBuild` and
-the polls until the build is final) and a script build at most 60:
+the polls until the build is final) and a script build at most 60,
+after a build-slot wait of at most 20:
 
 | Execution | Worst case at the caps |
 |---|---|
-| create or update, one event | 10 × 47 + 60 = 530 min |
-| `CreateDeployment` with a new cell, two events | 2 × 530 = 1,060 min (17.7 h) |
-| cell or deployment delete, one event | 10 × 144 (each hook's budget, 3 × 47 + 3 of backoff, R-46) + 60 = 1,500 min (25 h) |
+| create or update, one event | 10 × 47 + 20 + 60 = 550 min |
+| `CreateDeployment` with a new cell, two events | 2 × 550 = 1,100 min (18.3 h) |
+| cell or deployment delete, one event | 10 × 144 (each hook's budget, 3 × 47 + 3 of backoff, R-46) + 20 + 60 = 1,520 min (25.3 h) |
 | application, tenant or account create or update (§8.4) | 10 × 47 + the commit's seconds = 470 min |
 | application, tenant or account delete (§8.4) | 10 × 144 + the commit's seconds = 1,440 min (24 h) |
 
@@ -2599,7 +2619,9 @@ about 15.7 history events a minute and the 60-second poll's nine
 (R-46). With every hook refused for its whole budget that is about
 22,600 events, and polling throughout about 13,000, both inside the
 25,000-event quota of a Standard execution; the outputs guard adds six
-events per build (R-43). A 30-second poll would pass it.
+events per build (R-43), and a build start refused for its whole wait
+adds three per retry (`TaskScheduled`, `TaskStarted`, `TaskFailed`,
+H-12), 120, about 22,700 in all. A 30-second poll would pass it.
 
 Refusals are capped at 5 minutes and the queued timeout is shortened
 by the minutes refused, so refusals and queue together never pass the
@@ -3184,14 +3206,17 @@ integration test (§10) and the README's examples included, polls.
 
 ### 9.1 Service behaviour the hook design relies on
 
-Spike results the hook design relies on. Every row is verified or not
-needed; a later result that differs changes the requirement the row
-names. Two cases stay to verify, each in its row: in H-8, a `Retry`
-after a 5xx or a task timeout; and in H-9, one case, the account
-quota's error name together with whether a repeat under a bound token
-returns its build at that quota. H-3, H-4 and H-6 asked how a `.sync`
-hook task behaves; the poll loop of R-46 relies on none of them, and
-the rows stay so that their ids stay stable.
+Spike results the hook design relies on, one stress-run result the
+script build's slot wait relies on (H-12), and one documented behaviour
+the terminal-transaction retry relies on (H-13). Every row is verified,
+documented or not needed; a later result that differs changes the
+requirement the row names. Three cases stay to verify, each in its row:
+in H-8, a `Retry` after a 5xx or a task timeout; in H-9, one case, the
+account quota's error name together with whether a repeat under a bound
+token returns its build at that quota; and in H-13, whether a cancelled
+transaction resent under its token runs again. H-3, H-4 and H-6 asked
+how a `.sync` hook task behaves; the poll loop of R-46 relies on none of
+them, and the rows stay so that their ids stay stable.
 
 | # | Behaviour | Status | Relied on by |
 |---|---|---|---|
@@ -3203,9 +3228,11 @@ the rows stay so that their ids stay stable.
 | H-6 | A JSONata expression in a task's `TimeoutSeconds` sets a timeout per hook state; today's build tasks use a constant | Not needed: poll loop (the deadline is data) | — |
 | H-7 | A CodeBuild service role trust policy conditioned on `aws:SourceArn` equal to the project ARN, computed with `!Sub` from the project's fixed physical name before the project exists, deploys with no cycle and admits that project's builds, which run as the role (two role and project pairs, standing for the four). CodeBuild refuses `CreateProject` for a project of another name that names the role, and `UpdateProject` that switches an existing project to it, with `InvalidInputException` ("CodeBuild is not authorized to perform: sts:AssumeRole on service role"), so a mis-wired project fails at deploy, never at its first build. Adding `aws:SourceAccount` changes neither outcome; a role with no condition admits a project of any name | Verified: spike H-7, 2026-11-17, eu-central-1 | R-41 |
 | H-8 | Through a request-response `codebuild:startBuild` task: `$hash(..., 'SHA-256')` returns 64 lowercase hexadecimal characters equal to `sha256sum`, which CodeBuild accepts as `idempotencyToken`. A repeat with the same token and arguments within the token's validity returns the same build id; the same token with other arguments fails with `CodeBuild.InvalidInputException` ("Request parameter mismatch for idempotency token") and starts nothing. A start refused at the cap fails with `CodeBuild.AccountLimitExceededException` and creates no build; repeated under its token while capped it is refused again, and after the cap clears the token starts a build that a further repeat returns, so a refused request does not bind its token. A repeat under a token whose build was `IN_PROGRESS` in the only slot of a project capped at 1 returned that build, not a refusal. `StopBuild` on an unknown id fails with `CodeBuild.ResourceNotFoundException` and on a completed build succeeds. No execution returned both a build id and an error. A task `Retry` evaluates `Arguments` again on every repeat: a `$uuid()` in them differed on all four tries, 10 seconds apart, while a token computed from inputs fixed for the try stayed the same. Not provoked: a `Retry` after a 5xx or a task timeout; throttled calls are in H-11 | Verified: spike H-8, 2026-11-17, and for throttling spike H-11, 2026-11-18, eu-central-1; the one unprovoked case, a `Retry` after a 5xx or a task timeout, stays to verify | R-46 |
-| H-9 | A request-response `codebuild:startBuild` on a project at its `concurrentBuildLimit` is refused, not queued: it fails with `CodeBuild.AccountLimitExceededException`, cause "Concurrent build limit exceeded. This build project has a limit of 1 concurrent build(s)...", and creates no build. CodeBuild documents the same name for any limit exceeded for the calling account, which would cover the account's concurrent build quota, but the spike provoked only the project cap | Verified: spike H-9, 2026-11-17, eu-central-1; the account quota's error name, and that a repeat under a bound token returns its build at that quota (one case), stay to verify | R-46 |
+| H-9 | A request-response `codebuild:startBuild` on a project at its `concurrentBuildLimit` is refused, not queued: it fails with `CodeBuild.AccountLimitExceededException`, cause "Concurrent build limit exceeded. This build project has a limit of 1 concurrent build(s)...", and creates no build. CodeBuild documents the same name for any limit exceeded for the calling account, which would cover the account's concurrent build quota, but the spike provoked only the project cap | Verified: spike H-9, 2026-11-17, eu-central-1; the account quota's error name, and that a repeat under a bound token returns its build at that quota (one case), stay to verify | R-46, R-23 |
 | H-10 | A 4,096-byte compact outputs value of only `\"` and `\\` escapes, written by `jq -c .` and exported alone as `SCRIPT_OUTPUTS`, comes back byte for byte (equal SHA-256 in the origin log, the execution output, a `$hash` in state and the hook build's environment) through `startBuild.sync`, a JSONata `Output` into state and a hook build's override. JSON-encoded in state it is 8,190 characters; the execution output is 8,758 bytes, and the script task's `Output` took 23 ms. The R-43 guard in a Step Functions JSONata `Pass` state gives the expected verdict in 18 cases (the largest valid value, the largest valid value of `\"` only, the §10 near miss, a mixed near miss, 4,095 and 4,098 characters, empty and absent, a tab, DEL and non-ASCII, `{}`, two keys, a repeated key admitted, a space after `:`, a `\u` escape, keys of 64 and 65 characters), each in under 1 ms, with no evaluation error | Verified: spike H-10, 2026-11-17, eu-central-1 | R-43, §8.1 |
 | H-11 | In an inline Map (`MaxConcurrency` 40, no `Retry`), one burst of 200 request-response calls at 42 to 45 calls a second. `codebuild:startBuild` on a project at its cap returned 98 `CodeBuild.AccountLimitExceededException` and 102 throttled calls; `codebuild:stopBuild` on unknown build ids of the project returned 37 `CodeBuild.ResourceNotFoundException` and 163 throttled calls. A throttled call fails with the generic name `CodeBuild.AWSCodeBuildException`, and only its cause says "Rate exceeded: StartBuild ... Error Code: ThrottlingException" (or `StopBuild`). No burst call created a build, which the cap alone also explains (the 98 refusals were calls that passed the throttle), so whether a throttled call binds its token was not tested. 10 runs of `startBuild` with `TimeoutSeconds` 1 and the R-46 `Retry` fired no `States.Timeout`: each returned within a second, one build per seed. 40 `PARAM_` values of exactly 1,024 bytes of 2-, 3- and 4-byte UTF-8, with R-42's 13 fixed variables and a test label, 54 in all, arrive with the byte length and SHA-256 sent for each through a JSONata `EnvironmentVariablesOverride` and `startBuild.sync`. A value of 1,024 characters and 2,560 bytes arrives intact too, so CodeBuild enforces no byte cap there and the 1,024-byte cap is the control plane's (R-33). `$states.context.State.EnteredTime` is an ISO 8601 string with millisecond resolution. In one `Assign`, a `FIRST_TRY_AT` from it and a deadline from `$toMillis` of it share one instant; the next `Pass` state had the same `EnteredTime` to the millisecond, and a state after a 1-second `Wait` was 1,040 ms later. A second `Assign` field that reads `$FIRST_TRY_AT` reads its earlier value when one was assigned, and fails with `States.QueryEvaluationError` ("returned nothing (undefined)") when none was and the read is unguarded. Not provoked: the account's concurrent build quota, a task timeout | Verified: spike H-11, 2026-11-18, eu-central-1; the task timeout and the account quota stay to verify (H-8, H-9) | R-33, R-42, R-46 |
+| H-12 | A `codebuild:startBuild.sync` script build task refused at the project's `concurrentBuildLimit` fails with `CodeBuild.AccountLimitExceededException` and writes `TaskScheduled`, `TaskStarted` and `TaskFailed`: three history events per try. Each retry of its `Retry` writes its own `TaskScheduled`, carrying the task's `timeoutInSeconds` (3600), and its own `TaskStarted`; Step Functions counts a task timeout from `TaskStarted`, so the timeout runs per attempt. With waves of up to 20 operations at a limit of 5 sent at once, 361 refused starts in 104 executions were retried, at most 11 in one, and no operation ended `*_FAILED` | Verified: the control-plane stress slice, 2026-11-23, eu-central-1, from the execution histories; the per-attempt count from the Step Functions Task state documentation. No start waited long enough to show the timeout itself | R-23 |
+| H-13 | A `TransactWriteItems` resent with the same `ClientRequestToken` within the token's 10-minute window returns success without changing anything when the first call succeeded, and fails with `IdempotentParameterMismatch` when another parameter differs. A `TransactionConflict` cancellation applies nothing. The documentation does not say whether a call resent under the token of a cancelled call runs again or repeats the cancellation | Documented: [DynamoDB transactions, Idempotency](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html#transaction-apis-txwriteitems-idempotency), read 2026-11-23. Unverified: a retry after a cancellation under the same token; no conflict happened in the stress slice | R-22 |
 
 ---
 

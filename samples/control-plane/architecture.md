@@ -6,6 +6,8 @@ This sample has been verified as working via automated integration tests and end
 
 | Date | Commit | Test accounts | Region | Verified by | Notes |
 |------|--------|---------------|--------|-------------|-------|
+| 2026-11-23 | 7f52d8f | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6031s`: every step of spec §10 passed with the build-slot wait and the terminal-write retry of ADR-0049 and the race retry of ADR-0050 in the same stack. This is the merge of the build-slot wait with `main` at `a05c72d`. Deploy about 5 min, assertions about 62 min, teardown about 34 min; nothing of the run left in either account apart from the harness's default Lambda log groups (README Known issues). The scenario runs one build at a time under `concurrentBuildLimit` 50, so it does not meet a refused start or a transaction conflict: the build-slot wait and the terminal-write retry stay covered by the unit tests and by the stress run in the next row. The later commits change docs only |
+| 2026-11-23 | f0f4214 | two non-production test accounts (platform, one cell account) | eu-central-1 | control-plane stress slice (`scripts/stress/slice.sh`, tier `small`, `concurrentBuildLimit` 5, `STRESS_UNPACED=1`) | Build-slot wait (ADR-0049), every wave sent at once: a teardown (the 15 `DELETE_FAILED` deployments of the control run below deleted again, the cell, the tenants), `PS-1` (the cell, then 19 creates), two `build-limit-scaling` runs (20 deletes, then 20 creates) and a second teardown (20 deletes, the cell, the tenants). Every wave ended with 0 findings, 0 `*_FAILED` records and 0 isolation mismatches; 361 refused starts in 104 executions were retried, at most 11 in one execution. The deployed definition carried the refusal reason of this commit (read back from the live state machine). Control run on the code before ADR-0049, same stacks: one unpaced delete wave of 20 left 15 `DELETE_FAILED` (`CodeBuild.AccountLimitExceededException`, one try each). No transaction conflict occurred in these runs, so the terminal-write retry is covered by unit tests only. The later commits change docs, comments and tests, and in `src/` only the wording of the refusal reason (it names the project's or the account's limit); the integ-runner run of the head is the row above. Deploy of both stacks (the control run) 232 s, the redeploy with this commit 75 s; the teardowns 727 s and 772 s; the two stacks stay, for a destroy outside the run |
 | 2026-11-23 | c0647e9 | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6240s`: every step of spec §10 passed with the race retry of ADR-0050 in every API transaction. Deploy about 5 min, assertions about 64 min, teardown about 35 min; nothing of the run left in either account apart from the harness's default Lambda log groups (README Known issues). The same day, `scripts/conflict-probe.sh` against a control plane from the same commit (eu-west-1): three bursts of 19 CreateDeployment calls at once onto one cell, every first answer 202 and every deployment `ACTIVE`; the API logged 10 placements cancelled only by races, each sent again and committed on its second attempt. The later commits change docs only |
 | 2026-11-19 | 93e7ae4 | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 6359s`: every step of spec §10 passed, with the vendor hooks of ADR-044 in step 16 (global and application pre and post hooks around cell and deployment scripts, `SCRIPT_OUTPUTS` through the outputs guard, a failing pre and post hook, a skipped delete hook, the deny on the hook roles) and the asynchronous record operations of ADR-045 (202 and polling on every application, tenant and account call, hooks on tenant, application and account events in step 17, teardown through the API in step 18). Deploy about 5 min, assertions about 64 min, teardown about 37 min; nothing of the run left in either account apart from the harness's default Lambda log groups (README Known issues). The later commits change docs and comments only |
 | 2026-11-18 | 255aa7b | two non-production test accounts | eu-central-1 | `npx projen integ` (integ-runner) | `SUCCESS integ.tenant 3115s`: every step of spec §10 passed, with the deployment inputs in step 1: both CodeBuild projects carried the stack's `concurrentBuildLimit` of 50 (ADR-0046), and B's cell provisioning role carried exactly the policy its stack attached through `cellBuildManagedPolicyArns` (ADR-0047). Nothing left in the control plane account. The later commits change docs, a comment, and the assertion that names B's cell role, which now derives the name from the fleet name and gets the same name the run used; the deployed templates are those of the run |
@@ -1089,10 +1091,12 @@ transaction releases.
      hook (Catch):
        compare-and-set deployment from the operation's in-flight status to
          tenantBuild.failedStatus + statusReason + lastGlobalHooks
-3. Every terminal DynamoDB task retries transient failures. Retry exhaustion
-   is caught and routed through the same conditional *_FAILED transition when
-   the record still exists; an already-absent record means the terminal delete
-   committed and the workflow ends successfully.
+3. Every terminal DynamoDB task retries transient failures, and retries a
+   transaction cancelled by a concurrent one five times with jitter; a failed
+   condition is never retried (ADR-0049). Retry exhaustion is caught and
+   routed through the same conditional *_FAILED transition when the record
+   still exists; an already-absent record means the terminal delete committed
+   and the workflow ends successfully.
 ```
 
 Design points:
@@ -1116,13 +1120,17 @@ Design points:
   environment variables, the execution input, or the log (M21).
 - **Threat-model hardening (ADR-019/020/021, ADR-0046):** all four projects cap
   `concurrentBuildLimit` at the deployer's value, 5 by default, so a leaked
-  token's amplification queues instead of fanning out, and log to explicit one-month-retention log
-  groups. Every build receives `OPERATOR_ID` (the verified JWT `sub`) so
-  application-plane changes attribute to the initiating operator, not just
-  the shared fleet role. A stamped `sourceVersion` commit SHA pins what the
-  build fetches. Action-less CloudWatch alarms watch execution-start rate
-  and API 4XX rate. Provisioning scripts follow `scripts/CONVENTIONS.md`:
-  log parameter names, never values.
+  token's amplification cannot fan out. CodeBuild refuses a start over the
+  cap; a script build's start is retried every 30 seconds or less (full
+  jitter) for about 10 minutes, at most 20, then the operation fails with a
+  reason that names the refusal (ADR-0049). The projects log to explicit
+  one-month-retention log groups. Every build receives `OPERATOR_ID` (the
+  verified JWT `sub`) so application-plane changes attribute to the
+  initiating operator, not just the shared fleet role. A stamped
+  `sourceVersion` commit SHA pins what the build fetches. Action-less
+  CloudWatch alarms watch execution-start rate and API 4XX rate.
+  Provisioning scripts follow `scripts/CONVENTIONS.md`: log parameter names,
+  never values.
 - The inline buildspec assumes the account's provisioning role and then runs
   `bash "$SCRIPT_PATH"`. Lifecycle scripts must be idempotent and safe to rerun after
   partial completion; explicit no-op scripts represent empty deployments.
@@ -1169,16 +1177,18 @@ Design points:
   invariant violation (present becomes `DELETE_FAILED` with a reason). The
   account and application records always exist here, because
   `DeleteAccount` and `DeleteApplication` refuse while `cellCount > 0`.
-- Each script build Task has a catchable task-level timeout of one hour; a
+- Each script build Task has a catchable task-level timeout of one hour,
+  counted again on each attempt, so the build-slot wait is outside it; a
   hook attempt is bounded by its own deadline (Vendor hooks, below). The
   state-machine execution timeout, 26 hours, is greater than every build and
   hook budget an execution can run at the caps plus terminal-write recovery
   margin (a delete with ten hooks at 30 minutes, each spending its three
-  attempts, runs about 25 hours); it is a final safety net, not the normal
-  timeout path, and costs nothing on a Standard workflow. Terminal writes
-  retry transient failures, and retry exhaustion is caught so records do not
-  remain indefinitely in an in-flight state. `StartExecution` rejection is
-  compensated as in §6.
+  attempts, and a script build that waits 20 minutes for its slot runs
+  about 25.3 hours); it is a final safety net, not the normal timeout path,
+  and costs nothing on a Standard workflow. Terminal writes retry transient
+  failures and transaction conflicts, and retry exhaustion is caught so
+  records do not remain indefinitely in an in-flight state. `StartExecution`
+  rejection is compensated as in §6.
 - The **account role pair** (`CellAccountRoles`, installed per account) carries
   the asymmetry: `<fleet>-cell-provisioning` reads `/application-plane/shared/*`
   and `/application-plane/applications/*` and gets/puts/deletes
