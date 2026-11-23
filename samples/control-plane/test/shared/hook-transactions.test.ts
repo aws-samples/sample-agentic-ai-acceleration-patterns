@@ -13,7 +13,12 @@ import {
   HookLimitError,
   HookTransactions,
 } from '../../src/shared/hook-transactions';
-import { AmbiguousTransactionError, DynamoDBRepository } from '../../src/shared/repository';
+import {
+  AmbiguousTransactionError,
+  DynamoDBRepository,
+  RACE_RETRY_ATTEMPTS,
+  TransactionRaceError,
+} from '../../src/shared/repository';
 
 /**
  * The hook counter transactions (spec P-6, R-39): two code paths, both
@@ -81,8 +86,23 @@ describe('createHook', () => {
     await expect(transactions.createHook(params)).rejects.toBeInstanceOf(HookLimitError);
   });
 
-  test('any other failure is ambiguous', async () => {
+  test('a race on the shared counter is sent again, then succeeds (ADR-0050)', async () => {
+    ddbMock
+      .on(TransactWriteCommand)
+      .rejectsOnce(canceled(['None', 'TransactionConflict']))
+      .resolves({});
+    await transactions.createHook(params);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(2);
+  });
+
+  test('races on every attempt are a TransactionRaceError, never ambiguous (ADR-0050)', async () => {
     ddbMock.on(TransactWriteCommand).rejects(canceled(['None', 'TransactionConflict']));
+    await expect(transactions.createHook(params)).rejects.toBeInstanceOf(TransactionRaceError);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(RACE_RETRY_ATTEMPTS);
+  });
+
+  test('any other failure is ambiguous', async () => {
+    ddbMock.on(TransactWriteCommand).rejects(canceled(['None', 'None']));
     await expect(transactions.createHook(params)).rejects.toBeInstanceOf(AmbiguousTransactionError);
     ddbMock.on(TransactWriteCommand).rejects(new Error('throttled'));
     await expect(transactions.createHook(params)).rejects.toBeInstanceOf(AmbiguousTransactionError);
@@ -112,6 +132,12 @@ describe('deleteHook', () => {
   test('a hook the counter does not count is never a silent success', async () => {
     ddbMock.on(TransactWriteCommand).rejects(canceled(['None', 'ConditionalCheckFailed']));
     await expect(transactions.deleteHook(params)).rejects.toBeInstanceOf(AmbiguousTransactionError);
+  });
+
+  test('races on every attempt are a TransactionRaceError (ADR-0050)', async () => {
+    ddbMock.on(TransactWriteCommand).rejects(canceled(['TransactionConflict', 'TransactionConflict']));
+    await expect(transactions.deleteHook(params)).rejects.toBeInstanceOf(TransactionRaceError);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(RACE_RETRY_ATTEMPTS);
   });
 });
 

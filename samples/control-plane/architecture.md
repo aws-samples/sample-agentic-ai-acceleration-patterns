@@ -807,6 +807,11 @@ workflow starts:
      tenant condition cancelled → the tenant was deleted meanwhile → 404,
        or is not live → 409; stop
      capacity/status condition cancelled (lost a race) → try next candidate
+     cancelled by races only (every reason None, TransactionConflict,
+       ThrottlingError or ProvisionedThroughputExceeded) → nothing applied;
+       send again on the same candidate, at most 4 attempts with jitter;
+       every attempt raced → 409 with the retry hint, nothing written
+       (ADR-0050)
      any other cancellation or transaction error → fail the request; never
        retarget the same deployment after an ambiguous transaction outcome
 3. No candidate claimed (none found, or the candidate budget is exhausted):
@@ -829,7 +834,8 @@ workflow starts:
        (read from the returned item); next account, or 409 when targeted
      application condition cancelled → application deleted meanwhile → 404,
        or not live → 409
-     tenant / deployment / idempotency conditions → as in step 2
+     tenant / deployment / idempotency conditions, and races only → as in
+       step 2
      every eligible account refused (or none) → 409 InsufficientCapacityError,
        nothing written (ADR-026)
      → workflow will run the cell create build before the tenant create build

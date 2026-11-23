@@ -2137,6 +2137,12 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
                                                  → 404, or no longer
                                                  live → 409; stop
                  capacity/status cond. failed  → lost a race; next candidate
+                 cancelled by races only       → nothing applied; send
+                 (ADR-0050)                      again on the SAME
+                                                 candidate; every attempt
+                                                 raced → 409 Conflict
+                                                 with the retry hint
+                                                 (R-14); stop
                  anything else / ambiguous     → FAIL the request; never
                                                  retarget the same
                                                  deployment after an
@@ -2172,6 +2178,11 @@ workflow starts. It embodies P-5, P-6, P-7, and P-11 simultaneously.
                  application condition failed   → application deleted
                                                   meanwhile → 404, not
                                                   live → 409; stop
+                 cancelled by races only        → send again on the SAME
+                                                  account; every attempt
+                                                  raced → 409 Conflict
+                                                  with the retry hint;
+                                                  stop
                  anything else / ambiguous      → FAIL the request
                every eligible account refused   → 409 InsufficientCapacity
                                                   (nothing was written),
@@ -2237,6 +2248,20 @@ retry may succeed where a terminal error would be wrong
 ([ADR-031](../adr/0031-lost-placement-races-on-a-full-fleet-are-a-retryable-conflict.md)).
 The account loop is bounded by the number of eligible accounts, which is
 operator-controlled and small.
+
+**Cancelled by races only** (steps 2 and 3,
+[ADR-0050](../adr/0050-retry-a-transaction-cancelled-only-by-races.md)):
+a transaction whose cancellation reasons are all `None`,
+`TransactionConflict`, `ThrottlingError` or `ProvisionedThroughputExceeded`,
+with at least one of the last three, applied nothing and failed no
+condition. It is not ambiguous and it is not a lost race: the candidate
+lost no slot. The service MUST send it again on the same candidate (or
+account), at most 4 attempts with a full-jitter wait of up to 50, 100 and
+200 ms between them, each later attempt with its own `ClientRequestToken`
+(the first one's, suffixed `-r<attempt>`). When every attempt raced, the
+request MUST fail with a `ConflictError` that carries the retry hint (R-14),
+having written nothing. The same rule covers the paired compensation of
+§7.4 and the hook counter transactions (R-39).
 
 **R-28 (fleet full is terminal for the request):** when every eligible
 account refuses the claim, `CreateDeployment` MUST fail with

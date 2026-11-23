@@ -128,6 +128,7 @@ import {
   StaleTransitionError,
   TenantGoneError,
   TenantNotLiveError,
+  TransactionRaceError,
 } from '../shared/repository';
 import { CallerContext, ServiceConfig, sourcePinningWarning } from '../shared/service-config';
 import {
@@ -1652,6 +1653,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
       if (error instanceof HookGoneError) {
         throw new ResourceNotFoundError({ message: `Hook ${hookId} is not registered` });
       }
+      if (error instanceof TransactionRaceError) {
+        throw raceConflict(`Hook ${hookId} delete`);
+      }
       if (error instanceof AmbiguousTransactionError) {
         throw new InternalServerError({ message: `Hook ${hookId}: the delete could not be confirmed (${errorMessage(error)})` });
       }
@@ -1804,6 +1808,12 @@ export class TenantService implements TenantServiceService<CallerContext> {
           ) {
             throw error;
           }
+          // Races alone, on every attempt: nothing was written, so the
+          // caller may retry (ADR-0050). Not a lost race: the cell may still
+          // have room, and moving on would create cells nobody needs.
+          if (error instanceof TransactionRaceError) {
+            throw raceConflict(`Deployment placement on cell ${cell.cellId}`);
+          }
           // AmbiguousTransactionError (or anything else): the outcome is
           // unknown — fail the request; NEVER retarget this deployment (§7).
           throw new InternalServerError({
@@ -1887,6 +1897,9 @@ export class TenantService implements TenantServiceService<CallerContext> {
           error instanceof ApplicationNotLiveError
         ) {
           throw error;
+        }
+        if (error instanceof TransactionRaceError) {
+          throw raceConflict(`New-cell placement in account ${account.accountId}`);
         }
         // Any other new-cell transaction failure is ambiguous: fail the
         // request, never retarget the same deployment (§7).
@@ -2749,6 +2762,9 @@ function mapHookWriteError(hookId: string, error: unknown): unknown {
       message: `${MAX_GLOBAL_HOOKS} global hooks are registered, the maximum; delete one with DeleteHook before registering another`,
     });
   }
+  if (error instanceof TransactionRaceError) {
+    return raceConflict(`Hook ${hookId} write`);
+  }
   if (error instanceof AmbiguousTransactionError) {
     return new InternalServerError({ message: `Hook ${hookId}: the write could not be confirmed (${errorMessage(error)})` });
   }
@@ -2761,6 +2777,16 @@ function mapHookWriteError(hookId: string, error: unknown): unknown {
  * succeed, absent when the remedy is a delete.
  */
 const RETRY_HINT = 'retry the request';
+
+/**
+ * The 409 for a transaction cancelled by concurrent writes on every attempt
+ * (ADR-0050): it applied nothing, so a retry can succeed.
+ */
+function raceConflict(what: string): ConflictError {
+  return new ConflictError({
+    message: `${what} met concurrent writes on every attempt and nothing was written; ${RETRY_HINT}`,
+  });
+}
 
 /**
  * The 409 for an update (re-apply) refused by the record's status. In

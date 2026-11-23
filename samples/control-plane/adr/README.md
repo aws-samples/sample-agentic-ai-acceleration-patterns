@@ -57,3 +57,4 @@ Template for new records: [`docs/sample-standard.md` §2.2](../../../docs/sample
 | [ADR-0046](0046-make-the-concurrent-build-limit-a-prop.md) | Make the concurrent build limit a prop (amends ADR-0021) | Accepted | 2026-11-18 |
 | [ADR-0047](0047-let-the-cell-account-owner-attach-policies-to-the-cell-role.md) | Let the cell account owner attach policies to the cell role (amends ADR-0025) | Accepted | 2026-11-18 |
 | [ADR-0048](0048-measure-tenant-churn-through-the-front-door-edge.md) | Measure tenant churn through the front door's edge | Accepted | 2026-11-21 |
+| [ADR-0050](0050-retry-a-transaction-cancelled-only-by-races.md) | Retry a transaction cancelled only by races (amends ADR-0013) | Accepted | 2026-11-23 |

@@ -1360,11 +1360,3 @@ application's cells (threat T5, the highest-consequence open item).
   queue. Until the workflow waits for a free slot, keep a client's in-flight
   creates, updates and deletes at or below the limit; the platform stress
   slice paces its waves this way (stress ADR-0013).
-- **A transaction conflict between concurrent operations on one cell
-  surfaces as a failure.** A placement whose `TransactWriteItems` is
-  cancelled with `TransactionConflict` and no failed condition answers 500
-  "Deployment placement failed ambiguously", and a workflow's terminal
-  write cancelled the same way leaves the record `CREATE_FAILED` or
-  `DELETE_FAILED` although its build succeeded. A `CreateDeployment` retry
-  with the same `clientToken`, a new create after a delete, or another
-  delete clears it (stress ADR-0013).
