@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { RunDashboardStack } from '../dashboard/dashboard.cdk';
+import { RunSinkStack } from '../dashboard/sink.cdk';
 import { planFromFiles } from '../dashboard/plan';
 import { imageProperties } from '../dashboard/snapshot';
 import { type DashboardPlan, dashboardBody, RELAY_SLICE, widgetsFor } from '../dashboard/widgets';
@@ -133,6 +134,32 @@ describe('the run dashboard widgets (design §4)', () => {
     expect(p).toMatchObject({ region: 'eu-central-1', width: 900, height: 320, start: '2026-11-23T10:00:00Z', end: '2026-11-23T12:00:00Z' });
     expect(p.metrics).toEqual(w.properties.metrics);
     expect(imageProperties(all.find((x) => x.id === 'B1-compute')!, platform).region).toBe('us-east-1');
+  });
+});
+
+describe('the observability sink (design §8, §11)', () => {
+  it('allows the cell accounts to link metrics, and nothing else', () => {
+    const template = Template.fromStack(new RunSinkStack(new App(), 'StressRunSink', { cellAccountIds: [CELL_A, CELL_B], env: { account: '123456789012', region: 'eu-central-1' } }));
+    expect(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).map((r) => r.Type)).toEqual(['AWS::Oam::Sink']);
+    template.hasResourceProperties('AWS::Oam::Sink', {
+      Name: 'StressRunSink',
+      Policy: {
+        Statement: [
+          {
+            Action: ['oam:CreateLink', 'oam:UpdateLink'],
+            Condition: { 'ForAllValues:StringEquals': { 'oam:ResourceTypes': ['AWS::CloudWatch::Metric'] } },
+            Effect: 'Allow',
+            Principal: { AWS: [CELL_A, CELL_B] },
+            Resource: '*',
+          },
+        ],
+      },
+    });
+  });
+
+  it('refuses no account and an account that is not 12 digits', () => {
+    expect(() => new RunSinkStack(new App(), 'A', { cellAccountIds: [] })).toThrow(/12-digit/);
+    expect(() => new RunSinkStack(new App(), 'B', { cellAccountIds: ['*'] })).toThrow(/12-digit/);
   });
 });
 

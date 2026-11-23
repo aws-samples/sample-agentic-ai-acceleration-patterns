@@ -8,6 +8,7 @@
  */
 
 import { type CallResult, reasonOf } from './api';
+import { buildsArgs, emit, sampleArgs } from './metrics';
 
 export interface Percentiles {
   readonly p50: number;
@@ -132,6 +133,7 @@ export class Recorder {
     const samples = this.hops.get(hop) ?? [];
     samples.push(seconds);
     this.hops.set(hop, samples);
+    emit(sampleArgs(hop, seconds));
   }
 
   /** One isolation assertion (P-1). A false `held` is a mismatch and a finding. */
@@ -150,6 +152,7 @@ export class Recorder {
   quotaPeak(account: string, quota: string, value: number): void {
     const k = `${account}\u0000${quota}`;
     this.quotaPeaks.set(k, Math.max(this.quotaPeaks.get(k) ?? 0, value));
+    emit(buildsArgs(account, quota, value));
   }
 
   get totals(): { readonly assertions: number; readonly mismatches: number; readonly requests: number } {

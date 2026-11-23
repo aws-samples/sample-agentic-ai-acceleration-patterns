@@ -22,6 +22,7 @@
 import { ArnFormat, CfnOutput, LegacyStackSynthesizer, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as oam from 'aws-cdk-lib/aws-oam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 import {
@@ -150,7 +151,18 @@ export interface CellAccountBaseStackProps extends OwnerStackProps {
    * ingress reader role that account may assume (spec §3.5, §3.7); unset, no such role exists.
    */
   readonly platformAccountId?: string;
+  /**
+   * The ARN of the platform account's observability sink (`stress/dashboard/sink.cdk.ts`). When set,
+   * the stack holds one observability link that shares this account's `AWS/Lambda`,
+   * `AWS/Bedrock-AgentCore` and `StressCell` metrics with the platform account, so the run dashboard
+   * can show the cell account (stress ADR-0022). It shares no log group. The sink and the link
+   * work inside one Region.
+   */
+  readonly observabilitySinkArn?: string;
 }
+
+/** The metric namespaces the link shares: the three the run dashboard's cell widgets read. */
+export const OBSERVABILITY_NAMESPACES = ['AWS/Lambda', 'AWS/Bedrock-AgentCore', 'StressCell'] as const;
 
 /**
  * The cell ingress parameters the reader role may read: each cell's published ingress
@@ -165,6 +177,8 @@ export class CellAccountBaseStack extends Stack {
   readonly apiGatewayLogsRole: iam.Role;
   /** The role the platform account assumes to read a cell's ingress parameter; only with `platformAccountId`. */
   readonly ingressReaderRole?: iam.Role;
+  /** The link to the platform account's observability sink; only with `observabilitySinkArn`. */
+  readonly observabilityLink?: oam.CfnLink;
 
   constructor(scope: Construct, id: string, props: CellAccountBaseStackProps = {}) {
     super(scope, id, ownerProps(props));
@@ -173,6 +187,9 @@ export class CellAccountBaseStack extends Stack {
     }
     if (props.platformAccountId !== undefined && !/^[0-9]{12}$/.test(props.platformAccountId)) {
       throw new Error('platformAccountId must be a 12-digit account id');
+    }
+    if (props.observabilitySinkArn !== undefined && !/^arn:aws[a-z-]*:oam:[a-z0-9-]+:[0-9]{12}:sink\/[A-Za-z0-9-]+$/.test(props.observabilitySinkArn)) {
+      throw new Error('observabilitySinkArn must be the ARN of an observability sink');
     }
 
     // Every runtime-isolation stage writes access and execution logs (path spike CP-4).
@@ -209,6 +226,17 @@ export class CellAccountBaseStack extends Stack {
         'One parameter per cell, StressCell-<cell id>, which the platform account does not know before the cell exists; the action is read-only and the name is fixed to the cell stacks\' published ingress.',
       );
       new CfnOutput(this, 'IngressReaderRoleArn', { value: this.ingressReaderRole.roleArn });
+    }
+
+    if (props.observabilitySinkArn !== undefined) {
+      // One link, metrics only, three namespaces (design §11). It creates no role in this account,
+      // so the account check of spec §3.7 sees only one more resource in an account-base stack.
+      this.observabilityLink = new oam.CfnLink(this, 'ObservabilityLink', {
+        labelTemplate: '$AccountName',
+        resourceTypes: ['AWS::CloudWatch::Metric'],
+        sinkIdentifier: props.observabilitySinkArn,
+        linkConfiguration: { metricConfiguration: { filter: `Namespace IN (${OBSERVABILITY_NAMESPACES.map((n) => `'${n}'`).join(', ')})` } },
+      });
     }
   }
 }

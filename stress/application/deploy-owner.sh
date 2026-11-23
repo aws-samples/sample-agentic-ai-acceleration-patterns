@@ -11,6 +11,9 @@
 #     [PLATFORM_ACCOUNT_ID=<platform account id>] [CELL_OWNER_STACKS=base] \
 #     stress/application/deploy-owner.sh
 #
+# OBSERVABILITY_SINK_ARN (the run dashboard, stress ADR-0022) adds one observability link to
+# CellAccountBase that shares the account's AWS/Lambda, AWS/Bedrock-AgentCore and StressCell
+# metrics with the sink in the platform account (`stress/dashboard/deploy-sink.sh` makes it).
 # PLATFORM_ACCOUNT_ID (a platform run) adds the ingress reader role, which that account may
 # assume, to CellAccountBase. CELL_OWNER_STACKS=base deploys CellAccountBase alone: the second
 # Region of an account that already has the policies (their names are account-wide).
@@ -34,6 +37,7 @@ case "${CELL_OWNER_STACKS:-}" in
   *) echo "CELL_OWNER_STACKS must be empty or base" >&2; exit 1 ;;
 esac
 [[ -z "${PLATFORM_ACCOUNT_ID:-}" || "${PLATFORM_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || { echo "PLATFORM_ACCOUNT_ID must be a 12-digit account id" >&2; exit 1; }
+[[ -z "${OBSERVABILITY_SINK_ARN:-}" || "${OBSERVABILITY_SINK_ARN}" =~ ^arn:aws[a-z-]*:oam:[a-z0-9-]+:[0-9]{12}:sink/[A-Za-z0-9-]+$ ]] || { echo "OBSERVABILITY_SINK_ARN must be the ARN of an observability sink" >&2; exit 1; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${HERE}/.."
