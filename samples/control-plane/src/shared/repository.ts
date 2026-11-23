@@ -403,15 +403,28 @@ export class TransactionRaceError extends Error {
 export const RACE_RETRY_ATTEMPTS = 4;
 const RACE_RETRY_BASE_MS = 50;
 
+/** DynamoDB's `ClientRequestToken` limit, and the longest suffix {@link attemptToken} adds. */
+const MAX_CLIENT_REQUEST_TOKEN = 36;
+const RACE_TOKEN_SUFFIX_MAX = `-r${RACE_RETRY_ATTEMPTS - 1}`.length;
+
 /**
  * The `ClientRequestToken` of attempt `attempt`: the caller's token first,
  * then a suffixed one. A race-only cancellation is a definite answer that
  * applied nothing, so a new token on the next attempt cannot apply the
  * transaction twice, and it never meets a recorded outcome of the cancelled
  * attempt (ADR-0050). The suffix keeps a 26-character ULID within the
- * 36-character limit.
+ * 36-character limit. A token too long for the suffix is refused before the
+ * first attempt, so it can never fail on a later one after a definite
+ * cancellation.
  */
 export function attemptToken(token: string, attempt: number): string {
+  if (token.length > MAX_CLIENT_REQUEST_TOKEN - RACE_TOKEN_SUFFIX_MAX) {
+    throw new Error(
+      `ClientRequestToken of ${token.length} characters leaves no room for the race-retry suffix (at most ${
+        MAX_CLIENT_REQUEST_TOKEN - RACE_TOKEN_SUFFIX_MAX
+      })`,
+    );
+  }
   return attempt === 0 ? token : `${token}-r${attempt}`;
 }
 
@@ -432,10 +445,18 @@ export async function sendTransactionWithRaceRetry(
       await client.send(command(attempt));
       return;
     } catch (error) {
-      if (!isRaceCancellation(cancellationCodes(error))) {
+      const codes = cancellationCodes(error);
+      if (!isRaceCancellation(codes)) {
         throw error;
       }
-      if (attempt + 1 >= RACE_RETRY_ATTEMPTS) {
+      const exhausted = attempt + 1 >= RACE_RETRY_ATTEMPTS;
+      // One line per race, so how often placements meet (the ADR-0050 revisit
+      // trigger) shows in the logs before any request answers the 409.
+      console.warn(
+        `${what}: cancelled only by races on attempt ${attempt + 1} of ${RACE_RETRY_ATTEMPTS} ` +
+          `(reasons ${codes?.join(',')}); ${exhausted ? 'attempts spent' : 'sending again'}`,
+      );
+      if (exhausted) {
         throw new TransactionRaceError(
           `${what} was cancelled by concurrent writes on ${RACE_RETRY_ATTEMPTS} attempts; nothing was written`,
           error,

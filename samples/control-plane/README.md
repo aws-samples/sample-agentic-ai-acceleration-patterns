@@ -808,6 +808,17 @@ them as `409:conflict` requests with `conflict` refusals and as
 `CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts
 ([stress ADR-0013](../../stress/adr/0013-pace-waves-at-the-build-limit-and-retry-conflicts.md)).
 
+To check that race handling without the whole slice, run
+[`scripts/conflict-probe.sh`](./scripts/conflict-probe.sh) after a change to
+the placement or hook transactions. It deploys a small control plane from
+this checkout (`deploy`), builds one cell (`setup`), then sends one
+CreateDeployment per tenant at once onto that cell (`burst`). The burst
+fails if any first answer is other than 202 or 409, a 409 lacks the retry
+hint, a refused call left a deployment, or an accepted deployment did not
+settle to `ACTIVE` or `CREATE_FAILED`. `reset` clears the burst for another
+round and `clean` removes the records; the script lists its two stacks for
+you to remove by hand. Its header names the environment it reads.
+
 ## End-to-end demo
 
 The sample scripts provision a deliberately tiny cell: the cell scripts in
@@ -1370,3 +1381,21 @@ application's cells (threat T5, the highest-consequence open item).
   The API's own transactions send a race-only cancellation again and then
   answer a retryable 409
   ([ADR-0050](./adr/0050-retry-a-transaction-cancelled-only-by-races.md)).
+- **A compensation that races on every attempt leaves a new cell stuck in
+  `CREATING`.** When CreateDeployment creates a cell and the workflow then
+  fails to start, the API marks the new cell and its deployment
+  `CREATE_FAILED` in one transaction. That transaction is sent again when it
+  is cancelled only by races, at most four times (ADR-0050). If all four
+  race, the API still answers the start failure, but the cell and the
+  deployment stay `CREATING` with no execution to move them, and
+  `DeleteDeployment` and `DeleteCell` refuse an in-flight record with a 409.
+  Recovering them takes a manual edit of the two items in the table (set
+  `status` to `CREATE_FAILED`). The API logs `cancelled only by races ...
+  attempts spent` for it.
+- **A sustained burst onto one cell can still answer 409.** A placement
+  keeps its candidate cell across its four attempts and answers a 409 with
+  the retry hint once every attempt raced, rather than moving to another
+  cell. A client that sends many creates for one application at once must
+  retry those 409s with the same `clientToken`, as the stress driver does.
+  Each raced attempt logs one `cancelled only by races` line, which shows
+  how close a workload comes to that point.

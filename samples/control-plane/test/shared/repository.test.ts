@@ -19,6 +19,7 @@ import {
   AmbiguousTransactionError,
   ApplicationGoneError,
   ApplicationNotLiveError,
+  attemptToken,
   ConditionFailedError,
   DeploymentExistsError,
   DuplicateTokenError,
@@ -687,6 +688,40 @@ describe('PlacementTransactions', () => {
         TransactionRaceError,
       );
       expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(RACE_RETRY_ATTEMPTS);
+    });
+
+    test('the jitter waits stay under 50, 100 and 200 ms, and each race logs one line (ADR-0050)', async () => {
+      jest.spyOn(Math, 'random').mockReturnValue(0.9999);
+      const delays: number[] = [];
+      jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+        delays.push(ms ?? 0);
+        fn();
+        return 0;
+      }) as unknown as typeof setTimeout);
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      ddbMock
+        .on(TransactWriteCommand)
+        .rejects(transactionCanceled(['None', 'TransactionConflict', 'None']));
+      await expect(transactions.placeDeploymentInCell(placement)).rejects.toBeInstanceOf(
+        TransactionRaceError,
+      );
+      expect(delays).toHaveLength(RACE_RETRY_ATTEMPTS - 1);
+      [50, 100, 200].forEach((ceiling, i) => {
+        expect(delays[i]).toBeLessThan(ceiling);
+        expect(delays[i]).toBeGreaterThan(ceiling * 0.99);
+      });
+      expect(warn).toHaveBeenCalledTimes(RACE_RETRY_ATTEMPTS);
+      expect(warn.mock.calls[0][0]).toContain('attempt 1 of 4 (reasons None,TransactionConflict,None); sending again');
+      expect(warn.mock.calls[RACE_RETRY_ATTEMPTS - 1][0]).toContain('attempts spent');
+    });
+
+    test('a client token too long for the retry suffix is refused before the first send', async () => {
+      expect(attemptToken('x'.repeat(33), RACE_RETRY_ATTEMPTS - 1)).toHaveLength(36);
+      expect(() => attemptToken('x'.repeat(34), 0)).toThrow('race-retry suffix');
+      await expect(
+        transactions.placeDeploymentInCell({ ...placement, clientRequestToken: 'x'.repeat(34) }),
+      ).rejects.toBeInstanceOf(AmbiguousTransactionError);
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
     });
 
     test('a conflict beside a failed condition is classified by the condition, not retried', async () => {
