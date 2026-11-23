@@ -2548,8 +2548,8 @@ create.
   `lastGlobalHooks`; a failed create or update hook is a build failure
   here (R-46), and so are script outputs the workflow rejects (R-43);
   a hook build assumes nothing (R-41). A script build start still refused at
-  the project's concurrent build limit when its wait ends (R-23) is a
-  build failure whose `statusReason` names the refusal. For
+  a concurrent build limit (the project's or the account's) when its wait
+  ends (R-23) is a build failure whose `statusReason` names the refusal. For
   a failed **cell create with a pending deployment create**, one
   transaction moves *both* records to `CREATE_FAILED` (the deployment's
   reason: "cell provisioning failed").
@@ -2574,7 +2574,8 @@ write that can exhaust retries (documented residual, §7.4).
 
 **R-23 (timeouts):** each script build task MUST have a catchable
 task-level timeout routed to the failure path. Its `StartBuild`, refused
-at the project's `concurrentBuildLimit` (H-9), is retried every 30
+at a concurrent build limit (the project's `concurrentBuildLimit` or the
+account's, H-9), is retried every 30
 seconds or less (full jitter) 40 times, about 10 minutes and at most 20,
 before the refusal reaches the failure path with a reason that names it
 (ADR-0049). Step Functions starts the task timeout again on each attempt
