@@ -104,7 +104,7 @@ async function exists<T>(fn: () => Promise<T>): Promise<boolean> {
 
 const UNAVAILABLE: ReadonlyArray<{ readonly pattern: RegExp; readonly reason: string }> = [
   { pattern: /Unable to locate credentials|CredentialsProviderError|Could not load credentials|Error when retrieving credentials|config profile [^\n]{0,200} could not be found|Error loading SSO Token|SSOTokenLoadError|Token for [^\n]{0,200} does not exist/i, reason: 'no credentials found' },
-  { pattern: /ExpiredToken|RequestExpired|TokenRefreshRequired|security token included in the request is expired|SSO session [^\n]{0,200} (expired|invalid)|SSO access token has (either )?expired|Error when retrieving token from sso/i, reason: 'the credentials expired' },
+  { pattern: /ExpiredToken|RequestExpired|TokenRefreshRequired|security token included in the request is expired|SSO session [^\n]{0,200}(expired|invalid)|SSO access token has (either )?expired|Error when retrieving token from sso/i, reason: 'the credentials expired' },
   { pattern: /InvalidClientTokenId|InvalidAccessKeyId|UnrecognizedClientException|AuthFailure|SignatureDoesNotMatch|IncompleteSignature|MissingAuthenticationToken|InvalidSignatureException|security token included in the request is invalid/i, reason: 'the credentials were refused' },
   { pattern: /AccessDenied|UnauthorizedOperation|UnauthorizedException|NotAuthorized/i, reason: 'access denied' },
   { pattern: /spawn aws (ENOENT|EACCES)/, reason: 'the aws CLI could not be started' },
@@ -283,6 +283,9 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
 
 /** The exit status of `leftovers` and `destroy`: 1 for any finding that is not the known leftover, a check that could not run included. */
 export const leftoverExitCode = (findings: readonly Finding[]): number => (findings.some((f) => !f.known) ? 1 : 0);
+
+/** The `destroyed` flag a run state records: the stack delete ended and the check found nothing but the known leftover. `cleanup` repeats the check when it is false. */
+export const cleanAfter = (stackDeleted: boolean, findings: readonly Finding[]): boolean => stackDeleted && leftoverExitCode(findings) === 0;
 
 /**
  * One line per finding. A check that could not run is not a leftover: it is listed apart, and a closing line says

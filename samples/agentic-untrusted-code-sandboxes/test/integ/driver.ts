@@ -24,7 +24,7 @@ import { Aws } from './aws';
 import { deployConcurrency, runRegion, stackPrefix } from './common';
 import { Ctx } from './ctx';
 import { deployStacks, destroyStack, serviceNames, snapshotResources, synth } from './deploy';
-import { checkLeftovers, formatFindings, leftoverExitCode } from './leftovers';
+import { checkLeftovers, cleanAfter, formatFindings, leftoverExitCode } from './leftovers';
 import { formatRecord, Recorder } from './record';
 import { runPhase, skipPhase } from './runner';
 import { readState, stateDir, withState, writeState, type RunState } from './state';
@@ -72,7 +72,7 @@ async function runAll(): Promise<number> {
       else rec.check('the stack was destroyed', false);
       rec.end();
     });
-    if (outcome) writeState(withState(state, { destroyed: outcome.destroyed && outcome.findings.every((f) => f.known) }));
+    if (outcome) writeState(withState(state, { destroyed: cleanAfter(outcome.destroyed, outcome.findings) }));
   };
   /** One teardown per run, whoever asks first; a signal during it waits for the same one. */
   const teardown = (): Promise<void> => {
@@ -184,7 +184,7 @@ async function destroyOnly(): Promise<number> {
   process.stdout.write(`stack ${prefix}: ${r.status}${r.failures.length > 0 ? ` (${r.failures.join(' | ')})` : ''}\n`);
   const findings = await checkLeftovers(aws, prefix, state);
   process.stdout.write(`${formatFindings(findings)}\n`);
-  if (state) writeState(withState(state, { destroyed: leftoverExitCode(findings) === 0 }));
+  if (state) writeState(withState(state, { destroyed: cleanAfter(true, findings) }));
   return leftoverExitCode(findings);
 }
 

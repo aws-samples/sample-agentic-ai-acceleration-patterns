@@ -12,7 +12,7 @@ import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix }
 import { Ctx, TOKEN_REUSE_MS } from './ctx';
 import { imageNameOf } from './deploy';
 import { HOSTILE_DIR, MAX_CODE_BYTES, PROBES, probeCode } from './hostile';
-import { checkLeftovers, formatFindings, leftoverExitCode, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes, unavailableReason } from './leftovers';
+import { checkLeftovers, cleanAfter, formatFindings, leftoverExitCode, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes, unavailableReason } from './leftovers';
 import { claimsFor, mint, signJws } from './mint.function';
 import { formatRecord, median, Recorder } from './record';
 import { runPhase } from './runner';
@@ -204,6 +204,23 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     expect(leftoverExitCode([])).toBe(0);
   });
 
+  test('a run is recorded as destroyed only when the stack went and the check found nothing but the known leftover', () => {
+    const known = { kind: 'logs-resource-policy', id: 'p', detail: 'd', known: true };
+    expect(cleanAfter(true, [known])).toBe(true);
+    expect(cleanAfter(false, [])).toBe(false);
+    expect(cleanAfter(true, [{ kind: 'check-unavailable', id: 'stacks', detail: 'the credentials expired' }])).toBe(false);
+  });
+
+  test('an AWS error that is not a credentials error on the stack list reaches the caller', async () => {
+    const aws = fake({ cfn: { send: async () => { throw sdkError('ThrottlingException'); } } });
+    await expect(checkLeftovers(aws as never, 'P', undefined)).rejects.toMatchObject({ name: 'ThrottlingException' });
+  });
+
+  test('an SDK error that is not a credentials error is a check-failed that names the error', async () => {
+    const aws = fake({ ec2: { send: async () => { throw sdkError('ThrottlingException'); } } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([{ type: 'AWS::EC2::VPC', physicalId: 'vpc-1' }]))).toEqual([{ kind: 'check-failed', id: 'AWS::EC2::VPC:vpc-1', detail: 'ThrottlingException' }]);
+  });
+
   test('a resource that is still there is reported as LEFT', async () => {
     const aws = fake({ cli: async () => '{}' });
     const found = await checkLeftovers(aws as never, 'P', stateOf([FRG]));
@@ -250,8 +267,11 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     ['access denied', 'An error occurred (AccessDeniedException) when calling the GetFirewallRuleGroup operation: User is not authorized'],
     ['no credentials found', 'Error when retrieving credentials from custom-process: the command failed'],
     ['no credentials found', 'The config profile (work) could not be found'],
-    ['no credentials found', 'Token for my-sso does not exist'],
+    ['no credentials found', 'Could not load credentials from any providers'],
     ['no credentials found', 'Error loading SSO Token'],
+    ['no credentials found', 'Token for my-sso does not exist'],
+    ['the credentials expired', 'The security token included in the request is expired'],
+    ['the credentials were refused', 'The security token included in the request is invalid.'],
     ['the credentials expired', 'Error when retrieving token from sso: Token has expired and refresh failed'],
     ['the aws CLI could not be started', 'aws route53resolver get-firewall-rule-group failed: spawn aws EACCES'],
     ['no credentials found', 'Error loading SSO Token: Token for https://example.com/start does not exist'],
@@ -348,6 +368,7 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     expect(evidence).toMatch(/nothing left of microvm: not checked/);
     expect(evidence).toMatch(/the leftover check could run \(stacks: the credentials expired\)/);
     expect(evidence).not.toMatch(/no other resource/);
+    expect(evidence).toMatch(/no MicroVM image log group is left \(not checked\)/);
   });
 });
 

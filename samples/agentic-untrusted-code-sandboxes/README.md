@@ -411,10 +411,14 @@ send and receive data in DNS lookups on every backend (T-29, T-91).
 **The integration leftover check can miss a leftover.** The lookups of
 container instances, task definitions and MicroVMs read any other error, such
 as a throttle or a network error, as nothing there; a credentials, access or
-AWS CLI error is reported instead. The AWS CLI error text that the driver
-prints or records is redacted by a list of known shapes (ARNs, keys, tokens,
-account ids), so a shape not on the list passes through. See
+AWS CLI error is reported instead. See
 [integration-test.md](integration-test.md).
+
+**The integration driver's redaction is a list of known shapes.** The
+driver removes ARNs, account ids, access key ids, secret keys, session
+tokens and presigned URL values from AWS CLI errors before it prints them;
+a profile, role or portal name in the error text passes through. Read the
+run log before you share it.
 
 ## Production hardening checklist
 

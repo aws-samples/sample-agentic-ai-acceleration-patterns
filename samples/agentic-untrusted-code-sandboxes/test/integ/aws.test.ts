@@ -84,7 +84,12 @@ describe('redact', () => {
   test.each([
     ['an ASIA access key id', `key ASIA${'C'.repeat(16)} used`, 'key <key> used'],
     ['an aws-cn ARN', `on arn:aws-cn:iam::${id}:role/R.`, 'on <arn>'],
-    ['a session token', `token IQoJ${'b'.repeat(60)} sent`, 'token <token> sent'],
+    ['a session token', `token IQoJ${'b'.repeat(120)}== sent`, 'token <token> sent'],
+    ['an older FQoG session token', `token FQoG${'b'.repeat(120)} sent`, 'token <token> sent'],
+    ['a long base64 run with no known prefix', `token ${'b'.repeat(120)} sent`, 'token <token> sent'],
+    ['an older AQoD session token', `token AQoD${'b'.repeat(120)} sent`, 'token <token> sent'],
+    ['a SigV2 presigned signature', 'https://h/?AWSAccessKeyId=x&Signature=abc%2Bdef&Expires=1', 'https://h/?AWSAccessKeyId=x&Signature=<redacted>&Expires=1'],
+    ['a secret key followed by =', `secret=${'A'.repeat(20)}/${'b'.repeat(19)}=`, 'secret=<secret>='],
     ['the X-Amz query values of a presigned URL', 'https://h/?X-Amz-Security-Token=abc%2F&X-Amz-Signature=def', 'https://h/?X-Amz-Security-Token=<redacted>&X-Amz-Signature=<redacted>'],
     ['a secret key', `secret ${'A'.repeat(20)}/${'b'.repeat(19)} end`, 'secret <secret> end'],
     ['an account id glued to a word', `Role_${id}x`, 'Role_<account>x'],
@@ -114,5 +119,43 @@ describe('redact', () => {
     const t0 = Date.now();
     expect(redact(text)).toBe(text);
     expect(Date.now() - t0).toBeLessThan(2000);
+  });
+});
+
+describe('a long stderr', () => {
+  test.each([
+    ['an X-Amz name with no value', 'X-Amz-a'],
+    ['a token name with no end', 'Token for '],
+    ['an SSO session with no end', 'SSO session '],
+    ['a config profile with no end', 'config profile '],
+  ])('of 1 MB that repeats %s is redacted and classified in under a second', async (_shape, piece) => {
+    failWith(piece.repeat(Math.ceil((1024 * 1024) / piece.length)), 255);
+    const t0 = Date.now();
+    const e = await failure(['sts', 'get-caller-identity']);
+    unavailableReason(e);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  test.each([['Token for '], ['SSO session '], ['config profile ']])(
+    'of 256 KB that repeats %s is classified in under a second, without the cut', (piece) => {
+      const e = Object.assign(new Error('aws sts get-caller-identity failed'), { stderr: piece.repeat(Math.ceil((256 * 1024) / piece.length)) });
+      const t0 = Date.now();
+      unavailableReason(e);
+      expect(Date.now() - t0).toBeLessThan(1000);
+    });
+
+  test('keeps only its first and last 64 KB', async () => {
+    failWith('x '.repeat(512 * 1024), 255);
+    expect((await failure(['sts', 'get-caller-identity'])).stderr?.length).toBeLessThanOrEqual(2 * 64 * 1024 + 5);
+  });
+
+  test('keeps the cause at its end when the middle is cut', async () => {
+    failWith(`${'warning line\n'.repeat(20_000)}An error occurred (ExpiredToken) when calling the GetServiceQuota operation`, 255);
+    expect(unavailableReason(await failure(['service-quotas', 'get-service-quota']))).toBe('the credentials expired');
+  });
+
+  test('is trimmed', async () => {
+    failWith('  Unable to locate credentials.\n', 255);
+    expect((await failure(['sts', 'get-caller-identity'])).stderr).toBe('Unable to locate credentials.');
   });
 });

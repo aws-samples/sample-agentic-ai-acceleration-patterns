@@ -208,8 +208,8 @@ deleted). The tenant-identity `shared-pool` stays.
 Known limitation: the lookups of container instances, task definitions and
 MicroVMs read any other error (a throttle, a network error) as "nothing
 there", so those three can miss a leftover without a line. An AWS error on the
-stack list, a service log group listing or the resource policy listing stops the check
-with that error and no list; run it again.
+stack list, a service log group listing or the resource policy listing stops
+the check with that error and no list; run it again.
 
 ## Test-only shortcuts
 

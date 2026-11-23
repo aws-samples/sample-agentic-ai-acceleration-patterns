@@ -45,3 +45,8 @@ what it finds, a person removes with the commands in `integration-test.md`.
 The check proves the absence of what the stack owned and of the two log group
 families the services add; it does not prove nothing else in the account
 changed. Revisit if the construct names its resources so a prefix finds them.
+
+Note 2026-11-23: a check that cannot run (no credentials, an expired or
+refused token, access denied, no `aws` binary) is its own finding,
+`check-unavailable`. `scripts/leftovers.sh` lists it as `CHECK NOT RUN`
+apart from the leftovers, never prints "nothing left" then, and exits 1.

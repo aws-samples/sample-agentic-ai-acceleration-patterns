@@ -57,11 +57,11 @@ export function teardownUnit(rec: Recorder, u: Unit, outcome: TeardownOutcome, i
   rec.check(`the stack deleted (nothing left of ${backend}: ${state})`, outcome.destroyed && mine.length === 0 && unavailable.length === 0);
   if (u.instance === 'run-code' && backend === 'agentcore') {
     const logs = outcome.findings.filter((f) => f.kind === 'log-group' && f.id.startsWith('/aws/bedrock-agentcore/'));
-    rec.check(`no AgentCore runtime log group is left (${logs.length})`, logs.length === 0);
+    rec.check(`no AgentCore runtime log group is left (${unavailable.length > 0 ? 'not checked' : logs.length})`, logs.length === 0 && unavailable.length === 0);
   }
   if (u.instance === 'run-code' && backend === 'microvm') {
     const logs = outcome.findings.filter((f) => f.kind === 'log-group' && f.id.startsWith('/aws/lambda-microvms/'));
-    rec.check(`no MicroVM image log group is left (${logs.length})`, logs.length === 0);
+    rec.check(`no MicroVM image log group is left (${unavailable.length > 0 ? 'not checked' : logs.length})`, logs.length === 0 && unavailable.length === 0);
   }
   if (isFirst) {
     rec.check(`the leftover check could run (${unavailable.map((f) => `${f.id}: ${f.detail}`).join('; ') || 'yes'})`, unavailable.length === 0);

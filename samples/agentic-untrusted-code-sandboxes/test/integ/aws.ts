@@ -32,18 +32,25 @@ import { REGISTRY, registryPk, registrySk } from '../../src/env';
 
 const execFileAsync = promisify(execFile);
 
+/** How much of each end of a long CLI stderr `cli()` keeps (characters). */
+const STDERR_KEPT = 64 * 1024;
+
 /**
- * Replaces what a CLI error can carry about the account and its credentials: ARNs (any partition), session tokens,
- * `X-Amz-*` query values of a presigned URL, access key ids, 40-character secret keys and 12-digit account ids (also
- * next to a letter or `_`). Pure. shortcut: a deny-list of known shapes; profile, role and portal names pass through.
+ * Replaces what a CLI error can carry about the account and its credentials: ARNs (any partition), session tokens
+ * (an `IQoJ`, `FwoG`, `FQoG` or `AQoD` token, and any base64 run of 100 characters or more), `X-Amz-*` and SigV2 `Signature` query values of a presigned URL, access
+ * key ids, 40-character secret keys and 12-digit account ids (also next to a letter or `_`). Pure. The 40-character
+ * rule also replaces any other run of that shape, such as a git commit id; a message loses detail, nothing more.
+ * shortcut: a deny-list of known shapes; profile, role and portal names pass through.
  */
 export function redact(text: string): string {
   return text
     .replace(/arn:aws[\w-]*:[^\s"']+/g, '<arn>')
-    .replace(/(X-Amz-[A-Za-z-]{1,128}=)[^&\s"']+/gi, '$1<redacted>')
+    .replace(/(X-Amz-[A-Za-z-]{1,64}=)[^&\s"']+/gi, '$1<redacted>')
+    .replace(/([?&]Signature=)[^&\s"']+/g, '$1<redacted>')
     .replace(/(?<![A-Za-z0-9+/])(?:IQoJ|FwoG|FQoG|AQoD)[A-Za-z0-9+/=]{40,}/g, '<token>')
+    .replace(/(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{100,}={0,2}/g, '<token>')
     .replace(/(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])/g, '<key>')
-    .replace(/(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/=])/g, '<secret>')
+    .replace(/(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/])/g, '<secret>')
     .replace(/(?<!\d)\d{12}(?!\d)/g, '<account>');
 }
 
@@ -137,8 +144,8 @@ export class Aws {
    * Runs the AWS CLI for the few calls no declared SDK client covers (Service Quotas, Route 53 Resolver). A failure
    * keeps the CLI's own `stderr` (the cause: missing or expired credentials, a not-found answer) on the error, with
    * ARNs, account ids, access key ids, secret keys, session tokens and `X-Amz-*` query values replaced, and names the
-   * service and operation in the message. The whole redacted `stderr` stays on the error, so the cause is read from
-   * all of it; the message carries its first 2000 characters. A process with no stderr (it never started, or a signal
+   * service and operation in the message. The redacted `stderr` (up to its first and last 64 KB) stays on the error, so
+   * the cause is read from all of it; the message carries its first 2000 characters. A process with no stderr (it never started, or a signal
    * stopped it) is described by its exit code or signal, never by its command line.
    */
   public async cli(args: string[]): Promise<string> {
@@ -153,7 +160,10 @@ export class Aws {
           : typeof code === 'number' ? `the aws CLI exited with code ${code}`
             : typeof signal === 'string' ? `the aws CLI exited with signal ${signal}`
               : `the aws CLI failed (${String(code)})`;
-      const stderr = redact(cause).trim();
+      // shortcut: a stderr over 128 KB keeps its first and last 64 KB, so the redaction and the classifier stay
+      // fast on any input; a cause in the middle of a longer stderr is not read.
+      const kept = cause.length > 2 * STDERR_KEPT ? `${cause.slice(0, STDERR_KEPT)}\n...\n${cause.slice(-STDERR_KEPT)}` : cause;
+      const stderr = redact(kept).trim();
       throw Object.assign(new Error(`aws ${args.slice(0, 2).join(' ')} failed: ${stderr.slice(0, 2000)}`), { stderr });
     }
   }
