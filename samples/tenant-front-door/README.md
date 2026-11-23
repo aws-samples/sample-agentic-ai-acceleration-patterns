@@ -47,14 +47,15 @@ between cells.
 
 ## Architecture
 
-![Components: a tenant user's request reaches a distribution tenant and the multi-tenant distribution, whose tenant router looks the tenant up in the route table and sends the request to the cell's API (or the SPA bucket for static files); the route hook, run by the control plane, calls the route registrar, which reads the cell or deployment from the control plane and is the only writer of routes; the sweeper reads the route table and removes dedicated tenants and certificates; each box names the pattern it carries](./diagrams/tenant-front-door.components.drawio.svg)
+![Components, in three trust zones (the vendor's edge account, the vendor's control plane account and the cell accounts): a tenant user's request reaches a distribution tenant and the multi-tenant distribution, which carries the web ACL's per-tenant rate limit and the response headers baseline, and whose tenant router looks the tenant up in the route table and sends the request to the cell's API (or the SPA bucket for static files); the route hook, run by the control plane, calls the route registrar, which reads the cell or deployment from the control plane and is the only writer of routes; the sweeper reads the route table and removes dedicated tenants and certificates; each box names the pattern it carries](./diagrams/tenant-front-door.components.drawio.svg)
 
 A tenant user's request reaches the distribution, the router looks the tenant
 up in the route table, and CloudFront sends the request, signed, to the
-tenant's cell, while the control plane's route hook calls the registrar, which
-checks the record with the control plane and then writes the route table.
+tenant's cell. Routes are written the other way: the control plane's route
+hook calls the registrar, which checks the record with the control plane and
+then writes the route table.
 
-![Architecture: a tenant user calls a distribution tenant of the CloudFront multi-tenant distribution, whose Function looks the tenant up in the KeyValueStore and signs the request to the cell's Lambda function URL, or reads the SPA from S3; the control plane's CodeBuild route hook reads the hook parameter, calls the registrar's API Gateway, and the registrar Lambda reads the cell or deployment from the control plane API and writes the KeyValueStore, and for a dedicated domain creates the distribution tenant and requests its certificate; an optional EventBridge Scheduler runs the sweeper Lambda every 15 minutes and daily, which reads the KeyValueStore and removes dedicated tenants and certificates; the certificate, web ACL and access log are in us-east-1](./diagrams/tenant-front-door.drawio.svg)
+![Architecture: a tenant user calls a distribution tenant of the CloudFront multi-tenant distribution, whose Function looks the tenant up in the KeyValueStore and signs the request to the cell's Lambda function URL, or reads the SPA from S3; the control plane's CodeBuild route hook reads the hook parameter, calls the registrar's API Gateway, and the registrar Lambda reads the cell or deployment from the control plane API and writes the KeyValueStore, and for a dedicated domain creates the distribution tenant and requests its certificate; an optional EventBridge Scheduler runs the sweeper Lambda every 15 minutes and daily, which reads the KeyValueStore and removes dedicated tenants and certificates; the certificate, the distribution's web ACL and its access log are in us-east-1](./diagrams/tenant-front-door.drawio.svg)
 
 A request goes from the tenant user through CloudFront and the router function
 to the cell's Lambda function URL, and a route goes from the control plane's
@@ -99,8 +100,9 @@ registrar, which checks the control plane and then writes the route table.
 3. **A tenant is placed.** When the control plane creates the tenant's
    deployment, the same hook calls `PutTenantRoute`. The registrar reads the
    deployment and the tenant from the control plane and writes
-   `tenant#<tenantId>`, naming the cell. The route is live at the edge in
-   about 30 seconds.
+   `tenant#<tenantId>`, naming the cell. The route is live at the edge
+   usually 30 to 60 seconds later. The hook waits up to 45 seconds for it
+   and then warns without failing.
 4. **A request arrives.** The router strips any client `x-tenant-*` header,
    finds the tenant (token claim in `single` mode, host in `host` mode),
    refuses an unknown tenant with 403 and a suspended one with 503, and sends
@@ -185,24 +187,27 @@ section marks (§) in the table refer to the
 |---|---|---|---|
 | `appDomain` | yes | | Domain the app is served at, for example `app.example.com`. At most 64 characters, ACM's limit on a certificate's primary name. In `single` mode it sits below the `hostedZone` apex, because its record is a CNAME. Validated at synth |
 | `hostedZone` | yes | | Public Route 53 zone for `appDomain`, in the edge account, as `{zoneId, zoneName}`. `appDomain` is `zoneName` or a name below it |
-| `addressing` | no | `single` | `single`: one URL, tenant from the token. `host`: one host per tenant |
+| `addressing` | no | `single` | `single`: one URL, tenant from the token. `host`: one host per tenant, `<tenant id in lower case>.<appDomain>`. The labels `www`, `api`, `admin`, `auth`, `login`, `static` and `status` are reserved (`login` is the sign-in host); control-plane tenant ids are 26-character ULIDs, so none can take one, and the registrar refuses a reserved label with 400 |
 | `applicationId` | yes | | The control-plane application this front door serves |
-| `controlPlane` | yes | | Control plane API URL, account id and Region, and the vendor IdP token URL and client the registrar uses to get a reader token. The client secret is a plain secret string in Secrets Manager, in the edge account and the control plane's Region, where the registrar reads it. The deployer lists that client id in the control plane's `vendorIdp.clientIds` (§6.1). The account id names the global hook role the registrar admits; the Region is the one every cell origin must be in (§3.4 step 3) |
+| `controlPlane` | yes | | Control plane API URL, account id and Region, and the vendor IdP token URL and client the registrar uses to get a reader token. The client secret is a plain secret string in Secrets Manager, in the edge account and the control plane's Region, where the registrar reads it. The deployer lists that client id in the control plane's `vendorIdpClientIds` input (§6.1). The account id names the global hook role the registrar admits; the Region is the one every cell origin must be in (§3.4 step 3) |
 | `fleet` | yes | | The control plane's fleet name (`fleetName`, `[a-z0-9][a-z0-9-]{0,31}`, control-plane §3.3), which names its global hook role, `<fleet>-global-hook`, the one control-plane role the registrar admits |
 | `edgeOperatorRoleArn` | yes | | ARN of a role in the edge account that the registrar admits for the vendor-only calls: suspend and resume, `customDomain`, backfill, origin changes and clearing leftovers (§3.4). The deployer brings the role; the stack does not create it. Its account and partition are the edge account and partition that the secret and `alarmTopicArn` are checked against |
 | `issuer` | yes | | The SPA's client id and scopes, and the issuer's authorize, token and logout endpoints as `https` URLs, or a Cognito user-pool domain they are derived from (`/oauth2/authorize`, `/oauth2/token`, `/logout`). Optionally `exchangeEndpoint`, an `https` URL, for an issuer that serves the multi-tenant token exchange on a URL other than its token endpoint (§3.5); omit it when the issuer serves the exchange at its token endpoint or no user holds a `tenants` token. Validated at synth, with no network call (§7.1) |
 | `signinKeys` | no | `{ids: ["k1"], current: "k1"}` | `host` mode only: `{ids: string[], current: string}`, the `kid`s the `signin` key holds and the one that signs. Synth checks that `ids` holds one or two unique ids, each matching `[a-z0-9]{1,8}`, and that `current` is one of them (§4.1) |
-| `tenantClaim` | no | `tenant_id` | Name of the claim that holds the tenant id. The router, the SPA and the origin read it (below) |
+| `tenantClaim` | no | `tenant_id` | Name of the claim that holds the tenant id. The router, the SPA and the cell read it. At most 64 characters from `[A-Za-z0-9_:.-]`, starting with a letter or `_`; `tenants`, the multi-tenant claim, is refused |
 | `spaSource` | no | `build/spa` | Path of the built SPA, with `index.html` and `csp.json` at its root. The default is where `npx projen spa:build` writes the demo SPA |
-| `agentIngress` | no | off | Agent ingress endpoint; omit to leave `/agents/*` off, and the router then answers 404 for every `/agents` path (§3.3 step 3) |
+| `agentIngress` | no | off | The agent ingress's base URL, `https://<host>/<stage>`, with a plain origin path (a trailing slash is ignored); omit to leave `/agents/*` off, and the router then answers 404 for every `/agents` path (§3.3 step 3) |
 | `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, the registrar role holds no ACM or distribution-tenant action, and the sweeper, its role, its table, its schedules and the starter are not deployed. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
 | `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate: at the edge per host in `host` mode, at the origin per verified tenant in `single` mode (ADR-0009). An integer from 10 to 2,000,000,000 |
 | `ipRequestsPer5Min` | no | 500 | `host` mode only: the most requests one client IP may send to one tenant host's `/api/*` and `/agents/*` in 5 minutes before the edge answers 429, counted ahead of the per-host count (ADR-0021). One value for every tenant host; there is no per-tenant setting. A chosen value, not a measured one. Keep it below `tenantRequestsPer5Min`. A tenant whose users all reach the edge through one office NAT address shares one count: at 500 its whole user base gets about 1.7 requests per second before `tenantRequestsPer5Min` applies. Raising it raises it for every host. An integer from 10 to 2,000,000,000; set in `single` mode, synth fails |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports, on for the whole session in both modes. No report carries the callback's code, because the first inline script removes it from the URL before anything loads (§7.1 Reports) |
 | `registrarUrl` | no | none | The `registrarUrl` of this front door's edge parameter (§6.4), `https://<api id>.execute-api.<control plane Region>.amazonaws.com/v1/`, known once the main stack is deployed. Set, the app adds the `RouteHookAccess` stack in the control plane's account and Region (§3.1, ADR-0027); validated at synth |
 | `alarmTopicArn` | no | none | ARN of an SNS topic in the main stack's account and Region. The construct adds it as the ALARM action of every alarm this specification defines: the three-miss, `unverifiable`, queue-depth, missing-pages and no-lister alarms of the sweeper (§3.4 step 5) and the 80 % route table alarm on the registrar's `RouteTableBytes` metric (§4.1). Every one of these alarms is in the main stack's Region, so one topic serves them all. The deployer owns the topic, its policy (it must allow CloudWatch to publish) and its subscribers. With no topic the alarms exist and notify no one |
+| `stackNamePrefix` | no | `TenantFrontDoor` | Prefix of the stack names, and the construct id in this app. The stack names and CDK paths in this README (`TenantFrontDoor-main`, `TenantFrontDoor/Main`) assume the default. Set it to deploy a second front door in the same account, in another Region |
 
 `tenant_id` in the table means the claim that `tenantClaim` names.
+`routerSourcePath` and `registrarEntry` are test seams that swap the
+router and registrar sources; a deployment leaves them unset.
 
 ### Build
 
@@ -309,6 +314,34 @@ all.
 A cell created before the hooks has no route. The edge operator role backfills
 it with `PutCellRoute` and each tenant with `PutTenantRoute`.
 
+### Deploy a demo cell
+
+The Verify call below needs a cell behind the front door. The demo cell is
+the `DemoCellApi` construct, exported from [`src/index.ts`](./src/index.ts):
+a Lambda function URL that verifies the token, checks `x-tenant-route` and
+answers `/api/whoami`, with `CellRouteAccess` already applied. Each cell
+account needs one, deployed before the control plane creates the cell:
+
+1. In a stack in the cell's account and the control plane's Region, add
+   `DemoCellApi` with the issuer (`issuer`, `jwksUrl`, `clientIds`), the
+   `applicationId`, the `cellId`, and the front door's `distributionArn`
+   (omit it to read the cell account's front door parameter). In `host`
+   mode set `tenantRequestsPer5Min: 0`, because the edge limits each host.
+   Publish its `apiDomain` where the cell create script can read it.
+   `CellStack` in [`test/integ/stacks.ts`](./test/integ/stacks.ts) is the
+   worked stack: it writes the host to the parameter
+   `/application-plane/applications/<applicationId>/shared/front-door-cell-api`.
+2. Give the application's cell create and update scripts the contract of
+   the prerequisites: write `{"frontDoorApiDomain": "<host>"}` to
+   `OUTPUTS_FILE`. The worked script reads the parameter above and does
+   that: [`test/integ/app/cell/create.sh`](./test/integ/app/cell/create.sh).
+3. Create the cell and a tenant through the control plane. The hook writes
+   both routes.
+
+The shortest complete path is the integration test's own deployment: a kept
+`host` mode run stands up the front door, a control plane, two demo cells
+and two tenants (see "End-to-end demo" below).
+
 ### Verify
 
 In `single` mode the edge answers the SPA settings with no tenant:
@@ -330,11 +363,13 @@ tenant's user in at the issuer, and call the demo cell:
 curl -s -H "Authorization: Bearer <ACCESS_TOKEN>" https://app.example.com/api/whoami
 ```
 
-The answer holds `tenantId`, `cellId` and `routeHint`. A route needs about 30
-seconds to reach every edge location after the tenant's deployment is
-`ACTIVE`; the hook waits up to 45 seconds for it. If the call answers 403, the
-route is not live, or the tenant has no route: check that the hook parameter
-exists in the control plane's account and that `ListHooks` names both hooks.
+The answer holds `tenantId`, `cellId` and `routeHint`. A route usually needs
+30 to 60 seconds to reach every edge location after the tenant's deployment
+is `ACTIVE`. The hook waits up to 45 seconds for it and then warns without
+failing, so a 403 in the first minute can still be propagation: retry after
+a minute. If the call still answers 403, the tenant has no route: check that
+the hook parameter exists in the control plane's account and that
+`ListHooks` names both hooks.
 
 ### Teardown
 
@@ -388,11 +423,13 @@ create or update fails.
 ### Use the constructs
 
 The pattern ships as constructs, exported from [`src/index.ts`](./src/index.ts).
-Instantiate the front door in your own app with the inputs above as props:
+Declare this sample as a local dependency (`file:../tenant-front-door`) in
+your `.projenrc.ts`, import from its `src/index.ts` exports, and
+instantiate the front door in your own app with the inputs above as props:
 
 ```ts
 import { App } from 'aws-cdk-lib';
-import { TenantFrontDoor } from './src/index';
+import { TenantFrontDoor } from 'tenant-front-door/src';
 
 const app = new App();
 new TenantFrontDoor(app, 'TenantFrontDoor', {
@@ -421,7 +458,7 @@ It exposes `distributionId`, `distributionArn`, `routeTableArn`,
 distribution access to its Lambda function URL with `CellRouteAccess`:
 
 ```ts
-import { CellRouteAccess } from './src/index';
+import { CellRouteAccess } from 'tenant-front-door/src';
 
 new CellRouteAccess(this, 'RouteAccess', { function: cellApiFunction, applicationId: '<APPLICATION_ID>' });
 ```
@@ -457,10 +494,13 @@ Per-tenant attribution: a dedicated domain's certificate and distribution
 tenant carry the cost allocation tag `TenantId`, which you activate. Pooled
 tenants share one distribution tenant, so their requests and bytes come from
 the access log's `viewer-request-log-data` field, which names the tenant the
-router routed on. The fixed parts (registrar, route table, logging delivery,
-web ACL) are not attributable per tenant. Apportion them, for example by
-request count. The integration test records each stack's deploy and destroy
-time.
+router routed on. A pooled tenant's edge cost is its request count in that
+field times the CloudFront per-request price, plus its bytes out times the
+per-GB data transfer price, plus its request count times the AWS WAF
+per-request price. The fixed parts (registrar, route table, logging
+delivery, web ACL rules) are not attributable per tenant: split them by
+each tenant's share of requests, or equally. The integration test records
+each stack's deploy and destroy time.
 
 ## Deployment integration test
 
@@ -469,11 +509,10 @@ npx projen integ
 ```
 
 It deploys the front door, its own control plane and two cells in two
-accounts, runs the steps of `single` mode (1 to 16 and 19 to 24) and tears
-everything down; a `single` run takes about four and a half hours (an
-estimate, not run), a `host` run (`npx projen integ:host`) about an hour
-(measured, 64 minutes), for a few dollars (an estimate). Its inputs, steps
-and shortcuts are in [integration-test.md](./integration-test.md).
+accounts, runs the test steps and tears everything down, in about four and
+a half hours (an estimate) for a few dollars (an estimate). The `host` mode
+run, `npx projen integ:host`, and the inputs, steps and shortcuts are in
+[integration-test.md](./integration-test.md).
 
 ## End-to-end demo
 
@@ -500,16 +539,16 @@ needs bash 4.4 or later, the AWS CLI v2.9 or later, curl 7.75 or later and
 the same role: it reads the run's ids from `.integ/<run id>/`. The
 teardown needs the same inputs as the test.
 
-The demo takes about three minutes (137 to 199 s in three runs on
-2026-11-21 against a kept `host` mode deployment), uses only the run's
-synthetic tenants and prints no token. The test ends with `b` suspended
-(step 18), so the demo first sets both tenants active, and it suspends `b`
-once more for step 5. It undoes that suspension when the script exits,
-also after a failure. The tenants and stacks belong to the integration
-test run, so the teardown above removes them. The test's deployment
-limits one client IP to 50 requests per tenant host in five minutes on
-`/api/*`, so the demo polls `/api/whoami` once every six seconds, and a
-second run needs a five-minute gap.
+The demo takes about three minutes (137 to 199 s measured against a kept
+`host` mode deployment), uses only the run's synthetic tenants and prints
+no token. The test ends with `b` suspended (step 18), so the demo first
+sets both tenants active, and it suspends `b` once more for step 5. It
+undoes that suspension when the script exits, also after a failure. The
+tenants and stacks belong to the integration test run, so the teardown
+above removes them. The test's deployment limits one client IP to 50
+requests per tenant host in five minutes on `/api/*`, so the demo polls
+`/api/whoami` once every six seconds, and a second run needs a five-minute
+gap.
 
 | Step | Call | Expect |
 |---|---|---|
@@ -531,13 +570,16 @@ of it.
   `registrar/`, `sweeper/`, `edge/` (stack assertions and cdk-nag), `hooks/`
   (the route hook and `register-hooks.sh` against stub commands),
   `demo-cell/`, `spa/` and `integ/` (the driver's scripts and stacks).
-- **Smoke scripts**: `scripts/smoke.sh deploy` and `scripts/smoke.sh check`
-  deploy the front door in `single` mode with one demo cell and a stand-in
-  control plane (`test/smoke/`), seed routes, and check the edge, the cell and
-  the registrar live; `scripts/smoke-domains.sh` does the same for dedicated
-  domains. They need `SMOKE_APP_DOMAIN`, `SMOKE_ZONE_ID` and `SMOKE_ZONE_NAME`
-  (and `SMOKE_DEDICATED_DOMAIN` for the second) and the `tenant-identity`
-  `shared-pool` deployment, and they leave the stacks up. Conventions are in
+- **Smoke scripts**: `scripts/smoke.sh deploy` deploys the front door in
+  `single` mode with one demo cell and a stand-in control plane
+  (`test/smoke/`) and seeds routes, and `scripts/smoke.sh check` checks the
+  edge, the cell and the registrar live. `scripts/smoke-domains.sh` checks
+  dedicated domains on a smoke deployment made with
+  `SMOKE_DEDICATED_DOMAINS=true scripts/smoke.sh deploy`; it does not
+  deploy. They need `SMOKE_APP_DOMAIN`, `SMOKE_ZONE_ID` and
+  `SMOKE_ZONE_NAME` (and `SMOKE_DEDICATED_DOMAIN` for the domains check)
+  and the `tenant-identity` `shared-pool` deployment, and they leave the
+  stacks up. Conventions are in
   [`scripts/CONVENTIONS.md`](./scripts/CONVENTIONS.md).
 - **Integration test**: above.
 - **End-to-end demo**: above; it needs a kept `host` mode run.
@@ -601,18 +643,22 @@ The full threat model, with every threat, mitigation and accepted risk, is in
 - [ ] **Admit only the distribution at the agent ingress.** A request sent
       straight to it skips the edge's refusals, a suspension included (AR-3).
 - [ ] **Stop issuing tokens to a suspended tenant at the issuer.** A
-      suspension holds at the edge only (spec §6.2).
+      suspension holds at the edge only (spec §6.2; AR-3, AR-4).
 - [ ] **Raise the ACM certificate quota** before routing more than about
       2,500 dedicated domains (ACM's default quota; spec §4.1; AR-18).
 - [ ] **Add an edge rate rule in `single` mode, and size `ipRequestsPer5Min`**
       in `host` mode. The default is chosen, not measured (AR-8, AR-9).
-- [ ] **Rotate the sign-in key** in `host` mode on a schedule (spec §4.1).
+- [ ] **Rotate the sign-in key** in `host` mode on a schedule (spec §4.1;
+      M-20).
 - [ ] **Ask the control plane for a role per global hook.** Every global hook
       runs under one role the registrar admits (AR-1).
 - [ ] **Pin the hook source to a reviewed commit**, and move the pin for every
-      front door at once.
+      front door at once (M-41, T-59, AR-21).
 - [ ] **Change the removal policies** of the SPA bucket and the log groups
-      (`DESTROY` in this sample) and set retention to your policy.
+      (`DESTROY` in this sample) and set retention to your policy. The
+      threat model has no entry for this: retention is the deployer's
+      policy, and the readers of each log group are in its "Who can read
+      and write what".
 
 ## Known limitations
 
@@ -661,8 +707,8 @@ Open items and shortcuts. Each accepted risk is an `AR-n` in the
 - **Not built** (spec §1.2): several Regions per tenant, failover between
   cells, moving a tenant between cells with no downtime, server-side
   rendering or a backend-for-frontend that holds tokens, per-tenant SPA
-  versions, a collector for browser security reports, and origins other than
-  Lambda function URLs and S3.
+  versions, a collector for browser security reports, and cell origins
+  other than Lambda function URLs.
 - **Per-tenant cost attribution of the fixed parts is not built**: only a
   dedicated domain's resources carry the `TenantId` tag.
 - **Integration test shortcuts**, such as the edge account registered as

@@ -4,8 +4,8 @@
 
 - Status: Superseded by ADR-0017
 - Date: 2026-11-17
-- Deciders: Dave Roberts (PSA)
 - Amended by: ADR-0025
+- Deciders: Dave Roberts (PSA)
 
 ## Context
 
@@ -49,21 +49,21 @@ applications on the same control plane do not use.
 
 Option 1; spike S-8 passed on 2026-11-13. The registrar is the only
 writer of the route table. Its resource policy admits
-`<fleet>-cell-provisioning` and `<fleet>-tenant-provisioning` roles in any
-account, plus the edge operator role, and denies every other principal
-with an explicit `Deny` and `ArnNotLike` on `aws:PrincipalArn`. Admission
-grants no route. Every write checks the caller's
-account against `GetCell` or `GetDeployment`, and a tenant route also needs
-its cell's route written by the same account. The edge operator role's
-domain change is checked against the account recorded on the tenant
-route, not its own. A new tenant route is `active`; a later write from
-either role keeps the stored status, and only `UpdateTenantRouteStatus`
-changes it. A `customDomain` that
-equals `appDomain` or ends in `.<appDomain>` is refused with 400, one
-whose `host#` entry names another tenant with 409, and only the edge
-operator role may set or change it: a tenant provisioning role that
-sends one gets 403. Deletes check the account recorded on the route, so
-cleanup works after the control plane has removed the record.
+`<fleet>-cell-provisioning` and `<fleet>-tenant-provisioning` roles in
+any account, plus the edge operator role, and denies every other
+principal with an explicit `Deny` and `ArnNotLike` on
+`aws:PrincipalArn`. Admission grants no route. Every write checks the
+caller's account against `GetCell` or `GetDeployment`, and a tenant
+route also needs its cell's route written by the same account. The edge
+operator role's domain change is checked against the account recorded on
+the tenant route, not its own. A new tenant route is `active`; a later
+write from either role keeps the stored status, and only
+`UpdateTenantRouteStatus` changes it. A `customDomain` that equals
+`appDomain` or ends in `.<appDomain>` is refused with 400, one whose
+`host#` entry names another tenant with 409, and only the edge operator
+role may set or change it: a tenant provisioning role that sends one
+gets 403. Deletes check the account recorded on the route, so cleanup
+works after the control plane has removed the record.
 
 ## Consequences
 

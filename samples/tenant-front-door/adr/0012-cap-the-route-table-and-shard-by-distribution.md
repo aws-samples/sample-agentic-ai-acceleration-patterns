@@ -104,14 +104,13 @@ need their own record.
   store size or allows more than one store per function.
 
 Note 2026-11-18, effective when ADR-0017 (Proposed) is accepted: each
-`tenant#` value also carries
-`dt`, the deployment's `createdAt` as Unix milliseconds
-(`"dt":<13 digits>,`, 19 bytes), so a hook can tell a new deployment
-from a leftover entry. The worst-case `tenant#` value is 166 bytes and
-the entry 236, so a tenant needs at most 236 bytes in `single` mode and
-466 in `host` mode. The ceilings become floor(5,000,000 × 0.8 / 236) =
-16,949 tenants in `single` mode and floor(5,000,000 × 0.8 / 466) = 8,583
-in `host` mode, and the revisit points about 16,900 and 8,500.
+`tenant#` value also carries `dt`, the deployment's `createdAt` as Unix
+milliseconds (`"dt":<13 digits>,`, 19 bytes), so a hook can tell a new
+deployment from a leftover entry. The worst-case `tenant#` value is 166
+bytes and the entry 236, so a tenant needs at most 236 bytes in `single`
+mode and 466 in `host` mode. The ceilings become floor(5,000,000 × 0.8 /
+236) = 16,949 tenants in `single` mode and floor(5,000,000 × 0.8 / 466)
+= 8,583 in `host` mode, and the revisit points about 16,900 and 8,500.
 
 Amended 2026-11-18 by ADR-0018: a dedicated tenant's `tenant#` value
 also carries its domain challenge, `dk` (51 bytes) and, while the
@@ -123,3 +122,7 @@ floor(1,000,000 / 288) = 3,472 dedicated tenants, less what `app` and
 
 Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
 effect.
+
+Note 2026-11-23: the proof of this record is in the unit tests: the
+registrar's 507 past the store's size (`test/registrar/registrar.test.ts`)
+and the alarm on `RouteTableBytes` (`test/edge/stacks.test.ts`).

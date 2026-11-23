@@ -7,6 +7,7 @@
 - Deciders: Dave Roberts (PSA)
 
 ## Context
+
 Spec §10 has 24 steps across two accounts and two Regions. It deploys
 the front door, its own control plane, the stand-in agent ingress
 (ADR-0024), two cells and the test's roles, and drives the control plane
@@ -27,7 +28,9 @@ The sample standard (§5.2) allows either driver and asks for an ADR when
 the test uses the CDK CLI from `scripts/integ.sh`.
 
 ## Options considered
+
 ### Option 1: integ-runner with integ-tests-alpha
+
 Pros: the standard's default; the runner destroys its stacks in a
 `finally` block. Cons: every check is an assertion resource, so 24 steps
 would pass CloudFormation's output limit, as the control plane's test
@@ -38,6 +41,7 @@ stack deletes do not fit a deploy-then-destroy runner. Deploy times per
 stack are not reported.
 
 ### Option 2: a bash driver over CDK apps
+
 `scripts/integ.sh` deploys the stacks of `test/integ.single.ts` or
 `test/integ.host.ts` one CDK call per stack, makes the steps' calls with
 `curl`, the AWS CLI and the control plane's API, and runs the §6.2
@@ -51,6 +55,7 @@ teardown is the driver's code, so a killed driver leaves stacks, which
 state; bash is unit tested only through stubs.
 
 ## Decision
+
 Option 2. The test's shape, long waits, mid-run updates, one expected
 failure and an ordered teardown with API calls, is what a driver script
 handles and an assertion stack does not, and Option 1 would not fit
@@ -58,10 +63,11 @@ CloudFormation's output limit. The CDK apps keep the stacks in code a reader
 can copy, and synthesise under cdk-nag in the build.
 
 ## Consequences
+
 - `npx projen integ` and `npx projen integ:host` run the driver. The
-  driver saves the run's ids (no token, password or key) in `.integ/<run id>/`, so
-  `scripts/integ.sh teardown <run id> <mode>` can finish a teardown after
-  an interruption.
+  driver saves the run's ids (no token, password or key) in
+  `.integ/<run id>/`, so `scripts/integ.sh teardown <run id> <mode>` can
+  finish a teardown after an interruption.
 - Each teardown part is done, skipped or failed. A part is skipped only
   on a not-found answer or when the run's state shows the thing was never
   made; any other error fails it, so a teardown without working

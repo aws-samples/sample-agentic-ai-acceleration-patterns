@@ -45,19 +45,20 @@ cd stress
 
 The runner calls `slice.sh` with each verb (`budget`, `deploy`, `seed`,
 `run <scenario>`, `collect`, `teardown`), writes `results.md` and the records
-under `$STRESS_HOME/$STRESS_PREFIX/<run id>/`, and tears down at the end,
-also when anything fails. `STRESS_HOME` defaults to `~/.aaa-stress`. The tier is `small`; the
-slice reads `STRESS_TIER_JSON` and seeds `min(tenantsActive, 100)` active
-tenants, a write pool of `min(100, tenantsSeeded)` plus the sustained writes
-(30 at `small`, up to 60), and one spare: 71 tenants at `small`, up to 261 at
-`medium` and `large`. The slice keeps its state in
-`$STRESS_HOME/$STRESS_PREFIX/tenant-front-door/`: `manifest.json` (the
-tenants), `outputs.json` (the stacks' outputs), `context.json` (the record of
-the prefix), `resources.json` (what teardown checks), `timings.txt`,
-`requests.<scenario>.jsonl` (one request log per scenario) and the CDK output
-folders. A deploy takes about 11 minutes (the main stack, with the
-distribution, is most of it) and a destroy of the stacks about 9, with about
-6.5 more when `teardown` removes 71 tenants (see Measured).
+under `$STRESS_HOME/$STRESS_PREFIX/<run id>/`, and tears down at the end, also
+when anything fails. `STRESS_HOME` defaults to `~/.aaa-stress`. The tier is
+`small`; the slice reads `STRESS_TIER_JSON` and seeds
+`min(tenantsActive, 100)` active tenants, a write pool of
+`min(100, tenantsSeeded)` plus the sustained writes (30 at `small`, up to 60),
+and one spare: 71 tenants at `small`, up to 261 at `medium` and `large`. The
+slice keeps its state in `$STRESS_HOME/$STRESS_PREFIX/tenant-front-door/`:
+`manifest.json` (the tenants), `outputs.json` (the stacks' outputs),
+`context.json` (the record of the prefix), `resources.json` (what teardown
+checks), `timings.txt`, `requests.<scenario>.jsonl` (one request log per
+scenario) and the CDK output folders. A deploy takes about 11 minutes (the
+main stack, with the distribution, is most of it) and a destroy of the stacks
+about 9, with about 6.5 more when `teardown` removes 71 tenants (see
+Measured).
 
 | Input | Meaning |
 |---|---|
@@ -98,12 +99,12 @@ with a reason that names the hop (`edge-no-route`, `cell-forbidden`,
 `origin-iam-denied`, ...). A refusal is attributed to the tenant the request
 named, or `-` when it named none (stress spec P-7). The edge log's tenant is
 compared for the requests whose probe sets one; the `cross-site` probe sets
-none, because the router refuses before it reads the token. An answer no hop owns is an unattributed refusal and fails the
-run; so does a driver-side timeout or network error (status 0), which no hop
-answered. A registrar answer that is not a write is counted by cause: for a
-503, `route-table-busy` (five ETag conflicts), `control-plane-unreadable` or
-`other`; `throttled` for a 429; `server-error` for another 5xx but 507; and
-`network` for no answer.
+none, because the router refuses before it reads the token. An answer no hop
+owns is an unattributed refusal and fails the run; so does a driver-side
+timeout or network error (status 0), which no hop answered. A registrar answer
+that is not a write is counted by cause: for a 503, `route-table-busy` (five
+ETag conflicts), `control-plane-unreadable` or `other`; `throttled` for a 429;
+`server-error` for another 5xx but 507; and `network` for no answer.
 
 The tokens come from `tenant-identity`'s test aid `IssueToken`; they live
 5 minutes, so a scenario issues its own and issues new ones every 200 s while
@@ -327,20 +328,22 @@ What the numbers say:
   role is a role of the same account. Nothing in slice mode runs the route hook
   script, the real hooks or the cell scripts, and a slice-mode run registers no
   hook on any control plane, so `teardown` unregisters none.
-- Platform mode ran live once, at `small` (`stress/results/2026-11-21-small.md`):
-  the CDK deploys, phase two, PS-7 against the real ingress (90 assertions, 0
-  mismatches), `collect` without a cell log, and a teardown that deleted the
-  `RouteHookAccess` hook stack and left nothing the check reads. Not run live:
-  a rerun of phase two after a failure, `medium` and `large`. The shell scripts
-  are checked with `bash -n` only (no `shellcheck` here). An ingress whose
-  first `data:` line is not the `report` fails PS-7 as a mismatch.
+- A platform-mode run at `small` (`stress/results/2026-11-21-small.md`) ran
+  live and covers the CDK deploys, phase two, PS-7 against the real ingress
+  (90 assertions, 0 mismatches), `collect` without a cell log, and a teardown
+  that deleted the `RouteHookAccess` hook stack and left nothing the check
+  reads. Not run live: a rerun of phase two after a failure, `medium` and
+  `large`. The shell scripts are checked with `bash -n` only; `shellcheck` is
+  not run on them. An ingress whose first `data:` line is not the `report`
+  fails PS-7 as a mismatch.
 - Platform PS-7 sends one `report` per round to the ingress, which opens a
   Runtime session for the tenant's conversation: 10 at `small`, 25 above it.
   A cold session can take longer than the edge probes; those calls wait up to
   90 s.
 - Phase two is a distribution update on every run; its time is the number to
-  watch (stress ADR-0016 consequences). The first platform run took 134 s for
-  the deploy and 21 s more until the edge routed `/agents/*`. A run that fails between the
+  watch (stress ADR-0016 consequences). A platform run at `small` took 134 s
+  for the deploy and 21 s more until the edge routed `/agents/*`
+  (`stress/results/2026-11-21-small.md`). A run that fails between the
   `context.json` write and the manifest rewrite leaves `agentIngress` in the
   context and the manifest at phase 1: run the step again, it is idempotent.
 - `deploy` in platform mode rewrites `context.json` without `agentIngress`: do

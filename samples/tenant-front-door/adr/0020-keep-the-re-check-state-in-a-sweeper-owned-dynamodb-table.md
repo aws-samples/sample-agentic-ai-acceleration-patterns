@@ -101,9 +101,9 @@ the page size and the removal paths are as ADR-0018 states them.
   and never cancels one.
 - Easier: the integration test seeds an entry item as it would stand
   after two missed days, runs the real daily run once, and reads the
-  result (the domain challenge step of spec §10). The test role holds `dynamodb:GetItem` and
-  `PutItem` on this table only, listed among the test-only shortcuts;
-  the table holds no token and no key.
+  result (the domain challenge step of spec §10). The test role holds
+  `dynamodb:GetItem` and `PutItem` on this table only, listed among the
+  test-only shortcuts; the table holds no token and no key.
 - Easier: a page takes at most 500 ÷ 10 × (2 queries × 5.4 s + 2 DynamoDB
   calls × 2 s) = 740 s, plus 2 s to finish, 742 s, inside the 15-minute
   timeout. The sweeper's role holds `dynamodb:GetItem`, `Query`,

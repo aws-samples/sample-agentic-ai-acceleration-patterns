@@ -7,6 +7,7 @@
 - Deciders: Dave Roberts (PSA)
 
 ## Context
+
 The `/agents/*` route sends a tenant's agent calls to the agent ingress of
 `agentic-runtime-isolation` when `agentIngress` is set (spec §3.1, §6.3).
 What the front door owns on that route is the router's path filter and
@@ -18,7 +19,9 @@ The integration test (spec §10 step 23) needs an origin behind the route.
 Spec §11 left open whether that origin is the real ingress (Q-4).
 
 ## Options considered
+
 ### Option 1: Compose `agentic-runtime-isolation`
+
 Deploy that sample, or reuse a deployment when its published parameter is
 found, and send step 23 to its real ingress. Pros: the real ingress is
 behind the filter, so its own routes (`/invocations`,
@@ -27,16 +30,19 @@ through the edge. Cons: a second sample's stacks, quotas and tenants in the
 test, a long deploy, and a run that fails for reasons in the other sample.
 Reusing a found deployment makes the test depend on what the account
 happens to hold.
+
 ### Option 2: The stand-in of spike S-5
+
 A REST API with a REQUEST authoriser and a streaming Lambda proxy that
-records what reaches it. Pros: deploys in about a minute (67 s in
-S-5); asserts exactly what
-the front door owns: the rewritten path `<stage>/<backend>/invocations`,
-the forwarded bearer and `x-tenant-route`, and unbuffered streaming; and
-records that a refused path never reaches it. Cons: the real ingress's
-routes are not exercised behind the edge.
+records what reaches it. Pros: deploys in about a minute (67 s in S-5);
+asserts exactly what the front door owns: the rewritten path
+`<stage>/<backend>/invocations`, the forwarded bearer and
+`x-tenant-route`, and unbuffered streaming; and records that a refused
+path never reaches it. Cons: the real ingress's routes are not exercised
+behind the edge.
 
 ## Decision
+
 Option 2. The test checks what the front door is responsible for, and
 the stand-in records it more precisely than the real ingress would. The
 path filter refuses every path that is not `/agents/<backend>/invocations`
@@ -49,6 +55,7 @@ stand-in cannot show that, and `agentic-runtime-isolation`'s own test is
 what covers its resource tree.
 
 ## Consequences
+
 - §10 step 23 runs against the stand-in; §11 no longer lists Q-4.
 - Threat model T-16 stays mitigated by the path filter, with the residual
   that the real ingress is not driven through the edge in this sample's

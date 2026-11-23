@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-13
-- Amended by: ADR-0017
+- Amended by: ADR-0017, ADR-0031
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -28,9 +28,10 @@ re-reads, re-checks and retries (§3.4 step 5).
 Pros: reads run inside CloudFront Functions at the edge, with no network
 call and no origin. A write applies without a function publish or a
 distribution change (P-9). The store has one writer, the registrar, so
-P-3 holds through IAM. Cons: one store holds 5 MB and each value 1 KB, so
-the tenant count has a ceiling (§4.1, ADR-0012). A write takes time to reach every edge
-location (S-2). Writes are serialised through the ETag.
+P-3 holds through IAM. Cons: one store holds 5 MB and each value 1 KB,
+so the tenant count has a ceiling (§4.1, ADR-0012). A write takes time
+to reach every edge location (S-2). Writes are serialised through the
+ETag.
 
 ### Option 2: Lambda@Edge plus DynamoDB
 
@@ -54,12 +55,12 @@ than in data the registrar owns (P-3).
 
 ## Decision
 
-Option 1; spikes S-1 and S-2 ran on 2026-11-16. KeyValueStore is read inside the router at
-the edge with no network call, so refusals for unknown and suspended
-tenants cost no origin capacity (P-7). It changes without a publish or a
-distribution update, so onboarding stays one registrar call (P-9), and the
-registrar is its only writer (P-3). Option 2 adds a network call to every
-request; Option 3 breaks P-9.
+Option 1; spikes S-1 and S-2 ran on 2026-11-16. KeyValueStore is read
+inside the router at the edge with no network call, so refusals for
+unknown and suspended tenants cost no origin capacity (P-7). It changes
+without a publish or a distribution update, so onboarding stays one
+registrar call (P-9), and the registrar is its only writer (P-3). Option
+2 adds a network call to every request; Option 3 breaks P-9.
 
 ## Consequences
 
@@ -99,10 +100,10 @@ request; Option 3 breaks P-9.
 
 Note 2026-11-18, effective when ADR-0017 (Proposed) is accepted:
 `route.sh` goes. The route hook, which the control plane will run on
-cell and deployment events, waits the same 45 s bound, polls the same way in `host` mode, and warns and exits
-0 past it, so a cell or deployment reaches `ACTIVE` once its route is
-live. The integration test waits 60 s only after a change it makes
-without the hook.
+cell and deployment events, waits the same 45 s bound, polls the same
+way in `host` mode, and warns and exits 0 past it, so a cell or
+deployment reaches `ACTIVE` once its route is live. The integration test
+waits 60 s only after a change it makes without the hook.
 
 Note 2026-11-19: the smoke run (design/spikes.md) saw requests miss a
 change up to about 60 s after the write, after the first routed request.
@@ -111,3 +112,8 @@ The integration test waits 90 s after a change it makes without the hook
 
 Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
 effect.
+
+Note 2026-11-23: ADR-0031 amends this record. A writer treats a stale
+`IfMatch` as a conflict whether the store answers `ConflictException`,
+HTTP 409 or 412, or a `ValidationException` whose message says the
+pre-condition failed, and retries it as this record's ETag rule says.

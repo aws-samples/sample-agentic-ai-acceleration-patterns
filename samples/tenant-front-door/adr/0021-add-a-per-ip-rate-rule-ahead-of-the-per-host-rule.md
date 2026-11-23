@@ -65,15 +65,15 @@ aggregated on `Host` and client IP, scoped down to `/api/*` and
 per-host rule. The default is 500 requests in 5 minutes. It is a chosen
 value, not a measured one: a quarter of the default
 `tenantRequestsPer5Min`, so four addresses are needed to use up a
-tenant's budget, and well above what one interactive user sends.
-Each rule's `CustomResponse` sets its own response header,
+tenant's budget, and well above what one interactive user sends. Each
+rule's `CustomResponse` sets its own response header,
 `x-tfd-rate-rule: ip` on this rule and `x-tfd-rate-rule: host` on the
 per-host rule, so a 429 shows which rule answered and the integration
 test can prove the per-host rule bound (spec §10 step 17). The header
 names a rule, not a tenant, so it leaks nothing about other tenants or
 their counts. Option 1 leaves the lock-out open; Option 2 charges a
-multi-tenant client once for all tenants. `single` mode gets no edge rule, because
-its origin limit already counts verified requests only.
+multi-tenant client once for all tenants. `single` mode gets no edge
+rule, because its origin limit already counts verified requests only.
 
 ## Consequences
 

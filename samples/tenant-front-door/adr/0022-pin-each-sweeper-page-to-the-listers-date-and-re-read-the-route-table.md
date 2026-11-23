@@ -30,19 +30,19 @@ caller": each page reads the clock. That leaves four gaps.
   sweeper's role also needs `dynamodb:BatchWriteItem` for the lister's
   batch delete, an IAM action separate from `DeleteItem`.
 
-Constraints: the integration test must not reach another day through
-an input of the shipped function (ADR-0020). A page must stay inside
-the sweeper function's 900 s timeout with every term of its bound a
-hard limit. The route table is capped by bytes (5 MB, spec §4.1), not
-by keys: the registrar refuses a write only past 5 MB, so the number of
+Constraints: the integration test must not reach another day through an
+input of the shipped function (ADR-0020). A page must stay inside the
+sweeper function's 900 s timeout with every term of its bound a hard
+limit. The route table is capped by bytes (5 MB, spec §4.1), not by
+keys: the registrar refuses a write only past 5 MB, so the number of
 keys, and the number of `ListKeys` calls of 50 keys a full scan needs,
 depends on the entry sizes. No spike measured `ListKeys` or `GetKey`
 latency from the deployment Region to the store's global endpoint. An
-asynchronous Lambda invocation carries at most 1 MB of payload
-([Lambda quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html),
-"Invocation payload", checked 2026-11-18). `GetKey` on a key that is
-not in the store returns `ResourceNotFoundException`, the same error as
-for a store that does not exist.
+asynchronous Lambda invocation carries at most 1 MB of payload ([Lambda
+quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html),
+"Invocation payload", checked 2026-11-18). `GetKey` on a key that is not
+in the store returns `ResourceNotFoundException`, the same error as for
+a store that does not exist.
 
 ## Options considered
 

@@ -11,10 +11,12 @@
 > | Last green integration run | 2026-11-21, `host` mode, two accounts (103 checks passed, 0 failed, 3 skipped; 64 minutes with the teardown; leftover check 0 found) |
 > | Region | `eu-west-1` for the control plane and the cells, `us-east-1` for the edge stacks, `eu-central-1` for the `tenant-identity` shared pool |
 > | Mode and steps passed | `host`: steps 1, 2, 3, 4, 11, 15, 17, 18, 23 and 24 |
-> | Not exercised live | `single` mode and its steps (5 to 10, 12 to 14, 16, 19 to 22), and the `single`-mode parts of steps 3, 15 and 23 (including the streamed call to the stand-in); in `host` mode, the inline callback script order (SPA build tests cover it), the CSP check of the callback in a browser, and a real sign-in through the issuer (both left to a manual check) |
-> | Driver changes after that run | The 0700 run directory, moving a reused run id's `state.env` aside, the wording of one skip in step 18, and the check of the sign-in host's log lines, which runs at the end of step 18. Only the driver's stub tests cover them; run `npx projen integ:host` after changing the driver |
+> | Not exercised live | `single` mode and its steps (5 to 10, 12 to 14, 16, 19 to 22), and the `single`-mode parts of steps 3, 15 and 23 (including the streamed call to the stand-in); unit tests cover their logic (the threat model's Mitigations table names them). In `host` mode, the inline callback script order (SPA build tests cover it), the CSP check of the callback in a browser, and a real sign-in through the issuer (both left to a manual check) |
+> | Code the green run may not have covered | The registrar's control-plane read retry (spec §3.4 step 2) and the route table ETag-conflict handling are in the code at the date of this block; whether the 2026-11-21 run's build held them cannot be told from the history, so they count as not exercised live. Unit tests cover them (`test/registrar/control-plane.test.ts`, `test/registrar/route-store.test.ts`) |
+> | Driver code the green run did not cover | The 0700 run directory, moving a reused run id's `state.env` aside, the wording of one skip in step 18, and the check of the sign-in host's log lines, which runs at the end of step 18. Only the driver's stub tests cover them; run `npx projen integ:host` after changing the driver |
 > | End-to-end demo | 2026-11-21, against a kept `host` mode deployment: three runs of `scripts/demo.sh` passed (137 s, 153 s and 199 s) |
-> | Unit tests | 39 suites, 1,240 tests passed (`npx projen build`, 2026-11-21) |
+> | Unit tests | 43 suites, 1,318 tests passed, and eslint clean (the test and eslint steps of `npx projen build`, 2026-11-23) |
+> | Scans | ProtoShield 2026-11-22 on the sample, and ASH 2026-11-21 on the files the threat model's "Security review" lists; neither has been rerun on the code at the date of this block |
 
 This document describes what is built. The design is in
 [`design/tenant-front-door.spec.md`](design/tenant-front-door.spec.md), the
@@ -26,13 +28,15 @@ decisions in [`adr/`](adr/README.md), and the threats in
 One web address, or one address per tenant, for a multi-tenant agentic
 application, in front of every cell the control plane placed. A single
 Amazon CloudFront multi-tenant distribution in one edge account serves the
-shared single-page application (SPA) and routes every `/api/*` and
-`/agents/*` request to the cell that hosts the request's tenant, in
-whichever registered account that cell lives. A CloudFront Function, the
-tenant router, finds the tenant and looks it up in a CloudFront
-KeyValueStore, the route table. A route registrar is the only writer of that
-table, and it is called by a vendor route hook that the control plane runs on
-its own cell and deployment operations (ADR-0017).
+shared single-page application (SPA), routes every `/api/*` request to the
+cell that hosts the request's tenant, in whichever registered account that
+cell lives, and sends `/agents/*` to the agent ingress. A CloudFront
+Function, the tenant router, finds the tenant and looks it up in a
+CloudFront KeyValueStore, the route table (ADR-0002, ADR-0003). A route
+registrar is the only writer of routes (the `tenant#`, `host#` and `cell#`
+entries), and it is called by a vendor route hook that the control plane
+runs on its own cell and deployment operations (ADR-0017). The stack's
+custom resources write the `app` and `signin` entries (section 6 below).
 
 The sample is not an identity provider, not the authoriser (the cell
 verifies the token), and not tenant onboarding or placement (the control
@@ -72,8 +76,10 @@ Four stacks, deployed in this order (ADR-0010, ADR-0027):
 | `<prefix>-edge-logging` | edge, `us-east-1` | Standard logging v2: the log group, delivery source, delivery destination and delivery |
 | `<prefix>-route-hook-access` | the control plane's account and Region | The front door hook parameter and the hook policy (`RouteHookAccess`); added when the `registrarUrl` input is set |
 
-`<prefix>` is `TenantFrontDoor` in the sample app (`src/main.ts`). A cell's
-own stack uses `CellRouteAccess`, in the cell's account.
+`<prefix>` is the `stackNamePrefix` input, `TenantFrontDoor` by default in
+the sample app (`src/main.ts`). A cell's own stack uses `CellRouteAccess`,
+in the cell's account; given no `distributionArn`, it reads the ARN from a
+plain-string copy in that account (ADR-0011, ADR-0026).
 
 | Component | Runs on | Source |
 |---|---|---|
@@ -89,26 +95,36 @@ own stack uses `CellRouteAccess`, in the cell's account.
 
 ## 4. Request paths
 
-The router runs on every viewer request. It removes every client
-`x-tenant-*` header, lower-cases the host, and then:
+The router runs on every viewer request. Its steps carry the numbers of
+spec §3.3, which the ADRs and the threat model cite:
 
-1. On `host` mode's sign-in host, answers the sign-in redirects (§7).
-2. Looks up the host in the route table when the mode is `host` or the host
-   is a dedicated domain. No entry gives 404.
+1. Removes every client `x-tenant-*` header.
+2. Lower-cases the host. On `host` mode's sign-in host it answers the
+   sign-in redirects (section 7 below). It looks up the host in the route
+   table when the mode is `host` or the host is a dedicated domain; no
+   entry gives 404.
 3. Answers 404 for any `/agents` path that is not
-   `/agents/<backend>/invocations`.
-4. Checks `Sec-Fetch-Site` on `/api/*`, `/agents/*` and `/signin-state`:
-   `same-origin`, `none` or no header pass; anything else gets 403.
-5. Finds the tenant: in `single` mode from the bearer token's claim (no
-   token, or a `tenants` list, gets 401; an `Authorization` header over
-   8,192 bytes gets 401); in `host` mode from the host, comparing the claim
-   with it (a mismatch gets 403).
+   `/agents/<backend>/invocations` (ADR-0019).
+4. Checks `Sec-Fetch-Site` on `/api/*`, `/agents/*` and, in `host` mode,
+   `/signin-state`: `same-origin`, `none` or no header pass; anything else
+   gets 403.
+5. Finds the tenant. On `/api/*` and `/agents/*` it decodes the bearer
+   token's claim without checking the signature (ADR-0005): no token, an
+   undecodable one or a `tenants` list gets 401, and in `host` mode a claim
+   other than the host's tenant gets 403. `/config.json` and `/signin-state`
+   take the host's tenant. An `Authorization` header over 8,192 bytes gets
+   401 on every path that needs a tenant.
 6. Reads `tenant#<id>`: no entry gives 403, `suspended` gives 503 with
    `Retry-After: 300`.
-7. Reads the tenant's `cell#` entry, sets the origin to the cell's API with
-   origin access control, and sets `x-tenant-token` and `x-tenant-route`.
-   For `/agents/*` it strips the leading `/agents` instead.
-8. Rewrites other SPA paths to `/index.html`.
+7. For `/api/*`, reads the tenant's `cell#` entry (none gives 503), sets
+   the origin to the cell's API with origin access control, and sets
+   `x-tenant-token` and `x-tenant-route` (ADR-0004, ADR-0011). For
+   `/agents/*`, sets `x-tenant-route`, strips the leading `/agents`, and
+   leaves the origin at the agent ingress, with no `cell#` read and no
+   token header.
+8. Serves `/config.json` and `/logout` at the edge (ADR-0006), and
+   `/signin-state` in `host` mode only (`single` mode: 404). Rewrites
+   other SPA paths to `/index.html`.
 
 | Path | Origin | Cached |
 |---|---|---|
@@ -119,7 +135,7 @@ The router runs on every viewer request. It removes every client
 | `/agents/*` | the agent ingress, streamed | no |
 
 The edge adds one field to the access log, `viewer-request-log-data`,
-holding the tenant the router routed on (§10).
+holding the tenant the router routed on (section 10 below).
 
 ## 5. Route registration
 
@@ -150,14 +166,38 @@ it signs the call with the hook role's credentials. The registrar then:
 4. Accepts a cell's origin only in the form
    `<32 characters>.lambda-url.<Region>.on.aws`, and only once for the hook
    role.
-5. Writes the route table with the store's ETag and republishes the
-   `RouteTableBytes` metric.
+5. Writes the route table with the store's ETag, retrying on a conflict,
+   and republishes the `RouteTableBytes` metric (ADR-0003, ADR-0031).
 
-A route reaches an edge location in about 30 seconds. The hook waits at most
-45 seconds for it, and in `host` mode polls the tenant's `/config.json`.
-`UpdateTenantRouteStatus` (the edge operator) sets `active` or `suspended`
-without reading the control plane (ADR-0025). A hook write never changes a
-stored status.
+A route usually reaches every request at the edge 30 to 60 seconds after
+the write. The hook waits at most 45 seconds for it, and in `host` mode
+polls the tenant's `/config.json`; past 45 seconds it warns and exits 0, so
+the wait is a bound, not a guarantee (AR-7). `UpdateTenantRouteStatus` (the
+edge operator) sets `active` or `suspended` without reading the control
+plane (ADR-0025). A hook write never changes a stored status.
+
+### Registrar API
+
+The registrar is modelled in [`model/routes.smithy`](model/routes.smithy);
+every operation uses `AWS_IAM` and is idempotent.
+
+| Operation | HTTP | Caller |
+|---|---|---|
+| `PutCellRoute` | `PUT /cells/{cellId}` | hook role, edge operator role |
+| `DeleteCellRoute` | `DELETE /cells/{cellId}` | hook role, edge operator role |
+| `PutTenantRoute` | `PUT /tenants/{tenantId}` | hook role; edge operator role to set `customDomain` |
+| `DeleteTenantRoute` | `DELETE /tenants/{tenantId}` | hook role, edge operator role |
+| `UpdateTenantRouteStatus` | `PUT /tenants/{tenantId}/status` | edge operator role |
+| `DeleteHostRoute` | `DELETE /hosts/{host}` | edge operator role |
+
+`PutTenantRoute` with a `customDomain` answers 202 while the domain
+challenge or the certificate is pending (section 8 below). The errors are
+400 (a malformed input), 403 (a principal or record the registrar does not
+admit), 409 (a write that does not match the record's state), 422 (a failed
+certificate validation), 429 (the stage throttle, or `certificate-quota`),
+503 (the control plane cannot be read, or the store's ETag still conflicts)
+and 507 (the route table is full). Spec §5.1 says which operation gets
+which, and gives the error shapes.
 
 ## 6. Data model
 
@@ -232,10 +272,11 @@ deployment roles.
   tenant carry the cost allocation tag `TenantId` (the tenant id in the
   control plane's upper-case form). Pooled tenants share one distribution
   tenant, one web ACL and the SPA bucket, so their cost is attributed from
-  the per-tenant request and byte counts in the access log, times the
-  service's unit prices. The fixed parts (the registrar, the route table,
-  the logging delivery, the web ACL) are not attributable per tenant; the
-  vendor apportions them, for example by request count.
+  the access log: a tenant's request count times the CloudFront and AWS
+  WAF per-request prices, plus its bytes out times the per-GB data
+  transfer price. The fixed parts (the registrar, the route table, the
+  logging delivery, the web ACL rules) are not attributable per tenant;
+  the vendor splits them by each tenant's share of requests, or equally.
 
 ## 11. Deployment and teardown
 

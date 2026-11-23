@@ -37,11 +37,12 @@ which resolve against the document, so the one `index.html` resolves on
 every tenant host and dedicated domain.
 
 Browsers that enforce `integrity` in an import map: Chrome and Edge 127
-(2024-07), Firefox 138 (2025-04; Firefox ESR 128 does not, ESR 140 does),
-Safari 18.0 on macOS and iOS (2024-09). Sources:
-[MDN browser-compat-data, `html.elements.script.type.importmap.integrity`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap#browser_compatibility),
-read 2026-11-18, and
-[WebKit features in Safari 18.0](https://webkit.org/blog/15865/webkit-features-in-safari-18-0/)
+(2024-07), Firefox 138 (2025-04; Firefox ESR 128 does not, ESR 140
+does), Safari 18.0 on macOS and iOS (2024-09). Sources: [MDN
+browser-compat-data,
+`html.elements.script.type.importmap.integrity`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap#browser_compatibility),
+read 2026-11-18, and [WebKit features in Safari
+18.0](https://webkit.org/blog/15865/webkit-features-in-safari-18-0/)
 ("subresource integrity in imported module scripts"). Older browsers
 apply the import map and ignore its `integrity`.
 

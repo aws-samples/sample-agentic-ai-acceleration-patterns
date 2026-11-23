@@ -57,7 +57,7 @@ control plane, never writing unchecked.
 ## Consequences
 
 - The deployer adds the role value to `readerRoles`, creates the app
-  client and lists its client id in `vendorIdp.clientIds`; the control
+  client and lists its client id in `vendorIdpClientIds`; the control
   plane admits no reader until then (§6.1).
 - A namespaced value keeps a broader issuer's `reader` or `viewer` from
   mapping to the grant (control-plane R-36).
@@ -75,10 +75,10 @@ control plane, never writing unchecked.
 - So the vendor IdP needs the V3 trigger for `role`, and the control plane
   needs an input that accepts a client id in place of `aud` when a token
   has none. Control-plane R-38 and control-plane ADR-0043 add it:
-  `vendorIdp.clientIds`, a list of client ids, default none. A token with
+  `vendorIdpClientIds`, a list of client ids, default none. A token with
   no `aud` passes only when its `client_id` is listed and equals `sub`.
   The deployer lists the registrar's client id there. The optional
-  `vendorIdp.requiredScope` (R-38) binds such a token to the control
+  `vendorIdpRequiredScope` (R-38) binds such a token to the control
   plane's API; the deployer sets it when the registrar's client can also
   call another API on the issuer.
 - Follow-up: rotate the client secret, and log token fetch failures apart
@@ -99,3 +99,7 @@ which makes three of the control plane's reads, not two.
 
 Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
 effect.
+
+Note 2026-11-23: with the `GetTenant` read of the 2026-11-18 note, the
+registrar uses three of the ten reads the grant covers, not two, so the
+Revisit line above reads "three of ten".

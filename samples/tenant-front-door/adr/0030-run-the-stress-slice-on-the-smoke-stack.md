@@ -7,6 +7,7 @@
 - Deciders: Dave Roberts (PSA)
 
 ## Context
+
 The front door is one slice of the repository's platform stress test
 (`docs/stress-test.spec.md` §3.4). In slice mode the slice runs alone: it
 needs a front door to measure, a control plane for the registrar to read,
@@ -19,7 +20,9 @@ the names it uses must not collide with a front door that someone else
 runs there.
 
 ## Options considered
+
 ### Option 1: The smoke stack, named by a run prefix
+
 `deploy.sh` deploys the smoke stacks and the front door's three stacks
 under `STRESS_PREFIX`. The smoke app takes the stack names and the stand-in
 hook role's fleet from two contexts, `smokePrefix` and `smokeFleet`, and
@@ -30,30 +33,36 @@ exercise the same stand-ins, and two runs with different prefixes share
 neither a stack nor a role. Cons: the registrar reads a stand-in control
 plane, so nothing here runs the route hook, the real hooks or the cell
 scripts.
+
 ### Option 2: A stack of its own in the front door app
+
 Pros: no change to the smoke app. Cons: a second set of stand-ins that
 repeats the smoke app's and can drift from it.
+
 ### Option 3: Wait for platform mode
+
 Pros: measures the real control plane and hooks. Cons: the route write
 rate, the router's compute with large tokens and the refusals that never
 reach an origin all concern the front door alone, so the slice can measure
 them now.
 
 ## Decision
-Option 1. A prefix of 1 to 28 lower-case letters and digits starting with a letter
-names the stacks, the stand-in hook role and the application domain label.
-`teardown` destroys every stack of the prefix, so `slice.sh` refuses the
-prefixes of the front door's own stacks (`TenantFrontDoor`) and of the
-smoke test (`TfdSmoke`), and `deploy.sh` refuses a prefix whose stacks exist
-while the host holds no record of a deploy for it in the same account
-and Region. The
-slice declares only Lambda concurrency in its budget, because CloudFront
-Functions compute and the API Gateway control plane have no Service Quotas
-code. The router's compute utilization goes into the result record under a
-key of its own, `quotas.platform.cloudfront-function-compute-utilization-pct`,
+
+Option 1. A prefix of 1 to 28 lower-case letters and digits starting
+with a letter names the stacks, the stand-in hook role and the
+application domain label. `teardown` destroys every stack of the prefix,
+so `slice.sh` refuses the prefixes of the front door's own stacks
+(`TenantFrontDoor`) and of the smoke test (`TfdSmoke`), and `deploy.sh`
+refuses a prefix whose stacks exist while the host holds no record of a
+deploy for it in the same account and Region. The slice declares only
+Lambda concurrency in its budget, because CloudFront Functions compute
+and the API Gateway control plane have no Service Quotas code. The
+router's compute utilization goes into the result record under a key of
+its own, `quotas.platform.cloudfront-function-compute-utilization-pct`,
 which is not a budgeted quota.
 
 ## Consequences
+
 - The slice measures the front door against stand-ins. A platform run
   covers the real control plane, hooks and cells in the platform mode of the
   stress test.
@@ -83,3 +92,6 @@ which is not a budgeted quota.
 - Revisit when the platform run composes the real control plane, when
   CloudFront Functions compute gets a Service Quotas code, or when the
   contract names the `edge` hop and the compute reading.
+
+Note 2026-11-23: the proof of this record is the guard test of the slice
+script (`test/stress/slice-guards.test.ts`).

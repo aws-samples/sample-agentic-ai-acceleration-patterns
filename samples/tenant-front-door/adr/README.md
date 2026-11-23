@@ -5,9 +5,14 @@
 One file per decision, in the template of [`docs/sample-standard.md`
 §2.2](../../../docs/sample-standard.md). Every record is Accepted except
 ADR-0013, which ADR-0017 supersedes. ADR-0017 rests on the control plane's
-global hooks (control-plane ADR-0044 and ADR-0045), and its notes on
-ADR-0002, 0003, 0012, 0014 and 0015 are in effect. The spike results are
-in [spikes](../design/spikes.md).
+global hooks (control-plane ADR-0044 and ADR-0045). It amends ADR-0002,
+0003, 0012, 0014 and 0015, and the dated notes in those records took
+effect when it was accepted. Each record's `Amends` and `Amended by`
+lines name the records it changes and the ones that change it. A record's
+Date is the day its decision was taken, and its trailing notes carry their
+own dates. The records were written as one set of related decisions, so a
+record's Context or Consequences can cite a record or a spike result
+dated after it. The spike results are in [spikes](../design/spikes.md).
 
 | Number | Title | Status | Date |
 |---|---|---|---|

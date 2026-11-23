@@ -91,4 +91,7 @@ same way (P-4, ADR-0005). Options 3 and 4 fail P-2.
 - Revisit when tenants need per-tenant browser isolation by default, or
   when the issuer cannot put one tenant claim in each token.
 
-Spike S-7 passed 2026-11-13 (eu-central-1): a cloudfront-js-2.0 function decoded a real `tenant-identity` shared-pool access token (1,184 bytes) with `TestFunction` at 13 % compute utilisation, 14 % with a forged client `x-tenant-route` header, which it replaced with the lower-cased claim. A malformed token, no token and a token with its signature segment removed each got 401 at 9-10 %. The decode code is 1.9 KB of the 10 KB function limit. The measurement covers the decode and header handling only; the three KeyValueStore reads are measured in S-1. Create took 1 s and teardown, function and throwaway tenant, finished 32 s after the start.
+Note 2026-11-23: spike S-7 passed on 2026-11-13: the router reads
+`tenant_id` from a real 1,184-byte access token at 13-14 % compute and
+answers 401 on a malformed one. The figures are in the
+[spike record](../design/spikes.md#s-7).

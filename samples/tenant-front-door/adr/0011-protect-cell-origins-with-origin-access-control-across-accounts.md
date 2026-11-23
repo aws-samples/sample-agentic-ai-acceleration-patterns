@@ -57,12 +57,12 @@ sample defines, so every cell API reads `x-tenant-token`, not
 
 The distribution adds a header the cell checks. Pros: works with any
 origin type. Cons: the router holds no per-cell secret (it holds none in
-`single` mode and only the sign-in HMAC key in `host` mode, ADR-0016), so
-the header comes from the origin configuration, one value for every cell; a
-tenant-owned account sees the value in its own cell and can then call any
-other cell directly. Rotation touches every cell account. A value per cell avoids the
-shared secret, at the cost of secrets in the route table; it is the
-fallback below.
+`single` mode and only the sign-in HMAC key in `host` mode, ADR-0016),
+so the header comes from the origin configuration, one value for every
+cell; a tenant-owned account sees the value in its own cell and can then
+call any other cell directly. Rotation touches every cell account. A
+value per cell avoids the shared secret, at the cost of secrets in the
+route table; it is the fallback below.
 
 ### Option 3: IP allowlist
 
@@ -72,17 +72,18 @@ so any distribution passes; a function URL takes no security group.
 
 ## Decision
 
-Option 1; spike S-3 passed on 2026-11-16. Origin access control on the Lambda function
-URL, with `CellRouteAccess` granting the edge distribution
-`lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` conditioned on the
-distribution ARN in the cell's account, is the only option that binds the
-origin to this one distribution without a secret a tenant-owned account
-could read. The bearer token reaches the cell in `x-tenant-token`, a
-router-owned header no client can set. `/agents/*` goes to the single
-`agentIngress` input, an origin without origin access control (the API
-Gateway or AgentCore Gateway ingress of `agentic-runtime-isolation`). Its
-origin request policy, `Managed-AllViewerExceptHostHeader`, forwards
-`Authorization` on `GET` and `POST` and does not forward `Host`.
+Option 1; spike S-3 passed on 2026-11-16. Origin access control on the
+Lambda function URL, with `CellRouteAccess` granting the edge
+distribution `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`
+conditioned on the distribution ARN in the cell's account, is the only
+option that binds the origin to this one distribution without a secret a
+tenant-owned account could read. The bearer token reaches the cell in
+`x-tenant-token`, a router-owned header no client can set. `/agents/*`
+goes to the single `agentIngress` input, an origin without origin access
+control (the API Gateway or AgentCore Gateway ingress of
+`agentic-runtime-isolation`). Its origin request policy,
+`Managed-AllViewerExceptHostHeader`, forwards `Authorization` on `GET`
+and `POST` and does not forward `Host`.
 
 ## Consequences
 
@@ -129,3 +130,8 @@ arrived unbuffered (first byte within 14 ms of the ingress's write, one
 event per read). S-5 did not cover the `tenant-only` distribution; spec
 §10 step 23 verifies the rewrite, every 404 case and a streamed `POST`
 on it.
+
+Note 2026-11-23: the `/api/*` origin request policy forwards three
+headers, `x-tenant-token`, `x-tenant-route` and `content-type`. Origin
+access control reads `x-amz-content-sha256` from the viewer request
+itself, because CloudFront refuses `x-amz-*` names in the policy.

@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-13
-- Amended by: ADR-0017
+- Amended by: ADR-0017, ADR-0027
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -78,3 +78,9 @@ Note 2026-11-20: ADR-0017 is accepted, so the 2026-11-18 note above is in
 effect. The hook parameter is one JSON document, `registrarUrl` with
 `appDomain` and `addressing`, which the route hook needs to poll a
 tenant host in `host` mode (ADR-0027).
+
+Note 2026-11-23: ADR-0027 amends this record. The hook parameter is a
+JSON document written by the `RouteHookAccess` stack from the
+`registrarUrl` input, not a plain URL. The registrar unit tests prove
+the one-front-door rule: a record of another application gets 403
+(`test/registrar/registrar.test.ts`).

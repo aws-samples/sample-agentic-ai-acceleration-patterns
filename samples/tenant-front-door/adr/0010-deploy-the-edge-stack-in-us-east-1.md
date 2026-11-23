@@ -70,40 +70,39 @@ cells. Readers in `eu-central-1` would have to look in another Region for
 
 ## Decision
 
-Option 1. The edge stack in `us-east-1` holds the ACM certificate and the
-CloudFront-scope web ACL (spec §3.1). The edge logging stack in `us-east-1`
-holds the standard logging delivery source, delivery destination, delivery
-and the log group. Everything else runs in `eu-central-1` and takes the
-ARNs it needs through cross-Region references. The Region constraint is
-CloudFront's and CloudWatch Logs', so the split keeps it to the resources it
-applies to, and every other part of the front door sits in the same Region
-as the control plane and the cells it serves. Logs go to CloudWatch Logs
-because it is nine times faster to the first record than S3 and needs no
-query setup. The delivery names its record fields explicitly:
-`timestamp(ms)`, `x-edge-location`, `x-host-header`,
-`distribution-tenant-id`, `cs-method`, `cs-uri-stem`, `sc-status`,
-`sc-bytes`, `time-taken`, `x-edge-result-type`, `x-edge-request-id`,
-`cs-protocol`, `ssl-protocol` and `viewer-request-log-data`, the fields
-the per-tenant telemetry reads (spec §3.1), and the list stays closed.
-`viewer-request-log-data` names the tenant in both modes: the router
-writes it with `cf.logCustomData`, the lower-case tenant id or `-`,
-never the token, a header, the path or the query. It writes it where it
-first knows the tenant: after the `host#` lookup on a host it looks up
-(`host` mode, and a dedicated domain), so SPA loads and cross-site
-refusals there carry it too, and after the token decode on every host
-in `single` mode. CloudFront keeps only the last value, so in `single`
-mode the decoded claim, which the router routes on, replaces the host's
-tenant on a dedicated domain, and requests answered before the decode
-on `<appDomain>` carry none. In `single` mode no
-other field names the tenant, because every pooled tenant shares one
-host and one distribution tenant; in `host` mode `x-host-header` names
-a pooled host's tenant only. The delivery leaves out every other
-field, among them `cs-uri-query`, `cs(Referer)` and `cs(Cookie)`: in
-`host` mode the
-sign-in host's query carries authorization codes (ADR-0016), the
-referrer of a `/callback` page carries the code and `state` on each
-asset request the page makes, and a cookie the application adds would
-land in the log.
+Option 1. The edge stack in `us-east-1` holds the ACM certificate and
+the CloudFront-scope web ACL (spec §3.1). The edge logging stack in
+`us-east-1` holds the standard logging delivery source, delivery
+destination, delivery and the log group. Everything else runs in
+`eu-central-1` and takes the ARNs it needs through cross-Region
+references. The Region constraint is CloudFront's and CloudWatch Logs',
+so the split keeps it to the resources it applies to, and every other
+part of the front door sits in the same Region as the control plane and
+the cells it serves. Logs go to CloudWatch Logs because it is nine times
+faster to the first record than S3 and needs no query setup. The
+delivery names its record fields explicitly: `timestamp(ms)`,
+`x-edge-location`, `x-host-header`, `distribution-tenant-id`,
+`cs-method`, `cs-uri-stem`, `sc-status`, `sc-bytes`, `time-taken`,
+`x-edge-result-type`, `x-edge-request-id`, `cs-protocol`, `ssl-protocol`
+and `viewer-request-log-data`, the fields the per-tenant telemetry reads
+(spec §3.1), and the list stays closed. `viewer-request-log-data` names
+the tenant in both modes: the router writes it with `cf.logCustomData`,
+the lower-case tenant id or `-`, never the token, a header, the path or
+the query. It writes it where it first knows the tenant: after the
+`host#` lookup on a host it looks up (`host` mode, and a dedicated
+domain), so SPA loads and cross-site refusals there carry it too, and
+after the token decode on every host in `single` mode. CloudFront keeps
+only the last value, so in `single` mode the decoded claim, which the
+router routes on, replaces the host's tenant on a dedicated domain, and
+requests answered before the decode on `<appDomain>` carry none. In
+`single` mode no other field names the tenant, because every pooled
+tenant shares one host and one distribution tenant; in `host` mode
+`x-host-header` names a pooled host's tenant only. The delivery leaves
+out every other field, among them `cs-uri-query`, `cs(Referer)` and
+`cs(Cookie)`: in `host` mode the sign-in host's query carries
+authorization codes (ADR-0016), the referrer of a `/callback` page
+carries the code and `state` on each asset request the page makes, and a
+cookie the application adds would land in the log.
 
 ## Consequences
 
@@ -136,3 +135,8 @@ land in the log.
   configuration from other Regions, or CloudWatch Logs deliveries cross
   Regions. A deployer whose Region is `us-east-1` gets every stack in one
   Region with no change to this design.
+
+Note 2026-11-23: `eu-central-1` above is the Region the spikes ran in.
+The main stack's Region is the control plane's, the `controlPlane.region`
+input, and the integration test runs in whatever `AWS_REGION` names; the
+edge and edge logging stacks are always in `us-east-1`.

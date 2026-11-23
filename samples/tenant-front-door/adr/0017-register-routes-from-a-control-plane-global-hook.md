@@ -4,8 +4,8 @@
 
 - Status: Accepted
 - Date: 2026-11-18
-- Supersedes: ADR-0013
 - Amends: ADR-0002, ADR-0003, ADR-0012, ADR-0014, ADR-0015
+- Amended by: ADR-0025
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -55,8 +55,8 @@ small change to the registrar; no new dependency. Cons: it closes one
 sequence, not the cause. The tenant still holds a credential that
 reaches the registrar, so each status or lifecycle rule added later
 needs its own counter-rule. A tombstone is a third kind of `tenant#`
-entry for the router, the size ceilings and the delete paths. Dave
-Roberts rejected it for that reason.
+entry for the router, the size ceilings and the delete paths, which is
+the reason this option was rejected.
 
 ### Option 3: The control plane writes the route table directly
 
@@ -98,11 +98,11 @@ all.
 
 ## Decision
 
-Option 4. It supersedes ADR-0013. `hooks/route-hook.sh` is registered
-by `register-hooks.sh` with `PutHook` as two global hooks, because a
-hook has one phase: `front-door-post`, `POST` on `CELL_CREATE`,
-`CELL_UPDATE`, `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE`, puts the cell
-or tenant route; `front-door-pre`, `PRE` on `CELL_DELETE` and
+Option 4. It supersedes ADR-0013. `hooks/route-hook.sh` is registered by
+`register-hooks.sh` with `PutHook` as two global hooks, because a hook
+has one phase: `front-door-post`, `POST` on `CELL_CREATE`,
+`CELL_UPDATE`, `DEPLOYMENT_CREATE` and `DEPLOYMENT_UPDATE`, puts the
+cell or tenant route; `front-door-pre`, `PRE` on `CELL_DELETE` and
 `DEPLOYMENT_DELETE`, deletes it. Cell routes come from the hook too,
 with the API domain from the cell script's `frontDoorApiDomain` output:
 otherwise the registrar would still admit cell provisioning roles, and a
@@ -115,34 +115,35 @@ hook acts only for an application with a front door hook parameter
 in the control plane's account, which each front door's
 `RouteHookAccess` stack writes, so one pair of hooks serves every front
 door on the control plane (ADR-0014). The name differs from the copy
-that each cell account holds, so a control-plane account that also
-hosts cells holds both. The registrar's resource policy
-admits one control-plane role ARN, `<fleet>-global-hook` in the
-control plane's account, plus the edge operator role (an input of
-the stack, `edgeOperatorRoleArn`, which the deployer brings; spec §3.6),
-and denies everything else with the explicit `Deny` spike S-8 proved. The registrar
+that each cell account holds, so a control-plane account that also hosts
+cells holds both. The registrar's resource policy admits one
+control-plane role ARN, `<fleet>-global-hook` in the control plane's
+account, plus the edge operator role (an input of the stack,
+`edgeOperatorRoleArn`, which the deployer brings; spec §3.6), and denies
+everything else with the explicit `Deny` spike S-8 proved. The registrar
 still reads the control plane on every hook write (ADR-0015): every
-global hook runs under the same role, so admission proves only that
-some vendor global hook is calling. It takes the cell and account from
-the record, never the body, and admits a hook's put only while the
-record is `CREATING` or `UPDATING` and a hook's delete only while it is
-`DELETING` or gone. That check binds a write to the record's status,
-not to the hook: any global hook can write while an operation on the
-record runs. So the one value a hook supplies, a cell's origin, is
-pinned to a Lambda function URL host in the control plane's Region and
-is write-once for the global hook role: a put for a `cell#` that holds
-another origin gets 409, and only the edge operator role changes it,
-also for cells that predate the hooks (backfill). A `tenant#` entry
-records the deployment's `createdAt` as `dt`, so a hook put for a new
-deployment replaces an entry that a skipped delete hook left, while
-retries and updates of one deployment keep it. The display name comes from the control plane's `GetTenant` and not from
-the hook's `TENANT_NAME`, so no global hook can set it. Trusting the hook
-and dropping the read was rejected: one faulty or hostile global hook could
-then route or unroute any tenant. The hook retries a 5xx, 429 or missing answer inside its
-build for about two minutes, and a throttled read of the front door hook
-parameter for about a minute, so another application's burst of creates
-does not fail this one's. It fails at once on 400, 403, 409 or 507,
-printing the status and the response body.
+global hook runs under the same role, so admission proves only that some
+vendor global hook is calling. It takes the cell and account from the
+record, never the body, and admits a hook's put only while the record is
+`CREATING` or `UPDATING` and a hook's delete only while it is `DELETING`
+or gone. That check binds a write to the record's status, not to the
+hook: any global hook can write while an operation on the record runs.
+So the one value a hook supplies, a cell's origin, is pinned to a Lambda
+function URL host in the control plane's Region and is write-once for
+the global hook role: a put for a `cell#` that holds another origin gets
+409, and only the edge operator role changes it, also for cells that
+predate the hooks (backfill). A `tenant#` entry records the deployment's
+`createdAt` as `dt`, so a hook put for a new deployment replaces an
+entry that a skipped delete hook left, while retries and updates of one
+deployment keep it. The display name comes from the control plane's
+`GetTenant` and not from the hook's `TENANT_NAME`, so no global hook can
+set it. Trusting the hook and dropping the read was rejected: one faulty
+or hostile global hook could then route or unroute any tenant. The hook
+retries a 5xx, 429 or missing answer inside its build for about two
+minutes, and a throttled read of the front door hook parameter for about
+a minute, so another application's burst of creates does not fail this
+one's. It fails at once on 400, 403, 409 or 507, printing the status and
+the response body.
 
 ## Consequences
 
@@ -193,12 +194,11 @@ printing the status and the response body.
   `DeleteCellRoute` does not scan for tenant routes that name the cell:
   the control plane refuses `DeleteCell` while the cell holds a
   deployment, and a leftover tenant route answers 503 once its cell
-  route is gone. A later
-  `CreateDeployment` for the tenant does not inherit a leftover entry's
-  cell, `dt`, `host#` keys or domain: its `createdAt` differs from the
-  entry's `dt`, so the hook's put replaces the entry, routed to the new
-  cell. It keeps the entry's `s`, so a suspended leftover stays
-  suspended.
+  route is gone. A later `CreateDeployment` for the tenant does not
+  inherit a leftover entry's cell, `dt`, `host#` keys or domain: its
+  `createdAt` differs from the entry's `dt`, so the hook's put replaces
+  the entry, routed to the new cell. It keeps the entry's `s`, so a
+  suspended leftover stays suspended.
 - `dt` adds 19 bytes to every `tenant#` entry, so the ADR-0012 ceilings
   fall to 16,949 tenants in `single` mode and 8,583 in `host` mode.
 - A control-plane read outage now also fails hooks: creates and updates
@@ -257,3 +257,8 @@ registered with `timeoutMinutes` 10, inside the control plane's 5 to
 `registrarUrl` input after the main stack deploys (ADR-0027). The
 record operations ADR-0045 makes asynchronous (202) run no front door
 hook, because the two hooks name only cell and deployment events.
+
+Note 2026-11-23: ADR-0025 amends this record. The registrar reads the
+control plane on every hook write; `UpdateTenantRouteStatus`, an edge
+operator call that writes only the status, skips that read, so a
+suspension works while the control plane cannot be read.

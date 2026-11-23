@@ -158,8 +158,8 @@ requests, all removed at the end.
 
 Last green run: 2026-11-21, `host` mode, control plane in `eu-west-1`
 (steps 1, 2, 3, 4, 11, 15, 17, 18, 23 and 24; the status block of
-[`architecture.md`](./architecture.md) holds the coverage and the driver
-changes made after the run). 103 checks passed, 0 failed, 3 skipped.
+[`architecture.md`](./architecture.md) holds the coverage and what the run
+did not exercise). 103 checks passed, 0 failed, 3 skipped.
 Stack deploys took 1,289 s in all (the front door's main stack 375 s, the
 control plane 116 s; stacks of one phase overlap), the teardown 633 s of
 stack destroys, and the whole run 64 minutes including the leftover

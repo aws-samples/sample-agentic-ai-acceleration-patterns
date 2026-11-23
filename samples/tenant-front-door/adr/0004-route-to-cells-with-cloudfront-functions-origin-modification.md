@@ -54,11 +54,12 @@ to the request path.
 
 ## Decision
 
-Option 1; spike S-3 passed on 2026-11-16. Origin modification lets one behaviour reach every
-cell in every account, so a cell or tenant joins with a route table write
-and no distribution change (P-9). It reuses the router's own lookup in the
-KeyValueStore (ADR-0003), with no second function. Option 2 breaks P-9 and
-caps the cell count; Option 3 adds latency and a second lookup path.
+Option 1; spike S-3 passed on 2026-11-16. Origin modification lets one
+behaviour reach every cell in every account, so a cell or tenant joins
+with a route table write and no distribution change (P-9). It reuses the
+router's own lookup in the KeyValueStore (ADR-0003), with no second
+function. Option 2 breaks P-9 and caps the cell count; Option 3 adds
+latency and a second lookup path.
 
 ## Consequences
 

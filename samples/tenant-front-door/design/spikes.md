@@ -3,9 +3,9 @@
 # Tenant front door: spike record
 
 The measurements behind the specification
-([§9](./tenant-front-door.spec.md)). Each spike states its question, what had
-to be true to pass, and what was measured. Each reports its deploy and
-destroy time.
+([§9](./tenant-front-door.spec.md#9-spikes)). Each spike states its
+question, what had to be true to pass, and what was measured. Each
+reports its deploy and destroy time, or says it was not measured.
 
 ## S-1
 
@@ -38,7 +38,7 @@ request. **Measured 2026-11-16** over 100 rounds (one POP, 250 ms polling):
 median 28.4 s, p90 29.2 s, p99 29.4 s, max 29.5 s from the start of
 `put-key` to the first routed request; 29.6 s median until four pollers all
 saw it; no timeouts; inserts and updates alike. `put-key` itself takes about
-0.6 s. Deploy 340 s.
+0.6 s. Deploy 340 s; destroy not measured.
 
 ## S-3
 
@@ -159,7 +159,16 @@ payload within the CloudFront Functions limits?
 
 **Pass criterion and result.** `tenant_id` read from a real token; compute
 utilisation under 50 %; 401 on a malformed token. **Passed 2026-11-13**:
-13-14 % compute, 401 at 9-10 % (ADR-0005).
+a `cloudfront-js-2.0` function in `eu-central-1` decoded a real
+`tenant-identity` shared-pool access token of 1,184 bytes with
+`TestFunction` at 13 % compute utilisation, and at 14 % with a forged
+client `x-tenant-route` header, which it replaced with the lower-cased
+claim. A malformed token, no token and a token with its signature segment
+removed each got 401 at 9-10 % (ADR-0005). The decode code is 1.9 KB of
+the 10 KB function limit. The measurement covers the decode and header
+handling only; S-1 measures the three KeyValueStore reads. Create took
+1 s, and the teardown of the function and the throwaway tenant finished
+32 s after the start.
 
 ## S-8
 
@@ -226,36 +235,37 @@ negative-caching TTL of 900 s. Each probe was three concurrent invocations
 control query to the zone's name server from one), a new set of invocations
 every poll, and every 240 s a configuration change that forced new execution
 environments. The resolver is a link-local address from `/etc/resolv.conf`
-(`timeout:2 attempts:5`); a lookup takes 2 ms at the median. A fresh name
-was seen on 15 of 15 first lookups, with the record's TTL. **Negative
-answers last**: after NXDOMAIN the zone's name server had the record 23 s
-before `INSYNC`; all three first lookups saw it 3 s before `INSYNC`, yet 145
-of 1,590 queries (9 %) still got NXDOMAIN, and the last stale answer came
-697 s after `INSYNC` (732 s after the negative lookup). A second name (an
-empty non-terminal, also answered NXDOMAIN) had 166 of 1,575 queries stale,
-the last 851 s after `INSYNC` (882 s after the negative lookup), both inside
-900 s. S-10's data shows that lookups in one invocation disagree: the first
-lookup was stale in 28 of 318 invocations (34 of 315 for the second name),
-all five in only 7 (3). An environment whose first lookup was stale got a
-stale first lookup on its next invocation about half the time (14 of 24 and
-16 of 31), and queries from cold-start environments were stale as often (10
-of 60 and 5 of 55), so the cache is behind the resolver address, not in the
-environment. **A changed value** was read as the old one for at most its
-TTL: the last old answer came 31 s after `INSYNC` at TTL 60 and 181 s after
-`INSYNC` at TTL 300. A record of two strings (255 + 255) and one of three
-(255 + 255 + 43) arrived as an array of strings and joined equal the
-published value on 24 of 24 lookups. **TTL cap**: a record with TTL 86400
-came back with TTL 300, and after its removal the old answer was still given
-631 s after `INSYNC` (661 s after the deletion, 9 of 61 polls) and never in
-the last 19.5 minutes of the 30-minute cap. A zone name server answered
-every control query over UDP from the function. S-10 met the pass criterion:
-no answer held a value before it was published, the last cached negative
-answers came 697 s and 851 s after `INSYNC`, inside the 900 s
-negative-caching TTL, the last old values came 31 s after `INSYNC` at TTL 60
-and 181 s after `INSYNC` at TTL 300, and the deleted record was last served
-631 s after `INSYNC` (661 s after the deletion), within the one-day bound of
-the daily re-check (§3.4 step 5). Deploy 67 s plus 7 s for the function
-code; destroy 32 s for the stack and 35 s for the DNS records.
+(`timeout:2 attempts:5`); a lookup takes 2 ms at the median and the longest
+took 64 ms. A fresh name was seen on 15 of 15 first lookups, with the
+record's TTL. **Negative answers last**: after NXDOMAIN the zone's name
+server had the record 23 s before `INSYNC`; all three first lookups saw it 3
+s before `INSYNC`, yet 145 of 1,590 queries (9 %) still got NXDOMAIN, and
+the last stale answer came 697 s after `INSYNC` (732 s after the negative
+lookup). A second name (an empty non-terminal, also answered NXDOMAIN) had
+166 of 1,575 queries stale, the last 851 s after `INSYNC` (882 s after the
+negative lookup), both inside 900 s. S-10's data shows that lookups in one
+invocation disagree: the first lookup was stale in 28 of 318 invocations (34
+of 315 for the second name), all five in only 7 (3). An environment whose
+first lookup was stale got a stale first lookup on its next invocation about
+half the time (14 of 24 and 16 of 31), and queries from cold-start
+environments were stale as often (10 of 60 and 5 of 55), so the cache is
+behind the resolver address, not in the environment. **A changed value** was
+read as the old one for at most its TTL: the last old answer came 31 s after
+`INSYNC` at TTL 60 and 181 s after `INSYNC` at TTL 300. A record of two
+strings (255 + 255) and one of three (255 + 255 + 43) arrived as an array of
+strings and joined equal the published value on 24 of 24 lookups. **TTL
+cap**: a record with TTL 86400 came back with TTL 300, and after its removal
+the old answer was still given 631 s after `INSYNC` (661 s after the
+deletion, 9 of 61 polls) and never in the last 19.5 minutes of the 30-minute
+cap. A zone name server answered every control query over UDP from the
+function. S-10 met the pass criterion: no answer held a value before it was
+published, the last cached negative answers came 697 s and 851 s after
+`INSYNC`, inside the 900 s negative-caching TTL, the last old values came 31
+s after `INSYNC` at TTL 60 and 181 s after `INSYNC` at TTL 300, and the
+deleted record was last served 631 s after `INSYNC` (661 s after the
+deletion), within the one-day bound of the daily re-check (§3.4 step 5).
+Deploy 67 s plus 7 s for the function code; destroy 32 s for the stack and
+35 s for the DNS records.
 
 ## Smoke run, 2026-11-19
 
@@ -303,6 +313,7 @@ distribution tenant's tags with `ListTagsForResource` (spec §3.4 step 5).
 
 **Deploy.** Front door stacks 384 s (a fresh main stack after a failed
 first attempt; the edge stack had deployed), demo cell 66 s, support 59 s.
+The smoke stacks stay up, so destroy was not measured.
 
 ## Dedicated-domain run, 2026-11-20
 
@@ -336,7 +347,8 @@ pass; the drop disabling the distribution tenant; and the removal job
 deleting the distribution tenant and the certificate within 68 s. The
 whole run took 333 to 391 s. The base smoke run then passed 40 of 40 with
 `dedicatedDomains` on. Deploy with `dedicatedDomains` turned on: front door
-stacks 227 s, stand-in control plane and support 81 s.
+stacks 227 s, stand-in control plane and support 81 s. Destroy was not
+measured (see "Not run live").
 
 **Guard.** With `SMOKE_GUARD=1` the run sets a domain (202, `d` written)
 and deploys with `dedicatedDomains` off: the guard refused, the deploy

@@ -5,10 +5,12 @@ SPDX-License-Identifier: MIT-0
 # Script Conventions
 
 Conventions for the shell scripts in this directory and for the route
-hook in `../hooks/`. `smoke.sh` and `smoke-domains.sh` deploy the front
-door with one demo cell and a stand-in control plane in a test account,
-and check the edge, the cell and the registrar live without the control
-plane's hooks (design/spikes.md, Smoke run). `register-hooks.sh` puts or
+hook in `../hooks/`. `smoke.sh` deploys the front door with one demo
+cell and a stand-in control plane in a test account, and checks the
+edge, the cell and the registrar live without the control plane's hooks
+(the Smoke run in [the spike record](../design/spikes.md)).
+`smoke-domains.sh` checks dedicated domains on that deployment, deployed
+with `SMOKE_DEDICATED_DOMAINS=true`. `register-hooks.sh` puts or
 deletes the front door's two global hooks on the control plane (spec
 §5.2). `integ.sh`, with its parts in `integ/`, is the integration test
 driver (spec §10, ADR-0028); the integration test's demo application
