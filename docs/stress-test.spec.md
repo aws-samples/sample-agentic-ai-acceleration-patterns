@@ -737,6 +737,10 @@ sends `x-correlation-id`, and each hop logs it (stress ADR-0005).
 Edge overhead is client TTFB minus ingress TTFB, per request, joined on the
 correlation id.
 
+A live and after-the-run view of these figures on one CloudWatch dashboard is
+proposed in [`docs/stress-dashboard.design.md`](./stress-dashboard.design.md)
+(stress ADR-0022, Proposed). It is not built and decides no pass criterion.
+
 ## 7. Pass criteria
 
 | Criterion | Pass |
