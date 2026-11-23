@@ -33,6 +33,39 @@ export const FLEET_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** The two halves of the account role pair (spec §6.4). */
 export type ProvisioningRoleKind = 'cell' | 'tenant';
 
+/**
+ * The session tags a build passes when it assumes its half of the pair
+ * (ADR-0051), all transitive: a cell build tags its session with the cell,
+ * a tenant build with the cell, the tenant and the application. The values
+ * are the service-resolved `CELL_ID`, `TENANT_ID` and `APPLICATION_ID`.
+ */
+export const SESSION_TAG_KEYS: Readonly<Record<ProvisioningRoleKind, readonly string[]>> = {
+  cell: ['CellId'],
+  tenant: ['CellId', 'TenantId', 'ApplicationId'],
+};
+
+/**
+ * The conditions on a build's `sts:AssumeRole` and `sts:TagSession` to its
+ * half of the pair (ADR-0051), used by the pair's trust and by the build
+ * role's own grant: every tag of {@link SESSION_TAG_KEYS} is present, some
+ * key is transitive, and no other key is passed or made transitive. A
+ * `ForAllValues` condition alone is true for a request with no tags, which
+ * is why the `Null` conditions are there.
+ */
+export function sessionTagConditions(kind: ProvisioningRoleKind): Record<string, Record<string, string | string[]>> {
+  const keys = [...SESSION_TAG_KEYS[kind]];
+  return {
+    'Null': {
+      ...Object.fromEntries(keys.map((key) => [`aws:RequestTag/${key}`, 'false'])),
+      'sts:TransitiveTagKeys': 'false',
+    },
+    'ForAllValues:StringEquals': {
+      'aws:TagKeys': keys,
+      'sts:TransitiveTagKeys': keys,
+    },
+  };
+}
+
 /** Name of the provisioning role an account installs for one half of the pair. */
 export function provisioningRoleName(fleetName: string, kind: ProvisioningRoleKind): string {
   return `${fleetName}-${kind}-provisioning`;

@@ -9,15 +9,20 @@ import {
   apiRoleArn,
   buildRoleArn,
   DEFAULT_FLEET_NAME,
+  ProvisioningRoleKind,
   provisioningRoleName,
+  sessionTagConditions,
   validateExternalId,
   validateFleetName,
 } from '../shared/fleet';
 import { suppressTemplateScanners } from '../shared/nag';
 import {
   acknowledgeSsmNamespaceGrant,
+  acknowledgeTaggedSsmGrant,
   manageCellNamespaceStatement,
   manageTenantNamespaceStatement,
+  OWN_CELL_PATH,
+  OWN_DEPLOYMENT_PATH,
   readCellNamespaceStatement,
   readSharedResourcesStatement,
 } from '../shared/ssm-namespaces';
@@ -67,9 +72,12 @@ export interface CellAccountRolesProps {
  * cells — the control plane's own account included (P-4). Each role trusts
  * its control-plane build role and the control-plane API role (for the
  * registration probe, ADR-027/028), by ARN, and never a hook role (spec
- * R-41: a hook never acts in a cell account). It carries the asymmetric
- * §6.2 namespace grants: the cell role owns `/application-plane/cells/*`,
- * the tenant role reads it and owns `/application-plane/tenants/*`. These
+ * R-41: a hook never acts in a cell account). The build role must pass the
+ * session tags of ADR-0051 and nothing else; the API role passes none. It
+ * carries the asymmetric §6.2 namespace grants, named by those tags: the
+ * cell role owns its own `/application-plane/cells/<cellId>`, the tenant
+ * role reads its cell's and owns its own
+ * `/application-plane/tenants/<tenantId>/<applicationId>`. These
  * roles — not the build roles — are THE hardening point (P-12): the account
  * owner decides what provisioning may do in their account and can withdraw
  * it by deleting the pair.
@@ -93,36 +101,39 @@ export class CellAccountRoles extends Construct {
     const externalId = props.externalId === undefined ? undefined : validateExternalId(props.externalId);
     const partition = props.identity.partition;
 
-    // Each half trusts two control-plane roles: the matching build role (the
-    // scripts) and the API role (the PutAccount handshake probe, ADR-027/028).
-    const trust = (kind: 'cell' | 'tenant') => {
-      const conditions: Record<string, Record<string, string | string[]>> = {
-        ArnEquals: {
-          'aws:PrincipalArn': [
-            buildRoleArn(partition, props.controlPlaneAccountId, this.fleetName, kind),
-            apiRoleArn(partition, props.controlPlaneAccountId, this.fleetName),
-          ],
-        },
-      };
-      if (externalId !== undefined) {
-        conditions.StringEquals = { 'sts:ExternalId': externalId };
-      }
-      return new iam.PrincipalWithConditions(
-        new iam.AccountPrincipal(props.controlPlaneAccountId),
-        conditions,
-      );
+    // Each half trusts two control-plane roles in two statements: the API
+    // role (the PutAccount handshake probe, ADR-027/028) may assume it with
+    // no session tags, and the matching build role (the scripts) only with
+    // exactly its session tags (ADR-0051), so a build session always names
+    // its cell, and its tenant and application on a tenant build.
+    const withExternalId = (conditions: Record<string, Record<string, string | string[]>>) =>
+      externalId === undefined ? conditions : { ...conditions, StringEquals: { 'sts:ExternalId': externalId } };
+    const apiTrust = new iam.PrincipalWithConditions(
+      new iam.AccountPrincipal(props.controlPlaneAccountId),
+      withExternalId({ ArnEquals: { 'aws:PrincipalArn': apiRoleArn(partition, props.controlPlaneAccountId, this.fleetName) } }),
+    );
+    const trustBuildRole = (role: iam.Role, kind: ProvisioningRoleKind) => {
+      role.assumeRolePolicy!.addStatements(new iam.PolicyStatement({
+        actions: ['sts:AssumeRole', 'sts:TagSession'],
+        principals: [new iam.AccountPrincipal(props.controlPlaneAccountId)],
+        conditions: withExternalId({
+          ArnEquals: { 'aws:PrincipalArn': buildRoleArn(partition, props.controlPlaneAccountId, this.fleetName, kind) },
+          ...sessionTagConditions(kind),
+        }),
+      }));
     };
 
     this.cellRole = new iam.Role(this, 'CellProvisioningRole', {
       roleName: provisioningRoleName(this.fleetName, 'cell'),
-      assumedBy: trust('cell'),
+      assumedBy: apiTrust,
       description: `Assumed by the ${this.fleetName} control plane's cell build to run cell scripts in this account (spec §6.4)`,
     });
+    trustBuildRole(this.cellRole, 'cell');
     this.cellRole.addToPolicy(readSharedResourcesStatement(this));
     this.cellRole.addToPolicy(manageCellNamespaceStatement(this));
     acknowledgeSsmNamespaceGrant(this.cellRole, '/application-plane/shared/*');
     acknowledgeSsmNamespaceGrant(this.cellRole, '/application-plane/applications/*');
-    acknowledgeSsmNamespaceGrant(this.cellRole, '/application-plane/cells/*');
+    acknowledgeTaggedSsmGrant(this.cellRole, OWN_CELL_PATH);
     // ADR-0047: the account owner widens their own cell role by exactly what
     // they attach, as for the tenant role. Attached by reference, never read (P-3).
     (props.cellBuildManagedPolicyArns ?? []).forEach((arn, index) => {
@@ -133,16 +144,17 @@ export class CellAccountRoles extends Construct {
 
     this.tenantRole = new iam.Role(this, 'TenantProvisioningRole', {
       roleName: provisioningRoleName(this.fleetName, 'tenant'),
-      assumedBy: trust('tenant'),
+      assumedBy: apiTrust,
       description: `Assumed by the ${this.fleetName} control plane's tenant build to run tenant scripts in this account (spec §6.4)`,
     });
+    trustBuildRole(this.tenantRole, 'tenant');
     this.tenantRole.addToPolicy(readSharedResourcesStatement(this));
     this.tenantRole.addToPolicy(readCellNamespaceStatement(this));
     this.tenantRole.addToPolicy(manageTenantNamespaceStatement(this));
     acknowledgeSsmNamespaceGrant(this.tenantRole, '/application-plane/shared/*');
     acknowledgeSsmNamespaceGrant(this.tenantRole, '/application-plane/applications/*');
-    acknowledgeSsmNamespaceGrant(this.tenantRole, '/application-plane/cells/*');
-    acknowledgeSsmNamespaceGrant(this.tenantRole, '/application-plane/tenants/*');
+    acknowledgeTaggedSsmGrant(this.tenantRole, OWN_CELL_PATH);
+    acknowledgeTaggedSsmGrant(this.tenantRole, OWN_DEPLOYMENT_PATH);
     // ADR-022/025: the account owner widens their own tenant role by
     // exactly what they attach. Attached by reference, never read (P-3).
     (props.tenantBuildManagedPolicyArns ?? []).forEach((arn, index) => {

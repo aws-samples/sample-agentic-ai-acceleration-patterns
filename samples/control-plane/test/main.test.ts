@@ -1,10 +1,12 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { spawnSync } from 'node:child_process';
 import { App, Environment, Token } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { buildEnvironment, evaluateJsonata } from './workflow-jsonata';
 import { CellAccountStack, CellAccountStackProps } from '../src/cell-account/cell-account.cdk';
+import { sessionTagConditions } from '../src/shared/fleet';
 import { isFullCommitSha, sourcePinningWarning } from '../src/shared/service-config';
 import {
   TenantStack,
@@ -685,20 +687,66 @@ describe('build roles and the home account role pair (ADR-025)', () => {
     expect(serviceRole(template, tenant).Properties.RoleName).toBe('control-plane-tenant-build');
   });
 
-  test('the home pair trusts the control plane account narrowed to the matching build role and the API role (aws:PrincipalArn)', () => {
-    for (const kind of ['cell', 'tenant']) {
+  test('the home pair trusts the API role untagged and the matching build role only with its session tags (aws:PrincipalArn, ADR-0051)', () => {
+    for (const kind of ['cell', 'tenant'] as const) {
       const role = byName(`control-plane-${kind}-provisioning`);
-      const [statement] = role.Properties.AssumeRolePolicyDocument.Statement;
-      expect(statement.Action).toBe('sts:AssumeRole');
-      expect(JSON.stringify(statement.Principal.AWS)).toContain(':root');
-      const principals = JSON.stringify(statement.Condition.ArnEquals['aws:PrincipalArn']);
+      const [api, build, ...rest] = role.Properties.AssumeRolePolicyDocument.Statement;
+      expect(rest).toEqual([]);
+      for (const statement of [api, build]) {
+        expect(JSON.stringify(statement.Principal.AWS)).toContain(':root');
+        // No external id on the home account unless asked for.
+        expect(statement.Condition.StringEquals).toBeUndefined();
+      }
+      expect(api.Action).toBe('sts:AssumeRole');
+      expect(Object.keys(api.Condition)).toEqual(['ArnEquals']);
+      expect(JSON.stringify(api.Condition.ArnEquals['aws:PrincipalArn'])).toContain(':role/control-plane-api');
+      expect(build.Action).toEqual(['sts:AssumeRole', 'sts:TagSession']);
+      const principals = JSON.stringify(build.Condition.ArnEquals['aws:PrincipalArn']);
       expect(principals).toContain(`:role/control-plane-${kind}-build`);
-      expect(principals).toContain(':role/control-plane-api');
-      // Never the other half's build role.
+      // Never the other half's build role, nor the API role.
       expect(principals).not.toContain(`:role/control-plane-${kind === 'cell' ? 'tenant' : 'cell'}-build`);
-      // No external id on the home account unless asked for.
-      expect(statement.Condition.StringEquals).toBeUndefined();
+      expect(principals).not.toContain('-api');
+      expect(build.Condition.Null).toEqual(sessionTagConditions(kind).Null);
+      expect(build.Condition['ForAllValues:StringEquals']).toEqual(sessionTagConditions(kind)['ForAllValues:StringEquals']);
     }
+  });
+
+  test('each build role may pass only its half\'s session tags to the pair, in any account (ADR-0051)', () => {
+    for (const kind of ['cell', 'tenant'] as const) {
+      const statements = policyFor(logicalIdOf(`control-plane-${kind}-build`)).Properties.PolicyDocument.Statement as any[];
+      const tag = statements.find((s) => s.Sid === 'TagProvisioningSession');
+      expect(tag.Action).toBe('sts:TagSession');
+      expect(JSON.stringify(tag.Resource)).toContain(`:iam::*:role/control-plane-${kind}-provisioning`);
+      expect(tag.Condition).toEqual(sessionTagConditions(kind));
+    }
+    // The API role passes no tags: its probe stays AssumeRole only (ADR-027).
+    const apiStatements = policyFor(logicalIdOf('control-plane-api')).Properties.PolicyDocument.Statement as any[];
+    expect(JSON.stringify(apiStatements)).not.toContain('sts:TagSession');
+  });
+
+  test('the R-41 deny on the home pair blocks no STS or SSM action, so tagged builds and their own namespaces still work there (ADR-0051)', () => {
+    const deny = (Object.values(template.findResources('AWS::IAM::Policy')) as any[]).find((p) =>
+      (p.Properties.PolicyDocument.Statement as any[]).every((s) => s.Effect === 'Deny'));
+    const attachedTo = JSON.stringify(deny.Properties.Roles);
+    expect(attachedTo).toContain(logicalIdOf('control-plane-cell-provisioning'));
+    expect(attachedTo).toContain(logicalIdOf('control-plane-tenant-provisioning'));
+    const actions = (deny.Properties.PolicyDocument.Statement as any[]).flatMap((s) => [s.Action].flat());
+    expect(actions.filter((a: string) => a.startsWith('sts:') || a.startsWith('ssm:'))).toEqual([]);
+  });
+
+  test('the home pair\'s own cell and deployment namespaces are named by the session tags (ADR-0051)', () => {
+    const resources = (kind: string, sid: string) =>
+      JSON.stringify((policyFor(logicalIdOf(`control-plane-${kind}-provisioning`)).Properties.PolicyDocument.Statement as any[])
+        .find((s) => s.Sid === sid).Resource);
+    for (const [kind, sid] of [['cell', 'ManageCellNamespace'], ['tenant', 'ReadCellNamespace']]) {
+      expect(resources(kind, sid)).toContain('parameter/application-plane/cells/${aws:PrincipalTag/CellId}"');
+      expect(resources(kind, sid)).toContain('parameter/application-plane/cells/${aws:PrincipalTag/CellId}/*"');
+      expect(resources(kind, sid)).not.toContain('cells/*');
+    }
+    const tenants = resources('tenant', 'ManageTenantNamespace');
+    expect(tenants).toContain('parameter/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}"');
+    expect(tenants).toContain('parameter/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}/*"');
+    expect(tenants).not.toContain('tenants/*');
   });
 
   test('the home pair carries the §6.2 asymmetry: cell role owns cells/*, tenant role reads it and owns tenants/*', () => {
@@ -774,6 +822,60 @@ describe('the workflow assumes the account role before every script and releases
       expect(buildspec).not.toMatch(/echo .*AWS_SECRET/);
       expect(buildspec).not.toContain('set -x');
     }
+  });
+
+  /** The AssumeRole arguments the buildspec builds, run in bash with the given build environment. */
+  const assumeRoleArguments = (buildspec: string, env: Record<string, string>): string[] => {
+    const lines = buildspec.split('\n').map((l) => l.trim());
+    const from = lines.indexOf('set --');
+    const to = lines.findIndex((l) => l.startsWith('CREDENTIALS=$(aws sts assume-role'));
+    const run = spawnSync('bash', ['-c', `set -euo pipefail\n${lines.slice(from, to).join('\n')}\nprintf '%s\\n' "$@"`], {
+      env: { PATH: process.env.PATH ?? '', ...env },
+      encoding: 'utf8',
+    });
+    expect(run.status).toBe(0);
+    return run.stdout.split('\n').slice(0, -1);
+  };
+  const ids = { CELL_ID: '01KCELL0000000000000000001', TENANT_ID: '01KTENANT00000000000000001', APPLICATION_ID: 'app-x' };
+
+  test('a cell build tags its session with exactly CellId, transitive, from CELL_ID (ADR-0051)', () => {
+    for (const name of ['RunCellBuild', 'RunCellBuildPinned']) {
+      const buildspec: string = tasks[name].Arguments.BuildspecOverride;
+      expect(assumeRoleArguments(buildspec, { ...ids, PROVISIONING_EXTERNAL_ID: '' })).toEqual([
+        '--tags', `Key=CellId,Value=${ids.CELL_ID}`, '--transitive-tag-keys', 'CellId',
+      ]);
+      // With an external id, in the same argument array.
+      expect(assumeRoleArguments(buildspec, { ...ids, PROVISIONING_EXTERNAL_ID: 'ext-1' })).toEqual([
+        '--external-id', 'ext-1', '--tags', `Key=CellId,Value=${ids.CELL_ID}`, '--transitive-tag-keys', 'CellId',
+      ]);
+      expect(buildspec).not.toContain('TenantId');
+    }
+  });
+
+  test('a tenant build tags its session with CellId, TenantId and ApplicationId, all transitive, from the service variables (ADR-0051)', () => {
+    for (const name of ['RunTenantBuild', 'RunTenantBuildPinned']) {
+      const buildspec: string = tasks[name].Arguments.BuildspecOverride;
+      expect(assumeRoleArguments(buildspec, { ...ids, PROVISIONING_EXTERNAL_ID: '' })).toEqual([
+        '--tags',
+        `Key=CellId,Value=${ids.CELL_ID}`,
+        `Key=TenantId,Value=${ids.TENANT_ID}`,
+        `Key=ApplicationId,Value=${ids.APPLICATION_ID}`,
+        '--transitive-tag-keys', 'CellId', 'TenantId', 'ApplicationId',
+      ]);
+      // A value with a space stays one argument: the values are quoted.
+      expect(assumeRoleArguments(buildspec, { ...ids, TENANT_ID: 'a b', PROVISIONING_EXTERNAL_ID: '' })).toContain('Key=TenantId,Value=a b');
+      // The values come from the three service-resolved variables only, never a PARAM_ variable (R-32).
+      expect(buildspec).not.toMatch(/Value=\$PARAM_/);
+    }
+  });
+
+  test('the two halves\' buildspecs differ only in the session tag line, and the build env carries the tag variables', async () => {
+    const cell = (tasks.RunCellBuild.Arguments.BuildspecOverride as string).split('\n');
+    const tenant = (tasks.RunTenantBuild.Arguments.BuildspecOverride as string).split('\n');
+    expect(cell).toHaveLength(tenant.length);
+    expect(cell.filter((line, i) => line !== tenant[i]).map((l) => l.trim().split(' --tags')[0])).toEqual(['set -- "$@"']);
+    expect(await envOf(tasks.RunCellBuild)).toMatchObject({ CELL_ID: '$.cellId' });
+    expect(await envOf(tasks.RunTenantBuild)).toMatchObject({ CELL_ID: '$.cellId', TENANT_ID: '$.tenantId', APPLICATION_ID: '$.applicationId' });
   });
 
   test('the buildspec fails closed on empty credentials and hides the BUILD role credential source from the script (T29, M24)', () => {
@@ -879,7 +981,7 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
     return Template.fromStack(stack);
   }
 
-  test('installs the pair trusting the control plane account narrowed to the build roles, with the external id when given', () => {
+  test('installs the pair trusting the control plane account narrowed to the API role and the build roles, with the external id on both', () => {
     const template = synthAccountStack({ externalId: 'customer-handshake-1' });
     const roles = Object.values(template.findResources('AWS::IAM::Role')) as any[];
     expect(roles.map((r) => r.Properties.RoleName).sort()).toEqual([
@@ -887,21 +989,51 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
       'control-plane-tenant-provisioning',
     ]);
     for (const role of roles) {
-      const [statement] = role.Properties.AssumeRolePolicyDocument.Statement;
-      expect(JSON.stringify(statement.Principal.AWS)).toContain(`:${controlPlaneAccountId}:root`);
-      const principals = statement.Condition.ArnEquals['aws:PrincipalArn'] as string[];
-      expect(principals).toHaveLength(2);
-      expect(principals[0]).toContain(`:iam::${controlPlaneAccountId}:role/control-plane-`);
-      expect(principals[0]).toMatch(/-build$/);
-      expect(principals[1]).toBe(`arn:aws:iam::${controlPlaneAccountId}:role/control-plane-api`);
-      expect(statement.Condition.StringEquals).toEqual({ 'sts:ExternalId': 'customer-handshake-1' });
+      const kind = role.Properties.RoleName === 'control-plane-cell-provisioning' ? 'cell' : 'tenant';
+      const statements = role.Properties.AssumeRolePolicyDocument.Statement as any[];
+      expect(statements).toEqual([
+        {
+          Action: 'sts:AssumeRole',
+          Effect: 'Allow',
+          Principal: { AWS: { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:iam::${controlPlaneAccountId}:root`]] } },
+          Condition: {
+            ArnEquals: { 'aws:PrincipalArn': `arn:aws:iam::${controlPlaneAccountId}:role/control-plane-api` },
+            StringEquals: { 'sts:ExternalId': 'customer-handshake-1' },
+          },
+        },
+        {
+          Action: ['sts:AssumeRole', 'sts:TagSession'],
+          Effect: 'Allow',
+          Principal: { AWS: { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:iam::${controlPlaneAccountId}:root`]] } },
+          Condition: {
+            'ArnEquals': { 'aws:PrincipalArn': `arn:aws:iam::${controlPlaneAccountId}:role/control-plane-${kind}-build` },
+            'Null': kind === 'cell'
+              ? { 'aws:RequestTag/CellId': 'false', 'sts:TransitiveTagKeys': 'false' }
+              : {
+                'aws:RequestTag/CellId': 'false',
+                'aws:RequestTag/TenantId': 'false',
+                'aws:RequestTag/ApplicationId': 'false',
+                'sts:TransitiveTagKeys': 'false',
+              },
+            'ForAllValues:StringEquals': kind === 'cell'
+              ? { 'aws:TagKeys': ['CellId'], 'sts:TransitiveTagKeys': ['CellId'] }
+              : {
+                'aws:TagKeys': ['CellId', 'TenantId', 'ApplicationId'],
+                'sts:TransitiveTagKeys': ['CellId', 'TenantId', 'ApplicationId'],
+              },
+            'StringEquals': { 'sts:ExternalId': 'customer-handshake-1' },
+          },
+        },
+      ]);
     }
   });
 
   test('without an external id the trust has no sts:ExternalId condition', () => {
     const template = synthAccountStack();
     for (const role of Object.values(template.findResources('AWS::IAM::Role')) as any[]) {
-      expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals).toBeUndefined();
+      const statements = role.Properties.AssumeRolePolicyDocument.Statement as any[];
+      expect(statements).toHaveLength(2);
+      for (const statement of statements) expect(statement.Condition.StringEquals).toBeUndefined();
     }
   });
 
