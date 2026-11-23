@@ -51,10 +51,15 @@ interface AssumeRequest {
   readonly externalId?: string;
 }
 
-/** The request context value of a condition key, or undefined when the request does not carry it. */
-function contextValue(request: AssumeRequest, key: string): string[] | undefined {
+/**
+ * The request context value of a condition key for one action, or undefined
+ * when the request does not carry it. STS has no `sts:ExternalId` in the
+ * `sts:TagSession` context: a TagSession statement that required it refused
+ * every tagged request in the integration test.
+ */
+function contextValue(request: AssumeRequest, key: string, action: string): string[] | undefined {
   if (key === 'aws:PrincipalArn') return [request.principalArn];
-  if (key === 'sts:ExternalId') return request.externalId === undefined ? undefined : [request.externalId];
+  if (key === 'sts:ExternalId') return request.externalId === undefined || action === 'sts:TagSession' ? undefined : [request.externalId];
   const tagKeys = Object.keys(request.tags ?? {});
   if (key === 'aws:TagKeys') return tagKeys.length === 0 ? undefined : tagKeys;
   if (key === 'sts:TransitiveTagKeys') return (request.transitive ?? []).length === 0 ? undefined : request.transitive;
@@ -65,8 +70,8 @@ function contextValue(request: AssumeRequest, key: string): string[] | undefined
   throw new Error(`unmodelled condition key ${key}`);
 }
 
-function conditionHolds(operator: string, key: string, expected: string[], request: AssumeRequest): boolean {
-  const actual = contextValue(request, key);
+function conditionHolds(operator: string, key: string, expected: string[], request: AssumeRequest, action: string): boolean {
+  const actual = contextValue(request, key, action);
   switch (operator) {
     case 'Null': return (actual === undefined) === (expected[0] === 'true');
     case 'ArnEquals':
@@ -84,7 +89,7 @@ function trustAdmits(trust: any, request: AssumeRequest): boolean {
     list(st.Action).includes(action) &&
     render(st.Principal.AWS) === ROOT &&
     Object.entries(st.Condition ?? {}).every(([op, keys]) =>
-      Object.entries(keys as Record<string, unknown>).every(([key, value]) => conditionHolds(op, key, list(value), request)))));
+      Object.entries(keys as Record<string, unknown>).every(([key, value]) => conditionHolds(op, key, list(value), request, action)))));
 }
 
 /** The actions an AssumeRole request is authorised for: `sts:TagSession` too when it passes tags. */

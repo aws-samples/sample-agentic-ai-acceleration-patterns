@@ -45,12 +45,29 @@ export const SESSION_TAG_KEYS: Readonly<Record<ProvisioningRoleKind, readonly st
 };
 
 /**
- * The conditions on a build's `sts:AssumeRole` and `sts:TagSession` to its
- * half of the pair (ADR-0051), used by the pair's trust and by the build
- * role's own grant: every tag of {@link SESSION_TAG_KEYS} is present, some
- * key is transitive, and no other key is passed or made transitive. A
- * `ForAllValues` condition alone is true for a request with no tags, which
- * is why the `Null` conditions are there.
+ * The conditions on a build's `sts:AssumeRole` to its half of the pair
+ * (ADR-0051), in the pair's trust: every tag of {@link SESSION_TAG_KEYS} is
+ * present and no other key is passed. They make an untagged AssumeRole
+ * fail, because STS evaluates `sts:TagSession` only when a request carries
+ * tags. A `ForAllValues` condition alone is true for a request with no
+ * tags, which is why the `Null` conditions are there.
+ */
+export function sessionTagRequestConditions(kind: ProvisioningRoleKind): Record<string, Record<string, string | string[]>> {
+  const keys = [...SESSION_TAG_KEYS[kind]];
+  return {
+    'Null': Object.fromEntries(keys.map((key) => [`aws:RequestTag/${key}`, 'false'])),
+    'ForAllValues:StringEquals': { 'aws:TagKeys': keys },
+  };
+}
+
+/**
+ * The conditions on a build's `sts:TagSession` to its half of the pair
+ * (ADR-0051), used by the pair's trust and by the build role's own grant:
+ * every tag of {@link SESSION_TAG_KEYS} is present, some key is transitive,
+ * and no other key is passed or made transitive. The trust's TagSession
+ * statement carries no `sts:ExternalId` condition: STS evaluates that key
+ * on `sts:AssumeRole` only, and a TagSession statement that requires it
+ * refuses every tagged request (shown by the integration test).
  */
 export function sessionTagConditions(kind: ProvisioningRoleKind): Record<string, Record<string, string | string[]>> {
   const keys = [...SESSION_TAG_KEYS[kind]];

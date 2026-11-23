@@ -12,6 +12,7 @@ import {
   ProvisioningRoleKind,
   provisioningRoleName,
   sessionTagConditions,
+  sessionTagRequestConditions,
   validateExternalId,
   validateFleetName,
 } from '../shared/fleet';
@@ -101,11 +102,15 @@ export class CellAccountRoles extends Construct {
     const externalId = props.externalId === undefined ? undefined : validateExternalId(props.externalId);
     const partition = props.identity.partition;
 
-    // Each half trusts two control-plane roles in two statements: the API
+    // Each half trusts two control-plane roles in three statements: the API
     // role (the PutAccount handshake probe, ADR-027/028) may assume it with
-    // no session tags, and the matching build role (the scripts) only with
-    // exactly its session tags (ADR-0051), so a build session always names
-    // its cell, and its tenant and application on a tenant build.
+    // no session tags; the matching build role (the scripts) may assume it
+    // only with exactly its session tag keys, and tag the session only with
+    // those keys, all transitive (ADR-0051), so a build session always names
+    // its cell, and its tenant and application on a tenant build. The
+    // external id is a condition of the AssumeRole statements only: STS does
+    // not evaluate it on TagSession, where it would refuse every tagged
+    // request.
     const withExternalId = (conditions: Record<string, Record<string, string | string[]>>) =>
       externalId === undefined ? conditions : { ...conditions, StringEquals: { 'sts:ExternalId': externalId } };
     const apiTrust = new iam.PrincipalWithConditions(
@@ -113,14 +118,19 @@ export class CellAccountRoles extends Construct {
       withExternalId({ ArnEquals: { 'aws:PrincipalArn': apiRoleArn(partition, props.controlPlaneAccountId, this.fleetName) } }),
     );
     const trustBuildRole = (role: iam.Role, kind: ProvisioningRoleKind) => {
-      role.assumeRolePolicy!.addStatements(new iam.PolicyStatement({
-        actions: ['sts:AssumeRole', 'sts:TagSession'],
-        principals: [new iam.AccountPrincipal(props.controlPlaneAccountId)],
-        conditions: withExternalId({
-          ArnEquals: { 'aws:PrincipalArn': buildRoleArn(partition, props.controlPlaneAccountId, this.fleetName, kind) },
-          ...sessionTagConditions(kind),
+      const buildRole = { 'aws:PrincipalArn': buildRoleArn(partition, props.controlPlaneAccountId, this.fleetName, kind) };
+      role.assumeRolePolicy!.addStatements(
+        new iam.PolicyStatement({
+          actions: ['sts:AssumeRole'],
+          principals: [new iam.AccountPrincipal(props.controlPlaneAccountId)],
+          conditions: withExternalId({ ArnEquals: buildRole, ...sessionTagRequestConditions(kind) }),
         }),
-      }));
+        new iam.PolicyStatement({
+          actions: ['sts:TagSession'],
+          principals: [new iam.AccountPrincipal(props.controlPlaneAccountId)],
+          conditions: { ArnEquals: buildRole, ...sessionTagConditions(kind) },
+        }),
+      );
     };
 
     this.cellRole = new iam.Role(this, 'CellProvisioningRole', {

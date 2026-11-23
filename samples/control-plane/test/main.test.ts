@@ -6,7 +6,7 @@ import { App, Environment, Token } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { buildEnvironment, evaluateJsonata } from './workflow-jsonata';
 import { CellAccountStack, CellAccountStackProps } from '../src/cell-account/cell-account.cdk';
-import { sessionTagConditions } from '../src/shared/fleet';
+import { sessionTagConditions, sessionTagRequestConditions } from '../src/shared/fleet';
 import { isFullCommitSha, sourcePinningWarning } from '../src/shared/service-config';
 import {
   TenantStack,
@@ -690,9 +690,9 @@ describe('build roles and the home account role pair (ADR-025)', () => {
   test('the home pair trusts the API role untagged and the matching build role only with its session tags (aws:PrincipalArn, ADR-0051)', () => {
     for (const kind of ['cell', 'tenant'] as const) {
       const role = byName(`control-plane-${kind}-provisioning`);
-      const [api, build, ...rest] = role.Properties.AssumeRolePolicyDocument.Statement;
+      const [api, assume, tag, ...rest] = role.Properties.AssumeRolePolicyDocument.Statement;
       expect(rest).toEqual([]);
-      for (const statement of [api, build]) {
+      for (const statement of [api, assume, tag]) {
         expect(JSON.stringify(statement.Principal.AWS)).toContain(':root');
         // No external id on the home account unless asked for.
         expect(statement.Condition.StringEquals).toBeUndefined();
@@ -700,14 +700,19 @@ describe('build roles and the home account role pair (ADR-025)', () => {
       expect(api.Action).toBe('sts:AssumeRole');
       expect(Object.keys(api.Condition)).toEqual(['ArnEquals']);
       expect(JSON.stringify(api.Condition.ArnEquals['aws:PrincipalArn'])).toContain(':role/control-plane-api');
-      expect(build.Action).toEqual(['sts:AssumeRole', 'sts:TagSession']);
-      const principals = JSON.stringify(build.Condition.ArnEquals['aws:PrincipalArn']);
-      expect(principals).toContain(`:role/control-plane-${kind}-build`);
-      // Never the other half's build role, nor the API role.
-      expect(principals).not.toContain(`:role/control-plane-${kind === 'cell' ? 'tenant' : 'cell'}-build`);
-      expect(principals).not.toContain('-api');
-      expect(build.Condition.Null).toEqual(sessionTagConditions(kind).Null);
-      expect(build.Condition['ForAllValues:StringEquals']).toEqual(sessionTagConditions(kind)['ForAllValues:StringEquals']);
+      expect(assume.Action).toBe('sts:AssumeRole');
+      expect(tag.Action).toBe('sts:TagSession');
+      for (const build of [assume, tag]) {
+        const principals = JSON.stringify(build.Condition.ArnEquals['aws:PrincipalArn']);
+        expect(principals).toContain(`:role/control-plane-${kind}-build`);
+        // Never the other half's build role, nor the API role.
+        expect(principals).not.toContain(`:role/control-plane-${kind === 'cell' ? 'tenant' : 'cell'}-build`);
+        expect(principals).not.toContain('-api');
+      }
+      expect(assume.Condition.Null).toEqual(sessionTagRequestConditions(kind).Null);
+      expect(assume.Condition['ForAllValues:StringEquals']).toEqual(sessionTagRequestConditions(kind)['ForAllValues:StringEquals']);
+      expect(tag.Condition.Null).toEqual(sessionTagConditions(kind).Null);
+      expect(tag.Condition['ForAllValues:StringEquals']).toEqual(sessionTagConditions(kind)['ForAllValues:StringEquals']);
     }
   });
 
@@ -1002,7 +1007,27 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
           },
         },
         {
-          Action: ['sts:AssumeRole', 'sts:TagSession'],
+          Action: 'sts:AssumeRole',
+          Effect: 'Allow',
+          Principal: { AWS: { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:iam::${controlPlaneAccountId}:root`]] } },
+          Condition: {
+            'ArnEquals': { 'aws:PrincipalArn': `arn:aws:iam::${controlPlaneAccountId}:role/control-plane-${kind}-build` },
+            'Null': kind === 'cell'
+              ? { 'aws:RequestTag/CellId': 'false' }
+              : {
+                'aws:RequestTag/CellId': 'false',
+                'aws:RequestTag/TenantId': 'false',
+                'aws:RequestTag/ApplicationId': 'false',
+              },
+            'ForAllValues:StringEquals': kind === 'cell'
+              ? { 'aws:TagKeys': ['CellId'] }
+              : { 'aws:TagKeys': ['CellId', 'TenantId', 'ApplicationId'] },
+            'StringEquals': { 'sts:ExternalId': 'customer-handshake-1' },
+          },
+        },
+        {
+          // No external id here: STS evaluates it on AssumeRole only (ADR-0051).
+          Action: 'sts:TagSession',
           Effect: 'Allow',
           Principal: { AWS: { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:iam::${controlPlaneAccountId}:root`]] } },
           Condition: {
@@ -1021,7 +1046,6 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
                 'aws:TagKeys': ['CellId', 'TenantId', 'ApplicationId'],
                 'sts:TransitiveTagKeys': ['CellId', 'TenantId', 'ApplicationId'],
               },
-            'StringEquals': { 'sts:ExternalId': 'customer-handshake-1' },
           },
         },
       ]);
@@ -1032,7 +1056,7 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
     const template = synthAccountStack();
     for (const role of Object.values(template.findResources('AWS::IAM::Role')) as any[]) {
       const statements = role.Properties.AssumeRolePolicyDocument.Statement as any[];
-      expect(statements).toHaveLength(2);
+      expect(statements).toHaveLength(3);
       for (const statement of statements) expect(statement.Condition.StringEquals).toBeUndefined();
     }
   });

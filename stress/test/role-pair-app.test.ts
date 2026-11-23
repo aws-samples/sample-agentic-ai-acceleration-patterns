@@ -81,7 +81,17 @@ function synth(): any {
         Condition: { ArnEquals: { 'aws:PrincipalArn': `arn:aws:iam::${CP}:role/${FLEET}-api` } },
       },
       {
-        Action: ['sts:AssumeRole', 'sts:TagSession'],
+        Action: 'sts:AssumeRole',
+        Effect: 'Allow',
+        Principal: principal,
+        Condition: {
+          'ArnEquals': { 'aws:PrincipalArn': `arn:aws:iam::${CP}:role/${FLEET}-${kind}-build` },
+          'Null': Object.fromEntries(keys.map((k) => [`aws:RequestTag/${k}`, 'false'])),
+          'ForAllValues:StringEquals': { 'aws:TagKeys': keys },
+        },
+      },
+      {
+        Action: 'sts:TagSession',
         Effect: 'Allow',
         Principal: principal,
         Condition: {

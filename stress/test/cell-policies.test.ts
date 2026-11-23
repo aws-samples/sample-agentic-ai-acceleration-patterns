@@ -286,7 +286,7 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
         {
           Sid: 'AssumeCellBootstrapRoles',
           Effect: 'Allow',
-          Action: 'sts:AssumeRole',
+          Action: ['sts:AssumeRole', 'sts:TagSession'],
           Resource: ['deploy', 'file-publishing', 'image-publishing'].map(
             (r) => `arn:<AWS::Partition>:iam::<AWS::AccountId>:role/cdk-${CELL_QUALIFIER}-${r}-role-<AWS::AccountId>-<AWS::Region>`,
           ),

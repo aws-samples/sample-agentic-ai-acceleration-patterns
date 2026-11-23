@@ -13,6 +13,7 @@
     "eject": "projen eject",
     "eslint": "projen eslint",
     "integ": "projen integ",
+    "integ:session-tags": "projen integ:session-tags",
     "package": "projen package",
     "post-compile": "projen post-compile",
     "post-upgrade": "projen post-upgrade",

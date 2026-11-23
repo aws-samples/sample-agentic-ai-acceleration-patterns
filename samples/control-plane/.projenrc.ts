@@ -101,4 +101,13 @@ const integ = project.addTask('integ', {
 });
 integ.exec('bash test/integ-scripts/run-integ.sh');
 
+// Session tag integration test (test/integ.session-tags.ts, ADR-0051): a
+// small fleet of its own, same accounts, guards and leftover check; it starts
+// builds in the stack's provisioning projects and calls no API operation.
+const integSessionTags = project.addTask('integ:session-tags', {
+  description:
+    'Run the session tag integration test in $AWS_REGION across the current AWS account and $CP_INTEG_ACCOUNT_B (~30 min)',
+});
+integSessionTags.exec('bash test/integ-scripts/run-integ.sh integ.session-tags.ts');
+
 project.synth();

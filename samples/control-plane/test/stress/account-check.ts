@@ -17,7 +17,7 @@
  * `iam:GetRolePolicy`, and this decides.
  */
 
-import { sessionTagConditions } from '../../src/shared/fleet';
+import { sessionTagConditions, sessionTagRequestConditions } from '../../src/shared/fleet';
 
 export const CELL_TOOLKIT_STACK = 'CDKToolkit-cell';
 export const ACCOUNT_BASE_TAG = { key: 'stress:part', value: 'account-base' } as const;
@@ -86,29 +86,31 @@ function trustStatementShape(st: Record<string, unknown>): string | undefined {
 
 /**
  * Problems with a role pair half's trust policy: it must be what control-plane's
- * `CellAccountStack` writes (and `stress/test/role-pair-app.test.ts` pins), exactly two
+ * `CellAccountStack` writes (and `stress/test/role-pair-app.test.ts` pins), exactly three
  * statements to the platform account's root. One allows `sts:AssumeRole` to the fleet's
- * `<fleet>-api` role (`ArnEquals aws:PrincipalArn`), with no other condition. The other
- * allows `sts:AssumeRole` and `sts:TagSession` to the fleet's `<fleet>-<kind>-build` role,
- * only with the half's session tags (control-plane ADR-0051, `sessionTagConditions`). A
- * vendor-owned cell account carries no external id (control-plane ADR-0029).
+ * `<fleet>-api` role (`ArnEquals aws:PrincipalArn`), with no other condition. One allows
+ * `sts:AssumeRole` to the fleet's `<fleet>-<kind>-build` role only with the half's tag keys
+ * (`sessionTagRequestConditions`), and one `sts:TagSession` to the same role only with the
+ * half's transitive tags (`sessionTagConditions`, control-plane ADR-0051). A vendor-owned
+ * cell account carries no external id (control-plane ADR-0029).
  */
 export function pairTrustProblems(half: 'cell' | 'tenant', role: RoleState, s: AccountState, input: CheckInput): string[] {
   const arn = (name: string) => `arn:${s.partition}:iam::${input.platformAccountId}:role/${name}`;
   const statements = asList((role.trust as { Statement?: unknown } | null)?.Statement) as Record<string, unknown>[];
   const wrong = `role pair ${half} role ${role.name} has a trust policy other than its stack's`;
-  if (statements.length !== 2) return [wrong];
+  if (statements.length !== 3) return [wrong];
   // IAM may return the principal as the account's root ARN or the bare account id.
   const roots = [`arn:${s.partition}:iam::${input.platformAccountId}:root`, input.platformAccountId];
   const expected = (actions: string[], conditions: Record<string, Record<string, string | string[]>>) =>
     roots.map((root) => trustStatementShape({ Effect: 'Allow', Principal: { AWS: root }, Action: actions, Condition: conditions }));
-  const api = expected(['sts:AssumeRole'], { ArnEquals: { 'aws:PrincipalArn': arn(`${input.fleet}-api`) } });
-  const build = expected(['sts:AssumeRole', 'sts:TagSession'], {
-    ArnEquals: { 'aws:PrincipalArn': arn(`${input.fleet}-${half}-build`) },
-    ...sessionTagConditions(half),
-  });
+  const buildRole = { 'aws:PrincipalArn': arn(`${input.fleet}-${half}-build`) };
+  const wanted = [
+    expected(['sts:AssumeRole'], { ArnEquals: { 'aws:PrincipalArn': arn(`${input.fleet}-api`) } }),
+    expected(['sts:AssumeRole'], { ArnEquals: buildRole, ...sessionTagRequestConditions(half) }),
+    expected(['sts:TagSession'], { ArnEquals: buildRole, ...sessionTagConditions(half) }),
+  ];
   const shapes = statements.map((st) => trustStatementShape(st ?? {}));
-  const ok = shapes.some((x) => api.includes(x)) && shapes.some((x) => build.includes(x));
+  const ok = wanted.every((shape) => shapes.some((x) => shape.includes(x)));
   return ok ? [] : [wrong];
 }
 

@@ -368,12 +368,15 @@ export function cellBuildBootstrapRoleArns(): string[] {
 }
 
 /**
- * The cell build policy (control-plane ADR-0047): `sts:AssumeRole` on the deploy,
- * file-publishing and image-publishing cell bootstrap roles, and nothing else.
+ * The cell build policy (control-plane ADR-0047): `sts:AssumeRole` and `sts:TagSession`
+ * on the deploy, file-publishing and image-publishing cell bootstrap roles, and nothing else.
  */
 export function cellBuildPolicyDocument(): iam.PolicyDocument {
   return new iam.PolicyDocument({
-    statements: [new iam.PolicyStatement({ sid: 'AssumeCellBootstrapRoles', actions: ['sts:AssumeRole'], resources: cellBuildBootstrapRoleArns() })],
+    // sts:TagSession: the cell build's session carries the transitive CellId tag
+    // (control-plane ADR-0051), and a chained AssumeRole that inherits it needs
+    // TagSession on the caller too (shown by control-plane's session tag integ test).
+    statements: [new iam.PolicyStatement({ sid: 'AssumeCellBootstrapRoles', actions: ['sts:AssumeRole', 'sts:TagSession'], resources: cellBuildBootstrapRoleArns() })],
   });
 }
 

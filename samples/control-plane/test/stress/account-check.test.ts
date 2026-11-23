@@ -24,9 +24,11 @@ const role = (name: string, path: string, principal: unknown = { Service: 'lambd
 /** The session tag keys each half's build passes (control-plane ADR-0051), written out so the test does not read them from the code it checks. */
 const TAG_KEYS = { cell: ['CellId'], tenant: ['CellId', 'TenantId', 'ApplicationId'] } as const;
 
-/** The trust control-plane's CellAccountStack writes, as IAM returns it: the API statement, then the build statement. */
+/** The trust control-plane's CellAccountStack writes, as IAM returns it: the API statement, then the build's AssumeRole and TagSession statements. */
 function pairTrust(half: 'cell' | 'tenant'): any {
   const keys = [...TAG_KEYS[half]];
+  const required = Object.fromEntries(keys.map((k) => [`aws:RequestTag/${k}`, 'false']));
+  const buildRole = { 'aws:PrincipalArn': `arn:aws:iam::${OTHER}:role/${FLEET}-${half}-build` };
   return {
     Version: '2012-10-17',
     Statement: [
@@ -39,10 +41,20 @@ function pairTrust(half: 'cell' | 'tenant'): any {
       {
         Effect: 'Allow',
         Principal: { AWS: `arn:aws:iam::${OTHER}:root` },
-        Action: ['sts:AssumeRole', 'sts:TagSession'],
+        Action: 'sts:AssumeRole',
         Condition: {
-          'ArnEquals': { 'aws:PrincipalArn': `arn:aws:iam::${OTHER}:role/${FLEET}-${half}-build` },
-          'Null': { ...Object.fromEntries(keys.map((k) => [`aws:RequestTag/${k}`, 'false'])), 'sts:TransitiveTagKeys': 'false' },
+          'ArnEquals': buildRole,
+          'Null': required,
+          'ForAllValues:StringEquals': { 'aws:TagKeys': keys },
+        },
+      },
+      {
+        Effect: 'Allow',
+        Principal: { AWS: `arn:aws:iam::${OTHER}:root` },
+        Action: 'sts:TagSession',
+        Condition: {
+          'ArnEquals': buildRole,
+          'Null': { ...required, 'sts:TransitiveTagKeys': 'false' },
           'ForAllValues:StringEquals': { 'aws:TagKeys': keys, 'sts:TransitiveTagKeys': keys },
         },
       },
@@ -188,30 +200,37 @@ describe('the cell account check (spec §3.7)', () => {
     const s = healthy();
     const wrong = `role pair cell role ${FLEET}-cell-provisioning has a trust policy other than its stack's`;
     const base = pairTrust('cell');
-    const [api, build] = base.Statement;
+    const [api, assume, tag] = base.Statement;
     const variants: any[] = [
       // The API statement.
-      { ...base, Statement: [{ ...api, Principal: { AWS: 'arn:aws:iam::333333333333:root' } }, build] },
-      { ...base, Statement: [{ ...api, Principal: { AWS: '*' } }, build] },
-      { ...base, Statement: [{ ...api, Principal: { AWS: api.Principal.AWS, Service: 'ec2.amazonaws.com' } }, build] },
-      { ...base, Statement: [{ ...api, Condition: { ArnEquals: { 'aws:PrincipalArn': [api.Condition.ArnEquals['aws:PrincipalArn'], `arn:aws:iam::${OTHER}:role/admin`] } } }, build] },
-      { ...base, Statement: [{ ...api, Condition: { ArnLike: { 'aws:PrincipalArn': `arn:aws:iam::${OTHER}:role/*` } } }, build] },
-      { ...base, Statement: [{ ...api, Condition: undefined }, build] },
+      { ...base, Statement: [{ ...api, Principal: { AWS: 'arn:aws:iam::333333333333:root' } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Principal: { AWS: '*' } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Principal: { AWS: api.Principal.AWS, Service: 'ec2.amazonaws.com' } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Condition: { ArnEquals: { 'aws:PrincipalArn': [api.Condition.ArnEquals['aws:PrincipalArn'], `arn:aws:iam::${OTHER}:role/admin`] } } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Condition: { ArnLike: { 'aws:PrincipalArn': `arn:aws:iam::${OTHER}:role/*` } } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Condition: undefined }, assume, tag] },
       // The API role may not pass tags (ADR-0051).
-      { ...base, Statement: [{ ...api, Action: ['sts:AssumeRole', 'sts:TagSession'] }, build] },
-      { ...base, Statement: [{ ...api, Condition: { ...api.Condition, StringEquals: { 'sts:ExternalId': 'x' } } }, build] },
-      // The build statement: untagged, extra keys, no transitive keys, the API role's trust.
-      { ...base, Statement: [api, { ...build, Action: 'sts:AssumeRole', Condition: { ArnEquals: build.Condition.ArnEquals } }] },
-      { ...base, Statement: [api, { ...build, Condition: { ...build.Condition, Null: undefined } }] },
-      { ...base, Statement: [api, { ...build, Condition: { ...build.Condition, 'ForAllValues:StringEquals': undefined } }] },
-      { ...base, Statement: [api, { ...build, Condition: { ...build.Condition, 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId', 'TenantId'], 'sts:TransitiveTagKeys': ['CellId'] } } }] },
-      { ...base, Statement: [api, { ...build, Condition: { ...build.Condition, Null: { 'aws:RequestTag/CellId': 'false' } } }] },
-      { ...base, Statement: [api, { ...build, Action: ['sts:AssumeRole', 'sts:TagSession', 'sts:SetSourceIdentity'] }] },
-      // Either statement alone, or a third one.
+      { ...base, Statement: [{ ...api, Action: ['sts:AssumeRole', 'sts:TagSession'] }, assume, tag] },
+      { ...base, Statement: [{ ...api, Condition: { ...api.Condition, StringEquals: { 'sts:ExternalId': 'x' } } }, assume, tag] },
+      // The build AssumeRole statement: untagged, no key list, an extra key, TagSession folded in.
+      { ...base, Statement: [api, { ...assume, Condition: { ArnEquals: assume.Condition.ArnEquals } }, tag] },
+      { ...base, Statement: [api, { ...assume, Condition: { ...assume.Condition, Null: undefined } }, tag] },
+      { ...base, Statement: [api, { ...assume, Condition: { ...assume.Condition, 'ForAllValues:StringEquals': undefined } }, tag] },
+      { ...base, Statement: [api, { ...assume, Condition: { ...assume.Condition, 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId', 'TenantId'] } } }, tag] },
+      { ...base, Statement: [api, { ...assume, Action: ['sts:AssumeRole', 'sts:TagSession'] }, tag] },
+      // The build TagSession statement: no transitive keys, an extra key, an extra action, the external id.
+      { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, Null: { 'aws:RequestTag/CellId': 'false' } } }] },
+      { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, 'ForAllValues:StringEquals': undefined } }] },
+      { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId', 'TenantId'], 'sts:TransitiveTagKeys': ['CellId'] } } }] },
+      { ...base, Statement: [api, assume, { ...tag, Action: ['sts:TagSession', 'sts:SetSourceIdentity'] }] },
+      { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, StringEquals: { 'sts:ExternalId': 'x' } } }] },
+      // A statement missing, or a fourth one.
       { ...base, Statement: [api] },
-      { ...base, Statement: [build] },
-      { ...base, Statement: [api, build, { Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::333333333333:root' }, Action: 'sts:AssumeRole' }] },
-      { ...base, Statement: [api, api] },
+      { ...base, Statement: [api, assume] },
+      { ...base, Statement: [api, tag] },
+      { ...base, Statement: [assume, tag] },
+      { ...base, Statement: [api, assume, tag, { Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::333333333333:root' }, Action: 'sts:AssumeRole' }] },
+      { ...base, Statement: [api, api, tag] },
     ];
     for (const t of variants) {
       expect(check({ ...s, pair: { ...s.pair, cell: { ...s.pair.cell!, trust: t } } })).toEqual([wrong]);
@@ -220,7 +239,7 @@ describe('the cell account check (spec §3.7)', () => {
     const swapped = { ...s.pair.tenant!, trust: pairTrust('cell') };
     expect(check({ ...s, pair: { ...s.pair, tenant: swapped } })).toEqual([`role pair tenant role ${FLEET}-tenant-provisioning has a trust policy other than its stack's`]);
     // IAM may return the principal as the bare account id, single values as lists, and statements in any order.
-    const bare = { ...base, Statement: [{ ...build, Principal: { AWS: OTHER } }, { ...api, Principal: { AWS: OTHER }, Action: ['sts:AssumeRole'] }] };
+    const bare = { ...base, Statement: [{ ...tag, Principal: { AWS: OTHER } }, { ...assume, Principal: { AWS: OTHER } }, { ...api, Principal: { AWS: OTHER }, Action: ['sts:AssumeRole'] }] };
     expect(check({ ...s, pair: { ...s.pair, cell: { ...s.pair.cell!, trust: bare } } })).toEqual([]);
   });
 

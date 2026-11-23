@@ -4,11 +4,19 @@
 # The `integ` projen task: guards, a per-run id, integ-runner, and a leftover
 # check of this run's fleet (integration-test.md). Run from the package root.
 #
+# Argument: the test file, integ.tenant.ts (default) or integ.session-tags.ts.
+#
 # Environment: AWS_REGION (required), CP_INTEG_ACCOUNT_B (required),
 # CP_INTEG_RUN_ID (optional: [a-z0-9]{1,23}, without aws, amazon or cognito;
 # generated when unset; two runs must not share one), CDK_DEFAULT_ACCOUNT
 # (resolved with sts get-caller-identity when unset).
 set -uo pipefail
+
+TEST="${1:-integ.tenant.ts}"
+case "$TEST" in
+  integ.tenant.ts | integ.session-tags.ts) ;;
+  *) echo "Unknown test file $TEST: use integ.tenant.ts or integ.session-tags.ts"; exit 1 ;;
+esac
 
 [ -n "${AWS_REGION:-}" ] || { echo "Set AWS_REGION to the single Region to test in (e.g. export AWS_REGION=eu-central-1)"; exit 1; }
 [ -n "${CP_INTEG_ACCOUNT_B:-}" ] || { echo "Set CP_INTEG_ACCOUNT_B to the second (tenant-owned) test account id; it must be CDK-bootstrapped to trust this account (integration-test.md)"; exit 1; }
@@ -43,7 +51,7 @@ fi
 # is not set for it; the test needs the current account id at synth time (it is
 # account A of the two-account scenario).
 export CDK_DEFAULT_ACCOUNT="${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}"
-AWS_DEFAULT_REGION="$AWS_REGION" integ-runner --language typescript --parallel-regions "$AWS_REGION" --update-on-failed --force integ.tenant.ts
+AWS_DEFAULT_REGION="$AWS_REGION" integ-runner --language typescript --parallel-regions "$AWS_REGION" --update-on-failed --force "$TEST"
 status=$?
 
 # After the runner (it destroys the stacks, pass or fail): what of this run's
