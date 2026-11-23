@@ -12,7 +12,8 @@
 #   slice.sh seed                   the tier's tenants and users, from the manifest when it exists
 #   slice.sh run <scenario>         PS-1, token-rate or create-tenant-burst
 #   slice.sh collect                late fields of this run's records, from API Gateway metrics
-#   slice.sh teardown [--fixtures]  delete the run's tenants; with --fixtures also the stack
+#   slice.sh teardown [--fixtures]  delete the run's tenants; with --fixtures also the stack and
+#                                   both manifests
 #
 # The stack is `${STRESS_PREFIX}-identity`, a `shared-pool` deployment with its
 # own user pool that publishes none of the fixed-name shared parameters
@@ -130,7 +131,7 @@ case "$verb" in
     driver publish
     # The published identity (ids only, no secret) as a manifest, for the slices that read it
     # in platform mode: stress/README.md, "Platform mode: manifests".
-    (umask 077 && aws ssm get-parameter --name "/${STRESS_PREFIX}/identity" --query Parameter.Value --output text >"${RUN_HOME}/identity.json")
+    bash "${here}/identity-manifest.sh" write
     ;;
 
   seed)
@@ -194,7 +195,8 @@ case "$verb" in
         status=1
       else
         if driver unpublish; then
-          rm -f "${RUN_HOME}/tenant-identity.json" "${RUN_HOME}/identity.json"
+          rm -f "${RUN_HOME}/tenant-identity.json"
+          bash "${here}/identity-manifest.sh" remove
         else
           status=1
         fi

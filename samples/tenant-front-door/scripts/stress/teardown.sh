@@ -6,14 +6,12 @@
 # checks that nothing it owned is left.
 #
 # Slice mode, in order (the order matters):
-#   1. the front door's two global hooks on the control plane, when the run has
-#      one (STRESS_CONTROL_PLANE_URL and CONTROL_PLANE_TOKEN set): a control
-#      plane whose hooks still point at a destroyed registrar fails every cell
-#      and deployment delete. A slice-mode run registers no hook, and says so;
-#   2. the run's tenants in tenant-identity and their namespace parameters, and
+#   1. the run's tenants in tenant-identity and their namespace parameters, and
 #      their routes while the registrar exists;
-#   3. the stacks, last deployed first: cell, edge logging, main, edge,
+#   2. the stacks, last deployed first: cell, edge logging, main, edge,
 #      stand-in control plane, support.
+# A slice-mode run registers no global hook on any control plane, so this
+# script unregisters none.
 # Each stack's destroy time is printed. The tenants stay only at a tier whose
 # onboarding is a fixture (`large`) and only without `--fixtures`; the stacks
 # always go, they are not fixtures.
@@ -64,6 +62,9 @@ status=0
 TEARDOWN_START_MS="$(( $(date +%s) * 1000 ))"
 account="$(aws sts get-caller-identity --query Account --output text)"
 echo "teardown: account ${account}, ${AWS_REGION}, prefix ${PREFIX}${mode_note}"
+# The host's record of the prefix names the account and Region it was made in. Another account's or Region's stacks of the same names are not this run's.
+check_record "$CONTEXT" "$account"
+check_record "$OUTPUTS" "$account"
 
 driver() { (cd "$SAMPLE_DIR" && node_modules/.bin/ts-node -T -P test/tsconfig.json --prefer-ts-exts test/stress/driver.ts "$@"); }
 
@@ -83,21 +84,12 @@ if (( platform )) && stack_exists "$STACK_HOOK"; then
   else
     echo "teardown: could not read RouteHookPolicyArn of ${STACK_HOOK}; its deletion will say whether the policy is still attached" >&2
   fi
-fi
-
-# 1. The global hooks, before anything they call goes.
-if (( platform )); then
   echo "teardown: platform mode: the control-plane step unhook has unregistered the front door's global hooks; the hook policy was checked above"
-elif [[ -n "${STRESS_CONTROL_PLANE_URL:-}" && -n "${CONTROL_PLANE_TOKEN:-}" ]]; then
-  echo "teardown: unregistering the front door's global hooks on the control plane"
-  CONTROL_PLANE_URL="$STRESS_CONTROL_PLANE_URL" "${SAMPLE_DIR}/scripts/register-hooks.sh" --delete || status=1
-else
-  echo "teardown: no control plane in this run (slice mode: a stand-in control plane, no hooks): no global hooks to unregister"
 fi
 
-# 2. Tenants, parameters, routes. At `large` the seeded tenants stay unless --fixtures (stress ADR-0004).
-onboarding=every-run
-[[ -z "${STRESS_TIER_JSON:-}" ]] || onboarding="$(jq -er .onboarding <<<"$STRESS_TIER_JSON")"
+# 1. Tenants, parameters, routes. At `large` the seeded tenants stay unless --fixtures (stress ADR-0004).
+: "${STRESS_TIER_JSON:?teardown.sh: STRESS_TIER_JSON is not set (slice.sh sets it)}"
+onboarding="$(jq -er .onboarding <<<"$STRESS_TIER_JSON")"
 if (( platform )); then
   echo "teardown: platform mode: the tenants belong to the control-plane and tenant-identity slices; none to remove here"
 elif [[ "$fixtures" -eq 1 || "$onboarding" == every-run ]]; then
@@ -126,7 +118,7 @@ kind_of() {
   esac
 }
 
-# 3. What the stacks own, read before they go: the ids are the only way back. A rerun adds to what an earlier run read.
+# 2. What the stacks own, read before they go: the ids are the only way back. A rerun adds to what an earlier run read.
 found="${LOGS}/resources.jsonl"
 : >"$found"
 for s in "${STACKS[@]}"; do
@@ -188,7 +180,7 @@ delete_hook_parameter() {
   fi
 }
 
-[[ -s "$CONTEXT" ]] || { echo "teardown: no ${CONTEXT}: deploy stopped before it created a stack"; exit "$status"; }
+[[ -s "$CONTEXT" ]] || { echo "teardown: no ${CONTEXT}: this host has no stack of the prefix to destroy (deploy stopped before it created one, or an earlier teardown finished clean)"; exit "$status"; }
 total_start=$SECONDS
 for s in "${STACKS[@]}"; do
   destroy_stack "$s"
@@ -199,23 +191,38 @@ for s in "${STACKS[@]}"; do
 done
 echo "teardown: stacks destroyed in $((SECONDS - total_start)) s"
 
-# 4. Nothing left.
+# 3. Nothing left.
 for s in "${STACKS[@]}"; do
   if stack_exists "$s"; then echo "teardown: stack ${s} is still there" >&2; status=1; fi
 done
-# param_gone NAME: fails the check when the parameter is still there or AWS did not say.
-param_gone() {
-  local err
-  if err="$(aws ssm get-parameter --region "$AWS_REGION" --name "$1" 2>&1 >/dev/null)"; then
-    echo "teardown: ${1} is still there; remove it with: aws ssm delete-parameter --name ${1} --region ${AWS_REGION}" >&2
+if held="$(aws ssm get-parameter --name "$PARAM_EDGE" --query Parameter.Value --output text 2>"${LOGS}/edge-parameter.err")"; then
+  # The name is fixed per account and Region: a front door another person deployed since holds it under its own distribution.
+  mine="$(jq -r '.distributionArn // empty' "$CONTEXT" 2>/dev/null || true)"
+  theirs="$(jq -r '.distributionArn // empty' <<<"$held" 2>/dev/null || true)"
+  if [[ -n "$mine" && "$mine" == "$theirs" ]]; then
+    echo "teardown: ${PARAM_EDGE} is still there; remove it with: aws ssm delete-parameter --name ${PARAM_EDGE} --region ${AWS_REGION}" >&2
     status=1
-  elif ! grep -q 'ParameterNotFound' <<<"$err"; then
-    echo "teardown: could not tell whether ${1} is gone" >&2
+  elif [[ -n "$theirs" ]]; then
+    # The main stack owns the parameter and its destroy removes it, so a parameter of another distribution (or one this run never recorded) is not this run's.
+    echo "teardown: ${PARAM_EDGE} is held by a front door this run did not deploy (${theirs##*/}); it is left as it is"
+  else
+    echo "teardown: could not tell whose ${PARAM_EDGE} is" >&2
     status=1
   fi
-}
-param_gone "$PARAM_EDGE"
-if [[ -n "$HOOK_PARAM" ]]; then param_gone "$HOOK_PARAM"; fi
+elif ! grep -q 'ParameterNotFound' "${LOGS}/edge-parameter.err"; then
+  echo "teardown: could not tell whether ${PARAM_EDGE} is gone" >&2
+  status=1
+fi
+# The hook parameter (platform mode only): the stack retains it, so it is checked on its own.
+if [[ -n "$HOOK_PARAM" ]]; then
+  if err="$(aws ssm get-parameter --region "$AWS_REGION" --name "$HOOK_PARAM" 2>&1 >/dev/null)"; then
+    echo "teardown: ${HOOK_PARAM} is still there; remove it with: aws ssm delete-parameter --name ${HOOK_PARAM} --region ${AWS_REGION}" >&2
+    status=1
+  elif ! grep -q 'ParameterNotFound' <<<"$err"; then
+    echo "teardown: could not tell whether ${HOOK_PARAM} is gone" >&2
+    status=1
+  fi
+fi
 
 # log_group_created GROUP REGION -> the group's creation time in epoch milliseconds, `none` when it is not there; fails when AWS does not answer.
 log_group_created() {
@@ -227,7 +234,7 @@ log_group_created() {
 # exists TYPE ID REGION: 0 when the resource is still there, 1 when it is gone, 2 when the type is one this
 # script does not read, 3 when AWS did not say (a throttle, a denial): the check cannot tell.
 exists() {
-  local type="$1" id="$2" region="$3" err created
+  local type="$1" id="$2" region="$3" err created found
   case "$type" in
     AWS::Lambda::Function)
       err="$(aws lambda get-function --region "$region" --function-name "$id" 2>&1 >/dev/null)" && return 0
@@ -258,8 +265,12 @@ exists() {
       err="$(aws cloudfront describe-function --name "${id##*/}" 2>&1 >/dev/null)" && return 0
       grep -q 'NoSuchFunctionExists' <<<"$err" && return 1 ;;
     AWS::CloudFront::KeyValueStore)
-      err="$(aws cloudfront describe-key-value-store --name "$id" 2>&1 >/dev/null)" && return 0
-      grep -q 'EntityNotFound\|NoSuchResource' <<<"$err" && return 1 ;;
+      err="$(aws cloudfront describe-key-value-store --name "${id##*/}" 2>&1 >/dev/null)" && return 0
+      if grep -q 'EntityNotFound\|NoSuchResource' <<<"$err"; then
+        # CloudFormation's physical id may be the store's Id or ARN, not its name: look for the store in the list before it counts as gone.
+        found="$(aws cloudfront list-key-value-stores --query "KeyValueStoreList.Items[?Id=='${id##*/}' || ARN=='${id}'].Name" --output text 2>/dev/null)" || return 3
+        [[ -z "$found" || "$found" == None ]] && return 1 || return 0
+      fi ;;
     AWS::SSM::Parameter)
       err="$(aws ssm get-parameter --region "$region" --name "$id" 2>&1 >/dev/null)" && return 0
       grep -q 'ParameterNotFound' <<<"$err" && return 1 ;;
@@ -279,7 +290,7 @@ unchecked=0
 unowned=0
 left=0
 unsure=0
-while IFS= read -r line; do
+while IFS= read -r line <&3; do
   type="$(jq -r .type <<<"$line")"; id="$(jq -r .id <<<"$line")"; region="$(jq -r .region <<<"$line")"
   rc=0
   exists "$type" "$id" "$region" || rc=$?
@@ -316,7 +327,7 @@ while IFS= read -r line; do
       unsure=$((unsure + 1))
     fi
   fi
-done <"$RESOURCES"
+done 3<"$RESOURCES"
 if (( left > 0 || unsure > 0 )); then status=1; fi
 if (( status == 0 )); then
   kept=""
@@ -326,9 +337,11 @@ if (( status == 0 )); then
   what="no stack, resource, log group or edge parameter left"
   (( ! platform )) || what="no stack, resource, log group, edge parameter or hook parameter left"
   echo "teardown: ${what} (${unchecked} resources of types this check does not read; ${unowned} log groups noted above).${kept}"
+  # The host's record of the prefix ends with its stacks: a later deploy then checks that no stack of the prefix exists.
+  rm -f "$CONTEXT"
   # Platform mode: everything is gone, so the manifest other slices read and the slice's own state go too. The timings and request logs stay as evidence.
   if (( platform )); then
-    rm -f "$FD_MANIFEST" "$OUTPUTS" "$CONTEXT" "$RESOURCES"
+    rm -f "$FD_MANIFEST" "$OUTPUTS" "$RESOURCES"
     echo "teardown: removed ${FD_MANIFEST} and the slice's state"
   fi
 elif (( platform )); then

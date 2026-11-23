@@ -7,7 +7,6 @@
 import '@aws-sdk/signature-v4a';
 import {
   type CloudFrontKeyValueStoreClient,
-  ConflictException,
   DescribeKeyValueStoreCommand,
   GetKeyCommand,
   ResourceNotFoundException,
@@ -16,6 +15,7 @@ import {
 } from '@aws-sdk/client-cloudfront-keyvaluestore';
 import { refuse } from './errors';
 import { emitRouteTableBytes } from './log';
+import { isEtagConflict } from '../shared/etag-conflict';
 import { MAX_STORE_BYTES } from '../shared/route-table';
 
 /**
@@ -61,19 +61,6 @@ export interface KvsRouteStoreOptions {
 }
 
 const bytes = (s: string): number => Buffer.byteLength(s, 'utf8');
-
-/**
- * The store refuses the `IfMatch` of a stale ETag with a conflict (409; 412 is read the same way). The data
- * plane answers a stale ETag as a `ValidationException` (400) whose message says the pre-condition failed:
- * seen live against a real KeyValueStore, so it is a conflict too, not a bad request.
- */
-function isEtagConflict(error: unknown): boolean {
-  if (error instanceof ConflictException) return true;
-  const e = error as { name?: string; message?: string; $metadata?: { httpStatusCode?: number } } | undefined;
-  const status = e?.$metadata?.httpStatusCode;
-  if (status === 409 || status === 412) return true;
-  return e?.name === 'ValidationException' && /pre-?condition failed/i.test(e.message ?? '');
-}
 
 export class KvsRouteStore implements RouteStore {
   private readonly sleep: (ms: number) => Promise<void>;

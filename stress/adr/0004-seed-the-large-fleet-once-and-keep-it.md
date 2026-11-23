@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-18
+- Amended by: ADR-0021
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -46,3 +47,6 @@ cell or tenant scripts means reseeding or updating the fleet, which is
 itself a test of `UpdateCell` and `UpdateDeployment`. Revisit when the idle
 cost of the fleet (spec Q-3) is known, or when onboarding gets fast enough
 to run every time.
+
+Note 2026-11-21: ADR-0021 has PS-1 onboard the churn count before the
+load scenarios start, because the runner runs scenarios one after another.

@@ -11,14 +11,12 @@
 # Inputs (environment): AWS_REGION, STRESS_PREFIX, STRESS_HOME from the runner,
 # and STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME: a public hosted zone in this
 # account, the test subdomain the front door's `appDomain` goes under. The
-# application domain is `<prefix in lower case>.<zone name>`, one per run
-# prefix. INTEG_DEPLOY_CONCURRENCY (default 2) bounds the CDK's parallel
-# stack deploys: API Gateway's control plane answers a deploy that runs
-# more of them with 429 (six REST APIs at concurrency 6 failed in the
-# runtime-isolation integration test; two worked).
+# application domain is `<prefix>.<zone name>`, one per run
+# prefix. The stacks deploy one at a time, each named with `--exclusively`.
 #
 # Needs the tenant-identity shared-pool deployment's published parameters in
-# this Region, or in STRESS_FD_IDENTITY_REGION when it is another one. Prints one `stack=<name> deploy_seconds=<n>` line per stack.
+# this Region, or in STRESS_FD_IDENTITY_REGION when it is another one. Prints
+# one `stack=<name> deploy_seconds=<n>` line per stack.
 
 set -euo pipefail
 
@@ -33,8 +31,6 @@ done
 
 APP_DOMAIN="${PREFIX_LOWER}.${STRESS_FD_ZONE_NAME}"
 mkdir -p -m 700 "$STATE_DIR"
-# A new deploy starts the list of what teardown must check afresh.
-rm -f "$RESOURCES"
 cd "$SAMPLE_DIR"
 LOGS="$(mktemp -d)"
 trap 'rm -rf "$LOGS"' EXIT
@@ -42,6 +38,18 @@ trap 'rm -rf "$LOGS"' EXIT
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 echo "deploy: account ${ACCOUNT}, ${AWS_REGION} (edge in ${EDGE_REGION}, identity in ${IDENTITY_REGION}), prefix ${PREFIX}, application domain ${APP_DOMAIN}"
 
+# A prefix whose stacks exist while this host has no deploy for it names stacks the run did not make, and teardown
+# would destroy them. A rerun after a failed deploy has its context file. The context file and the outputs of an earlier deploy
+# name the account and Region they were made in.
+check_record "$CONTEXT" "$ACCOUNT"
+check_record "$OUTPUTS" "$ACCOUNT"
+if [[ ! -s "$CONTEXT" ]]; then
+  for s in "$STACK_SUPPORT" "$STACK_CP" "$STACK_EDGE" "$STACK_MAIN" "$STACK_LOGGING" "$STACK_CELL"; do
+    if stack_exists "$s"; then
+      fail "stack ${s} exists and this host has no state for the prefix ${PREFIX}: pick another STRESS_PREFIX, or remove the stack"
+    fi
+  done
+fi
 # One front door per account and Region: the edge parameter has a fixed name (spec §6.4).
 if ! stack_exists "$STACK_MAIN" && aws ssm get-parameter --name "$PARAM_EDGE" >/dev/null 2>&1; then
   fail "another front door holds ${PARAM_EDGE} in this account and ${AWS_REGION}: one front door per account and Region (spec §6.4); remove it or use another Region"
@@ -54,10 +62,18 @@ USER_POOL_ID="$(param "$IDENTITY_PREFIX/userPoolId" "$IDENTITY_REGION")"
 ISSUER="https://cognito-idp.${IDENTITY_REGION}.amazonaws.com/${USER_POOL_ID}"
 
 # deploy_stack STACK APP_KIND (smoke|fd): one timed CDK deploy of one stack, in lib.sh.
+
+# A deploy that no check refused starts the list of what teardown must check afresh.
+rm -f "$RESOURCES"
 total_start=$SECONDS
 
 # 1. The two callers of the registrar and the stand-in control plane.
-jq -n --arg p "$PREFIX" --arg f "$FLEET" '{stackNamePrefix: $p, fleet: $f}' >"$CONTEXT"
+# A rerun keeps what the earlier deploy recorded: teardown needs it to find the cell stack when this run stops early.
+OLD_CONTEXT='{}'
+[[ ! -s "$CONTEXT" ]] || OLD_CONTEXT="$(cat "$CONTEXT")"
+jq -n --arg p "$PREFIX" --arg f "$FLEET" --arg acct "$ACCOUNT" --arg region "$AWS_REGION" --argjson old "$OLD_CONTEXT" \
+  '$old + {stackNamePrefix: $p, fleet: $f, accountId: $acct, region: $region}' >"${CONTEXT}.new"
+mv "${CONTEXT}.new" "$CONTEXT"
 chmod 600 "$CONTEXT"
 deploy_stack "$STACK_SUPPORT" smoke
 deploy_stack "$STACK_CP" smoke
@@ -73,11 +89,13 @@ FIXTURE_TABLE="$(stack_output "$STACK_CP" FixtureTable)"
 
 # 2. The front door: edge (certificate, web ACL), main (distribution, router, route table, registrar), edge logging.
 jq -n --arg d "$APP_DOMAIN" --arg zi "$STRESS_FD_ZONE_ID" --arg zn "$STRESS_FD_ZONE_NAME" --arg app "$APPLICATION_ID" --arg f "$FLEET" --arg p "$PREFIX" \
-  --arg op "$OPERATOR_ROLE" --arg ac "$APP_CLIENT_ID" --argjson cp "$CONTROL_PLANE" --arg ci "$ISSUER" --arg ca "$APP_CLIENT_ID" \
+  --arg op "$OPERATOR_ROLE" --arg cid "$APP_CLIENT_ID" --argjson cp "$CONTROL_PLANE" --arg ci "$ISSUER" \
   '{appDomain: $d, hostedZone: {zoneId: $zi, zoneName: $zn}, applicationId: $app, controlPlane: $cp, dedicatedDomains: "false", fleet: $f,
-    edgeOperatorRoleArn: $op, issuer: {clientId: $ac, scopes: "openid", authorizeEndpoint: "https://issuer.example.com/oauth2/authorize",
+    edgeOperatorRoleArn: $op, issuer: {clientId: $cid, scopes: "openid", authorizeEndpoint: "https://issuer.example.com/oauth2/authorize",
     tokenEndpoint: "https://issuer.example.com/oauth2/token", logoutEndpoint: "https://issuer.example.com/logout"}, stackNamePrefix: $p,
-    cellIssuer: $ci, cellClientId: $ca}' >"$CONTEXT"
+    cellIssuer: $ci, cellClientId: $cid}' | jq --arg acct "$ACCOUNT" --arg region "$AWS_REGION" --argjson old "$OLD_CONTEXT" '. + {accountId: $acct, region: $region} + ($old | {distributionArn} | with_entries(select(.value != null)))' >"${CONTEXT}.new"
+mv "${CONTEXT}.new" "$CONTEXT"
+chmod 600 "$CONTEXT"
 deploy_stack "$STACK_EDGE" fd
 deploy_stack "$STACK_MAIN" fd
 deploy_stack "$STACK_LOGGING" fd

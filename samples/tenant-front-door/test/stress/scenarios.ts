@@ -14,7 +14,8 @@ import type { Env, Manifest, Outputs, RequestLine, TenantEntry } from './state';
  * The four scenarios of the front-door slice (docs/stress-test.spec.md §5.2,
  * §5.1 PS-7). Each returns its result record and the request lines the join
  * with the edge log reads; none sends a token, a password or a key anywhere
- * but to the edge or the platform API it belongs to.
+ * but to the edge, the platform API it belongs to, or (PS-7's direct-origin
+ * probe) the cell origin the probe is for.
  */
 
 export const SCENARIOS = ['PS-7', 'route-write', 'router-load', 'edge-refusals'] as const;
@@ -52,7 +53,7 @@ export interface Outcome {
 }
 
 const TOKEN_ISSUE_CONCURRENCY = 8;
-/** A registrar answer worth trying again: the route table was busy, or no answer. */
+/** A registrar answer worth trying again for a call that is not a write (the status change, the sweep): the route table was busy, or no answer. */
 const busy = (r: { status: number }): boolean => r.status === 503 || r.status === 0;
 /** Quiet time after the last answer: the next scenario's window never touches this one's (collect counts by window). */
 const QUIET_MS = 5000;
@@ -77,16 +78,18 @@ async function tokensFor(ctx: Ps7Ctx, tenants: readonly TenantEntry[]): Promise<
   });
   await issue();
   const first = tokens.values().next().value;
+  let lifetime = 0;
   if (first !== undefined) {
     const p = payloadOf(first);
-    console.log(`tokens: ${tokens.size} issued, lifetime ${Number(p.exp) - Number(p.iat)} s, refreshed every ${TOKEN_REFRESH_MS / 1000} s`);
+    lifetime = Number(p.exp) - Number(p.iat);
+    console.log(`tokens: ${tokens.size} issued, lifetime ${lifetime} s, refreshed every ${TOKEN_REFRESH_MS / 1000} s`);
   }
-  // A refresh that fails is tried again after 20 s, well before the tokens it replaces (five minutes) run out.
+  // A refresh that fails is tried again after 20 s, well before the tokens it replaces (their lifetime, five minutes) run out.
   const refresh = (): void => {
     issue().then(
       () => { setTimeout(refresh, TOKEN_REFRESH_MS).unref(); },
       (e: unknown) => {
-        console.error(`tokens: refresh failed (${e instanceof Error ? e.message : String(e)}); trying again in 20 s, the tokens in hand had about ${300 - TOKEN_REFRESH_MS / 1000} s left when the first try began`);
+        console.error(`tokens: refresh failed (${e instanceof Error ? e.message : String(e)}); trying again in 20 s, the tokens in hand had about ${lifetime - TOKEN_REFRESH_MS / 1000} s left when the first try began`);
         setTimeout(refresh, 20_000).unref();
       },
     );
@@ -213,11 +216,15 @@ export interface WriteAnswer {
 export function writeAnswer(r: { status: number; body: string }): WriteAnswer {
   if (r.status === 200) return { written: true, retry: false, reason: '' };
   if (r.status === 503) return { written: false, retry: true, reason: `registrar-${registrarCause(r)}` };
+  // The route hook retries these too (spec §3.4, route hook step 4). A 429 is the stage throttle: the hook sends no `customDomain`.
+  if (r.status === 429) return { written: false, retry: true, reason: 'registrar-throttled' };
+  if (r.status === 0) return { written: false, retry: true, reason: 'registrar-network' };
+  if (r.status >= 500 && r.status !== 507) return { written: false, retry: true, reason: 'registrar-server-error' };
   return {
     written: false,
     retry: false,
-    reason: `registrar-${r.status === 0 ? 'network' : 'refused'}`,
-    violation: `route-write: the registrar answered a write with ${r.status === 0 ? 'no answer (network)' : `HTTP ${r.status}`}`,
+    reason: 'registrar-refused',
+    violation: `route-write: the registrar answered a write with HTTP ${r.status}`,
   };
 }
 
@@ -251,7 +258,7 @@ export async function watchRoute(ctx: Ctx, sink: Sink, w: Watch, tokenOf: () => 
     }
     await sleep(Math.max(0, 1000 - (Date.now() - tick)));
   }
-  // Ninety seconds on, every request must see the route (spec §3.4 step 5): ten more, a quarter second apart.
+  // Ninety seconds on, every request must see the route (spec §4.2): ten more, a quarter second apart.
   for (let i = 0; i < 10; i += 1) {
     const r = await request({ method: 'GET', url: `https://${ctx.out.appDomain}/api/whoami`, headers: { authorization: bearer(tokenOf()) } });
     sink.take({ kind: 'route-watch', tenant: w.tenantId, edgeTenant: w.tenantId.toLowerCase(), expect: w.tenantId }, r);
@@ -266,8 +273,8 @@ export async function watchRoute(ctx: Ctx, sink: Sink, w: Watch, tokenOf: () => 
  * `sustainedWriteSeconds`, each a hook-role `PutTenantRoute` against the
  * registrar, which reads the stand-in control plane and writes the route
  * table with the store's ETag. Each written tenant is then watched for the
- * route (p50 and p99 of the write cycle and of the time to routable; no pass
- * limit until measured). A 503 is counted by cause; a failed write is tried
+ * route (p50 and p99 of the write cycle and of the time to routable, with no
+ * pass limit on either). A 503 is counted by cause; a failed write is tried
  * again as the hook does, four more times.
  */
 export async function routeWrite(ctx: Ctx): Promise<Outcome> {
@@ -309,7 +316,8 @@ export async function routeWrite(ctx: Ctx): Promise<Outcome> {
       // Wait before the next attempt, not after the last one: a given-up write must not add its wait to the burst's time.
       if (attempt < 4) await sleep(5000 * (0.5 + Math.random()));
     }
-    // A 503 after the driver's five attempts is counted, by cause, and does not fail the run: the hook retries it and the spec sets no limit before it is measured.
+    // A write not written: an answer the hook retries (see writeAnswer) after the driver's five attempts, counted by cause and not a failure
+    // because the spec sets no limit on it, or a refusal, which is already a violation.
     failedWrites += 1;
   };
 
@@ -330,16 +338,16 @@ export async function routeWrite(ctx: Ctx): Promise<Outcome> {
   sink.flush();
   await sleep(QUIET_MS);
   const flapping = watches.filter((w) => w.flaps > 0);
-  const refused503 = rec.entries().filter(([k]) => k.startsWith('503:registrar-')).map(([k, n]) => `${k}=${n}`);
+  const notWritten = rec.entries().filter(([k]) => /^\d+:registrar-/.test(k) && !k.startsWith('200:')).map(([k, n]) => `${k}=${n}`);
   return {
     record: rec.build(identityOf(ctx), 'route-write'),
     lines: sink.lines,
     failures: rec.failures,
     notes: [
-      `writes: burst ${burst.length} at once, then ${sustained.length} at ${plan.sustainedWritesPerSecond}/s; ${attempts} registrar calls, ${failedWrites} writes failed after five attempts`,
+      `writes: burst ${burst.length} at once, then ${sustained.length} at ${plan.sustainedWritesPerSecond}/s; ${attempts} registrar calls, ${failedWrites} writes not written (503 after five attempts, or refused)`,
       `the burst's ${burst.length} writes were all written (or given up) ${Math.round((burstDone - rec.started.getTime()) / 1000)} s after it started, the driver's own waits before a retry included`,
-      `a route served once and refused again before it settled (edge locations learn a write at different times): ${flapping.length} of ${watches.length} routes, ${flapping.reduce((a, w) => a + w.flaps, 0)} requests`,
-      `registrar 503 by cause: ${refused503.length === 0 ? 'none' : refused503.join(' ')}`,
+      `a route served once and refused again before it settled (the servers of an edge location learn a write at different times): ${flapping.length} of ${watches.length} routes, ${flapping.reduce((a, w) => a + w.flaps, 0)} requests`,
+      `registrar answers that were not a write, by cause: ${notWritten.length === 0 ? 'none' : notWritten.join(' ')}`,
     ],
   };
 }
@@ -435,32 +443,41 @@ export async function edgeRefusals(ctx: Ctx): Promise<Outcome> {
   const s0 = Date.now();
   const suspend = await retrying(() => ctx.registrar.setStatus(spare.tenantId, 'suspended'), busy);
   if (suspend.status !== 200) throw new Error(`UpdateTenantRouteStatus: HTTP ${suspend.status}`);
-  const toSuspended = await waitFor(ctx, token(tokens, spare.tenantId), 503, 150);
-  notes.push(`time from the suspend call to five 503s in a row: ${Math.round((Date.now() - s0) / 100) / 10} s (the first of them ${Math.round(toSuspended * 10) / 10} s into the wait)`);
+  // From the suspend call on, the spare is resumed whatever happens: a spare left suspended would fail the next run's wait for its route.
+  const resumed: { problem?: string } = {};
+  const measured = await (async () => {
+    const toSuspended = await waitFor(ctx, token(tokens, spare.tenantId), 503, 150);
+    notes.push(`time from the suspend call to five 503s in a row: ${Math.round((Date.now() - s0) / 100) / 10} s (the first of them ${Math.round(toSuspended * 10) / 10} s into the wait)`);
 
-  const rec = new Recorder();
-  const sink = new Sink(rec);
-  const kinds: (() => Promise<void>)[] = [];
-  const n = plan.refusalsPerKind;
-  for (let i = 0; i < n; i += 1) {
-    kinds.push(
-      () => send(ctx, sink, { kind: 'no-token', tenant: '-', edgeTenant: '-' }),
-      () => send(ctx, sink, { kind: 'bad-token', tenant: '-', edgeTenant: '-' }, { auth: 'Bearer abc.def.ghi' }),
-      () => {
-        const ghost = newUlid();
-        return send(ctx, sink, { kind: 'unrouted', tenant: ghost, edgeTenant: ghost.toLowerCase() }, { auth: bearer(unsignedToken(ghost)) });
-      },
-      () => send(ctx, sink, { kind: 'suspended', tenant: spare.tenantId, edgeTenant: spare.tenantId.toLowerCase() }, { auth: bearer(token(tokens, spare.tenantId)) }),
-      () => send(ctx, sink, { kind: 'cross-site', tenant: live.tenantId }, { auth: bearer(token(tokens, live.tenantId)), headers: { 'sec-fetch-site': 'same-site' } }),
-      () => send(ctx, sink, { kind: 'token-too-long', tenant: '-', edgeTenant: '-' }, { auth: bearer(forgeToken(token(tokens, live.tenantId), live.tenantId, OVER_LIMIT_BYTES)) }),
-      () => send(ctx, sink, { kind: 'agents-closed', tenant: '-' }, { path: '/agents/probe/invocations' }),
-    );
-  }
-  const order = shuffled(kinds);
-  await paced(ctx.env.tier.steadyRps, order.length / ctx.env.tier.steadyRps, async (i) => order[i]());
-  sink.flush();
-  const resume = await retrying(() => ctx.registrar.setStatus(spare.tenantId, 'active'), busy);
-  if (resume.status !== 200) rec.problem(`the spare tenant could not be resumed: HTTP ${resume.status}`);
+    // The record's window starts here, after the wait: the polls above reach the cell while the suspension propagates, and no request log holds them.
+    const rec = new Recorder();
+    const sink = new Sink(rec);
+    const kinds: (() => Promise<void>)[] = [];
+    const n = plan.refusalsPerKind;
+    for (let i = 0; i < n; i += 1) {
+      kinds.push(
+        () => send(ctx, sink, { kind: 'no-token', tenant: '-', edgeTenant: '-' }),
+        () => send(ctx, sink, { kind: 'bad-token', tenant: '-', edgeTenant: '-' }, { auth: 'Bearer abc.def.ghi' }),
+        () => {
+          const ghost = newUlid();
+          return send(ctx, sink, { kind: 'unrouted', tenant: ghost, edgeTenant: ghost.toLowerCase() }, { auth: bearer(unsignedToken(ghost)) });
+        },
+        () => send(ctx, sink, { kind: 'suspended', tenant: spare.tenantId, edgeTenant: spare.tenantId.toLowerCase() }, { auth: bearer(token(tokens, spare.tenantId)) }),
+        () => send(ctx, sink, { kind: 'cross-site', tenant: live.tenantId }, { auth: bearer(token(tokens, live.tenantId)), headers: { 'sec-fetch-site': 'same-site' } }),
+        () => send(ctx, sink, { kind: 'token-too-long', tenant: '-', edgeTenant: '-' }, { auth: bearer(forgeToken(token(tokens, live.tenantId), live.tenantId, OVER_LIMIT_BYTES)) }),
+        () => send(ctx, sink, { kind: 'agents-closed', tenant: '-' }, { path: '/agents/probe/invocations' }),
+      );
+    }
+    const order = shuffled(kinds);
+    await paced(ctx.env.tier.steadyRps, order.length / ctx.env.tier.steadyRps, async (i) => order[i]());
+    sink.flush();
+    return { rec, sink, kinds };
+  })().finally(async () => {
+    const resume = await retrying(() => ctx.registrar.setStatus(spare.tenantId, 'active'), busy);
+    if (resume.status !== 200) resumed.problem = `the spare tenant could not be resumed: HTTP ${resume.status}`;
+  });
+  const { rec, sink, kinds } = measured;
+  if (resumed.problem !== undefined) rec.problem(resumed.problem);
   await sleep(QUIET_MS);
   return { record: rec.build(identityOf(ctx), 'edge-refusals'), lines: sink.lines, failures: rec.failures, notes: [...notes, `${kinds.length} requests of ${new Set(sink.lines.map((l) => l.kind)).size} kinds`] };
 }

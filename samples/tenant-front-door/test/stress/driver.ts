@@ -8,7 +8,7 @@
  *   driver.ts budget            the slice's draws on account-wide quotas (no credentials)
  *   driver.ts seed              tenants in tenant-identity, their cell namespace and control-plane records, the routes
  *   driver.ts run <scenario>    one scenario: its result record and request log
- *   driver.ts collect           the hops' logs against the driver's counts; the late fields
+ *   driver.ts collect           the hops' logs against the driver's counts; the edge hop and the router's compute reading
  *   driver.ts sweep             the run's routes and tenants
  *   driver.ts ingress           platform mode: the cell's ingress base URL, read through the ingress reader role (stdout)
  *   driver.ts await-agents      platform mode: polls until the edge routes `/agents/*` (front-door phase two)
@@ -20,6 +20,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DeleteParametersCommand, GetParameterCommand, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { Fixtures, IdentityClient, newUlid, Registrar, retrying, unsignedToken } from './clients';
 import { collect } from './collect';
 import { request, sleep } from './http';
@@ -28,7 +29,7 @@ import { drawsOf, parseTier, planOf, tenantsToSeed } from './plan';
 import { agentIngressOf, agentsOpen, ingressBaseUrl, manifestDir, needWarmUp, parseControlPlane, parseFrontDoor, parseIdentity, platformTenants, ps7Outputs, readManifest as readPlatformManifest } from './platform';
 import { ps7, runScenario, SCENARIOS, type Ctx, type Ps7Ctx, type ScenarioId } from './scenarios';
 import { assumedCredentials, ownCredentials, signedCaller } from './sigv4';
-import { readEnv, readManifest, readOutputs, readPlatformOutputs, writeManifest, writeRequestLog, type Env, type Manifest, type Outputs, type TenantEntry } from './state';
+import { readEnv, readManifest, readOutputs, readPlatformOutputs, recordMismatch, writeManifest, writeRequestLog, type Env, type Manifest, type Outputs, type TenantEntry } from './state';
 
 const SEED_CONCURRENCY = 2;
 /** PutParameter and DeleteParameter share a 3 per second account limit (SSM). */
@@ -126,7 +127,8 @@ async function seed(env: Env, out: Outputs): Promise<void> {
   console.log(`seed: every active route answered five times in a row ${Math.round((Date.now() - ready) / 1000)} s after the last write`);
 }
 
-async function sweep(env: Env, routes: boolean): Promise<number> {
+/** Removes the run's routes (when `routes`), tenants and namespace parameters; keeps the manifest when anything failed. Returns the exit code. */
+export async function sweep(env: Env, routes: boolean): Promise<number> {
   const file = path.join(env.stateDir, 'manifest.json');
   if (!fs.existsSync(file)) {
     console.log('sweep: no manifest: nothing to remove');
@@ -144,7 +146,7 @@ async function sweep(env: Env, routes: boolean): Promise<number> {
   await pool(manifest.tenants, SEED_CONCURRENCY, async (t) => {
     // The routes go with the front door's stacks: with `routes` off the registrar is gone and only the tenant remains to remove.
     if (routes) {
-      const route = await ctx.registrar.deleteTenant(t.tenantId);
+      const route = await retrying(() => ctx.registrar.deleteTenant(t.tenantId), (r) => r.status === 503 || r.status === 0);
       if (route.status !== 200) {
         failed += 1;
         console.log(`sweep: DeleteTenantRoute HTTP ${route.status}`);
@@ -171,14 +173,15 @@ async function sweep(env: Env, routes: boolean): Promise<number> {
     }
   }
   if (routes) {
-    const cell = await ctx.registrar.deleteCell(out.cellId);
+    const cell = await retrying(() => ctx.registrar.deleteCell(out.cellId), (r) => r.status === 503 || r.status === 0);
     if (cell.status !== 200) {
       failed += 1;
       console.log(`sweep: DeleteCellRoute HTTP ${cell.status}`);
     }
   }
   if (failed === 0) fs.rmSync(file);
-  console.log(`sweep: ${manifest.tenants.length} tenants, ${routes ? 'their routes and ' : ''}parameters removed; ${failed} failures`);
+  const what = `${manifest.tenants.length} tenants, ${routes ? 'their routes and ' : ''}parameters`;
+  console.log(failed === 0 ? `sweep: ${what} removed` : `sweep: ${what} swept with ${failed} failures; the manifest is kept`);
   return failed === 0 ? 0 : 1;
 }
 
@@ -201,6 +204,14 @@ async function run(env: Env, scenario: string): Promise<number> {
   for (const n of outcome.notes) console.log(`  ${n}`);
   for (const f of outcome.failures) console.error(`run ${scenario}: FAIL ${f}`);
   return outcome.failures.length === 0 && record.isolation.mismatches === 0 && record.refusals.unattributed === 0 ? 0 : 1;
+}
+
+/** Refuses a verb that runs with other credentials or in another Region than the deploy recorded in `outputs.json`, before it changes anything. */
+async function checkRecord(env: Env): Promise<void> {
+  if (!fs.existsSync(path.join(env.stateDir, 'outputs.json'))) return;
+  const id = await new STSClient({ region: env.region }).send(new GetCallerIdentityCommand({}));
+  const why = recordMismatch(readOutputs(env), id.Account, env.region);
+  if (why !== undefined) throw new Error(`${why}; nothing was changed`);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,21 +290,33 @@ async function main(): Promise<number> {
       return 0;
     case 'seed': {
       const env = readEnv();
+      await checkRecord(env);
       await seed(env, readOutputs(env));
       return 0;
     }
     case 'run': {
-      return run(readEnv(), arg ?? '');
+      const env = readEnv();
+      await checkRecord(env);
+      return run(env, arg ?? '');
     }
     case 'collect': {
       const env = readEnv();
+      await checkRecord(env);
       const r = await collect(env, env.mode === 'platform' ? readPlatformOutputs(env) : readOutputs(env));
       for (const n of r.notes) console.log(`collect: ${n}`);
       for (const f of r.failures) console.error(`collect: FAIL ${f}`);
       return r.failures.length === 0 ? 0 : 1;
     }
     case 'sweep':
-      return sweep(readEnv(), arg !== '--no-routes');
+      if (arg !== undefined && arg !== '--no-routes') {
+        console.error(`driver: sweep takes no argument or --no-routes, not ${arg}`);
+        return 2;
+      }
+      {
+        const env = readEnv();
+        await checkRecord(env);
+        return sweep(env, arg !== '--no-routes');
+      }
     case 'ingress':
       return ingress(readEnv());
     case 'await-agents':
@@ -304,10 +327,13 @@ async function main(): Promise<number> {
   }
 }
 
-main().then(
-  (code) => process.exit(code),
-  (e: unknown) => {
-    console.error(`driver: ${e instanceof Error ? e.message : String(e)}`);
-    process.exit(1);
-  },
-);
+// Not when the unit test imports `sweep`.
+if (require.main === module) {
+  main().then(
+    (code) => process.exit(code),
+    (e: unknown) => {
+      console.error(`driver: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    },
+  );
+}

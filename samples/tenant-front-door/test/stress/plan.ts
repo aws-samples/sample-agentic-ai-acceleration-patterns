@@ -5,8 +5,9 @@
  * What the front-door stress slice does at a tier: the sizes every scenario
  * reads and the quota draws `budget` prints. The runner hands the whole tier
  * over as JSON in `STRESS_TIER_JSON` (docs/stress-test.spec.md §3.4); this
- * file reads the fields it needs and nothing else, so the sample imports no
- * code from `stress/`.
+ * file reads the fields it needs and nothing else, so the driver imports no
+ * code from `stress/`. The unit test imports the contract's parsers to check
+ * the records and the budget the driver writes.
  */
 
 export interface TierJson {
@@ -45,7 +46,7 @@ export interface Plan {
   readonly sustainedWritesPerSecond: number;
   readonly sustainedWriteSeconds: number;
   readonly sustainedWrites: number;
-  /** Seconds a written route is watched: every request must see it by then (spec §3.4 step 5). */
+  /** Seconds a written route is watched: every request must see it by then (spec §4.2). */
   readonly routeWatchSeconds: number;
   /** `router-load`: seconds at the steady rate, then at the peak rate. */
   readonly steadySeconds: number;
@@ -66,7 +67,7 @@ export interface Plan {
  */
 export const MAX_ACTIVE = 100;
 
-/** Spec §3.4 step 5: a burst of about 100 creates is the figure to measure. */
+/** The tier's write burst is capped at the registrar stage's burst limit (`REGISTRAR_THROTTLE`, spec §3.4 step 5). */
 export const MAX_BURST = 100;
 
 /** The scenario's tokens carry a payload this long, in bytes of Authorization, below the router's 8,192-byte limit. */

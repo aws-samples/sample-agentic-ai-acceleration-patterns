@@ -146,7 +146,7 @@ export interface RunOptions {
   readonly repoRoot: string;
   readonly tier: string;
   readonly slices: readonly string[];
-  /** Scenario ids to run; default per mode (see `scenarioOrder`): the `PS-*` scenarios in a platform run, the slice's own in a slice run. */
+  /** Scenario ids to run; default per mode (see `scenarioOrder`): the `PS-<n>` scenarios in a platform run, every scenario but the `platformOnly` ones in a slice run. */
   readonly scenarios?: readonly string[];
   /** Folder for manifests, the lock and results, outside the repository (spec §4.2). */
   readonly home: string;
@@ -228,15 +228,11 @@ export function planRun(opts: Pick<RunOptions, 'repoRoot' | 'tier' | 'slices'>):
  * (spec §5.1), then each slice's own scenarios in the order it declares them.
  * `mode` picks what runs when no scenario is named (spec §5.2): a platform run
  * takes only the `PS-<n>` scenarios, a slice run takes everything but the
- * scenarios a slice marks `platformOnly`. Without `mode` it is every scenario.
+ * scenarios a slice marks `platformOnly`.
  */
-export function scenarioOrder(slices: readonly Slice[], mode?: 'slice' | 'platform'): string[] {
+export function scenarioOrder(slices: readonly Slice[], mode: 'slice' | 'platform'): string[] {
   const platformOnly = new Set(slices.flatMap((s) => s.platformOnly));
-  const all = [...new Set(slices.flatMap((s) => s.scenarios))].filter((sc) => {
-    if (mode === 'platform') return /^PS-\d+$/.test(sc);
-    if (mode === 'slice') return !platformOnly.has(sc);
-    return true;
-  });
+  const all = [...new Set(slices.flatMap((s) => s.scenarios))].filter((sc) => (mode === 'platform' ? /^PS-\d+$/.test(sc) : !platformOnly.has(sc)));
   const platform = all.filter((s) => /^PS-\d+$/.test(s)).sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
   return [...platform, ...all.filter((s) => !platform.includes(s))];
 }
@@ -267,8 +263,14 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices, mode))];
   const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
   if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
-  if (scenarios.length === 0 && mode === 'platform') {
-    throw new Error('no slice in the run declares a PS-<n> scenario, so a platform run has nothing to run: name --scenarios or add the slices that own them');
+  if (scenarios.length === 0) {
+    throw new Error(
+      opts.scenarios !== undefined
+        ? '--scenarios names no scenario, so the run has nothing to run'
+        : mode === 'platform'
+          ? 'no slice in the run declares a PS-<n> scenario, so a platform run has nothing to run: name --scenarios or add the slices that own them'
+          : 'the slice declares no scenario to run in slice mode (none, or only platformOnly ones), so the run has nothing to run: add the slices it needs to --slices',
+    );
   }
   // A scenario that needs the other slices' interfaces has nothing to run against alone.
   const alone = scenarios.filter((sc) => mode === 'slice' && slices.some((s) => s.platformOnly.includes(sc)));

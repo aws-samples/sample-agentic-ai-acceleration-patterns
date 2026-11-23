@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-18
-- Amended by: ADR-0011
+- Amended by: ADR-0011, ADR-0016
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -113,3 +113,9 @@ boundary. The shipped policies, the `/cell/` aspect, the cell bootstrap
 script and the probes are in
 [`stress/application/`](../application/README.md), whose README records
 their probe runs in both cell accounts.
+
+Note 2026-11-20: ADR-0016 adds one item to the account base: a read-only
+role, trusted by the platform account, that allows `ssm:GetParameter` on
+the stress cells' ingress parameters only, for front-door phase two. It
+deploys in an owner stack tagged `stress:part=account-base`, like the
+rest of the base.

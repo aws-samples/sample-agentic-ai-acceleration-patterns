@@ -8,7 +8,8 @@
 #     --slurpfile lines <lines.json> -f attribute-edge.jq
 #
 # lines.json is the JSON lines k6 printed (`<script>.k6-stdout.txt`), as an array:
-#   {"kind": "edge_refusal", "tenantId", "status", "count"}   one per VU, tenant, status, minute
+#   {"kind": "edge_refusal", "epochMinute", "tenantId", "status"}   one per refused request (the
+#                                                                   minute is for a reader of the output)
 #   {"kind": "body_refusal", "tenantId", "reason"}            one per refusal inside a 200
 # The answer is the `refusals` field of a result record. A status refusal's reason is
 # `http-<status>`: the edge and the cells' own logs are not joined in platform mode, so the
@@ -16,11 +17,9 @@
 #   byTenantReason: the counted refusals by tenant and reason, the largest first
 #   unattributed:   what the driver saw beyond the counted lines, never below 0
 
-def count: (.count // 1) | (if type == "number" then . else 1 end);
-
 (
   [$lines[0][] | select(.kind == "edge_refusal" and (.tenantId | type) == "string" and (.status | type) == "number")
-    | {tenant: .tenantId, reason: "http-\(.status)", count: count}]
+    | {tenant: .tenantId, reason: "http-\(.status)", count: 1}]
   + [$lines[0][] | select(.kind == "body_refusal" and (.tenantId | type) == "string" and (.reason | type) == "string")
     | {tenant: .tenantId, reason: .reason, count: 1}]
 ) as $rows

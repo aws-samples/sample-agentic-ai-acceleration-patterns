@@ -12,8 +12,20 @@
  * bearer token's payload without checking its signature (front-door spec §3.3 step 5) and
  * answers from its route table before any origin sees the request: 403 for a tenant with no
  * route entry, 503 for a suspended one, and anything else once the request goes on to the
- * origin (the ingress refuses the unsigned token with 401, so no model call, no cost). The
- * token this file builds is unsigned and names a tenant id; no verifier accepts it (P-1).
+ * origin, where the ingress refuses the unsigned token (an `api-gateway` ingress answers 403
+ * with the body `forbidden`, so no model call, no cost). The router's 403 and the ingress's 403
+ * differ in the body: the router's is `{"status":403}`, so the probe reads the body too. The
+ * token this file builds carries no signature and names a tenant id; no verifier accepts it
+ * (P-1). The probe reads a front door in `single` addressing mode, where the bearer token alone
+ * names the tenant, and `edgeUrl`'s host is the front door's `appDomain`: in `host` mode, or on
+ * any other host, the router looks the host up first and the probe reads 404 or 403 whatever
+ * the tenant's state. The token names the tenant in the claim `tenant_id`, the front door's
+ * default `tenantClaim`; a router that wants another claim answers 401, which PS-5 refuses.
+ * An answer is read as the origin's only when API Gateway's request id (`x-amzn-requestid`) is
+ * on it: CloudFront's own answers (a geographic restriction, a host the distribution does not
+ * serve, a function failure) have none, and tell nothing about the tenant. `x-cache` cannot
+ * tell them apart, because CloudFront sets `Error from cloudfront` on an origin's 4xx too
+ * (`adr/0048-measure-tenant-churn-through-the-front-door-edge.md`).
  */
 
 import { execFile } from 'node:child_process';
@@ -71,43 +83,63 @@ export function parseEdgeInputs(text: string | undefined, file: string): EdgeInp
   return { edgeUrl: edge, registrarUrl: registrar, agentBackend: backend, ...(operator === undefined ? {} : { operatorRoleArn: operator }) };
 }
 
-/** Reads the front-door manifest of this run's prefix, or undefined when it is not there. */
+/** Reads the front-door manifest of this run's prefix; throws, naming the file and its writer, when it is missing or malformed. */
 export function readEdgeInputs(home: string, prefix: string): EdgeInputs {
   const file = path.join(home, prefix, FRONT_DOOR_FILE);
   return parseEdgeInputs(fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined, file);
 }
 
-/** What the edge does for one tenant, read from one HTTP status. */
+/** What the edge does for one tenant, read from one answer. */
 export type EdgeState = 'unrouted' | 'suspended' | 'routed' | 'error';
 
 /**
- * 403: no route entry (never created, or removed). 503: suspended. 0 (no answer) and 404
- * (the router's answer for `/agents` when no agent ingress is configured) tell nothing about the
- * tenant: `error`. Any other status means the request left the router for an origin.
+ * One answer of the edge: the HTTP status (0: no answer), whether the router function wrote it,
+ * and whether the origin did (API Gateway's `x-amzn-requestid` is on it).
  */
-export function edgeStateOf(status: number): EdgeState {
-  if (status === 403) return 'unrouted';
-  if (status === 503) return 'suspended';
+export interface EdgeAnswer {
+  readonly status: number;
+  readonly router: boolean;
+  readonly origin: boolean;
+}
+
+/** The statuses the router writes on `/agents` in `single` mode (front-door router: 401, 403, 404, 503). */
+export const ROUTER_STATUSES: readonly number[] = [401, 403, 404, 503];
+
+/** The router writes its refusals as `{"status":<code>}` (front-door router, `fail`); no origin or CloudFront error page has that body. */
+export const isRouterBody = (body: string, status: number): boolean => body.trim() === `{"status":${status}}`;
+
+/**
+ * A router 403: no route entry (never created, or removed). A router 503: suspended. An answer
+ * the origin wrote, the ingress's own 403 included, means the request left the router for an
+ * origin: `routed`. Everything else tells nothing about the tenant: `error`. That covers no
+ * answer, a 404 (the router's answer for `/agents` when no agent ingress is configured, or for
+ * a host it does not know), CloudFront's own answers (a 503 when the router function fails, a
+ * 403 for a geographic restriction) and a router answer with another status, which the caller
+ * refuses (`churn.ts`).
+ */
+export function edgeStateOf(answer: EdgeAnswer): EdgeState {
+  const { status, router, origin } = answer;
   if (status === 0 || status === 404) return 'error';
-  return 'routed';
+  if (router) return status === 403 ? 'unrouted' : status === 503 ? 'suspended' : 'error';
+  return origin ? 'routed' : 'error';
 }
 
 /**
- * A bearer credential whose payload names `tenantId` and whose signature is a made-up word. Never sent anywhere
- * but the edge. The router needs three non-empty parts (`decodeClaim`) and does not check the signature, so
- * it routes on the claim; no verifier accepts it.
+ * A bearer token whose payload names `tenantId` and whose signature is not one. The router
+ * refuses a token with an empty third segment (401 at step 5, before it looks the tenant up),
+ * so the segment holds a fixed word; no verifier accepts it. Never sent anywhere but the edge.
  */
 export function probeToken(tenantId: string): string {
   const part = (o: object): string => Buffer.from(JSON.stringify(o)).toString('base64url');
-  return `${part({ alg: 'RS256', kid: 'stress' })}.${part({ tenant_id: tenantId })}.${Buffer.from('stress').toString('base64url')}`;
+  return `${part({ alg: 'none', typ: 'JWT' })}.${part({ tenant_id: tenantId })}.${Buffer.from('unsigned').toString('base64url')}`;
 }
 
 /** The edge as PS-5 uses it; the unit tests give it a fake. */
 export interface Edge {
   /** Loads what `setStatus` needs (credentials) before the first timed call, so no hop includes it. */
   prepare?(): Promise<void>;
-  /** The HTTP status the edge answers for the tenant's probe request (0: no answer). */
-  probe(tenantId: string): Promise<number>;
+  /** The edge's answer to the tenant's probe request (status 0: no answer). */
+  probe(tenantId: string): Promise<EdgeAnswer>;
   /** `UpdateTenantRouteStatus`: the registrar's HTTP status (0: no answer, or no credentials). */
   setStatus(tenantId: string, status: 'active' | 'suspended'): Promise<number>;
 }
@@ -124,7 +156,7 @@ export interface Credentials {
 export async function loadCredentials(): Promise<{ creds: Credentials; expiresAt: number } | undefined> {
   try {
     const out = await aws(['configure', 'export-credentials', '--format', 'process']);
-    if (typeof out.AccessKeyId !== 'string' || typeof out.SecretAccessKey !== 'string') return undefined;
+    if (typeof out.AccessKeyId !== 'string' || typeof out.SecretAccessKey !== 'string') return undefined; // pragma: allowlist secret (a type check)
     const expires = typeof out.Expiration === 'string' ? Date.parse(out.Expiration) : Number.NaN;
     return {
       creds: { accessKeyId: out.AccessKeyId, secretAccessKey: out.SecretAccessKey, sessionToken: typeof out.SessionToken === 'string' ? out.SessionToken : undefined },
@@ -184,14 +216,16 @@ export function liveEdge(
           redirect: 'manual',
           signal: AbortSignal.timeout(15_000),
         });
-        await res.arrayBuffer();
-        // The router answers 403 (no route) and 503 (suspended) itself, as a CloudFront function response; the
-        // ingress's authorizer also answers 403 to a credential it cannot verify, which this probe's is. Only an
-        // answer the router generated tells the tenant's state: any other means the request was passed on.
-        const fromRouter = (res.headers.get('x-cache') ?? '').startsWith('FunctionGeneratedResponse');
-        return fromRouter ? res.status : 401;
+        const origin = res.headers.has('x-amzn-requestid');
+        // Only the statuses the router writes need the body, which is a few bytes; any other
+        // body (an origin's answer can be long) is never read.
+        if (!ROUTER_STATUSES.includes(res.status)) {
+          await res.body?.cancel().catch(() => undefined);
+          return { status: res.status, router: false, origin };
+        }
+        return { status: res.status, router: isRouterBody(await res.text(), res.status), origin };
       } catch {
-        return 0;
+        return { status: 0, router: false, origin: false };
       }
     },
     async setStatus(tenantId, status) {

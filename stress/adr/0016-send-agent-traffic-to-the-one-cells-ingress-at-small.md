@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-20
+- Amends: ADR-0006, ADR-0012, ADR-0014
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -26,15 +27,15 @@ differently:
 | `/agents/*` | the one `agentIngress` input, an origin without origin access control | the deployer, once, at deploy (front-door spec §3.3 step 7, §3.6) |
 
 The runtime-isolation ingress is a public API Gateway that verifies the
-token itself (front-door spec §1.2). It is not a cell origin, and the
-router cannot point `/agents/*` at a different ingress per cell. A path
-of "router, then cell origin, then ingress" for agent calls, across
-every cell, does not exist. The router adds `x-tenant-route` to the
-request on both paths, but the ingress does not echo it, so an edge
-check on the response's route hint has no source on `/agents/*`. The
-front door's own test runs the agent route against a stand-in ingress
-(front-door ADR-0024), so the platform run is the first to drive the
-real ingress through the edge.
+token itself (front-door spec §1.2, §3.3 step 7). It is not a cell
+origin, and the router cannot point `/agents/*` at a different ingress
+per cell. A path of "router, then cell origin, then ingress" for agent
+calls, across every cell, does not exist. The router adds
+`x-tenant-route` to the request on both paths, but the ingress does not
+echo it, so an edge check on the response's route hint has no source on
+`/agents/*`. The front door's own test runs the agent route against a
+stand-in ingress (front-door ADR-0024), so the platform run is the first
+to drive the real ingress through the edge.
 
 The tiers fix the cell count (spec §4.1): `small` has one cell, `medium`
 two, `large` four. The first platform run is at `small` (P-8).
@@ -80,9 +81,9 @@ hint is checked; the platform run waits for it.
 
 Deploy: one front-door main-stack update per front-door release, an
 update of the existing distribution, unmeasured (the front door's spikes
-took 221 to 506 s to create their distribution stacks, front-door
-`design/spikes.md`); none per run, since each cell's agent origin is a
-route-table write.
+created a distribution stack in 221 s, S-5, to 506 s, S-3, which also
+deployed a cell in a second account, front-door `design/spikes.md`);
+none per run, since each cell's agent origin is a route-table write.
 
 ### Option 3: `small` only, with `agentIngress` set to the one cell's ingress
 At `small` the one cell's ingress is the only agent origin, so the
@@ -97,8 +98,9 @@ to what the ingress shows.
 
 Deploy: phase two is a front-door main-stack update that sets
 `agentIngress`, an update of the existing distribution on every run,
-unmeasured; the front door's spikes took 221 to 506 s to create their
-distribution stacks (front-door `design/spikes.md`).
+unmeasured; the front door's spikes created a distribution stack in 221 s
+(S-5) to 506 s (S-3, which also deployed a cell in a second account,
+front-door `design/spikes.md`).
 
 ## Decision
 Option 3. The first platform run is at `small`, which has one cell, so
@@ -108,15 +110,14 @@ goes through the router's cell origin as the front door specifies. The
 front door is deployed in two phases (spec §3.5). Phase one is two
 deploys of the front-door app, the second with `registrarUrl`, which
 adds the `RouteHookAccess` stack, the hook parameter and policy
-(front-door ADR-0027); the global hooks are then registered with the
-control plane. So the first cell's route is registered when the cell is
+(front-door ADR-0027); the control plane's `globalHookManagedPolicyArns`
+update then attaches the hook policy, and the global hooks are
+registered. So the first cell's route is registered when the cell is
 built; a cell built before the hook has no cell route, and its
 deployments fail their hook with 409 (front-door spec §3.2, §3.4).
 Phase two, once the first cell exists, sets `agentIngress` only.
-
 Per-cell agent routing for `medium` and `large` stays open as spec Q-7,
-with Options 1 and 2 as its candidates. It is decided, by a new ADR that
-amends this one, before the first `medium` run.
+with Options 1 and 2 as its candidates.
 
 ## Consequences
 Easier: the first platform run needs no new component on the agent path
@@ -129,25 +130,52 @@ warm-up tenant builds the cell alone and waits for phase two, so PS-1
 does not time it, and the cell account is registered with `maxCells` 1
 at `small`, so a placement during the build is refused rather than
 claiming a second cell (spec §3.5). The edge check on `/agents/*`
-cannot read a route hint; spec §5.3 asserts the token's tenant at the
+cannot read a route hint. Spec §5.3 asserts the token's tenant at the
 ingress and the vended credential instead, and sees an edge fault only
 as a wrong admit or refusal. The change that removes the limit is an
 ingress that echoes the hint it received; Option 1 would bring it too.
-A `medium` or `large` platform run cannot start until Q-7 is decided. A
-direct call to the ingress with a valid token is served, by design
-(front-door spec §1.2), so PS-7 there refuses a token whose payload
-names another tenant and serves the tenant's own.
+The route hook runs in a third control-plane CodeBuild project that the
+stress run did not use before; the control plane creates four projects,
+so the Linux/Small quota is raised to `buildLimit` x 4, 200 at 50 (spec
+§3.6). A `medium` or `large` platform run cannot start until Q-7 is
+decided, by a new ADR that amends this one, before the first `medium`
+run. A direct call to the ingress with a valid token is served, by
+design (front-door spec §1.2), so PS-7 there refuses a token whose
+payload names another tenant and serves the tenant's own.
 
-The stress cell serves a cell API origin. The front door writes a tenant
+In the platform run, the stress cell serves a cell API origin; in `slice`
+mode there is no front door and no origin. The front door writes a tenant
 route only for a cell that has a cell route, and the cell route needs the
 API domain from the cell script's `frontDoorApiDomain` output; without it
 every deployment's hook fails with 409 (front-door spec §3.2, §3.4). So
-the cell script deploys a cell API origin with `CellRouteAccess`, which
-takes the distribution ARN from a cell parameter, and writes that output
-(spec §3.3 step 2, §3.5); a tenant is routed on `/agents/*` only once
-this holds. Phase two reads the ingress's `baseUrl` from its published
-parameter in the cell account (front-door spec §6.3) through a read-only
-role that allows `ssm:GetParameter` on that one parameter (spec §3.6,
-§3.7). The role adds one item to the account base that ADR-0006 lists.
-Revisit when Q-7 is decided, or if the front door gains per-cell agent
-origins.
+the cell script deploys a cell API origin, the front door's demo cell
+API (`samples/tenant-front-door/src/demo-cell/`), with `CellRouteAccess`,
+which takes the distribution ARN from a cell parameter, and writes that
+output (spec §3.3 step 2, §3.5). The cell source zip of ADR-0014 also
+carries `samples/tenant-front-door/src/demo-cell/` and `src/shared/` for
+it; this record amends ADR-0014 on that point. The demo cell API checks
+that its cell's account hosts the tenant under
+`/application-plane/tenants/<tenant id>/<app id>`, so the tenant script
+records the deployment in the parameter `.../<app id>/deployment` and
+does not write a route; this record amends ADR-0012 on those points. A
+tenant is routed on `/agents/*` only once its cell's API origin exists
+and its cell route is registered.
+
+Phase two reads the ingress's `baseUrl` from its published parameter in
+the cell account, `StressCell-<cellId>/ingress` under
+`/application-plane/shared/agent-runtime/` (front-door spec §6.3; the
+stress cell does not publish the account-wide name), through a read-only
+role that allows `ssm:GetParameter` on the stress cells' ingress parameter
+names only, `.../agent-runtime/StressCell-*/ingress` (spec §3.6, §3.7).
+The role adds one item to the account base that ADR-0006 lists; this
+record amends it. A cell build writes that parameter and the value picks
+the host that receives every tenant's bearer token on `/agents/*`. Phase
+two refuses a `baseUrl` that is not an API Gateway host (spec §3.5), but
+that does not stop a compromised cell build that points the parameter at
+an API Gateway it owns elsewhere, so that path stays open at `small`
+(spec §3.7). Revisit when Q-7 is decided, or if the front door gains
+per-cell agent origins.
+
+The route hook's source is a commit fetched from the remote, so the
+platform run pins the hook to a pushed commit, not necessarily the run's
+own (spec §3.5).

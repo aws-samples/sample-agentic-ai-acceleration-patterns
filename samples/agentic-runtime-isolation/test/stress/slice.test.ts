@@ -74,7 +74,7 @@ describe('slice.json', () => {
     }
     // The record is written under the PS id: probe.js renames the slice's id with RECORD_SCENARIO.
     expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', 'probe.js'), 'utf8')).toContain("env('RECORD_SCENARIO', scenario)");
-    // Every response goes to the refusal tracker in platform mode, so a minute's counts are always written.
+    // Every response goes to the refusal tracker in platform mode, so every refusal prints its line.
     expect(fs.readFileSync(path.join(STRESS_DIR, 'k6', 'probe.js'), 'utf8')).toMatch(/if \(PLATFORM\) \{\s+edgeRefusals\.track\(entry\.tenantId, r\.status\);/);
   });
 });
@@ -174,6 +174,9 @@ describe('slice.sh', () => {
         const odd = run(SLICE_SH, platformEnv(h), 'run', 'PS-7');
         expect(odd.status).toBe(2);
         expect(odd.stderr).toContain('unknown scenario PS-7');
+        const foreign = run(SLICE_SH, sliceEnv('small', { AWS_REGION: 'eu-central-1', STRESS_RESULTS: h, STRESS_COMMIT: 'abc1234' }), 'run', 'PS-5');
+        expect(foreign.status).toBe(2);
+        expect(foreign.stderr).toContain('unknown scenario PS-5');
         const mode = run(SLICE_SH, sliceEnv('small', { STRESS_MODE: 'both' }), 'budget');
         expect(mode.status).toBe(2);
         expect(mode.stderr).toContain('STRESS_MODE must be slice or platform');
@@ -207,7 +210,7 @@ describe('slice.sh', () => {
         ['a bad agent backend', { 'tenant-front-door.json': { ...EDGE, agentBackend: 'A/b' } }, /agentBackend must match/],
         ['an identity API that is not execute-api', { 'identity.json': { ...IDENTITY, apiUrl: 'https://example.com/' } }, /apiUrl must be an execute-api URL/],
         ['an identity with no client', { 'identity.json': { ...IDENTITY, appClientId: '' } }, /appClientId is missing/],
-        ['an identity with a bad pool', { 'identity.json': { ...IDENTITY, userPoolId: 'pool' } }, /userPoolId is missing/],
+        ['an identity in another Region than the run', { 'identity.json': { ...IDENTITY, region: 'us-east-1', userPoolId: 'us-east-1_AbCdEf123', apiUrl: 'https://abc123.execute-api.us-east-1.amazonaws.com/prod' } }, /region us-east-1 is not this run's Region eu-central-1/],
         ['a manifest that is not an object', { 'control-plane.json': '[1]' }, /control-plane.json \(written by the control-plane slice\) is not a JSON object/],
         ['a control-plane manifest whose identity is no list', { 'control-plane.json': { ...CONTROL_PLANE, identity: {} } }, /"identity" must be an array/],
         ['a control-plane manifest with no seeded list', { 'control-plane.json': { version: 1 } }, /control-plane.json \(written by the control-plane slice\): "seeded" must be an array/],
@@ -248,6 +251,7 @@ describe('slice.sh', () => {
           [
             '#!/usr/bin/env bash',
             `echo "driver ${verb} $STRESS_PREFIX $STRESS_TIER" >> "$FAKE/calls.txt"`,
+            ...(verb === 'teardown' ? ['[[ -z "${FAKE_TEARDOWN_FAILS:-}" ]] || { echo "destroy failed" >&2; exit 1; }'] : []),
             `echo "stack=$STRESS_PREFIX-driver ${verb === 'deploy' ? 'deploy' : 'destroy'}_seconds=3"`,
             verb === 'deploy' ? 'mkdir -p "$FAKE/stacks/$STRESS_PREFIX-driver"' : 'rm -rf "$FAKE/stacks/$STRESS_PREFIX-driver"',
             '',
@@ -322,13 +326,29 @@ describe('slice.sh', () => {
       it('removes the host it deployed, and its run files, at teardown', () => {
         withHome(ALL, (h) => {
           expect(run(script(), env(h), 'deploy').status).toBe(0);
-          fs.writeFileSync(path.join(stateOf(h), 'manifest.json'), '{}');
+          fs.mkdirSync(path.join(stateOf(h), 'platform'));
+          fs.writeFileSync(path.join(stateOf(h), 'platform', 'manifest.json'), '{}');
           fs.writeFileSync(path.join(stateOf(h), 'platform-tenants.json'), '{}');
+          // The seed manifest of a slice-mode run (the fleet fixture at large) is not this run's.
+          fs.writeFileSync(path.join(stateOf(h), 'manifest.json'), '{"tenants":[]}');
           const teardown = run(script(), env(h), 'teardown', '--fixtures');
           expect(teardown.stderr).toBe('');
           expect(teardown.status).toBe(0);
           expect(calls()).toBe('driver deploy StressTest small\ndriver teardown StressTest small\n');
-          for (const f of ['platform-driver-owned', 'manifest.json', 'platform-tenants.json']) expect(fs.existsSync(path.join(stateOf(h), f))).toBe(false);
+          for (const f of ['platform-driver-owned', 'platform', 'platform-tenants.json']) expect(fs.existsSync(path.join(stateOf(h), f))).toBe(false);
+          expect(fs.readFileSync(path.join(stateOf(h), 'manifest.json'), 'utf8')).toBe('{"tenants":[]}');
+          expect(fs.existsSync(path.join(fake, 'stacks', 'StressTest-driver'))).toBe(false);
+        });
+      });
+
+      it('keeps its ownership marker when the host teardown fails, so a rerun can still remove the host', () => {
+        withHome(ALL, (h) => {
+          expect(run(script(), env(h), 'deploy').status).toBe(0);
+          const teardown = run(script(), { ...env(h), FAKE_TEARDOWN_FAILS: '1' }, 'teardown', '--fixtures');
+          expect(teardown.status).not.toBe(0);
+          expect(fs.existsSync(path.join(stateOf(h), 'platform-driver-owned'))).toBe(true);
+          expect(fs.existsSync(path.join(fake, 'stacks', 'StressTest-driver'))).toBe(true);
+          expect(run(script(), env(h), 'teardown', '--fixtures').status).toBe(0);
           expect(fs.existsSync(path.join(fake, 'stacks', 'StressTest-driver'))).toBe(false);
         });
       });
@@ -336,12 +356,36 @@ describe('slice.sh', () => {
       const k6Args = (): string[] => fs.readFileSync(path.join(fake, 'k6-args.txt'), 'utf8').trim().split('\n');
       const runEnv = (h: string): NodeJS.ProcessEnv => ({ ...env(h), STRESS_RESULTS: path.join(h, 'results'), STRESS_COMMIT: 'abc1234' });
 
+      it('starts a scenario on a fresh minute past the last platform record\'s metric window', () => {
+        withHome(ALL, (h) => {
+          fs.mkdirSync(path.join(h, 'results'));
+          const end = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+          fs.writeFileSync(path.join(h, 'results', 'agentic-runtime-isolation.PS-2.json'), JSON.stringify({ runId: 'r', scenario: 'PS-2', window: { start: end, end } }));
+          // A `sleep` that logs and returns, so the test does not wait for the minute.
+          const bin = path.join(fake, 'sleepbin');
+          fs.mkdirSync(bin, { recursive: true });
+          fs.writeFileSync(path.join(bin, 'sleep'), '#!/usr/bin/env bash\necho "$1" >> "$FAKE/sleeps.txt"\n', { mode: 0o755 });
+          fs.rmSync(path.join(fake, 'sleeps.txt'), { force: true });
+          const r = run(script(), { ...runEnv(h), PATH: `${bin}:${path.join(fake, 'bin')}:${process.env.PATH}` }, 'run', 'PS-4');
+          expect(r.stderr).toBe('');
+          expect(r.status).toBe(0);
+          expect(r.stdout).toMatch(/waiting \d+s for a fresh minute past the last scenario's metric window/);
+          // The record ends now, so the wait is about a minute and a few seconds more (a stalled
+          // host takes a little off); with no record at all it is at most 59 s (window.sh). That
+          // is what shows the PS records are read.
+          expect(Number(fs.readFileSync(path.join(fake, 'sleeps.txt'), 'utf8').trim())).toBeGreaterThanOrEqual(60);
+        });
+      });
+
       it('runs PS-2 as the S1 shape against the edge, with the identity and the tenants of the manifests', () => {
         withHome(ALL, (h) => {
           fs.mkdirSync(path.join(h, 'results'));
+          fs.mkdirSync(stateOf(h), { recursive: true });
+          fs.writeFileSync(path.join(stateOf(h), 'manifest.json'), '{"tenants":[]}');
           const r = run(script(), runEnv(h), 'run', 'PS-2');
           expect(r.stderr).toBe('');
           expect(r.status).toBe(0);
+          expect(fs.readFileSync(path.join(stateOf(h), 'manifest.json'), 'utf8')).toBe('{"tenants":[]}');
           expect(r.stdout).toContain('platform tenants: 2 of 4 steady tenants usable');
           expect(r.stdout).toContain(`refused ${ids(4)[2]}: no-user`);
           expect(r.stdout).toContain('run: PS-2 (s1-steady.js) at small');
@@ -353,8 +397,6 @@ describe('slice.sh', () => {
             'AGENT_BACKEND=default',
             'PLATFORM_API=https://abc123.execute-api.eu-central-1.amazonaws.com/prod/',
             'APP_CLIENT_ID=client123abc',
-            'ISSUER=https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_AbCdEf123',
-            'REGION=eu-central-1',
             'RECORD_SCENARIO=PS-2',
           ]);
           const manifest = JSON.parse(fs.readFileSync(path.join(fake, 'k6-manifest.json'), 'utf8'));
@@ -362,7 +404,7 @@ describe('slice.sh', () => {
         });
       });
 
-      it('runs S1 as before in slice mode: its own ingress and the shared identity, no platform record id', () => {
+      it('runs S1 in slice mode against its own ingress and the shared identity, with no platform record id', () => {
         withHome(ALL, (h) => {
           fs.mkdirSync(path.join(h, 'results'));
           fs.mkdirSync(stateOf(h), { recursive: true });
@@ -553,7 +595,7 @@ describe('slice.sh', () => {
     describe('the edge-refusal lines (k6/edge-refusals.js)', () => {
       // The file has no k6 import, so it runs here as it is, with its `export` keyword dropped.
       type Tracker = { track: (tenant: string, status: number) => void };
-      type Loaded = { createEdgeRefusals: (now: () => number, progress: () => number, log: (l: string) => void) => Tracker };
+      type Loaded = { createEdgeRefusals: (now: () => number, log: (l: string) => void) => Tracker };
       const load = (): Loaded => {
         const ctx: Record<string, unknown> = {};
         vm.runInNewContext(`${fs.readFileSync(path.join(STRESS_DIR, 'k6', 'edge-refusals.js'), 'utf8').replace(/^export /gm, '')}\nthis.createEdgeRefusals = createEdgeRefusals;`, ctx);
@@ -561,42 +603,24 @@ describe('slice.sh', () => {
       };
       const MINUTE = 60_000;
 
-      it('writes a minute\'s refusals when the next minute\'s first response arrives, even a success', () => {
+      it('writes each refusal at once, with its minute, so the last one of a VU is never lost', () => {
         const lines: string[] = [];
         let now = 10 * MINUTE;
-        const { track } = load().createEdgeRefusals(() => now, () => 0.2, (l) => lines.push(l));
+        const { track } = load().createEdgeRefusals(() => now, (l) => lines.push(l));
         track('A', 503);
-        track('A', 503);
-        track('B', 403);
-        track('A', 200);
-        expect(lines).toEqual([]);
-        now += MINUTE;
-        track('A', 200);
-        expect(lines.map((l) => JSON.parse(l))).toEqual([
-          { kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 503, count: 2 },
-          { kind: 'edge_refusal', epochMinute: 10, tenantId: 'B', status: 403, count: 1 },
+        expect(lines.map((l) => JSON.parse(l))).toEqual([{ kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 503 }]);
+        now += MINUTE + 5_000;
+        track('B', 429);
+        track('B', 429);
+        expect(lines.map((l) => JSON.parse(l)).slice(1)).toEqual([
+          { kind: 'edge_refusal', epochMinute: 11, tenantId: 'B', status: 429 },
+          { kind: 'edge_refusal', epochMinute: 11, tenantId: 'B', status: 429 },
         ]);
-        now += MINUTE;
-        track('A', 200);
-        expect(lines).toHaveLength(2);
-      });
-
-      it('writes after every response in the last 1 % of the scenario, a success included', () => {
-        const lines: string[] = [];
-        let progress = 0.5;
-        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, () => progress, (l) => lines.push(l));
-        track('A', 429);
-        expect(lines).toEqual([]);
-        progress = 0.995;
-        track('A', 200);
-        expect(lines.map((l) => JSON.parse(l))).toEqual([{ kind: 'edge_refusal', epochMinute: 10, tenantId: 'A', status: 429, count: 1 }]);
-        track('A', 200);
-        expect(lines).toHaveLength(1);
       });
 
       it('counts nothing for a success', () => {
         const lines: string[] = [];
-        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, () => 1, (l) => lines.push(l));
+        const { track } = load().createEdgeRefusals(() => 10 * MINUTE, (l) => lines.push(l));
         track('A', 200);
         expect(lines).toEqual([]);
       });
@@ -619,8 +643,7 @@ describe('slice.sh', () => {
           fs.writeFileSync(
             path.join(k6, 's1-steady.k6-stdout.txt'),
             lines([
-              { kind: 'edge_refusal', epochMinute: 1, tenantId: 'A', status: 503, count: 3 },
-              { kind: 'edge_refusal', epochMinute: 2, tenantId: 'A', status: 503, count: 2 },
+              ...[1, 1, 1, 2, 2].map((epochMinute) => ({ kind: 'edge_refusal', epochMinute, tenantId: 'A', status: 503 })),
               { kind: 'body_refusal', epochMinute: 2, tenantId: 'B', reason: 'tool-403' },
               { kind: 'tenant_minute', epochMinute: 2, tenantId: 'A', sent: 9, r429: 0 },
             ]),

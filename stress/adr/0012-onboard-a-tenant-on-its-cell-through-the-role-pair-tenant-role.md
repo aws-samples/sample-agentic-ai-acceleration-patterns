@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-20
+- Amended by: ADR-0016, ADR-0017
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -64,3 +65,13 @@ every cell account the pair is installed in, as ADR-0047 says of the cell role's
 tenant parameters `AGENTS` and `TOOLS` (default `default` and none) name what a tenant is
 subscribed to. Revisit when the stress cell gets per-tenant tool sets, or when a cell
 account holds cells of more than one application.
+
+Note 2026-11-20: ADR-0016 gives the tenant's front-door route to the front
+door's global route hook. The tenant script does not write a route; it
+records the deployment in the parameter
+`/application-plane/tenants/<tenant id>/<application id>/deployment`,
+below the namespace the cell API origin reads.
+
+Note 2026-11-20: ADR-0017 gives the tenant's identity tenant and users to
+the driver of the `control-plane` slice (spec §3.3 step 4). The tenant
+script makes no identity call.

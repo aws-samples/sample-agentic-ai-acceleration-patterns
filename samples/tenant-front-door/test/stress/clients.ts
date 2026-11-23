@@ -13,7 +13,7 @@ import type { Outputs } from './state';
  * control plane's fixture table, and the route registrar.
  */
 
-const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // pragma: allowlist secret
 
 /** A control-plane style id: 26 characters of Crockford base32, a millisecond timestamp then random. */
 export function newUlid(now: number = Date.now()): string {
@@ -34,7 +34,7 @@ export async function retrying(fn: () => Promise<HttpResult>, retryOn: (r: HttpR
   let last: HttpResult | undefined;
   for (let i = 0; i < attempts; i += 1) {
     last = await fn();
-    if (!retryOn(last)) return last;
+    if (!retryOn(last) || i === attempts - 1) return last;
     await sleep(Math.min(8000, 300 * 2 ** i) * (0.5 + Math.random()));
   }
   return last as HttpResult;

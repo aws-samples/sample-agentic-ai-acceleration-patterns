@@ -83,7 +83,7 @@ describe('runner (spec §3.5)', () => {
   it('orders platform scenarios by number, then the slices own scenarios', () => {
     const { root } = fixture(slices);
     const loaded = ['tenant-identity', 'control-plane'].map((n) => loadSlice(root, n));
-    expect(scenarioOrder(loaded)).toEqual(['PS-1', 'PS-5', 'placement-race']);
+    expect(scenarioOrder(loaded, 'slice')).toEqual(['PS-1', 'PS-5', 'placement-race']);
   });
 
   it('runs only the PS scenarios in a platform run and leaves the platform-only ones out of a slice run', () => {
@@ -94,7 +94,6 @@ describe('runner (spec §3.5)', () => {
     const pair = ['tenant-identity', 'control-plane'].map((n) => loadSlice(root, n));
     expect(scenarioOrder(pair, 'platform')).toEqual(['PS-1', 'PS-5']);
     expect(scenarioOrder(pair, 'slice')).toEqual(['PS-1', 'token-rate', 'placement-race']);
-    expect(scenarioOrder(pair)).toEqual(['PS-1', 'PS-5', 'token-rate', 'placement-race']);
   });
 
   it('refuses a need that is no slice, and a need left out of --slices', () => {
@@ -138,6 +137,20 @@ describe('runner (spec §3.5)', () => {
     const { root, home } = fixture({ a: { scenarios: ['x'] }, b: { needs: ['a'], scenarios: ['y'] } });
     const { calls, exec } = stub();
     await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['a', 'b'], exec })).rejects.toThrow(/nothing to run/);
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a slice run whose scenarios are all platformOnly, before anything runs', async () => {
+    const { root, home } = fixture({ a: { scenarios: ['PS-7'], platformOnly: ['PS-7'] } });
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['a'], exec })).rejects.toThrow(/declares no scenario to run in slice mode/);
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses an empty --scenarios list in a platform run with its own message', async () => {
+    const { root, home } = fixture(slices);
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, scenarios: [], exec })).rejects.toThrow(/--scenarios names no scenario/);
     expect(calls).toEqual([]);
   });
 

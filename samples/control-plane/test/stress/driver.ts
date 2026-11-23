@@ -13,7 +13,7 @@
  *   connection               write control-plane-connection.json, the manifest the front-door slice reads (platform mode)
  *   step <name>              a platform step (spec §3.5): hooks, register, warm-up or unhook
  *   seed                     the tier's tenant records, from the manifest when it exists
- *   run <scenario>           PS-1, placement-race, read-rate or build-limit-scaling (slice mode); PS-5, churn through the edge (platform mode)
+ *   run <scenario>           PS-1, placement-race, read-rate or build-limit-scaling; PS-5, churn through the edge (platform mode only)
  *   collect                  server-side 5xx in each record's window (P-7)
  *   sweep [--seeded]         remove the run's deployments, cells and tenants
  *   unregister               DeleteAccount and DeleteApplication

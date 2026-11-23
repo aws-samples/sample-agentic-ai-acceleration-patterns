@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-20
+- Amended by: ADR-0016
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -45,3 +46,7 @@ The slice needs `git`, `zip` and the Smithy CLI on the runner's host. A fixed ce
 script reaches an existing cell only after it is deleted and created again (the cell's
 stamped source; control-plane ADR-0032). The zip is in the run folder, outside the
 repository, and goes with `teardown --fixtures`.
+
+Note 2026-11-20: ADR-0016 adds `samples/tenant-front-door/src/demo-cell/`
+and `samples/tenant-front-door/src/shared/` to the archived paths, for the
+stress cell's cell API origin.

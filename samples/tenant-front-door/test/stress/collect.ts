@@ -8,17 +8,17 @@ import { CloudWatchLogsClient, GetQueryResultsCommand, StartQueryCommand } from 
 import { sleep } from './http';
 import { compareCell, expectedAtCell, joinEdge, type EdgeRow } from './join';
 import { percentiles, type ResultRecordJson } from './recorder';
-import { readRequestLog, type Env, type Outputs, type RequestLine } from './state';
+import { readRequestLog, requestLogPath, type Env, type Outputs, type RequestLine } from './state';
 
 /**
  * `collect`: reads the hops' logs for each scenario's window and checks
  * them against what the driver saw (P-7, docs/stress-test.spec.md §3.4).
  * Edge: every request's `x-amz-cf-id` is looked up as `x-edge-request-id` in
- * the standard log (the correlation join, ADR-0028). Cell: its log's count by
+ * the standard log (the correlation join, ADR-0029). Cell: its log's count by
  * status equals the number of requests the driver saw reach it, so a
  * refusal at the edge that also reached the origin shows. Router: the
  * function's compute utilization and its error metrics for the window.
- * Writes the edge hop into the scenario's record (late field) and
+ * Writes the edge hop and the router's compute reading into the scenario's record and
  * returns the failures; the run fails when there are any.
  */
 
@@ -135,7 +135,13 @@ export async function collect(env: Env, out: CollectOutputs): Promise<CollectRes
   let joinedAll = 0;
   let expectedAll = 0;
 
-  for (const { scenario, file, record } of recordsOf(env)) {
+  const records = recordsOf(env);
+  if (records.length === 0) failures.push(`no tenant-front-door.<scenario>.json record in ${env.results}: run a scenario first, there is nothing to check`);
+  for (const { scenario, file, record } of records) {
+    if (!fs.existsSync(requestLogPath(env, scenario))) {
+      failures.push(`${scenario}: no request log ${requestLogPath(env, scenario)}: there is nothing to join with the edge log`);
+      continue;
+    }
     const lines = readRequestLog(env, scenario);
     const fromMs = Date.parse(record.window.start);
     const toMs = Date.parse(record.window.end);
@@ -182,11 +188,13 @@ export async function collect(env: Env, out: CollectOutputs): Promise<CollectRes
         if (key !== previous) quietSince = Date.now();
         previous = key;
         const total = [...want.values()].reduce((a, b) => a + b, 0);
-        const quiet = Date.now() - quietSince > 60_000;
-        if (diff.length === 0 && (total > 0 || quiet)) break;
+        // The counts agree: wait until they stop changing, so a line for a request that must not have reached the cell is not missed
+        // because it arrives after the poll that found them equal. A minute when nothing is expected, half of that when something is.
+        const quiet = Date.now() - quietSince > (total > 0 ? 30_000 : 60_000);
+        if (diff.length === 0 && quiet) break;
         if (Date.now() > cellDeadline) {
-          // Nothing expected at the cell and its log never stayed quiet for a minute: the check did not run to its end.
-          if (diff.length === 0) failures.push(`${scenario}: the cell log was still changing at the deadline; no origin call is not shown`);
+          // The counts agree but the log never stayed quiet: the check did not run to its end.
+          if (diff.length === 0) failures.push(`${scenario}: the cell log was still changing at the deadline; a request that should not have reached the origin may not be shown yet`);
           break;
         }
         await sleep(10_000);
@@ -221,7 +229,6 @@ export async function collect(env: Env, out: CollectOutputs): Promise<CollectRes
         `router compute max ${compute.points > 0 ? `${compute.max.toFixed(1)} %` : 'no datapoint yet'}`,
     );
   }
-  fs.writeFileSync(path.join(env.stateDir, 'correlation.json'), `${JSON.stringify({ requestsWithId: expectedAll, joinedOnAmzCfId: joinedAll })}\n`, { mode: 0o600 });
   notes.push(`correlation: ${joinedAll} of ${expectedAll} requests joined the edge log on x-amz-cf-id = x-edge-request-id`);
   return { failures, notes };
 }

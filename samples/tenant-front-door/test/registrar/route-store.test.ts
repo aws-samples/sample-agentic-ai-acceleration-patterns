@@ -1,13 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { KvsRouteStore } from '../../src/registrar/route-store';
+import { KvsRouteStore, MAX_ATTEMPTS } from '../../src/registrar/route-store';
 
 /**
  * The data plane of a real KeyValueStore answers a stale `IfMatch` with a
- * `ValidationException` whose message says the pre-condition failed (stress
- * slice live run, HTTP 400), not with a `ConflictException`. The store must
- * read that as an ETag conflict and try again.
+ * `ValidationException` whose message says the pre-condition failed (HTTP
+ * 400), not with a `ConflictException`. The store must read that as an ETag
+ * conflict and try again.
  */
 describe('KvsRouteStore on a stale ETag', () => {
   const stale = (): Error => Object.assign(new Error('Pre-Condition failed during update of Key-Value-Store'), { name: 'ValidationException', $metadata: { httpStatusCode: 400 } });
@@ -34,9 +34,9 @@ describe('KvsRouteStore on a stale ETag', () => {
   });
 
   it('answers 503 once the attempts run out', async () => {
-    const t = store(Array.from({ length: 10 }, stale));
+    const t = store(Array.from({ length: MAX_ATTEMPTS + 1 }, stale));
     await expect(t.store.update(async () => ({ puts: { k: 'v' }, result: 'done' }))).rejects.toThrow('the route table is busy; retry');
-    expect(t.updates).toBe(5);
+    expect(t.updates).toBe(MAX_ATTEMPTS);
   });
 
   it('does not read another ValidationException as a conflict', async () => {

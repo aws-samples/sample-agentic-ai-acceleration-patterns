@@ -123,6 +123,16 @@ describe('route table keys custom resource (spec §4.1, ADR-0016, M-20)', () => 
     expect(kvs.commandCalls(UpdateKeysCommand)).toHaveLength(MAX_ATTEMPTS);
   });
 
+  it('reads the data plane\'s stale-ETag answer, a ValidationException that says the pre-condition failed, as a conflict', async () => {
+    storedSignin(undefined);
+    kvs.on(UpdateKeysCommand)
+      .rejectsOnce(Object.assign(new Error('Pre-Condition failed'), { name: 'ValidationException' }))
+      .resolves({ ETag: 'etag-3' });
+    kvs.resetHistory();
+    expect((await handleEvent(event({}), deps)).status).toBe('SUCCESS');
+    expect(kvs.commandCalls(UpdateKeysCommand)).toHaveLength(2);
+  });
+
   it('reports a failure by error name only, never a key or a message', async () => {
     storedSignin(undefined);
     kvs.on(UpdateKeysCommand).rejects(Object.assign(new Error(`bad value ${APP}`), { name: 'ValidationException' }));

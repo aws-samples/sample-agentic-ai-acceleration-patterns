@@ -2,7 +2,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# The slice's `collect` verb in platform mode (docs/stress-test.spec.md §3.4; stress/README.md).
+# The slice's `collect` verb in platform mode (docs/stress-test.spec.md §3.4; stress/README.md;
+# ADR-0054).
 # slice.sh calls it after the last scenario with the runner's environment:
 #
 #   STRESS_RESULTS STRESS_RUN_ID

@@ -19,7 +19,7 @@
 #                                   hook parameter, after the control-plane step `unhook` (teardown.sh)
 #
 # Slice mode: the front door runs on the smoke stack (a stand-in control plane,
-# one demo cell). Platform mode (STRESS_MODE=platform) composes the real control
+# one demo cell; ADR-0030). Platform mode (STRESS_MODE=platform) composes the real control
 # plane, its global hooks and the cell scripts: the runner calls `deploy`, then
 # the control-plane steps `hooks`, `register` and `warm-up`, then `step
 # phase-two` (stress/src/platform.ts), and the front door's tenants and routes
@@ -27,8 +27,9 @@
 # share a run prefix.
 #
 # Needs AWS_REGION and credentials for the account (every verb but budget),
-# STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME (deploy), bash, aws, jq, node and
-# the sample's npm install (run once when missing). Prints ids, counts and
+# STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME (deploy), bash, aws, jq, node, the
+# `smithy` CLI (deploy, on a fresh checkout) and npm (an `npm ci` of the
+# sample, run once when a package is missing). Prints ids, counts and
 # seconds only, never a token, a password or a key, and never runs `set -x`
 # (scripts/CONVENTIONS.md): the runner writes this output to run.log.
 
@@ -45,10 +46,18 @@ for name in STRESS_TIER_JSON STRESS_PREFIX STRESS_HOME STRESS_MODE STRESS_RUN_ID
     exit 2
   fi
 done
-# The prefix names stacks, the IAM role of the stand-in global hook and the
-# application domain label, so it is short and lower-case safe.
-if ! [[ "$STRESS_PREFIX" =~ ^[A-Za-z][A-Za-z0-9]{0,27}$ ]]; then
-  echo "slice.sh: STRESS_PREFIX must be 1 to 28 letters and digits, starting with a letter (it names the stacks and the application domain)" >&2
+# The default construct id and the smoke test's prefix name stacks a person deploys outside the stress run; teardown destroys every
+# stack of the prefix.
+case "$(printf '%s' "$STRESS_PREFIX" | tr '[:upper:]' '[:lower:]')" in
+  tenantfrontdoor | tfdsmoke)
+    echo "slice.sh: STRESS_PREFIX ${STRESS_PREFIX} is the name of the front door's own stacks (or the smoke test's); pick another" >&2
+    exit 2
+    ;;
+esac
+# The prefix names stacks, the IAM role of the stand-in global hook, the application id and the application domain label. It is lower
+# case, so the stack names and those derived names never differ by case between two prefixes.
+if ! [[ "$STRESS_PREFIX" =~ ^[a-z][a-z0-9]{0,27}$ ]]; then
+  echo "slice.sh: STRESS_PREFIX must be 1 to 28 lower-case letters and digits, starting with a letter (it names the stacks and the application domain)" >&2
   exit 2
 fi
 command -v jq >/dev/null 2>&1 || { echo "slice.sh: jq is not installed" >&2; exit 2; }

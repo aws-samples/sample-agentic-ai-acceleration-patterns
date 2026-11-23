@@ -33,7 +33,6 @@ OUTPUTS="${STATE_DIR}/outputs.json"
 CONTEXT="${STATE_DIR}/context.json"
 RESOURCES="${STATE_DIR}/resources.json"
 TIMINGS="${STATE_DIR}/timings.txt"
-CONCURRENCY="${INTEG_DEPLOY_CONCURRENCY:-2}"
 
 STACK_SUPPORT="${PREFIX}-support"
 STACK_CP="${PREFIX}-control-plane"
@@ -62,6 +61,18 @@ fd_selector() {
 SMOKE_APP="npx ts-node -P test/tsconfig.json --prefer-ts-exts test/smoke/smoke.app.ts"
 
 fail() { echo "slice: $*" >&2; exit 1; }
+
+# check_record FILE ACCOUNT: fails when the host's record of the prefix was made in another account or Region than the credentials and
+# AWS_REGION name. The prefix's stacks of another account or Region are not this run's, and the edge stacks in us-east-1 would be shared.
+check_record() {
+  local file="$1" account="$2" recorded_account recorded_region
+  [[ -s "$file" ]] || return 0
+  recorded_account="$(jq -r '.accountId // empty' "$file")"
+  recorded_region="$(jq -r '.region // empty' "$file")"
+  if [[ "$recorded_account" != "$account" || "$recorded_region" != "$AWS_REGION" ]]; then
+    fail "${file} names account ${recorded_account:-none} in ${recorded_region:-no Region}, not ${account} in ${AWS_REGION}: nothing was changed; use the credentials and Region it names, or another STRESS_PREFIX or STRESS_HOME"
+  fi
+}
 
 # Region of each stack: the edge stacks are in us-east-1 (ADR-0010), the rest in AWS_REGION.
 stack_region() {
@@ -103,6 +114,8 @@ param() { # NAME [REGION]
   present "parameter $1" "$v"
 }
 
+# shortcut: takes the first resource of the type; the stacks it is asked about hold one log group and one function each, so a second one
+# in a stack would need this to select by logical id.
 resource() { # STACK TYPE -> physical id of the first resource of that type
   local v
   v="$(aws cloudformation describe-stack-resources --region "$(stack_region "$1")" --stack-name "$1" \
@@ -143,6 +156,12 @@ smoke_context_args() {
   fi
 }
 
+# The same prefix guard as slice.sh, for deploy.sh and teardown.sh run by hand: `teardown` destroys every stack of the prefix.
+case "$PREFIX_LOWER" in
+  tenantfrontdoor | tfdsmoke) fail "STRESS_PREFIX ${PREFIX} is the name of the front door's own stacks (or the smoke test's); pick another" ;;
+esac
+[[ "$PREFIX" =~ ^[a-z][a-z0-9]{0,27}$ ]] || fail "STRESS_PREFIX must be 1 to 28 lower-case letters and digits, starting with a letter"
+
 # deploy_stack STACK APP_KIND [NOTE]: one CDK deploy of one stack, timed. APP_KIND is `smoke` (the smoke app) or `fd` (the
 # front door app). NOTE, when given, ends the printed line (platform mode: `phase=two`). The caller sets LOGS to a scratch
 # folder; a failed deploy prints the last lines of its log.
@@ -152,11 +171,11 @@ deploy_stack() {
   if [[ "$kind" == smoke ]]; then
     smoke_context_args
     npx cdk deploy "$stack" --exclusively --app "$SMOKE_APP" --output "${STATE_DIR}/cdk.out.smoke" "${SMOKE_CONTEXT[@]}" \
-      --require-approval never --concurrency "$CONCURRENCY" >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
+      --require-approval never >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
   else
     fd_context_args
     npx cdk deploy "$(fd_selector "$stack")" --exclusively --output "${STATE_DIR}/cdk.out.fd" "${FD_CONTEXT[@]}" \
-      --require-approval never --concurrency "$CONCURRENCY" >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
+      --require-approval never >"${LOGS}/${stack}.log" 2>&1 || { tail -40 "${LOGS}/${stack}.log" >&2; fail "deploy ${stack}"; }
   fi
   secs=$((SECONDS - start))
   echo "stack=${stack} deploy_seconds=${secs}${note:+ ${note}}"

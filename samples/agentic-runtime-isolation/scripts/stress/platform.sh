@@ -2,17 +2,17 @@
 # SPDX-License-Identifier: MIT-0
 #
 # What slice.sh needs in platform mode (STRESS_MODE=platform; docs/stress-test.spec.md §3.3,
-# §3.4, §4.2; stress/README.md, "Platform mode: manifests"). Sourced, not run.
+# §3.4, §4.2; stress/README.md, "Platform mode: manifests"; ADR-0054). Sourced, not run.
 #
 # In platform mode the slice deploys no cell and seeds nothing. The control plane builds the
 # cells, tenant-identity holds the users, and the front door is the edge, so the slice reads
 # the manifests those slices wrote to $STRESS_HOME/$STRESS_PREFIX and drives the edge. Needs
 # jq, STRESS_HOME, STRESS_PREFIX, STRESS_TIER and STRESS_STATE_DIR (slice.sh sets the last).
 
-# The manifests, the slice that writes each one, and what the slice reads from it.
 PLATFORM_MANIFEST_DIR="${STRESS_HOME:-}/${STRESS_PREFIX:-}"
 PLATFORM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# platform_producer FILE -> the slice that writes that manifest.
 platform_producer() {
   case "$1" in
     tenant-front-door.json) echo tenant-front-door ;;
@@ -23,7 +23,7 @@ platform_producer() {
 
 # need_platform_inputs VERB -> exits 1 naming every manifest that is missing or unusable.
 # Sets EDGE_URL (an https origin, no path), IDENTITY_API (with a trailing slash), IDENTITY_CLIENT,
-# IDENTITY_REGION and IDENTITY_ISSUER (the stress identity's token issuer).
+# and IDENTITY_REGION.
 need_platform_inputs() {
   local verb="$1" f bad=0 d="$PLATFORM_MANIFEST_DIR"
   for f in tenant-front-door.json identity.json control-plane.json; do
@@ -49,15 +49,14 @@ need_platform_inputs() {
   IDENTITY_API="$(jq -r '.apiUrl // empty' "${d}/identity.json")"
   IDENTITY_CLIENT="$(jq -r '.appClientId // empty' "${d}/identity.json")"
   IDENTITY_REGION="$(jq -r '.region // empty' "${d}/identity.json")"
-  local pool
-  pool="$(jq -r '.userPoolId // empty' "${d}/identity.json")"
   [[ "$IDENTITY_API" =~ ^https://[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com(/[A-Za-z0-9_./-]*)?$ ]] \
     || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): apiUrl must be an execute-api URL (got '${IDENTITY_API:-nothing}')" >&2; exit 1; }
   [[ "$IDENTITY_API" == */ ]] || IDENTITY_API="${IDENTITY_API}/"
   [[ "$IDENTITY_CLIENT" =~ ^[A-Za-z0-9]{1,128}$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): appClientId is missing or malformed" >&2; exit 1; }
   [[ "$IDENTITY_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): region is missing or malformed" >&2; exit 1; }
-  [[ "$pool" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]_[A-Za-z0-9]+$ ]] || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): userPoolId is missing or malformed" >&2; exit 1; }
-  IDENTITY_ISSUER="https://cognito-idp.${IDENTITY_REGION}.amazonaws.com/${pool}"
+  # k6 signs IssueToken for AWS_REGION, so an identity in another Region would answer 403.
+  [[ -z "${AWS_REGION:-}" || "$IDENTITY_REGION" == "$AWS_REGION" ]] \
+    || { echo "slice.sh ${verb}: identity.json (written by the tenant-identity slice): region ${IDENTITY_REGION} is not this run's Region ${AWS_REGION}" >&2; exit 1; }
 
   jq -e '.seeded | type == "array"' "${d}/control-plane.json" >/dev/null 2>&1 \
     || { echo "slice.sh ${verb}: ${d}/control-plane.json (written by the control-plane slice): \"seeded\" must be an array" >&2; exit 1; }
@@ -76,7 +75,7 @@ build_platform_manifest() {
   built="$(jq -n --slurpfile cp "${d}/control-plane.json" \
     --argjson active "$active" --arg scale "${STRESS_TIER:-}" -f "${PLATFORM_DIR}/platform-tenants.jq")" \
     || { echo "slice.sh run: could not read ${d}/control-plane.json" >&2; exit 1; }
-  mkdir -p -m 700 "$STRESS_STATE_DIR"
+  mkdir -p -m 700 "$STRESS_STATE_DIR" "$(dirname "$out")"
   ( umask 077; jq .manifest <<<"$built" >"$out" )
   ( umask 077; jq '{refused, ignored}' <<<"$built" >"${STRESS_STATE_DIR}/platform-tenants.json" )
   usable="$(jq '.manifest.tenants | length' <<<"$built")"

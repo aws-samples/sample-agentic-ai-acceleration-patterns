@@ -9,8 +9,10 @@
 #   slice.sh budget                  draws on the account-wide quotas, no credentials
 #   slice.sh deploy                  <prefix>-ingress, the agents stacks, <prefix>-driver (deploy.sh)
 #   slice.sh seed                    the tier's tenants, users, subscriptions and demo rows (seed.sh)
-#   slice.sh run <scenario>          S1 to S7 (slice mode) or PS-2, PS-3, PS-4, PS-6, PS-8 (platform mode): k6 on the driver host, one record per scenario
-#   slice.sh collect                 the late fields of this run's records, from the hops' logs (collect.sh; platform mode: collect-platform.sh)
+#   slice.sh run <scenario>          S1 to S7 (slice mode) or PS-2, PS-3, PS-4, PS-6, PS-8 (platform
+#                                    mode): k6 on the driver host, one record per scenario
+#   slice.sh collect                 the late fields of this run's records, from the hops' logs
+#                                    (collect.sh; platform mode: collect-platform.sh)
 #   slice.sh teardown [--fixtures]   destroys the stacks, and the tenants at small and medium or on --fixtures
 #
 # In slice mode the slice deploys its own cell: one ingress with the tier's agents
@@ -27,10 +29,12 @@
 # control plane and tenant-identity both know, and sends the S1, S2, S3, S5 and S6 load
 # shapes to <edgeUrl>/agents as PS-2, PS-3, PS-4, PS-6 and PS-8 (spec §5.1); `collect` takes
 # each refusal's tenant and reason from the driver's own lines (collect-platform.sh);
-# `teardown` removes only this slice's run files. stress/README.md has the manifest contract.
+# `teardown` removes this slice's run files, and the k6 host only when its own `deploy` made
+# it (ADR-0054). stress/README.md has the manifest contract.
 #
 # State lives in $STRESS_HOME/$STRESS_PREFIX/agentic-runtime-isolation/: the stack
-# outputs, the tenant manifest and the deploy and destroy times; never a token,
+# outputs, the tenant manifest and the deploy and destroy times, and in platform mode
+# platform/manifest.json, platform-tenants.json and the platform-driver-owned marker; never a token,
 # a password or a key. Needs AWS_REGION and credentials for the account (every
 # verb but budget), bash, aws, jq, node and the sample's npm install (run once
 # when missing). Prints ids and counts only and never runs `set -x`: the runner
@@ -267,7 +271,7 @@ case "$verb" in
         S5) k6_file=s5-streams.js ;;
         S6) k6_file=s6-peak.js ;;
         S7) k6_file=s7-eviction.js ;;
-        PS-*) echo "slice.sh run: ${scenario} runs in platform mode only: it needs the edge, so run it with every slice it needs" >&2; exit 2 ;;
+        PS-2 | PS-3 | PS-4 | PS-6 | PS-8) echo "slice.sh run: ${scenario} runs in platform mode only: it needs the edge, so run it with every slice it needs" >&2; exit 2 ;;
         *) echo "slice.sh run: unknown scenario ${scenario} (S1 to S7)" >&2; exit 2 ;;
       esac
     fi
@@ -298,7 +302,9 @@ case "$verb" in
       # No cell of this slice's own: the edge, the stress identity and the tenants come from
       # the other slices' manifests (platform.sh).
       need_platform_inputs run
-      manifest="${STRESS_STATE_DIR}/manifest.json"
+      # Not ${STRESS_STATE_DIR}/manifest.json, which is slice mode's seed manifest (the fleet
+      # fixture of a large run); k6 takes the file by its base name.
+      manifest="${STRESS_STATE_DIR}/platform/manifest.json"
       build_platform_manifest "$tier_json" "$manifest"
       env_args=(
         "MANIFEST=/opt/stress/inputs/manifest.json"
@@ -306,12 +312,9 @@ case "$verb" in
         "AGENT_BACKEND=${EDGE_BACKEND}"
         "PLATFORM_API=${IDENTITY_API}"
         "APP_CLIENT_ID=${IDENTITY_CLIENT}"
-        "ISSUER=${IDENTITY_ISSUER}"
-        "REGION=${IDENTITY_REGION}"
         "RECORD_SCENARIO=${scenario}"
       )
     else
-      manifest="${STRESS_STATE_DIR}/manifest.json"
       ident="/application-plane/shared/identity"
       platform_api="$(aws ssm get-parameter --name "${ident}/apiUrl" --query Parameter.Value --output text)"
       [[ "$platform_api" == */ ]] || platform_api="${platform_api}/"
@@ -392,7 +395,7 @@ case "$verb" in
     source "${here}/window.sh"
     prev_end=0
     shopt -s nullglob
-    for r in "${STRESS_RESULTS}"/agentic-runtime-isolation.S[1-7].json "${STRESS_RESULTS}"/agentic-runtime-isolation.PS-[2-8].json; do
+    for r in "${STRESS_RESULTS}"/agentic-runtime-isolation.S[1-7].json "${STRESS_RESULTS}"/agentic-runtime-isolation.PS-*.json; do
       end_iso="$(jq -er '.window.end' "$r" 2>/dev/null)" \
         || { echo "slice.sh run: ${r} has no window.end; cannot space ${scenario} after it" >&2; exit 1; }
       e="$(iso_epoch "$end_iso")" || { echo "slice.sh run: ${r}: window.end is not a timestamp" >&2; exit 1; }
@@ -439,7 +442,8 @@ case "$verb" in
     if platform_mode; then
       # The slice made no tenant and no cell. It removes its run files, and the k6 host only
       # when its own deploy made it (fixtures stay with their owners).
-      rm -f "${STRESS_STATE_DIR}/manifest.json" "${STRESS_STATE_DIR}/platform-tenants.json"
+      rm -f "${STRESS_STATE_DIR}/platform/manifest.json" "${STRESS_STATE_DIR}/platform-tenants.json"
+      rmdir "${STRESS_STATE_DIR}/platform" 2> /dev/null || true
       if [[ -e "$DRIVER_MARK" ]]; then
         need_region
         echo "teardown: platform mode: ${DRIVER_STACK} (stress/driver/teardown.sh)"

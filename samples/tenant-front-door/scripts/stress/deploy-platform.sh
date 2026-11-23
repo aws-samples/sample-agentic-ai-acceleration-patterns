@@ -19,8 +19,7 @@
 #
 # Inputs (environment): AWS_REGION, STRESS_PREFIX, STRESS_HOME from the runner;
 # STRESS_FD_ZONE_ID and STRESS_FD_ZONE_NAME as in slice mode (the application
-# domain is `<prefix in lower case>.<zone name>`); INTEG_DEPLOY_CONCURRENCY
-# (default 2). Reads `identity.json` (tenant-identity slice) and
+# domain is `<prefix in lower case>.<zone name>`). Reads `identity.json` (tenant-identity slice) and
 # `control-plane-connection.json` (control-plane slice) from
 # $STRESS_HOME/$STRESS_PREFIX/; each missing field is named with the slice that
 # writes it. The prefix is used in one mode only: slice mode and platform mode
