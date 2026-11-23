@@ -20,6 +20,7 @@ tsconfig.tsbuildinfo
 /projenrc/tsconfig.json
 /driver/tsconfig.json
 /application/tsconfig.json
+/dashboard/tsconfig.json
 /.gitattributes
 /.projenrc.ts
 /projenrc

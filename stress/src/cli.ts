@@ -1,12 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { parseLimits, QUOTAS } from './budget';
+import { awsCliPublish, Emitter, emitFromCli } from './metrics';
 import { parseRecord, renderResults } from './result';
 import { planRun, runStress } from './runner';
 import { TIERS, tierOf, tierProblems } from './tiers';
@@ -17,11 +18,16 @@ import { TIERS, tierOf, tierProblems } from './tiers';
  *   tier   <name>                            the tier as JSON (also exported to slices as STRESS_TIER_JSON)
  *   plan   --tier T --slices a,b             the order and mode a run would use
  *   run    --tier T --slices a,b [--scenarios x,y] [--limits file] [--remove-fixtures]
+ *          [--dashboard | --no-dashboard] [--keep-dashboard]
  *   report <results dir>                     a run's results file, to stdout
  *   quotas                                   the budgeted quotas and their Service Quotas codes
+ *   emit   <metric> <value> [Dim=value ...]  one StressRun data point (a slice's script; needs STRESS_METRICS=1)
+ *   dashboard up|snapshot|down --run <id>    a run's dashboard by hand, from the plan in its run folder
+ *                                            (stress/dashboard/README.md)
  */
 
 const repoRoot = path.resolve(__dirname, '..', '..');
+const dashboardScript = path.join(repoRoot, 'stress', 'dashboard', 'dashboard.sh');
 
 function list(value: string | undefined): string[] {
   return (value ?? '').split(',').map((s) => s.trim()).filter((s) => s.length > 0);
@@ -43,6 +49,10 @@ async function main(argv: string[]): Promise<number> {
       'scenarios': { type: 'string' },
       'limits': { type: 'string' },
       'remove-fixtures': { type: 'boolean', default: false },
+      'dashboard': { type: 'boolean', default: false },
+      'no-dashboard': { type: 'boolean', default: false },
+      'keep-dashboard': { type: 'boolean', default: false },
+      'run': { type: 'string' },
     },
   });
   switch (command) {
@@ -76,7 +86,22 @@ async function main(argv: string[]): Promise<number> {
       const runId = process.env.STRESS_RUN_ID ?? new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, 'Z');
       const commit = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
       const limits = values.limits === undefined ? undefined : parseLimits(fs.readFileSync(values.limits, 'utf8'), values.limits, tier.cellAccounts);
+      // The dashboard is for platform runs (stress ADR-0022); --dashboard turns it on for a slice
+      // run too (a slice run has no front door and no cell account to show), --no-dashboard off.
+      const sliceNames = list(values.slices);
+      if (values.dashboard && values['no-dashboard']) throw new Error('--dashboard and --no-dashboard exclude each other');
+      const withDashboard = !values['no-dashboard'] && (values.dashboard || sliceNames.length > 1);
+      const region = process.env.AWS_REGION ?? '';
+      if (withDashboard && region === '') throw new Error('the dashboard needs AWS_REGION (the platform account\'s Region); set it or pass --no-dashboard');
+      if (withDashboard && (process.env.STRESS_CELL_ACCOUNTS ?? '') === '') {
+        process.stderr.write('dashboard: STRESS_CELL_ACCOUNTS is not set, so the dashboard shows no cell account (stress/dashboard/README.md)\n');
+      }
+      const metrics = withDashboard ? new Emitter(awsCliPublish(region), runId, (l) => process.stderr.write(`${l}\n`)) : undefined;
       const summary = await runStress({
+        metrics,
+        dashboard: withDashboard
+          ? { script: dashboardScript, keep: values['keep-dashboard'] && !values['remove-fixtures'], region }
+          : undefined,
         repoRoot,
         tier: tier.name,
         slices: list(values.slices),
@@ -98,6 +123,7 @@ async function main(argv: string[]): Promise<number> {
       return summary.failures.length === 0 ? 0 : 1;
     }
     case 'report': {
+      // Re-renders from the records alone: it has no verdict and no "Dashboard" section (the runner's results.md has both).
       const dir = positionals[0];
       if (dir === undefined) throw new Error('report needs a results folder');
       const records = fs
@@ -107,6 +133,36 @@ async function main(argv: string[]): Promise<number> {
         .map((f) => parseRecord(fs.readFileSync(path.join(dir, f), 'utf8'), f));
       process.stdout.write(renderResults(records));
       return 0;
+    }
+    case 'emit': {
+      return emitFromCli(rest, process.env, awsCliPublish(process.env.AWS_REGION ?? ''), (l) => process.stderr.write(`${l}\n`));
+    }
+    case 'dashboard': {
+      const verb = positionals[0];
+      if (verb !== 'up' && verb !== 'snapshot' && verb !== 'down') throw new Error('dashboard needs up, snapshot or down');
+      // The run's own plan, written by the runner when the run started: the run folder holds it.
+      const runId = values.run ?? process.env.STRESS_RUN_ID;
+      if (runId === undefined) throw new Error('dashboard needs --run <run id>');
+      const home = process.env.STRESS_HOME ?? path.join(os.homedir(), '.aaa-stress');
+      const prefix = process.env.STRESS_PREFIX ?? 'stress';
+      // The run id and the prefix make a path and reach a stack name: the runner's own rule for both.
+      if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(runId)) throw new Error('--run must be a run id: letters, digits and hyphens');
+      if (!/^[A-Za-z][A-Za-z0-9]{0,39}$/.test(prefix)) throw new Error('STRESS_PREFIX must be 1 to 40 letters and digits, starting with a letter');
+      const runDir = path.join(home, prefix, runId);
+      const planFile = path.join(runDir, 'dashboard-plan.json');
+      if (!fs.existsSync(planFile)) throw new Error(`${planFile} does not exist: only a run made with the dashboard on has a plan`);
+      const r = spawnSync('bash', [dashboardScript, verb], {
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          STRESS_PREFIX: prefix,
+          STRESS_HOME: home,
+          STRESS_RUN_ID: runId,
+          STRESS_RUN_DIR: runDir,
+          STRESS_DASHBOARD_PLAN_FILE: planFile,
+        },
+      });
+      return r.status ?? 1;
     }
     case 'quotas': {
       for (const [id, q] of Object.entries(QUOTAS)) {

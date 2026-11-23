@@ -98,6 +98,8 @@ export async function ps5(s: ScenarioEnv, timing: Timing = REAL_TIMING): Promise
         if (e instanceof EdgeMisconfigured) queue.length = 0;
       } finally {
         active -= 1;
+        // The peak does not fall; the dashboard's builds in flight do.
+        s.rec.quotaPeak('platform', 'codebuild-linux-small', active);
       }
     }
   };

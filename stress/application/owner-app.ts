@@ -12,7 +12,9 @@
  * (optional: the platform account of a platform run, which gets the ingress reader role in
  * `CellAccountBase`) and `CELL_OWNER_STACKS` (optional: `base` makes `CellPolicies` no part of
  * the app, for the second Region of an account that already has the policies: their names
- * are account-wide).
+ * are account-wide) and `OBSERVABILITY_SINK_ARN` (optional: the platform account's observability
+ * sink, `stress/dashboard/deploy-sink.sh`; `CellAccountBase` then holds the one link that shows
+ * this account on the run dashboard, stress ADR-0022).
  */
 
 import { App, Validations } from 'aws-cdk-lib';
@@ -37,6 +39,7 @@ new CellAccountBaseStack(app, 'CellAccountBase', {
   userPoolId: blank(process.env.CELL_USER_POOL_ID),
   appClientId: blank(process.env.CELL_APP_CLIENT_ID),
   platformAccountId: blank(process.env.PLATFORM_ACCOUNT_ID),
+  observabilitySinkArn: blank(process.env.OBSERVABILITY_SINK_ARN),
   description: 'Cell account owner: API Gateway logs role and the identity parameters (spec §3.7)',
 });
 new CellBoundaryProbeStack(app, 'CellBoundaryProbe', { env, names, description: 'Temporary: the cell permissions boundary probe role (probes.sh)' });

@@ -36,6 +36,11 @@
 # The mirror travels inside the Run Command parameters (below 60 KB, see the guard), compressed:
 # this is for the shared library and one sample's scenario folder, not for data.
 #
+# In a platform run (STRESS_MODE=platform) of a scenario (RECORD_SCENARIO, a NAME=value argument,
+# as slice.sh passes it) with the run's metrics on (STRESS_METRICS=1, set by the runner), `k6 run`
+# also starts stress/k6/relay.sh on the host, which publishes the run's minutes to CloudWatch while
+# k6 runs (stress ADR-0022); it is stopped, and given a minute to publish what is pending, after k6.
+#
 # A SIGINT or SIGTERM is passed on to host.sh, which cancels the command on the host.
 
 set -euo pipefail
@@ -88,7 +93,7 @@ fi
     echo "echo $(base64 -w0 <"${TMP}/inputs.tgz") | base64 -d | tar xz -C /opt/stress"
   fi
   NAMES=""
-  for name in STRESS_RUN_ID STRESS_TIER_JSON STRESS_MODE STRESS_COMMIT STRESS_TIER; do
+  for name in STRESS_RUN_ID STRESS_TIER_JSON STRESS_MODE STRESS_COMMIT STRESS_TIER STRESS_METRICS; do
     [[ -z "${!name:-}" ]] || { echo "export ${name}=$(sq "${!name}")"; NAMES="${NAMES} ${name}"; }
   done
   for kv in "$@"; do
@@ -114,7 +119,28 @@ fi
   if [[ "$COMMAND" == inspect ]]; then
     echo "for n in ${NAMES} STRESS_RESULTS; do eval \"v=\\\${\$n}\"; set -- \"\$@\" --env \"\$n=\$v\"; done"
   fi
+  if [[ "$COMMAND" == run ]]; then
+    # The dashboard's relay (stress ADR-0022): in a platform run of a scenario, it reads k6's output
+    # as it grows and publishes each minute. It is a view: if it cannot start, k6 runs without it.
+    echo 'relay_pid=""'
+    # The relay ends itself when this script dies or after K6_TIMEOUT + 300 s; the trap ends it at once.
+    echo "trap '[ -z \"\$relay_pid\" ] || kill \"\$relay_pid\" 2>/dev/null || true' EXIT"
+    echo 'if [ "${STRESS_METRICS:-}" = 1 ] && [ "${STRESS_MODE:-}" = platform ] && [ -n "${RECORD_SCENARIO:-}" ] && [ -f /opt/stress/repo/stress/k6/relay.sh ] && command -v jq >/dev/null 2>&1; then'
+    echo '  rm -f /opt/stress/out/relay.stop'
+    echo "  RELAY_MAX_S=$((TIMEOUT + 300)) bash /opt/stress/repo/stress/k6/relay.sh >/opt/stress/out/relay.log 2>&1 &"
+    echo '  relay_pid=$!'
+    echo 'fi'
+  fi
   echo "k6 \"\$@\" $(sq "$(basename "$SCRIPT")") >/opt/stress/out/k6-stdout.txt 2>&1 || rc=\$?"
+  if [[ "$COMMAND" == run ]]; then
+    # Tell the relay to publish what is pending and stop; give it a minute, then end it.
+    echo 'if [ -n "$relay_pid" ]; then'
+    echo '  touch /opt/stress/out/relay.stop'
+    echo '  waited=0'
+    echo '  while kill -0 "$relay_pid" 2>/dev/null && [ "$waited" -lt 60 ]; do sleep 1; waited=$((waited + 1)); done'
+    echo '  kill "$relay_pid" 2>/dev/null || true'
+    echo 'fi'
+  fi
   echo 'tar czf /opt/stress/out.tgz -C /opt/stress out'
   echo 'echo "k6 exit=${rc}"'
   echo '[ "$rc" -eq 0 ] || tail -n 40 /opt/stress/out/k6-stdout.txt'
@@ -156,6 +182,7 @@ if sed -n '/^OUT_BASE64_BEGIN$/,/^OUT_BASE64_END$/{/^OUT_BASE64_/!p}' "${TMP}/ho
   NAME="$(basename "$SCRIPT" .js)"
   mkdir -p "$DEST"
   cp "${TMP}/out/k6-stdout.txt" "${DEST}/${NAME}.k6-stdout.txt" || echo "could not keep k6's stdout" >&2
+  [[ ! -f "${TMP}/out/relay.log" ]] || cp "${TMP}/out/relay.log" "${DEST}/${NAME}.relay.log" || echo "could not keep the relay's log" >&2
   if [[ -f "${TMP}/out/summary.json" ]]; then
     cp "${TMP}/out/summary.json" "${DEST}/${NAME}.summary.json" || echo "could not keep k6's summary" >&2
   else

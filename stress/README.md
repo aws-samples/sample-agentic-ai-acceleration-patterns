@@ -21,7 +21,8 @@ whose cell and tenant scripts the control-plane slice runs.
 | Result records | [`src/result.ts`](./src/result.ts) | one JSON record per slice per scenario, its checks and the results file (spec §4.3) |
 | Runner | [`src/runner.ts`](./src/runner.ts), [`run.sh`](./run.sh) | budget, then `deploy`, `seed`, `run`, `collect` in dependency order, `teardown` in reverse (spec §3.5) |
 | Driver host | [`driver/`](./driver/stress-driver.cdk.ts) | the k6 host every slice runs its load from: one EC2 instance, no inbound rule, no public IP, SSM Session Manager (ADR-0007, ADR-0009) |
-| k6 library | [`k6/`](./k6/README.md) | tokens, pacing, the correlation header and the result record every slice's scenarios share (ADR-0008) |
+| k6 library | [`k6/`](./k6/README.md) | tokens, pacing, the correlation header and the result record every slice's scenarios share (ADR-0008), and the relay that publishes a scenario's minutes while it runs |
+| Run dashboard | [`dashboard/`](./dashboard/README.md), [`src/metrics.ts`](./src/metrics.ts) | one CloudWatch dashboard of a platform run, removed after it, and the `StressRun` metrics the runner, the relay and a slice publish (ADR-0022) |
 | Cell account owner's stacks and the stress application | [`application/`](./application/README.md) | the cell policies, the account base, the `/cell/` path aspect, the cell bootstrap and its probes, the control-plane role pair, and the stress application's cell app and cell and tenant scripts (spec §3.1, §3.7, §8 decision 7; ADR-0006, ADR-0011, ADR-0012, ADR-0014) |
 
 ## A slice
@@ -216,6 +217,13 @@ the service default and often lower than an account holds. `run.sh quotas`
 lists the Service Quotas codes to read them from
 (`aws service-quotas get-service-quota --service-code <s> --quota-code <c>`).
 
+A platform run also deploys the run dashboard and publishes its `StressRun` metrics; it needs `AWS_REGION`
+in the environment (the platform account's Region), and `STRESS_CELL_ACCOUNTS` for the cell widgets.
+`--no-dashboard` turns it off, `--dashboard` turns it on for a slice run, `--keep-dashboard` keeps it after the
+run. A slice's script can add a figure with `run.sh emit <metric> <value> [Dimension=value ...]` (it does
+nothing unless the run has its metrics on). See [`dashboard/README.md`](./dashboard/README.md), which also
+says how to set up the sink and the link once.
+
 The run id defaults to the start time (UTC); the runner refuses a run
 folder that already exists. Ctrl-C, SIGTERM or a hangup (SIGHUP) stops the
 current step, with everything it started, and then tears down every slice
@@ -313,8 +321,12 @@ run, copy that file to `stress/results/<date>-<tier>.md` and commit it
   `lib.js` needs that check again.
 - `refusals` in a record from k6 are all unattributed until the slice's `collect` joins them
   with the hops' logs (ADR-0008).
+- The run dashboard is a view: it decides no pass criterion, a failed dashboard step does not fail a run,
+  and a cell build can forge its `StressCell` numbers. Its limits (one Region, no tenant, no Contributor
+  Insights widget, `medium` and `large` not run) are in [`dashboard/README.md`](./dashboard/README.md).
 - A SIGKILL to the runner leaves the current verb's process group
-  running, and the run lock in place.
+  running, and the run lock in place. The dashboard stack is then left too: remove it with
+  `run.sh dashboard down --run <run id>`.
 - A process a verb starts with `setsid` leaves the group, so the runner
   cannot stop it, and while it holds the verb's stdout or stderr the verb
   does not end. Redirect the output of anything started that way.

@@ -23,6 +23,8 @@
 
 import * as path from 'node:path';
 import { App, CfnOutput, Tags } from 'aws-cdk-lib';
+import type { ILogGroup } from 'aws-cdk-lib/aws-logs';
+import { addCellMetricFilters } from './cell-metrics';
 import { applyCellRolePath, cellSynthContext } from './cell-path';
 import { cellPolicyNames } from './cell-policies';
 import { CELL_TAG, cellAppContext, cellStackName } from './cell-stack';
@@ -59,6 +61,31 @@ const stack = new RuntimeIsolationDemoStack(app, stackName, {
   owner: stackName,
   description: `Stress application cell ${cellId} (platform stress test, spec §3.3)`,
   env: { account: need('CDK_DEFAULT_ACCOUNT'), region },
+});
+
+// The run dashboard's metric filters on the cell's own log lines (stress ADR-0022, design §3.2):
+// the access, ingress and authoriser log groups of the `api-gateway` ingress, and the log group
+// of each tools gateway's interceptor. No per-tenant metric is added. The filters are tested in
+// `test/cell-metrics.test.ts`; this wiring (the log group ids, the tools gateways) has no unit test,
+// because the app loads the sample's CDK and runs only in the cell build. It was checked by synthesising
+// the app with the sample's own `node_modules`: the template held the filters on the ingress, the
+// authoriser and both interceptor log groups (stress/spikes/dashboard/README.md, "The cell app's filters").
+const ingressOf = (stack as unknown as {
+  ingress: {
+    node: { tryFindChild(id: string): { logGroup?: ILogGroup } | ILogGroup | undefined };
+    toolsGateways: Record<string, { interceptor: { logGroup: ILogGroup } }>;
+  };
+}).ingress;
+const logGroupOf = (id: string): ILogGroup => {
+  const found = ingressOf.node.tryFindChild(id);
+  if (found === undefined) throw new Error(`the ingress has no ${id} log group: the stress cell needs the api-gateway ingress`);
+  return found as ILogGroup;
+};
+addCellMetricFilters(stack as never, {
+  access: logGroupOf('ApiAccessLogs'),
+  ingress: logGroupOf('IngressLogs'),
+  authorizer: logGroupOf('AuthorizerLogs'),
+  interceptors: Object.values(ingressOf.toolsGateways).map((g) => g.interceptor.logGroup),
 });
 
 // The cell API origin of the tenant front door (spec §3.3 step 2). `DISTRIBUTION_ARN` empty or

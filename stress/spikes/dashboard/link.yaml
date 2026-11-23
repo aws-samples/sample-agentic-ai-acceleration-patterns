@@ -1,0 +1,98 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Spike SD-1 and SD-3, cell side: one observability link limited to three metric namespaces, a
+# log group with the metric filters the cell app will add (design section 3.2), and a function
+# that gives AWS/Lambda something to count. A spike stack, deleted when the spike ends.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Stress dashboard spike SD-1 and SD-3, the link, filters and a function in a cell account
+Parameters:
+  SinkArn:
+    Type: String
+Resources:
+  Link:
+    Type: AWS::Oam::Link
+    Properties:
+      LabelTemplate: '$AccountName'
+      ResourceTypes:
+        - AWS::CloudWatch::Metric
+      SinkIdentifier: !Ref SinkArn
+      LinkConfiguration:
+        MetricConfiguration:
+          Filter: "Namespace IN ('AWS/Lambda', 'AWS/Bedrock-AgentCore', 'StressCell')"
+  Ingress:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /stress-dashboard-spike/ingress
+      RetentionInDays: 1
+  ServedMs:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref Ingress
+      FilterPattern: '{ $.message = "request served" }'
+      MetricTransformations:
+        - MetricNamespace: StressCell
+          MetricName: IngressServedMs
+          MetricValue: $.totalMs
+          Unit: Milliseconds
+  ByStatus:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref Ingress
+      FilterPattern: '{ $.message = "request served" || $.message = "request refused" }'
+      MetricTransformations:
+        - MetricNamespace: StressCell
+          MetricName: IngressRequests
+          MetricValue: '1'
+          Unit: Count
+          Dimensions:
+            - Key: Status
+              Value: $.status
+  Total:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref Ingress
+      FilterPattern: '{ $.message = "request served" || $.message = "request refused" }'
+      MetricTransformations:
+        - MetricNamespace: StressCell
+          MetricName: IngressRequests
+          MetricValue: '1'
+          Unit: Count
+  Retried:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref Ingress
+      FilterPattern: '{ $.message = "sdk retried" }'
+      MetricTransformations:
+        - MetricNamespace: StressCell
+          MetricName: SdkRetryLines
+          MetricValue: '1'
+          Unit: Count
+          Dimensions:
+            - Key: Service
+              Value: $.service
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt FunctionRole.Arn
+      Code:
+        ZipFile: 'exports.handler = async () => ({ ok: true });'
+Outputs:
+  LogGroupName:
+    Value: !Ref Ingress
+  FunctionName:
+    Value: !Ref Function

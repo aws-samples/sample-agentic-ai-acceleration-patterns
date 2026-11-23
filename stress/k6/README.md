@@ -14,6 +14,35 @@ this library by its repository-relative path.
 | `lib.js` | the tier (`loadTier`) and seed manifest (`loadManifest`, `selectTenants`, `plan`, `tokenMode`); identity tokens (`setupTokens`, `refreshIfNeeded`, `ensureToken`, per-VU ownership with `adopt`, pacing); the correlation header (`correlate`); the counters and `isolationCheck`; the per-tenant ledger lines; `buildOptions`; `summarize` (summary files and the result record) |
 | `record.js` | `buildRecord`: the result record from k6's end-of-test data, with no k6 import so the contract's tests run it (`stress/test/record.test.ts` checks that `parseRecord` accepts it) |
 | `smoke.js` | five requests to one public endpoint and a record: proves that k6 runs on the driver host and that the library loads from its mirrored path |
+| `relay.sh` | the run dashboard's relay (stress ADR-0022): `driver/k6.sh` starts it on the host before `k6 run` in a platform run of a scenario (`STRESS_MODE=platform`, and `RECORD_SCENARIO=<PS-n>` as a `NAME=value` argument) and stops it after. It reads k6's output file, sums the `minute` lines of all VUs and the `edge_refusal` and `body_refusal` lines by minute, and publishes each minute to the `StressRun` metrics, 3 to 19 seconds after it ends in the spike. It prints counts only |
+
+## The minute line
+
+`lib.js` counts, in each VU and for each epoch minute, the responses by status class, the isolation assertions and
+mismatches, the refusals seen and a latency histogram (log-spaced buckets about 12 % wide, at most 105), and prints
+`{"kind":"minute", "epochMinute":..., "vu":...}` lines with what it has counted since its last line. The state machine is
+in `minute.js` (no k6 import, tested by `stress/test/minute.test.ts`); a VU prints:
+
+| When | Bound |
+|---|---|
+| a minute ends (the first call of an iteration in the next minute) | the old minute prints whole, the new call counts in the new minute |
+| at the first call of an iteration when the VU's stat is 5 seconds old | what a VU counted since its last line is at most 5 seconds old |
+| in the last 5 % of the scenario, at the first call of an iteration a second after the last print | a VU that is called there holds at most 1 second of its requests at the end |
+| on every other call of an iteration in which a print began | a request is never split between a line and the end of the scenario |
+
+The loss at the end of a scenario is whole requests: each request is lost with all its counts. A VU that is idle in the
+whole last 5 % holds up to 5 seconds of its requests. For 16 requests a second, one request an iteration and requests
+handed out round robin, a simulation of 100 VUs for one minute (tier `small`) lost 0 to 52 of 960 requests, depending on
+the second the load began in, and none over 240 seconds with 50 or 100 VUs. The loss grows with the VUs in use and with
+the requests an iteration (100 VUs, three requests an iteration, 240 seconds: up to 105 of 3,839). An iteration
+whose counts straddle a minute edge stays in the minute of its first count (the probes make one request an iteration).
+
+A count is in exactly one line, and the relay adds the lines of a minute up. k6 has no per-VU end hook, so what a VU
+counts after its last line is lost. The relay starts only when `STRESS_METRICS=1` (the runner sets it for the verbs),
+`STRESS_MODE=platform` and `RECORD_SCENARIO=<PS-n>` (a `NAME=value` argument of `k6.sh`) are all set. The line holds
+counts only: no tenant, token or header. A slice needs no code for it: `countStatus`, `timed`, `isolationCheck` and
+`countRefusal` add to it. It was checked live on a driver host (stress/spikes/dashboard/README.md, SD-2): the relay's
+totals were compared with k6's own counters.
 
 ## The result record
 

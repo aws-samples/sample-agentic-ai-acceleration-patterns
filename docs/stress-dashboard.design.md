@@ -4,7 +4,8 @@ SPDX-License-Identifier: MIT-0
 -->
 # Platform stress test: a CloudWatch dashboard for a run
 
-- Status: Proposed (design only; no code, nothing deployed)
+- Status: Accepted and built as W-12 (2026-11-23). The sections below are the design as it was
+  accepted; [§15](#15-as-built) lists where the build differs and what the spikes found.
 - Date: 2026-11-23
 - Decision record: [stress ADR-0022](../stress/adr/0022-show-a-run-on-one-dashboard-in-the-platform-account.md)
 - Builds on: [`docs/stress-test.spec.md`](./stress-test.spec.md) (§4.3 result
@@ -717,5 +718,57 @@ front door's spikes `S-2`, `S-3`, `S-5` and `S-7`.
 | The k6 library can flush a per-minute histogram line without changing k6's request pacing | the existing ledger flushes the same way; the histogram is new | W-12c |
 | `medium` and `large` | more cells need Q-7 (spec §10); the link and sink are per Region and per account, so a second cell account is one more link | after Q-7 |
 
-Nothing in this design has run. The dashboard, the emitters, the link and the
-relay are not built.
+This section is the state of the design before the build. §15 says what the build and
+the spikes found.
+
+## 15. As built
+
+Built on 2026-11-23 as work items W-12a to W-12h. The code is in `stress/src/metrics.ts` (the
+emitter, W-12a), `stress/src/runner.ts` (the runner's step, W-12g), `stress/dashboard/` (the
+dashboard app, the widgets as data, the sink and the snapshot step, W-12b and W-12e),
+`stress/k6/relay.sh` and `stress/k6/lib.js` (the relay and the minute line, W-12c),
+`stress/driver/` (the relay's start and the host role statement, W-12c and W-12h),
+`stress/application/` (the cell's metric filters and the link, W-12d and W-12e) and
+`samples/control-plane/test/stress/metrics.ts` (W-12f). The spikes' results are in
+[`stress/spikes/dashboard/README.md`](../stress/spikes/dashboard/README.md) and the guide is
+[`stress/dashboard/README.md`](../stress/dashboard/README.md).
+
+### Where the build differs from the design
+
+| Design | Built | Why |
+|---|---|---|
+| A live minute shows about three minutes after it ends (§5, unmeasured) | 3 to 19 seconds (spike SD-2) | The relay publishes a minute as soon as every VU that has printed a line has printed one for it and a later minute exists; the 90-second grace is the bound for a slow VU. Measured with a constant-VU load and with a constant-arrival-rate load (the shape of the scenarios); a VU with nothing to do for a while makes the relay wait the grace. At `small` a one-minute scenario shows a little after it ended |
+| A minute is published once (§5) | A line that arrives after its minute went out is published as an addition at the next pass: CloudWatch adds the data points of a period and merges histograms. The relay keeps the sums of each minute and the number of lines it has read, and reads only new lines | A VU that prints late must not be lost, and a pass must not read the whole file again (200,000 refusal lines took 9 s at the first pass and 0.05 s for the next 100) |
+| One `minute` line a VU a minute (§5) | A VU prints what it has counted since its last line: at the end of a minute, every 5 seconds, and in the last 5 % of the scenario once a second and for the rest of that iteration (the state machine and the line shape are in `stress/k6/minute.js`, tested; `stress/k6/lib.js` wires them to k6) | k6 has no per-VU end hook. At the end of a scenario a VU loses whole requests: up to 1 second of them when it is called in the last 5 %, up to 5 seconds when it is not (a simulation of 100 VUs for one minute at 16 requests a second, one request an iteration, handed out round robin, lost 0 to 52 of 960); a request is never split between a line and the loss (a print goes on for all calls of its iteration) |
+| `RefusalsByReason` takes at most 16 values (§3.1) | A fixed list: `http-401`, `http-403`, `http-429`, `http-500`, `http-502`, `http-503`, `http-504` and `other` | The dashboard names every series it draws, so it needs the list ahead of the run; the relay, the emitter (`REFUSAL_REASONS` in `metrics.ts` refuses any other reason) and the dashboard share it, and tests pin that |
+| The dashboard step is for platform runs only (§1) | Platform runs by default; `--dashboard` turns it on for a slice run, `--no-dashboard` off | A slice run is the only cheap way to prove the lifecycle without a front door and a cell. Only the runner's own series and the account-wide widgets have data in it |
+| The plan travels in stack parameters (§2) | A file, `dashboard-plan.json`, in the run folder, written by the runner when the run starts and again at the end with the window | `run.sh dashboard up --run <id>` deploys a past run from it. Account ids stay out of the repository: they come from the cell accounts file |
+| CodeBuild and Step Functions are found by search (§3.3) | Account-wide series, no search | The spike found both namespaces have a series with no dimension |
+| `FunctionValidationErrors` in B2 (§4) | Dropped | The metric is not listed in a test account that ran the front door (SD-3) |
+| AgentCore throttles are an aggregate series (§3.3) | A sum of a search over `Operation` and `Protocol` | `Throttles` has no aggregate series (SD-3). Sessions and invocations use `AggregateOperation=InvokeAgentRuntime` |
+| `cognito-user-authentication-rps` has Cognito's own throttle metric (§6) | No signal: the panel shows the planned draw and the limit | `AWS/Cognito` has `SignInThrottles`, but nothing shows it counts that quota's category |
+| D3 breaks refusals down by `Reason` and `Status` (§4) | D3 draws the totals of the ingress, the authoriser and the token refusals; the filters publish the breakdowns | The breakdown has one series for each reason a cell can give, which the dashboard cannot name ahead of a run |
+| E2 ranks every quota with a signal (§4) | E2 shows the peak as a percent of the limit for `lambda-concurrency` and `agentcore-active-sessions` only, and a note names the quotas with no rate signal | The others have a retry signal and no count, or none |
+| `AWS::CloudWatch::Dashboard` and nothing else (§8) | The same; the CDK's `AWS::CDK::Metadata` marker is turned off with `--no-version-reporting` | A marker creates nothing, but the stack should hold one resource |
+| The `dashboard` lifecycle entry (§8) | `dashboard.lifecycle.json`, a record of slice `dashboard`, so the results file's deploy and destroy table has a row for it | The lifecycle record needed no change in `result.ts`; the runner owns it like any slice's. `renderResults` gained the "Dashboard" section |
+| `cost.sh` for a platform run (W-12g, §10) | Not done | The cost was read as series counts at list price; Cost Explorer settles a day later and mixes in the account's other CloudWatch use. A platform run's cost is still an estimate |
+| The dashboard stack may be any stack named `<prefix>-dashboard` | `dashboard.sh` touches only a stack with the tag `stress:part=run-dashboard`; the sink's removal checks `stress:part=run-sink` | The platform account holds other stacks |
+| The account check "passes" with the link (§11, §14) | The spike's check named no problem about the link; it ran with another fleet's settings, no baseline, and not on the real `CellAccountBase` | An owner runs the check before and after (README, step 2) |
+
+### What the spikes and the live run settled
+
+| Claim of §14 | Result |
+|---|---|
+| The sink and link give a dashboard the cell account's metrics by account id | Yes (SD-1). The query carries `AccountId`; the search form `:aws.AccountId` returns nothing |
+| The account check of spec §3.7 passes with the link | The spike's check named no problem about the link and the link made no role (SD-1), but the check reported seven other problems, ran with another fleet's settings and had no baseline. Not run on the real `CellAccountBase` |
+| Metric names for CodeBuild, Step Functions, Cognito, AgentCore and CloudFront | Found, with the differences above (SD-3) |
+| A metric filter publishes `$.totalMs` with percentiles | Yes (SD-1) |
+| A dashboard `RunId` variable | `PutDashboard` accepts it; rendering not checked; not used |
+| The live view trails a minute of load by under 3 minutes | 3 to 19 seconds (SD-2). The 5-second herd of PS-3 is still one point at a 60-second period |
+| `GetMetricWidgetImage` renders cross-account widgets | Yes |
+| Deploy and destroy under a minute | Yes: 20 s and 31 s (CDK), 36 s and 31 s (CloudFormation by hand) |
+| A run under $0.50 | The slice run published 13 `StressRun` series: about $0.01 at list price for the hour. The dashboard of a platform run at `small` (all nine scenarios, one cell account, nine quota pairs) names 154 `StressRun` series and 19 `StressCell` series: about $0.18 for three hours, inside the design's $0.13 to $0.29. Cost Explorer settles a day later and was not read |
+| A point stamped more than 3 hours back is readable only after up to two hours | Not run: no run was long enough |
+| Searched widgets show data from the first minute of PS-1 | Not run: no front door was deployed |
+| `sdk retried` lines of the real authoriser and interceptors reach `SdkRetryLines` | Not run: the cell app's synthesised template has the filter on all four log groups, and a synthetic line reached the metric |
+| `medium` and `large` | Not run (Q-7) |

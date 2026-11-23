@@ -68,6 +68,18 @@ new javascript.TypescriptConfig(project, {
 });
 // Machine output of the driver app (driver/deploy.sh) and its AZ lookup, which is keyed by account id.
 project.gitignore.exclude('cdk.driver.out/');
+// dashboard/ holds the run dashboard's CDK app, the widgets as data and the snapshot step
+// (stress ADR-0022), linted and type-checked like driver/.
+project.eslint?.addLintPattern('dashboard');
+new javascript.TypescriptConfig(project, {
+  fileName: 'dashboard/tsconfig.json',
+  extends: javascript.TypescriptConfigExtends.fromPaths(['../tsconfig.json']),
+  include: ['**/*.ts'],
+  compilerOptions: { noEmit: true, rootDir: '..', skipLibCheck: true },
+});
+// Machine output of the dashboard app (dashboard/dashboard.sh).
+project.gitignore.exclude('cdk.dashboard.out/');
+project.gitignore.exclude('cdk.dashboard.sink.out/');
 // Machine output of the cell account apps (application/*.sh).
 project.gitignore.exclude('cdk.application.out/');
 project.gitignore.exclude('cdk.context.json');

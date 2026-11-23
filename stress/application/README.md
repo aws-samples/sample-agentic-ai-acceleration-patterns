@@ -98,6 +98,14 @@ export AWS_PROFILE=<cell account profile> AWS_REGION=eu-central-1
    `CellPolicies` out of the app: use it to add the identity or the reader
    role to an account whose policies are in place, without touching them.
 
+   For the run dashboard (stress ADR-0022) also give `OBSERVABILITY_SINK_ARN`, the ARN that
+   [`dashboard/deploy-sink.sh`](../dashboard/README.md) printed in the platform account. `CellAccountBase`
+   then holds one observability link that shares the account's `AWS/Lambda`, `AWS/Bedrock-AgentCore` and
+   `StressCell` metrics with that sink, and no log group. It makes no role in this account. Without it the
+   dashboard shows no cell account. The cell app also adds metric filters on the cell's own log lines
+   (`cell-metrics.ts`), which publish the `StressCell` metrics; no filter has a tenant, user, agent or token
+   dimension.
+
 2. Bootstrap the cell qualifier against the policies:
 
    ```bash

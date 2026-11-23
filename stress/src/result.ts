@@ -142,7 +142,11 @@ function fmt(n: number | undefined, digits = 0): string {
  * the run's verdict and lists them. `report` re-renders from the records
  * alone and leaves the verdict out.
  */
-export function renderResults(records: readonly ResultRecord[], runFailures?: readonly string[]): string {
+export function renderResults(
+  records: readonly ResultRecord[],
+  runFailures?: readonly string[],
+  dashboard?: { readonly name: string; readonly region: string },
+): string {
   if (records.length === 0) throw new Error('no result records to render');
   const first = records[0];
   for (const k of ['runId', 'tier', 'mode'] as const) {
@@ -192,5 +196,19 @@ export function renderResults(records: readonly ResultRecord[], runFailures?: re
     );
   }
   lines.push('');
+  if (dashboard !== undefined) {
+    // The link holds the dashboard's name and Region only, never an account id. The dashboard is
+    // removed after the run unless --keep-dashboard was given (stress ADR-0022).
+    lines.push(
+      '## Dashboard',
+      '',
+      `[${dashboard.name}](https://${dashboard.region}.console.aws.amazon.com/cloudwatch/home?region=${dashboard.region}#dashboards/dashboard/${dashboard.name}) in ${dashboard.region}. It is removed after the run unless \`--keep-dashboard\` was given; \`run.sh dashboard up --run ${first.runId}\` deploys it again.`,
+      '',
+    );
+    for (const r of records.filter((x) => x.scenario !== 'lifecycle')) {
+      lines.push(`- Dashboard window ${r.scenario} (${r.slice}): ${r.window.start} to ${r.window.end} (UTC)`);
+    }
+    lines.push('');
+  }
   return lines.join('\n');
 }

@@ -33,6 +33,7 @@ import { type Edge, liveEdge, readEdgeInputs } from './edge';
 import { cellsOf, deploymentsOf, type FleetEnv, removeAll } from './fleet';
 import { IdentityApi, curlSend, identityTenantsToDelete } from './identity';
 import { allTenants, emptyManifest, type IdentityEntry, type Manifest, manifestPath, readManifest, writeManifest } from './manifest';
+import { metrics } from './metrics';
 import {
   APPLICATION_ID,
   applicationDefinition,
@@ -751,10 +752,11 @@ async function main(argv: readonly string[]): Promise<number> {
   }
 }
 
+// The dashboard's data points go out in order and the driver waits for them: process.exit would drop the ones in flight.
 main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
+  (code) => metrics.flush().then(() => process.exit(code)),
   (e) => {
     log(`driver: ${errorText(e)}`);
-    process.exit(2);
+    return metrics.flush().then(() => process.exit(2));
   },
 );

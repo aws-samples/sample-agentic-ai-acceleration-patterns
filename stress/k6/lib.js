@@ -52,6 +52,7 @@ import encoding from 'k6/encoding';
 import { SignatureV4, Endpoint } from 'https://jslib.k6.io/aws/0.14.0/signature.js';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.1.0/index.js';
 import { buildRecord } from './record.js';
+import { bump as bumpMinute, latencyBucket, minuteLine, newVuState, statusClass } from './minute.js';
 
 // -- configuration ------------------------------------------------------------
 
@@ -107,6 +108,32 @@ for (const code of STATUS_CODES) {
 }
 statusCounters.other = new Counter('status_other');
 
+// -- the minute line (stress ADR-0022, stress/k6/relay.sh) ------------------------------------
+
+// Each VU counts, per epoch minute, what the dashboard's relay publishes: requests by status
+// class, isolation assertions and mismatches, refusals seen, and a latency histogram. `minute`
+// JSON lines go to k6's output, like the `tenant_minute` ledger line, and the relay sums the
+// lines of all VUs. No tenant, token or header is in it.
+// The shape of the line, the buckets and when a VU prints (at the end of a minute, every 5 s while
+// a minute goes on, and in the last 5 % of the scenario once a second, whole iterations) are in minute.js (no k6
+// import, tested). k6 has no per-VU end hook, so what a VU counts after its last line is lost.
+const vuState = newVuState();
+
+/** Applies one count to this VU's minute; minute.js decides when a line is printed. */
+function bump(apply) {
+  let progress = 0;
+  let iteration = 0;
+  let scenario;
+  try {
+    progress = exec.scenario.progress;
+    scenario = exec.scenario.name;
+    iteration = exec.vu.iterationInScenario;
+  } catch (_) {
+    // outside a scenario (setup): nothing to flush at
+  }
+  bumpMinute(vuState, Date.now(), progress, apply, (stat) => console.log(JSON.stringify(minuteLine(stat, exec.vu.idInTest))), iteration, scenario);
+}
+
 /** Counts one response by status; a 4xx or 5xx is also a refusal the run must attribute. */
 export function countStatus(status, tenantId) {
   (statusCounters[status] || statusCounters.other).add(1);
@@ -116,6 +143,13 @@ export function countStatus(status, tenantId) {
   if (status === 429) {
     tenant429.add(1, { tenant: tenantId });
   }
+  const cls = statusClass(status);
+  bump((s) => {
+    s[cls] += 1;
+    if (status >= 400) {
+      s.refusals += 1;
+    }
+  });
 }
 
 /**
@@ -129,6 +163,9 @@ export function countStatus(status, tenantId) {
  */
 export function countRefusal(tenantId, reason) {
   refusalsSeen.add(1);
+  bump((s) => {
+    s.refusals += 1;
+  });
   console.log(JSON.stringify({ kind: 'body_refusal', epochMinute: Math.floor(Date.now() / 60000), tenantId, reason: String(reason).slice(0, 64) }));
 }
 
@@ -136,6 +173,10 @@ export function countRefusal(tenantId, reason) {
 export function timed(ttfb, total, tags) {
   ttfbMs.add(ttfb, tags);
   clientMs.add(total, tags);
+  const bucket = latencyBucket(total);
+  bump((s) => {
+    s.hist[bucket] = (s.hist[bucket] || 0) + 1;
+  });
 }
 
 // -- the correlation header (stress ADR-0005) -------------------------------------------
@@ -543,6 +584,12 @@ export function ensureToken(entry) {
  */
 export function isolationCheck(entry, probeKind, status, bad, requestId, correlationId) {
   isolationAssertions.add(1, { probe: probeKind });
+  bump((s) => {
+    s.assertions += 1;
+    if (bad.length > 0) {
+      s.mismatches += 1;
+    }
+  });
   if (bad.length === 0) {
     return true;
   }

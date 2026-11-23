@@ -801,6 +801,12 @@ also deregisters the accounts and the application and destroys both stacks. A
 seeded tenant left `CREATE_FAILED` stops every later seed with that status: run
 `slice.sh teardown --fixtures`, which deletes it, then seed again.
 
+When the runner has the run dashboard on (`STRESS_METRICS=1`, stress ADR-0022), the driver also
+publishes its figures to the `StressRun` metrics through the runner's own `run.sh emit`
+([`test/stress/metrics.ts`](./test/stress/metrics.ts)): each tenant's PS-1 ready time, PS-5's times to
+routable, suspended and removed, and the builds in flight against the platform's build limit. Nothing
+is published otherwise, a failed publish never fails a scenario, and the result record stays the record.
+
 The driver keeps every wave of creates and deletes at the build limit, unless
 `STRESS_UNPACED=1`: the workflow then holds the excess in its build-slot wait
 (ADR-0049). Concurrent placements and deletes on one cell also meet each other

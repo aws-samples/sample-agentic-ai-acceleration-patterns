@@ -6,7 +6,8 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { type Draw, type Limits, overdraws, parseDraws, sumDraws } from './budget';
+import { type Draw, type Limits, overdraws, parseDraws, QUOTAS, sumDraws } from './budget';
+import { dashboardName, type Emitter, K6_SCENARIOS, stampFor } from './metrics';
 import { setupActions, stepsBeforeTeardown } from './platform';
 import { parseRecord, recordFailures, renderResults, type ResultRecord } from './result';
 import { loadSlice, orderSlices, type Slice, type Verb } from './slice';
@@ -161,6 +162,21 @@ export interface RunOptions {
   readonly now?: () => Date;
   /** Where SIGINT, SIGTERM and SIGHUP come from; default `process`. */
   readonly signals?: Pick<NodeJS.EventEmitter, 'on' | 'off'>;
+  /** Publishes the run's `StressRun` metrics (stress ADR-0022); without it the run publishes none. */
+  readonly metrics?: Emitter;
+  /** The run's dashboard: deployed after `budget`, snapshotted and removed after the last teardown. */
+  readonly dashboard?: DashboardOptions;
+}
+
+export interface DashboardOptions {
+  /** `stress/dashboard/dashboard.sh`: called with `up`, `snapshot` and `down`. */
+  readonly script: string;
+  /** Keep the dashboard after the run (`--keep-dashboard`); the snapshots are taken anyway. */
+  readonly keep: boolean;
+  /** The Region of the dashboard, for the link in the results file. */
+  readonly region: string;
+  /** Wait before the snapshots so the last minutes have reached CloudWatch; default 150 s. */
+  readonly settleMs?: number;
 }
 
 export interface RunSummary {
@@ -301,6 +317,10 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     STRESS_RESULTS: resultsDir,
     STRESS_REPO: opts.repoRoot,
     STRESS_COMMIT: opts.commit,
+    // A slice's `run.sh emit` publishes only when the run has its metrics on (ADR-0022).
+    ...(opts.metrics === undefined ? {} : { STRESS_METRICS: '1' }),
+    // The plan the dashboard is built from (written by `dashboardUp`), and where to read it again.
+    ...(opts.dashboard === undefined ? {} : { STRESS_DASHBOARD_PLAN_FILE: path.join(runDir, 'dashboard-plan.json'), STRESS_RUN_DIR: runDir }),
   };
   const failures: string[] = [];
   const started = new Map<string, { start: string; deploySeconds?: number }>();
@@ -324,10 +344,64 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
       // The run folder is gone; the terminal copy is all there is.
     }
   }
-  const own = (s: Slice, scenario: string): void => {
+  const own = (s: { readonly name: string }, scenario: string): void => {
     const f = `${s.name}.${scenario}.json`;
     owned.set(f, hashOf(path.join(resultsDir, f)));
   };
+  const metrics = opts.metrics;
+  /** The record `slice.scenario` as it is on disk now, or undefined when it is missing or does not parse. */
+  const recordNow = (slice: string, scenario: string): ResultRecord | undefined => {
+    try {
+      return parseRecord(fs.readFileSync(path.join(resultsDir, `${slice}.${scenario}.json`), 'utf8'), `${slice}.${scenario}.json`);
+    } catch {
+      return undefined;
+    }
+  };
+  const timers: NodeJS.Timeout[] = [];
+  /** Emits `ScenarioActive` 1 now and every 60 s until the returned function is called, which emits 0. */
+  const beat = (scenario: string): (() => Promise<void>) => {
+    if (metrics === undefined) return async () => undefined;
+    void metrics.emit('ScenarioActive', 1, { Scenario: scenario });
+    const t = setInterval(() => void metrics.emit('ScenarioActive', 1, { Scenario: scenario }), 60_000);
+    t.unref();
+    timers.push(t);
+    return () => {
+      clearInterval(t);
+      return metrics.emit('ScenarioActive', 0, { Scenario: scenario });
+    };
+  };
+  /** The run's budget sums and limits, as `QuotaPlannedDraw` and `QuotaLimit` (design §6). */
+  const publishQuotas = (sums: ReturnType<typeof sumDraws>): Promise<void> => {
+    if (metrics === undefined) return Promise.resolve();
+    const data = [];
+    for (const [account, perAccount] of sums) {
+      for (const [quota, sum] of perAccount) {
+        for (const [name, value] of [['QuotaPlannedDraw', sum], ['QuotaLimit', opts.limits?.[account]?.[quota] ?? QUOTAS[quota].defaultLimit]] as const) {
+          const d = metrics.make(name, value, { Account: account, Quota: quota });
+          if (d !== undefined) data.push(d);
+        }
+      }
+    }
+    return metrics.send(data);
+  };
+  /** A scenario's isolation totals, stamped at the end of its window (design §5). */
+  const publishFinals = (slice: string, scenario: string): Promise<void> => {
+    const r = metrics === undefined ? undefined : recordNow(slice, scenario);
+    if (metrics === undefined || r === undefined) return Promise.resolve();
+    const at = stampFor(new Date(r.window.end), now());
+    const dims = { Slice: slice, Scenario: scenario };
+    return metrics.send(
+      [metrics.make('IsolationAssertionsFinal', r.isolation.assertions, dims, at), metrics.make('IsolationMismatchesFinal', r.isolation.mismatches, dims, at)].filter((d) => d !== undefined),
+    );
+  };
+  /** The unattributed count of a k6 scenario's record, after the slice's `collect` (design §5). */
+  const publishUnattributed = (slice: string, scenario: string): Promise<void> => {
+    const r = metrics === undefined || !K6_SCENARIOS.includes(scenario) ? undefined : recordNow(slice, scenario);
+    if (metrics === undefined || r === undefined) return Promise.resolve();
+    return metrics.emit('RefusalsUnattributed', r.refusals.unattributed, { Slice: slice, Scenario: scenario }, stampFor(new Date(r.window.end), now()));
+  };
+  const lifecycleSeconds = (slice: string, phase: 'deploy' | 'destroy', seconds: number): Promise<void> =>
+    metrics === undefined ? Promise.resolve() : metrics.emit('LifecycleSeconds', seconds, { Slice: slice, Phase: phase });
   let signal: NodeJS.Signals | undefined;
   let tearingDown = false;
   let stop: Stop | undefined;
@@ -357,6 +431,92 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     if (signal !== undefined) throw new Error(`the run was interrupted (${signal})`);
   };
 
+  // The dashboard (ADR-0022): a view, so a failed `up` or `snapshot` is logged and the run goes
+  // on; a `down` that leaves something behind is a failure, like any leftover.
+  const dashboard = opts.dashboard;
+  let dashboardTried = false;
+  let dashboardDeploySeconds: number | undefined;
+  let dashboardStart = '';
+  let planSums: ReturnType<typeof sumDraws> = new Map();
+  const dashboardVerb = async (v: 'up' | 'snapshot' | 'down'): Promise<boolean> => {
+    log(`== dashboard ${v}`);
+    try {
+      const r = await exec(dashboard!.script, [v], env, false, track, output);
+      return r.status === 0;
+    } catch (e) {
+      // A script that cannot start is a failed step like any other: the dashboard is a view.
+      log(`dashboard ${v}: ${(e as Error).message}`);
+      return false;
+    }
+  };
+  /** What the dashboard is built from: one entry for each record the run will write, and the budget's quota pairs. */
+  const writePlan = (sums: ReturnType<typeof sumDraws>, window?: { start: string; end: string }): void => {
+    const plan = {
+      runId: opts.runId,
+      tier: tier.name,
+      commit: opts.commit,
+      region: dashboard!.region,
+      runs: scenarios.flatMap((scenario) => slices.filter((s) => s.scenarios.includes(scenario)).map((s) => ({ slice: s.name, scenario }))),
+      quotas: [...sums].flatMap(([account, perAccount]) => [...perAccount.keys()].map((quota) => `${account}:${quota}`)),
+      ...(window ?? {}),
+    };
+    fs.writeFileSync(env.STRESS_DASHBOARD_PLAN_FILE!, `${JSON.stringify(plan, null, 2)}\n`, { mode: 0o600 });
+  };
+  const dashboardUp = async (sums: ReturnType<typeof sumDraws>): Promise<void> => {
+    dashboardTried = true;
+    dashboardStart = now().toISOString();
+    planSums = sums;
+    writePlan(sums);
+    const t0 = Date.now();
+    if (await dashboardVerb('up')) {
+      dashboardDeploySeconds = Math.round((Date.now() - t0) / 1000);
+      await lifecycleSeconds('dashboard', 'deploy', dashboardDeploySeconds);
+    } else {
+      log('dashboard up failed: the run goes on without it');
+    }
+  };
+  const dashboardEnd = async (): Promise<void> => {
+    if (dashboard === undefined || !dashboardTried) return;
+    // The window a dashboard deployed again later shows (`run.sh dashboard up --run <id>`).
+    writePlan(planSums, { start: dashboardStart, end: new Date(now().getTime() + 5 * 60_000).toISOString() });
+    if (dashboardDeploySeconds !== undefined) {
+      // The last minutes reach CloudWatch a little after the run; a run that was interrupted or failed has nothing to wait for.
+      if (signal === undefined && failures.length === 0) await sleep(dashboard.settleMs ?? 150_000);
+      if (!(await dashboardVerb('snapshot'))) log('dashboard snapshot failed: the dashboard shows the run until it is removed');
+    }
+    let destroySeconds: number | undefined;
+    // A dashboard that did not come up is removed even with --keep-dashboard: a half-made stack would block the next run's up.
+    if (dashboard.keep && dashboardDeploySeconds !== undefined) {
+      log(`dashboard kept: ${dashboardName(opts.prefix)} (stress/dashboard/README.md, "Remove a kept dashboard")`);
+    } else {
+      const t0 = Date.now();
+      if (await dashboardVerb('down')) {
+        destroySeconds = Math.round((Date.now() - t0) / 1000);
+        await lifecycleSeconds('dashboard', 'destroy', destroySeconds);
+      } else {
+        failures.push('dashboard down exited non-zero: a stack or dashboard of the run may be left (stress/dashboard/README.md)');
+      }
+    }
+    const record: ResultRecord = {
+      runId: opts.runId,
+      tier: tier.name,
+      slice: 'dashboard',
+      scenario: 'lifecycle',
+      mode,
+      commits: { dashboard: opts.commit },
+      window: { start: dashboardStart, end: now().toISOString() },
+      ...(dashboardDeploySeconds === undefined ? {} : { deploySeconds: dashboardDeploySeconds }),
+      ...(destroySeconds === undefined ? {} : { destroySeconds }),
+      requests: {},
+      latency: {},
+      isolation: { assertions: 0, mismatches: 0 },
+      quotas: {},
+      refusals: { byTenantReason: [], unattributed: 0 },
+    };
+    fs.writeFileSync(path.join(resultsDir, 'dashboard.lifecycle.json'), `${JSON.stringify(record, null, 2)}\n`);
+    own({ name: 'dashboard' }, 'lifecycle');
+  };
+
   for (const sig of SIGNALS) signals.on(sig, onSignal);
   process.stderr.on('error', ignore);
   try {
@@ -381,10 +541,22 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
       }
       draws.push(...sliceDraws);
     }
-    const over = overdraws(sumDraws(draws), opts.limits);
+    const sums = sumDraws(draws);
+    const over = overdraws(sums, opts.limits);
     if (over.length > 0) {
       throw new Error(`budget over the limit: ${over.map((o) => `${o.account} ${o.quota} ${o.sum} > ${o.limit}`).join('; ')}`);
     }
+    stopIfAborted();
+
+    // The planned draw and the limits, at the start and every minute (design §6), then the
+    // dashboard: after `budget` passes and before the first slice `deploy`, so it never delays one.
+    if (metrics !== undefined) {
+      void publishQuotas(sums);
+      const t = setInterval(() => void publishQuotas(sums), 60_000);
+      t.unref();
+      timers.push(t);
+    }
+    if (opts.dashboard !== undefined) await dashboardUp(sums);
     stopIfAborted();
 
     // A slice-mode run deploys and then seeds each slice in turn; a platform run follows the
@@ -400,6 +572,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
       if (a.verb !== 'seed') {
         const info = started.get(s.name)!;
         info.deploySeconds = (info.deploySeconds ?? 0) + Math.round((Date.now() - t0) / 1000);
+        await lifecycleSeconds(s.name, 'deploy', info.deploySeconds);
       }
       stopIfAborted();
     }
@@ -413,8 +586,14 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
           failures.push(`${early}: written before its run`);
           fs.rmSync(path.join(resultsDir, early), { force: true });
         }
-        ran.set(`${s.name}.${sc}`, await verb(s, 'run', [sc]));
+        const endBeat = beat(sc);
+        try {
+          ran.set(`${s.name}.${sc}`, await verb(s, 'run', [sc]));
+        } finally {
+          await endBeat();
+        }
         own(s, sc);
+        await publishFinals(s.name, sc);
         stopIfAborted();
       }
     }
@@ -428,6 +607,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
       });
       await verb(s, 'collect');
       for (const sc of intact) own(s, sc);
+      for (const sc of mine) await publishUnattributed(s.name, sc);
       stopIfAborted();
     }
   } catch (e) {
@@ -445,7 +625,15 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
           failures.push(`${s.name} teardown: ${(e as Error).message}`);
         }
       }
+      try {
+        await dashboardEnd();
+      } catch (e) {
+        failures.push(`dashboard: ${(e as Error).message}`);
+      }
     } finally {
+      for (const t of timers) clearInterval(t);
+      await metrics?.flush();
+      if (metrics !== undefined && metrics.failures > 0) log(`metrics: ${metrics.failures} publish(es) failed or were dropped; the dashboard may miss points (the records are unaffected)`);
       for (const sig of SIGNALS) signals.off(sig, onSignal);
       process.stderr.off('error', ignore);
       fs.rmSync(lock, { force: true });
@@ -459,7 +647,8 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   let resultsFile: string | undefined;
   if (records.length > 0) {
     resultsFile = path.join(runDir, 'results.md');
-    fs.writeFileSync(resultsFile, renderResults(records, failures));
+    const link = dashboard === undefined ? undefined : { name: dashboardName(opts.prefix), region: dashboard.region };
+    fs.writeFileSync(resultsFile, renderResults(records, failures, link));
   }
   return { runId: opts.runId, mode, order: slices.map((s) => s.name), failures, ...(signal === undefined ? {} : { signal }), resultsFile };
 
@@ -492,6 +681,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     };
     fs.writeFileSync(path.join(resultsDir, `${s.name}.lifecycle.json`), `${JSON.stringify(lifecycle, null, 2)}\n`);
     own(s, 'lifecycle');
+    if (ok) await lifecycleSeconds(s.name, 'destroy', Math.round((Date.now() - t0) / 1000));
   }
 }
 

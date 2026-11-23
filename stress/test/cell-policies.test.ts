@@ -390,6 +390,38 @@ describe('CellAccountBaseStack (spec §3.7, CP-4)', () => {
   });
 });
 
+describe('the observability link of the account base (stress ADR-0022, design §11)', () => {
+  const SINK = 'arn:aws:oam:eu-central-1:123456789012:sink/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  const base = (props: { observabilitySinkArn?: string; platformAccountId?: string } = {}): any => {
+    const app = new App();
+    Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
+    return render(Template.fromStack(new CellAccountBaseStack(app, 'CellAccountBase', props)).toJSON());
+  };
+  const links = (json: any): any[] => (Object.values(json.Resources) as any[]).filter((r) => r.Type === 'AWS::Oam::Link');
+
+  it('exists only when a sink is named, and adds no role, policy or other resource', () => {
+    expect(links(base())).toHaveLength(0);
+    const without = Object.values(base().Resources).map((r: any) => r.Type).sort();
+    const withLink = Object.values(base({ observabilitySinkArn: SINK }).Resources).map((r: any) => r.Type).sort();
+    expect(withLink).toEqual([...without, 'AWS::Oam::Link'].sort());
+  });
+
+  it('shares metrics only, three namespaces, and no log group', () => {
+    const [link] = links(base({ observabilitySinkArn: SINK }));
+    expect(link.Properties).toEqual({
+      LabelTemplate: '$AccountName',
+      ResourceTypes: ['AWS::CloudWatch::Metric'],
+      SinkIdentifier: SINK,
+      LinkConfiguration: { MetricConfiguration: { Filter: "Namespace IN ('AWS/Lambda', 'AWS/Bedrock-AgentCore', 'StressCell')" } },
+    });
+  });
+
+  it('refuses a value that is not a sink ARN', () => {
+    expect(() => new CellAccountBaseStack(new App(), 'E', { observabilitySinkArn: 'sink' })).toThrow(/sink/);
+    expect(() => new CellAccountBaseStack(new App(), 'F', { observabilitySinkArn: `${SINK}'; DROP` })).toThrow(/sink/);
+  });
+});
+
 describe('the /cell/ path aspect and the cell synth context', () => {
   it('puts CfnRole and raw AWS::IAM::Role resources on /cell/, overriding a path, and leaves other resources alone', () => {
     const app = new App();
