@@ -1,6 +1,7 @@
 {
   "name": "control-plane",
-  "needs": [],
-  "scenarios": ["PS-1", "placement-race", "read-rate", "build-limit-scaling"],
+  "needs": ["tenant-identity"],
+  "scenarios": ["PS-1", "PS-5", "placement-race", "read-rate", "build-limit-scaling"],
+  "platformOnly": ["PS-5"],
   "quotas": ["codebuild-linux-small", "lambda-concurrency", "sts-assume-role-rps"]
 }

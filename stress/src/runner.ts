@@ -145,7 +145,7 @@ export interface RunOptions {
   readonly repoRoot: string;
   readonly tier: string;
   readonly slices: readonly string[];
-  /** Scenario ids to run; default every scenario the slices declare (see `scenarioOrder`). */
+  /** Scenario ids to run; default per mode (see `scenarioOrder`): the `PS-<n>` scenarios in a platform run, every scenario but the `platformOnly` ones in a slice run. */
   readonly scenarios?: readonly string[];
   /** Folder for manifests, the lock and results, outside the repository (spec §4.2). */
   readonly home: string;
@@ -200,16 +200,36 @@ export function planRun(opts: Pick<RunOptions, 'repoRoot' | 'tier' | 'slices'>):
   const problems = tierProblems(tier);
   if (problems.length > 0) throw new Error(problems.join('; '));
   if (opts.slices.length === 0) throw new Error('name at least one slice');
-  const slices = orderSlices(opts.slices.map((s) => loadSlice(opts.repoRoot, s)));
+  const loaded = opts.slices.map((s) => loadSlice(opts.repoRoot, s));
+  // Several slices make a platform run, which needs every slice a slice needs. Say whether a
+  // missing one is no slice at all or only left out of --slices.
+  if (loaded.length > 1) {
+    const named = new Set(loaded.map((s) => s.name));
+    for (const s of loaded) {
+      for (const n of s.needs.filter((x) => !named.has(x))) {
+        const declared = fs.existsSync(path.join(opts.repoRoot, 'samples', n, 'scripts', 'stress', 'slice.json'));
+        throw new Error(
+          declared
+            ? `${s.name} needs ${n}, which the run does not include: add it to --slices`
+            : `${s.name} needs ${n}, which is not a slice: samples/${n}/scripts/stress/slice.json is missing`,
+        );
+      }
+    }
+  }
+  const slices = orderSlices(loaded);
   return { tier, slices, mode: slices.length === 1 ? 'slice' : 'platform' };
 }
 
 /**
  * The default scenario order: the platform scenarios `PS-<n>` by number
  * (spec §5.1), then each slice's own scenarios in the order it declares them.
+ * `mode` picks what runs when no scenario is named (spec §5.2): a platform run
+ * takes only the `PS-<n>` scenarios, a slice run takes everything but the
+ * scenarios a slice marks `platformOnly`.
  */
-export function scenarioOrder(slices: readonly Slice[]): string[] {
-  const all = [...new Set(slices.flatMap((s) => s.scenarios))];
+export function scenarioOrder(slices: readonly Slice[], mode: 'slice' | 'platform'): string[] {
+  const platformOnly = new Set(slices.flatMap((s) => s.platformOnly));
+  const all = [...new Set(slices.flatMap((s) => s.scenarios))].filter((sc) => (mode === 'platform' ? /^PS-\d+$/.test(sc) : !platformOnly.has(sc)));
   const platform = all.filter((s) => /^PS-\d+$/.test(s)).sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
   return [...platform, ...all.filter((s) => !platform.includes(s))];
 }
@@ -237,9 +257,21 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   const { tier, slices, mode } = planRun(opts);
   // A scenario no slice declares is refused before anything touches disk,
   // so the corrected command can reuse the run id.
-  const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices))];
+  const scenarios = [...new Set(opts.scenarios ?? scenarioOrder(slices, mode))];
   const unknown = scenarios.filter((sc) => !slices.some((s) => s.scenarios.includes(sc)));
   if (unknown.length > 0) throw new Error(`no slice in the run declares ${unknown.join(', ')}`);
+  if (scenarios.length === 0) {
+    throw new Error(
+      opts.scenarios !== undefined
+        ? '--scenarios names no scenario, so the run has nothing to run'
+        : mode === 'platform'
+          ? 'no slice in the run declares a PS-<n> scenario, so a platform run has nothing to run: name --scenarios or add the slices that own them'
+          : 'the slice declares no scenario to run in slice mode (none, or only platformOnly ones), so the run has nothing to run: add the slices it needs to --slices',
+    );
+  }
+  // A scenario that needs the other slices' interfaces has nothing to run against alone.
+  const alone = scenarios.filter((sc) => mode === 'slice' && slices.some((s) => s.platformOnly.includes(sc)));
+  if (alone.length > 0) throw new Error(`${alone.join(', ')} runs in platform mode only: name every slice it needs in --slices`);
   const prefixDir = path.join(opts.home, opts.prefix);
   const runDir = path.join(prefixDir, opts.runId);
   const resultsDir = path.join(runDir, 'results');
@@ -352,14 +384,16 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     }
     stopIfAborted();
 
+    // Each slice deploys and then seeds before the next one starts, so a slice can read what
+    // an earlier one seeded when it deploys (the front door needs the control plane's
+    // application, which exists after the control plane's seed). A slice's `needs` are
+    // always earlier in `slices`, so its seed follows every deploy it depends on.
     for (const s of slices) {
       const t0 = Date.now();
       started.set(s.name, { start: now().toISOString() });
       if (!(await verb(s, 'deploy'))) throw new Stopped();
       started.get(s.name)!.deploySeconds = Math.round((Date.now() - t0) / 1000);
       stopIfAborted();
-    }
-    for (const s of slices) {
       if (!(await verb(s, 'seed'))) throw new Stopped();
       stopIfAborted();
     }

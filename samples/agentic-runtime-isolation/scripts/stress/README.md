@@ -69,6 +69,15 @@ variable it needs that is not set, with exit code 2.
 | `collect` | `collect.sh`: for each record, Logs Insights and the k6 summary over the record's window, CloudWatch metrics over its whole minutes (start minute to one past the end minute; per-minute datapoints kept in `<scenario>/cloudwatch/`); fills `refusals` (P-7), `latency.ingress` and `quotas` in the record; appends the pass table to `design/stress-results/<YYYY-MM-DD>-<tier>.md` in this checkout (so a run leaves that file new or changed; commit it with the run, as earlier runs' files are; "Commit tested" is the runner's `STRESS_COMMIT`) after a redaction check that refuses any 12-digit number, any tenant id, tenant name or user name from the manifest, `eyJ` and `https://`; exits 1 on a failed row |
 | `teardown [--fixtures]` | `teardown.sh`: deletes the seeded tenants (at `small` and `medium`, or with `--fixtures`), destroys driver, agents and ingress stacks in that order, removes the Runtime log groups a late line recreated and the log groups of the CDK provider functions, which no stack owns, and fails if a stack, a log group a stack owned, any other log group with the stacks' names, an agent runtime or a registry parameter with the prefix is left |
 
+With `STRESS_MODE=platform` the verbs work on the other slices' manifests instead of this
+sample's own stacks: `deploy` and `seed` read the manifests and deploy only the k6 host,
+`run` takes `PS-2`, `PS-3`, `PS-4`, `PS-6` and `PS-8` instead of `S1` to `S7`, `collect` reads
+the refusals from the driver's own lines, and `teardown` removes the run files (the last
+bullet under [Also](#also) has the details). `platform.sh` reads and checks the manifests,
+`platform-tenants.jq` picks the tenants to drive, `k6/edge-refusals.js` prints a line for
+each refused request, and `collect-platform.sh` with `attribute-edge.jq`
+turns those lines into the record's refusals.
+
 `attribute.jq` is the P-7 step of `collect`: the refusals the hops log with a
 tenant, matched by count with the 4xx and 5xx the driver counted. Each tenant's
 429 lines count at most up to the driver's own 429 count for that tenant
@@ -169,5 +178,12 @@ Estimates from the plan; the scripts print the measured figures.
 - `large` reserves 800 + 1,000 Lambda concurrency (ADR-0049): the account's
   Lambda concurrency quota must be at least 1,900 before `deploy` at that
   scale, or CloudFormation refuses the reserve.
-- In the platform run (`STRESS_MODE=platform`) every verb but `budget` refuses
-  until the control plane deploys this sample as a cell (W-5).
+- In the platform run (`STRESS_MODE=platform`) the slice deploys no cell: the cells
+  are the control plane's. `deploy` and `seed` check the manifests the other
+  slices write, `run` sends the S1, S2, S3, S5 and S6 shapes to the edge as
+  `PS-2`, `PS-3`, `PS-4`, `PS-6` and `PS-8`, `collect` takes each refusal's
+  tenant and reason from k6's own lines (`collect-platform.sh`), and `teardown`
+  removes only the files `run` wrote and a k6 host its own `deploy` made.
+  `S1` to `S7` are refused in platform mode and the `PS-n` scenarios in slice mode. The
+  manifests and what each field is for are in
+  [`stress/README.md`](../../../../stress/README.md#platform-mode-manifests).

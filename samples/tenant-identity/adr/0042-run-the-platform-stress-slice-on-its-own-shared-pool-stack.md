@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-19
+- Amended by: ADR-0043
 - Deciders: Dave Roberts (SA)
 
 ## Context
@@ -141,3 +142,5 @@ grant of its own built from the published API id; decide when W-5 starts.
 Group counts in the budget are the pool's peak, not a quota read from the
 account. Revisit when tenant-identity spreads tenants across pools (a stress
 deployment could then hold more than 5,000 tenants) or when option 2 is built.
+
+**2026-11-21.** Amended by ADR-0043: `deploy` also copies the parameter's value to `identity.json` in the run's folder, and `teardown --fixtures` removes the copy with the parameter; the next slice reads that file.
