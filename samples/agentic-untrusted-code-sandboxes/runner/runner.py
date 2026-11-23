@@ -49,6 +49,7 @@ def become_tenants(backend: str):
     elif backend == "nitro":
         size = sizing.Sizing(backend, sizing.memory_m(backend, meminfo, job.task_memory_max(group)))
         executor = job.Executor(backend, size, Filter(backend, platform.machine()), task_group=group)
+        executor.open_watchdog()
     else:
         size = sizing.Sizing(backend, sizing.memory_m(backend, meminfo, None))
         job_group = job.prepare_agentcore_groups(group, size.l)

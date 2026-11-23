@@ -253,7 +253,7 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
   }
   // The fill did not cost the tenant its files: setsid_spawn's /work/child.pid is still there to read.
   const kept = await run('setsid_check');
-  c.rec.check(`/work survives the memory fill (child.pid read: ${String(field(kept.out, 'child_alive') !== undefined)}, sandbox ${String(kept.r.result?.sandbox)})`,
+  c.rec.check(`/work survives the memory fill (child_alive ${String(field(kept.out, 'child_alive'))}, sandbox ${String(kept.r.result?.sandbox)})`,
     field(kept.out, 'child_alive') === false && kept.r.result?.sandbox === 'reused');
 
   const over = await run('over_as');

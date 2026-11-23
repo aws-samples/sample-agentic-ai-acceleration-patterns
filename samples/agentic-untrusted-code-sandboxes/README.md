@@ -395,12 +395,13 @@ code fills memory from all 64 process slots at once, the job holds the
 task group at its limit until the watchdog or the kernel ends it. The
 runner locks its own pages, so the fill cannot evict them, and it
 answers `memoryExceeded` on the same sandbox with the tenant's `/work`
-files kept (ADR-0074; 0 of 44 such fills overran in a test account,
-against 5 of 8 before the lock). Such a fill still takes up to about
-7 s at the default task size, because the runner's own allocations wait
-while the group is full. With a `runTimeout` below that, the time cap
-may end the job first (spec §3.5, threat model T-89). The fix was measured in one Region at the default task
-size only.
+files kept (ADR-0074). In a test account 0 of 14 such fills of this
+runner overran, against 5 of 8 before the lock. Such a fill still takes
+up to about 7 s at the default task size, because the runner's own
+allocations wait while the group is full. With a `runTimeout` below
+that, the time cap may end the job first (spec §3.5, threat model
+T-89). The fix was measured in one Region at the default task size
+only.
 
 **The AgentCore usage record is not checked.** The cost join for
 `agentcore` reads the AgentCore usage logs in the log group the construct

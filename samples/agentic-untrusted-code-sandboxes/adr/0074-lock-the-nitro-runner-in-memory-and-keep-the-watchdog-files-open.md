@@ -3,7 +3,7 @@
 # ADR-0074: Lock the `nitro` runner in memory and keep the watchdog's files open
 
 - Status: Accepted
-- Date: 2026-11-24
+- Date: 2026-11-23
 - Amends: [ADR-0022](0022-leave-room-for-the-runner-in-the-nitro-process-cap.md)
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
@@ -77,19 +77,30 @@ Option 1, with the watchdog's files kept open:
    space, while only its resident pages (about 36 MiB) use memory; a fixed
    bound could refuse a later mapping and break the runner.
 3. Every job child sets `RLIMIT_MEMLOCK` to 0 (soft and hard) before it
-   drops to uid 1001, on every backend, so code can lock nothing.
-4. The `nitro` watchdog opens `memory.current` and `memory.stat` once,
-   keeps them open for the task's life, and reads them with `pread`. The
-   decision of ADR-0022 (the watchdog at L on `memory.current` less the
-   file cache, A = L − 64 MiB) is unchanged.
+   drops to uid 1001, on every backend, and so does the runner's SysV
+   sweep, the other uid 1001 process. uid 1001 holds no capability, so
+   code can lock nothing. Every other process in the container keeps the
+   unlimited limit; a tenant that reached root there could lock memory,
+   which it could already fill.
+4. The `nitro` watchdog opens `memory.current` and `memory.stat` and
+   reads them once when the sandbox is claimed, before any job, keeps
+   them open for the task's life, and reads them with `pread`. A read
+   error closes them, and the next poll opens them again. The decision
+   of ADR-0022 (the watchdog at L on `memory.current` less the file
+   cache, A = L − 64 MiB) is unchanged.
 
-Measured on the same stack: with the lock and the open files, 0 of 44
-such fills overran (32 with the side process, 14 of them with one of
-the two variants below; 12 without). All 12 fills
-of the final runner answered `memoryExceeded` true in 0.65 to 7.4 s,
-kept the `bootId`, and kept every file the tenant had written to
-`/work` before them. Locking cost about 0.3 MiB of the group at idle
-(25.7 against 25.5 MiB in a local container).
+Measured on the same stack: with the lock and the open files, 0 of 58
+such fills overran. 32 of them ran with the side process, 14 of those
+with one of the two variants below. 12 ran with a runner that opened
+the files at the first poll instead of at claim. The last 14 are this
+decision's runner, without the side process, 4 of them as the first
+call of a new sandbox: all 14 answered `memoryExceeded` true in 0.54 to
+7.4 s on the same task, and every file the tenant had written to
+`/work` before them was still there.
+
+Locking cost about 0.3 MiB of the watchdog's counted memory at idle in
+a local container (25.7 against 25.5 MiB). On the task the runner's
+resident memory (`VmRSS`) was about 36 MiB.
 
 Two other changes were tried and not kept: ending the job on the first
 `oom_kill` in `memory.events` before reading `memory.stat`, and running
@@ -100,8 +111,8 @@ the job at nice 19. Neither shortened the fills measurably.
 The `runaway` step requires `memoryExceeded` on `nitro` again; a tool
 overrun there is a failure. A fill from every slot still takes up to
 about 7 s on a 1 vCPU task, because the runner's own allocations wait
-while the group is full; the slowest seen is well inside a 20 s
-`runTimeout`. The runner's locked memory comes out of the 256 MiB margin
+while the group is full; the slowest seen is well inside the
+integration test's 20 s `runTimeout` and the 30 s default. The runner's locked memory comes out of the 256 MiB margin
 between L and the task limit, as its resident memory already did.
 
 Revisit if the runner grows past the margin, if a fill again ends as an

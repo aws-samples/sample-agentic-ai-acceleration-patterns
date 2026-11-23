@@ -36,7 +36,8 @@ POST_JOB_DEADLINE_S = 3.0
 # all that is left of it, so slowly freed memory is not called a leftover (ADR-0064).
 DIRTY_POLL_S = POST_JOB_DEADLINE_S
 READ_CHUNK = 65536
-GROUP_READ = 16384  # one pread of a task group file; memory.stat is about 2 KiB
+CURRENT_READ = 64  # one pread of memory.current, a single number
+GROUP_READ = 16384  # one pread of memory.stat, about 2 KiB
 CPU_LIMIT_SLACK_MS = 100
 # mlockall(2) flags (linux/mman.h).
 MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT = 1, 2, 4
@@ -45,8 +46,10 @@ JOB_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 # Runs as uid 1001 with no filter: removes every SysV object uid 1001 owns
 # or created. The root runner on microvm may not (no CAP_SYS_ADMIN, S-17).
+# The script is the runner's own code, never the tenant's.
 SYSV_SWEEP = r"""
-import ctypes
+import ctypes, resource
+resource.setrlimit(resource.RLIMIT_MEMLOCK, (0, 0))  # uid 1001 locks no memory, here too (ADR-0074)
 libc = ctypes.CDLL(None, use_errno=True)
 removed = 0
 for name, ctl in (("msg", libc.msgctl), ("sem", libc.semctl), ("shm", libc.shmctl)):
@@ -444,8 +447,27 @@ class Executor:
         # runner, and an allocation while the job holds the task group at its limit waited seconds (ADR-0074).
         if self._group_fds is None:
             self._group_fds = self._open_group_files()
-        current, stat = (os.pread(fd, GROUP_READ, 0).decode("ascii") for fd in self._group_fds)
+        fds = self._group_fds
+        try:
+            current = os.pread(fds[0], CURRENT_READ, 0).decode("ascii")
+            stat = os.pread(fds[1], GROUP_READ, 0).decode("ascii")
+        except OSError:
+            self._group_fds = None  # the next poll opens them again
+            for fd in fds:
+                os.close(fd)
+            raise
         return sz.counted(current, stat) > self.sizing.l
+
+    def open_watchdog(self) -> None:
+        """nitro: open the watchdog's files and read them once, when the sandbox is claimed and before any job.
+
+        The first open and read allocate; done here, they never happen while a job fills the group (ADR-0074).
+        A failure leaves the files to the first poll, as before.
+        """
+        try:
+            self._above_l()
+        except (OSError, ValueError, KeyError):
+            pass
 
     def _open_group_files(self) -> Tuple[int, int]:
         group = self.task_group or ""

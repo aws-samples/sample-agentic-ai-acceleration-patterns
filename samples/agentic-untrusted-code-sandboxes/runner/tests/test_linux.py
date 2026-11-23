@@ -99,6 +99,10 @@ def thread():
     t = threading.Thread(target=lambda: None); t.start(); t.join()
 check("thread", thread)
 check("subprocess", lambda: subprocess.run(["/bin/true"], check=True))
+def mlockall():
+    if libc.mlockall(1) != 0:
+        raise OSError(ctypes.get_errno(), "mlockall")
+check("mlockall", mlockall)
 def fork():
     p = os.fork()
     if p == 0:
@@ -193,6 +197,7 @@ class NitroLinux(Base):
         out = run_json(self.executor(), calls_code())
         for name in ("semget", "shmget"):
             self.assertEqual(out[name], "EPERM", name)
+        self.assertIn(out["mlockall"], ("EPERM", "ENOMEM"))  # RLIMIT_MEMLOCK 0 (ADR-0074)
         for name in ("memfd_create", "socket_unix", "listen_9", "sndbuf", "thread", "subprocess"):
             self.assertEqual(out[name], "ok", name)
 
@@ -275,12 +280,15 @@ class NitroLinux(Base):
 
     def test_runner_entry_fill_from_every_slot(self):
         # Issue 144: the job and every child it can fork (RLIMIT_NPROC 64) allocate to their own limit at once, far
-        # past the task group's. The runner answers memoryExceeded, keeps /work and its bootId, and holds its own
-        # pages locked, so the fill cannot evict them (ADR-0074).
+        # past the group's. The fill checks the contract: memoryExceeded, /work and the bootId kept. This host does
+        # not reproduce the stall itself (that needs the task's 1 vCPU VM); what pins the fix is that the runner's
+        # pages are locked and the watchdog's files are open before the first job (ADR-0074).
         nonce = os.urandom(32)
         proc = self.start_runner(nonce)
         conn = self.connect(timeout=30)
         _, hello = self.hello(conn, nonce)
+        opened = [os.readlink("/proc/%d/fd/%s" % (proc.pid, fd)) for fd in os.listdir("/proc/%d/fd" % proc.pid)]
+        self.assertTrue(any(p.endswith("/memory.current") for p in opened), opened)
         self.assertEqual(self.post_run(conn, nonce, "r1", "open('/work/keep', 'w').write('kept')")["exitCode"], 0)
         fill = ("import os, sys, time\n"
                 "def hog():\n    held = []\n    try:\n        while True:\n            held.append(bytearray(b'x') * (16 << 20))\n"
@@ -294,9 +302,16 @@ class NitroLinux(Base):
         after = self.post_run(conn, nonce, "r3", "print(open('/work/keep').read())")
         self.assertEqual((after["exitCode"], after["stdout"].strip()), (0, "kept"), after)
         self.assertEqual(after["bootId"], hello["bootId"])
-        with open("/proc/%d/status" % proc.pid, encoding="ascii") as f:
-            locked = [int(line.split()[1]) for line in f if line.startswith("VmLck:")]
-        self.assertGreater(locked[0], 0, "the runner's pages are not locked")
+        # libc was mapped before the lock: only MCL_CURRENT locks it; MCL_FUTURE alone would lock only later mappings.
+        locked, path = 0, ""
+        with open("/proc/%d/smaps" % proc.pid, encoding="ascii", errors="replace") as f:
+            for line in f:
+                head = line.split()
+                if head and "-" in head[0] and len(head) >= 5:
+                    path = head[5] if len(head) > 5 else ""
+                elif head[:1] == ["Locked:"] and os.path.basename(path).startswith("libc.so"):
+                    locked += int(head[1])
+        self.assertGreater(locked, 0, "the runner's libc pages are not locked")
         conn.close()
 
 
