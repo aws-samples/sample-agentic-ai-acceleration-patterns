@@ -20,7 +20,7 @@ Resources:
           - Effect: Allow
             Principal:
               AWS: !Ref CellAccountId
-            Resource: '*'
+            Resource: !Sub 'arn:${AWS::Partition}:oam:${AWS::Region}:${AWS::AccountId}:sink/*'
             Action:
               - oam:CreateLink
               - oam:UpdateLink

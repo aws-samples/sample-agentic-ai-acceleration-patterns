@@ -15,6 +15,8 @@
 # snapshot  saves a PNG of each metric widget into <STRESS_RUN_DIR>/dashboard/.
 # down      removes the stack, prints `stack=<name> destroy_seconds=<n>`, then checks that the
 #           stack and the dashboard are gone (the leftover check of design §8) and exits 1 if not.
+#           A stack of that name without the `stress:part=run-dashboard` tag is not ours: it is left
+#           alone and `down` exits 0.
 #
 # The credentials are the platform account's. The synthesised app goes to stress/cdk.dashboard.out
 # (not committed). Nothing here prints an account id.
@@ -28,6 +30,7 @@ for tool in aws npx; do
   command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
 done
 
+[[ "$STRESS_PREFIX" =~ ^[A-Za-z][A-Za-z0-9]{0,39}$ ]] || { echo "STRESS_PREFIX must be 1 to 40 letters and digits, starting with a letter" >&2; exit 2; }
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${HERE}/.."
 [[ -d node_modules ]] || npm ci --silent
@@ -50,9 +53,24 @@ stack_status() {
   fi
 }
 
+# Refuses to touch a stack of the dashboard's name that is not a run dashboard (the tag the app
+# gives its stack): the platform account holds other stacks, and `<prefix>-dashboard` is a likely name.
+is_run_dashboard() {
+  local tag
+  # A failed read must stop the script: an empty tag would read as "not ours" and `down` would leave the stack.
+  tag="$(aws cloudformation describe-stacks --stack-name "$STACK" --query "Stacks[0].Tags[?Key=='stress:part'].Value | [0]" --output text)" \
+    || { echo "describe-stacks ${STACK} failed: could not read its tags (the stack may have been deleted meanwhile)" >&2; exit 1; }
+  [[ "$tag" == run-dashboard ]]
+}
+
 case "$verb" in
   up)
     : "${STRESS_DASHBOARD_PLAN_FILE:?Set STRESS_DASHBOARD_PLAN_FILE to the plan the runner wrote}"
+    existing="$(stack_status)"
+    if [[ "$existing" != absent && "$existing" != DELETE_COMPLETE ]] && ! is_run_dashboard; then
+      echo "${STACK} exists and is not a run dashboard (no stress:part=run-dashboard tag): not touching it" >&2
+      exit 1
+    fi
     start=$SECONDS
     npx cdk --app "npx ts-node --transpile-only dashboard/app.ts" deploy "$STACK" \
       --output "$OUT" --exclusively --require-approval never --no-version-reporting >&2
@@ -66,6 +84,10 @@ case "$verb" in
   down)
     status="$(stack_status)"
     if [[ "$status" != absent && "$status" != DELETE_COMPLETE ]]; then
+      if ! is_run_dashboard; then
+        echo "${STACK} is not a run dashboard (no stress:part=run-dashboard tag): not ours, nothing to remove" >&2
+        exit 0
+      fi
       start=$SECONDS
       aws cloudformation delete-stack --stack-name "$STACK"
       aws cloudformation wait stack-delete-complete --stack-name "$STACK"

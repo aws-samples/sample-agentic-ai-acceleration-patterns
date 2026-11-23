@@ -26,8 +26,13 @@ export const K6_SCENARIOS: readonly string[] = ['PS-2', 'PS-3', 'PS-4', 'PS-6', 
 export const STATUS_CLASSES = ['2xx', '3xx', '4xx', '5xx', 'none'] as const;
 export const PHASES = ['deploy', 'destroy'] as const;
 
-/** At most this many distinct `Reason` values a run publishes; the rest map to `other`. */
-export const MAX_REASONS = 16;
+/**
+ * The refusal reasons that have a series of their own (the design's "at most 16 values"): eight
+ * values, so a run publishes at most eight `RefusalsByReason` series for each scenario. The relay's
+ * default list (`stress/k6/relay.sh`, `RELAY_REASONS`) and the dashboard draw these and no others;
+ * any other reason is `other`.
+ */
+export const REFUSAL_REASONS = ['http-401', 'http-403', 'http-429', 'http-500', 'http-502', 'http-503', 'http-504', 'other'] as const;
 
 const VALUE_RULES = {
   RunId: (v: string) => /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(v),
@@ -37,7 +42,7 @@ const VALUE_RULES = {
   Phase: (v: string) => (PHASES as readonly string[]).includes(v),
   Account: (v: string) => v === 'platform' || /^cell-account-[1-9][0-9]*$/.test(v),
   Quota: (v: string) => isQuotaId(v),
-  Reason: (v: string) => /^[a-z0-9][a-z0-9_-]{0,31}$/.test(v),
+  Reason: (v: string) => (REFUSAL_REASONS as readonly string[]).includes(v),
 } as const satisfies Record<string, (v: string) => boolean>;
 
 export type DimensionName = keyof typeof VALUE_RULES;
@@ -119,21 +124,6 @@ function checkedDimensions(name: string, spec: MetricSpec, dimensions: Readonly<
   return { ...dimensions };
 }
 
-/** Maps a refusal reason to at most `MAX_REASONS` distinct values; later ones become `other`. */
-export class ReasonMapper {
-  private readonly seen = new Set<string>();
-  value(reason: string): string {
-    const clean = reason.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 32);
-    if (!VALUE_RULES.Reason(clean)) return 'other';
-    if (this.seen.has(clean)) return clean;
-    if (this.seen.size < MAX_REASONS - 1) {
-      this.seen.add(clean);
-      return clean;
-    }
-    return 'other';
-  }
-}
-
 /** The datum as the `PutMetricData` API (and the CLI's `--metric-data`) takes it. */
 export function toApi(d: Datum): Record<string, unknown> {
   return {
@@ -171,7 +161,7 @@ function runAws(args: readonly string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     execFile('aws', [...args], { timeout: 60_000 }, (error, _stdout, stderr) => {
       if (error === null) resolve();
-      else reject(new Error(`aws ${args.slice(0, 2).join(' ')} failed: ${stderr.trim().split('\n')[0] ?? error.message}`));
+      else reject(new Error(`aws ${args.slice(0, 2).join(' ')} failed: ${stderr.trim().split('\n')[0] || error.message}`));
     });
   });
 }
@@ -272,6 +262,8 @@ export async function emitFromCli(
   }
   let d: Datum;
   try {
+    // A plain decimal only: Number('') is 0 and Number('0x10') is 16.
+    if (!/^[0-9]+(\.[0-9]+)?$/.test(rawValue)) throw new Error(`${name}: the value must be a non-negative decimal number`);
     d = datum(name, Number(rawValue), dimensions);
   } catch (e) {
     warn((e as Error).message);

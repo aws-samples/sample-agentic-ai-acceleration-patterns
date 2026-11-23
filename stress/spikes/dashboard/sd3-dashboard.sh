@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT-0
 #
 # Spike SD-3: deploy and remove the one-dashboard stack and print the seconds of each.
-#   PLATFORM_PROFILE=pg CELL_ACCOUNT=<12 digits> AWS_REGION=eu-central-1 sd3-dashboard.sh
+#   PLATFORM_PROFILE=<platform profile> CELL_ACCOUNT=<12 digits> AWS_REGION=<Region> sd3-dashboard.sh
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${PLATFORM_PROFILE:?}" "${CELL_ACCOUNT:?}" "${AWS_REGION:?}"

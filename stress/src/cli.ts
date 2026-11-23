@@ -93,6 +93,9 @@ async function main(argv: string[]): Promise<number> {
       const withDashboard = !values['no-dashboard'] && (values.dashboard || sliceNames.length > 1);
       const region = process.env.AWS_REGION ?? '';
       if (withDashboard && region === '') throw new Error('the dashboard needs AWS_REGION (the platform account\'s Region); set it or pass --no-dashboard');
+      if (withDashboard && (process.env.STRESS_CELL_ACCOUNTS ?? '') === '') {
+        process.stderr.write('dashboard: STRESS_CELL_ACCOUNTS is not set, so the dashboard shows no cell account (stress/dashboard/README.md)\n');
+      }
       const metrics = withDashboard ? new Emitter(awsCliPublish(region), runId, (l) => process.stderr.write(`${l}\n`)) : undefined;
       const summary = await runStress({
         metrics,
@@ -120,6 +123,7 @@ async function main(argv: string[]): Promise<number> {
       return summary.failures.length === 0 ? 0 : 1;
     }
     case 'report': {
+      // Re-renders from the records alone: it has no verdict and no "Dashboard" section (the runner's results.md has both).
       const dir = positionals[0];
       if (dir === undefined) throw new Error('report needs a results folder');
       const records = fs
@@ -141,6 +145,9 @@ async function main(argv: string[]): Promise<number> {
       if (runId === undefined) throw new Error('dashboard needs --run <run id>');
       const home = process.env.STRESS_HOME ?? path.join(os.homedir(), '.aaa-stress');
       const prefix = process.env.STRESS_PREFIX ?? 'stress';
+      // The run id and the prefix make a path and reach a stack name: the runner's own rule for both.
+      if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(runId)) throw new Error('--run must be a run id: letters, digits and hyphens');
+      if (!/^[A-Za-z][A-Za-z0-9]{0,39}$/.test(prefix)) throw new Error('STRESS_PREFIX must be 1 to 40 letters and digits, starting with a letter');
       const runDir = path.join(home, prefix, runId);
       const planFile = path.join(runDir, 'dashboard-plan.json');
       if (!fs.existsSync(planFile)) throw new Error(`${planFile} does not exist: only a run made with the dashboard on has a plan`);

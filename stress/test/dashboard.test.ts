@@ -5,10 +5,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { App } from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
-import { RunDashboardStack } from '../dashboard/dashboard.cdk';
+import { Match, Template } from 'aws-cdk-lib/assertions';
+import { CELL_DIMENSIONS } from '../application/cell-metrics';
+import { DASHBOARD_TAG, RunDashboardStack } from '../dashboard/dashboard.cdk';
 import { planFromFiles } from '../dashboard/plan';
-import { RunSinkStack } from '../dashboard/sink.cdk';
+import { RunSinkStack, SINK_TAG } from '../dashboard/sink.cdk';
 import { imageProperties } from '../dashboard/snapshot';
 import { type DashboardPlan, dashboardBody, RELAY_SLICE, widgetsFor } from '../dashboard/widgets';
 import { DIMENSION_NAMES, METRICS } from '../src/metrics';
@@ -79,8 +80,17 @@ describe('the run dashboard widgets (design §4)', () => {
   });
 
   it('carries no tenant, user, agent or token dimension anywhere', () => {
-    const text = JSON.stringify(dashboardBody(platform));
-    expect(text).not.toMatch(/"(TenantId|Tenant|User|UserId|AgentId|Agent|Token|Host)"/);
+    // Every dimension name of every metric row is one the emitters publish: StressRun's allowlist, or
+    // the four a cell filter may carry; the account-wide series carry none.
+    const allowed = new Set<string>([...DIMENSION_NAMES, ...CELL_DIMENSIONS, 'FunctionName', 'Region', 'DistributionId', 'AggregateOperation', 'Service']);
+    for (const w of all.filter((x) => x.type === 'metric')) {
+      for (const r of rows(w.properties)) {
+        if (typeof r[0] !== 'string') continue;
+        const dims = r.slice(2, -1) as string[];
+        for (let i = 0; i < dims.length; i += 2) expect(allowed).toContain(dims[i]);
+      }
+    }
+    expect(JSON.stringify(dashboardBody(platform))).not.toMatch(/tenant ?id|"token"|user ?name/i);
   });
 
   it('keeps the body under the 100 KB CloudWatch limit and every widget on the 24 columns', () => {
@@ -150,11 +160,17 @@ describe('the observability sink (design §8, §11)', () => {
             Condition: { 'ForAllValues:StringEquals': { 'oam:ResourceTypes': ['AWS::CloudWatch::Metric'] } },
             Effect: 'Allow',
             Principal: { AWS: [CELL_A, CELL_B] },
-            Resource: '*',
+            Resource: Match.anyValue(),
           },
         ],
       },
     });
+    // The sinks of the account and Region, not every resource: the policy cannot name its own sink's ARN.
+    const sink = Object.values(template.findResources('AWS::Oam::Sink'))[0] as { Properties: { Policy: { Statement: { Resource: unknown }[] } } };
+    const resource = JSON.stringify(sink.Properties.Policy.Statement[0]!.Resource);
+    expect(resource).toContain(':oam:');
+    expect(resource).toContain(':sink/*');
+    expect(resource).not.toBe('"*"');
   });
 
   it('refuses no account and an account that is not 12 digits', () => {
@@ -172,6 +188,17 @@ describe('the run dashboard stack (design §8)', () => {
     expect(Object.values(resources).map((r) => r.Type)).toEqual(['AWS::CloudWatch::Dashboard']);
     template.hasResourceProperties('AWS::CloudWatch::Dashboard', { DashboardName: 'Stress-run' });
     expect(template.toJSON().Outputs).toBeUndefined();
+  });
+
+  it('tags its stack, so dashboard.sh touches a stack of its name only when it is this one', () => {
+    const app = new App();
+    const stack = new RunDashboardStack(app, 'StressDashboardTag', { prefix: 'Stress', plan: platform, env: { account: '123456789012', region: 'eu-central-1' } });
+    expect(stack.tags.tagValues()).toMatchObject({ [DASHBOARD_TAG.key]: DASHBOARD_TAG.value });
+    const sink = new RunSinkStack(app, 'StressRunSink', { cellAccountIds: [CELL_A], env: { account: '123456789012', region: 'eu-central-1' } });
+    expect(sink.tags.tagValues()).toMatchObject({ [SINK_TAG.key]: SINK_TAG.value });
+    const text = fs.readFileSync(path.resolve(__dirname, '..', 'dashboard', 'dashboard.sh'), 'utf8');
+    expect(text).toContain(`Key=='${DASHBOARD_TAG.key}'`);
+    expect(text).toContain(`== ${DASHBOARD_TAG.value}`);
   });
 });
 

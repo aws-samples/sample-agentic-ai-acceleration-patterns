@@ -52,6 +52,7 @@ import encoding from 'k6/encoding';
 import { SignatureV4, Endpoint } from 'https://jslib.k6.io/aws/0.14.0/signature.js';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.1.0/index.js';
 import { buildRecord } from './record.js';
+import { bump as bumpMinute, latencyBucket, minuteLine, newVuState, statusClass } from './minute.js';
 
 // -- configuration ------------------------------------------------------------
 
@@ -110,59 +111,27 @@ statusCounters.other = new Counter('status_other');
 // -- the minute line (stress ADR-0022, stress/k6/relay.sh) ------------------------------------
 
 // Each VU counts, per epoch minute, what the dashboard's relay publishes: requests by status
-// class, isolation assertions and mismatches, refusals seen, and a latency histogram. One
-// `minute` JSON line a VU a minute goes to k6's output, like the `tenant_minute` ledger line,
-// and the relay sums the lines of all VUs. No tenant, token or header is in it.
-const LATENCY_STEP = Math.log(1.12);
-// log-spaced buckets about 12 % wide from 1 ms to 120 s: at most 104, below the 150 CloudWatch takes
-const LATENCY_MAX_BUCKET = Math.ceil(Math.log(120000) / LATENCY_STEP);
-let stat = null;
+// class, isolation assertions and mismatches, refusals seen, and a latency histogram. `minute`
+// JSON lines go to k6's output, like the `tenant_minute` ledger line, and the relay sums the
+// lines of all VUs. No tenant, token or header is in it.
+// The shape of the line, the buckets and when a VU prints (at the end of a minute, every 5 s while
+// a minute goes on, and in the last 5 % of the scenario once a second, whole iterations) are in minute.js (no k6
+// import, tested). k6 has no per-VU end hook, so what a VU counts after its last line is lost.
+const vuState = newVuState();
 
-function newStat(minute) {
-  return { minute, s2xx: 0, s3xx: 0, s4xx: 0, s5xx: 0, snone: 0, assertions: 0, mismatches: 0, refusals: 0, hist: {} };
-}
-
-function flushStat() {
-  if (stat === null) {
-    return;
-  }
-  const line = { kind: 'minute', epochMinute: stat.minute, vu: exec.vu.idInTest };
-  for (const key of Object.keys(stat)) {
-    if (key !== 'minute') {
-      line[key] = stat[key];
-    }
-  }
-  console.log(JSON.stringify(line));
-  stat = null;
-}
-
-/** Applies one count to this VU's minute; flushes the minute that has ended, and the last one near the scenario's end. */
+/** Applies one count to this VU's minute; minute.js decides when a line is printed. */
 function bump(apply) {
-  const minute = Math.floor(Date.now() / 60000);
-  if (stat !== null && stat.minute !== minute) {
-    flushStat();
-  }
-  stat = stat || newStat(minute);
-  apply(stat);
   let progress = 0;
+  let iteration = 0;
+  let scenario;
   try {
     progress = exec.scenario.progress;
+    scenario = exec.scenario.name;
+    iteration = exec.vu.iterationInScenario;
   } catch (_) {
     // outside a scenario (setup): nothing to flush at
   }
-  if (progress >= 0.99) {
-    flushStat();
-  }
-}
-
-/** The status class of a response: 2xx to 5xx, or none for a status of 0 or an unusual one. */
-export function statusClass(status) {
-  return status >= 200 && status < 600 ? `s${Math.floor(status / 100)}xx` : 'snone';
-}
-
-/** The log-spaced bucket of a latency in ms: bucket i holds up to 1.12^i ms. */
-export function latencyBucket(ms) {
-  return Math.min(LATENCY_MAX_BUCKET, Math.max(0, Math.ceil(Math.log(Math.max(1, ms)) / LATENCY_STEP)));
+  bumpMinute(vuState, Date.now(), progress, apply, (stat) => console.log(JSON.stringify(minuteLine(stat, exec.vu.idInTest))), iteration, scenario);
 }
 
 /** Counts one response by status; a 4xx or 5xx is also a refusal the run must attribute. */

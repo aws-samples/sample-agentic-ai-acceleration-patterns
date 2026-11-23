@@ -14,7 +14,7 @@
  * series with no dimension.
  */
 
-import { K6_SCENARIOS } from '../src/metrics';
+import { K6_SCENARIOS, REFUSAL_REASONS, STATUS_CLASSES } from '../src/metrics';
 
 /** What a run did: one `(slice, scenario)` pair for each record it writes. */
 export interface RunPart {
@@ -56,8 +56,7 @@ export const RELAY_SLICE = 'agentic-runtime-isolation';
 /** The front door's router lives in the edge Region. */
 export const EDGE_REGION = 'us-east-1';
 /** The refusal reasons the dashboard draws; any other reason is `other` (design §3.1, §5). */
-export const REASONS = ['http-401', 'http-403', 'http-429', 'http-500', 'http-502', 'http-503', 'http-504', 'other'] as const;
-const STATUS_CLASSES = ['2xx', '3xx', '4xx', '5xx'] as const;
+export const REASONS = REFUSAL_REASONS;
 /** The `Status` values the cell's ingress returns (design §3.2). */
 const INGRESS_STATUSES = ['200', '401', '403', '404', '429', '500', '502', '503'] as const;
 const SDK_SERVICES = ['sts', 'kms', 'dynamodb'] as const;
@@ -131,7 +130,7 @@ function sectionA(plan: DashboardPlan): Widget[] {
       markdown: [
         `## Stress run \`${plan.runId}\``,
         `Tier \`${plan.tier}\`, commit \`${plan.commit.slice(0, 7)}\`, Region \`${r}\`. The scenarios of the run: ${all.map((s) => `\`${s}\``).join(', ') || 'none'}.`,
-        'A view, not a gate: the result records decide the run. Live widgets trail a minute of load by about three minutes (design, "near-live").',
+        'A view, not a gate: the result records decide the run. Live widgets show a minute of load a few seconds to a minute and a half after it ends (the relay\'s grace is 90 s for a slow VU).',
       ].join('\n'),
     },
   });
@@ -235,7 +234,7 @@ function sectionA(plan: DashboardPlan): Widget[] {
       height: 6,
       section: 'A',
       properties: {
-        ...common('A4 Requests by status class, all k6 scenarios', r, 'Sum'),
+        ...common('A4 Requests by status class, all k6 scenarios (none: no answer)', r, 'Sum'),
         metrics: STATUS_CLASSES.flatMap((c) => summed(plan, live, 'Requests', (s) => [['Scenario', s], ['StatusClass', c]], `req${c}`, c)),
       },
     });
@@ -577,7 +576,7 @@ function sectionD(plan: DashboardPlan): Widget[] {
       height: 6,
       section: 'D',
       properties: {
-        ...common('D6 The driver\'s 2xx against the cells\' 200 (compare totals over a scenario, not one minute)', r, 'Sum'),
+        ...common('D6 The driver\'s 2xx against the cells\' 200 (compare totals over a scenario, not one minute; requests with no answer are not in either)', r, 'Sum'),
         metrics: [
           ...summed(plan, live, 'Requests', (s) => [['Scenario', s], ['StatusClass', '2xx']], 'drv', 'driver 2xx'),
           ...plan.cellAccounts.map((a, n) => cell(a, CELL, 'IngressRequests', [['Status', '200']], { id: `c200_${n}`, visible: false })),

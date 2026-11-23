@@ -10,7 +10,7 @@
 #
 # The sink's policy names the account ids of the cell accounts file, and allows only metric links.
 # Deploy it again after a cell account is added. Prints `stack=StressRunSink deploy_seconds=<n>`
-# and `SinkArn=<arn>`. The synthesised app goes to stress/cdk.dashboard.out (not committed).
+# and `SinkArn=<arn>`. The synthesised app goes to stress/cdk.dashboard.sink.out (not committed).
 
 set -euo pipefail
 
@@ -28,6 +28,6 @@ echo "account=$(aws sts get-caller-identity --query Account --output text) regio
 
 start=$SECONDS
 npx cdk --app "npx ts-node --transpile-only dashboard/sink-app.ts" deploy StressRunSink \
-  --output cdk.dashboard.out/sink --exclusively --require-approval never >&2
+  --output cdk.dashboard.sink.out --exclusively --no-version-reporting --require-approval never >&2
 echo "stack=StressRunSink deploy_seconds=$((SECONDS - start))"
 echo "SinkArn=$(aws cloudformation describe-stacks --stack-name StressRunSink --query 'Stacks[0].Outputs[?OutputKey==`SinkArn`].OutputValue' --output text)"

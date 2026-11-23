@@ -36,9 +36,10 @@
 # The mirror travels inside the Run Command parameters (below 60 KB, see the guard), compressed:
 # this is for the shared library and one sample's scenario folder, not for data.
 #
-# In a platform run (STRESS_MODE=platform) of a scenario (RECORD_SCENARIO), `k6 run` also starts
-# stress/k6/relay.sh on the host, which publishes the run's minutes to CloudWatch while k6 runs
-# (stress ADR-0022); it is stopped, and given a minute to publish what is pending, after k6.
+# In a platform run (STRESS_MODE=platform) of a scenario (RECORD_SCENARIO, a NAME=value argument,
+# as slice.sh passes it) with the run's metrics on (STRESS_METRICS=1, set by the runner), `k6 run`
+# also starts stress/k6/relay.sh on the host, which publishes the run's minutes to CloudWatch while
+# k6 runs (stress ADR-0022); it is stopped, and given a minute to publish what is pending, after k6.
 #
 # A SIGINT or SIGTERM is passed on to host.sh, which cancels the command on the host.
 
@@ -92,7 +93,7 @@ fi
     echo "echo $(base64 -w0 <"${TMP}/inputs.tgz") | base64 -d | tar xz -C /opt/stress"
   fi
   NAMES=""
-  for name in STRESS_RUN_ID STRESS_TIER_JSON STRESS_MODE STRESS_COMMIT STRESS_TIER; do
+  for name in STRESS_RUN_ID STRESS_TIER_JSON STRESS_MODE STRESS_COMMIT STRESS_TIER STRESS_METRICS; do
     [[ -z "${!name:-}" ]] || { echo "export ${name}=$(sq "${!name}")"; NAMES="${NAMES} ${name}"; }
   done
   for kv in "$@"; do
@@ -122,9 +123,11 @@ fi
     # The dashboard's relay (stress ADR-0022): in a platform run of a scenario, it reads k6's output
     # as it grows and publishes each minute. It is a view: if it cannot start, k6 runs without it.
     echo 'relay_pid=""'
-    echo 'if [ "${STRESS_MODE:-}" = platform ] && [ -n "${RECORD_SCENARIO:-}" ] && [ -f /opt/stress/repo/stress/k6/relay.sh ] && command -v jq >/dev/null 2>&1; then'
+    # The relay ends itself when this script dies or after K6_TIMEOUT + 300 s; the trap ends it at once.
+    echo "trap '[ -z \"\$relay_pid\" ] || kill \"\$relay_pid\" 2>/dev/null || true' EXIT"
+    echo 'if [ "${STRESS_METRICS:-}" = 1 ] && [ "${STRESS_MODE:-}" = platform ] && [ -n "${RECORD_SCENARIO:-}" ] && [ -f /opt/stress/repo/stress/k6/relay.sh ] && command -v jq >/dev/null 2>&1; then'
     echo '  rm -f /opt/stress/out/relay.stop'
-    echo '  bash /opt/stress/repo/stress/k6/relay.sh >/opt/stress/out/relay.log 2>&1 &'
+    echo "  RELAY_MAX_S=$((TIMEOUT + 300)) bash /opt/stress/repo/stress/k6/relay.sh >/opt/stress/out/relay.log 2>&1 &"
     echo '  relay_pid=$!'
     echo 'fi'
   fi

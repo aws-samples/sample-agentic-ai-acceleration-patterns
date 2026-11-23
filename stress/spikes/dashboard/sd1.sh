@@ -6,7 +6,7 @@
 # the platform account, a link and metric filters in a cell account, and a read of the cell
 # account's metrics from the platform account.
 #
-#   PLATFORM_PROFILE=pg CELL_PROFILE=cella CELL_ACCOUNT=<12 digits> AWS_REGION=eu-central-1 \
+#   PLATFORM_PROFILE=<platform profile> CELL_PROFILE=<cell profile> CELL_ACCOUNT=<12 digits> AWS_REGION=<Region> \
 #     sd1.sh up | drive | read | down
 #
 # `up` deploys the sink and then the link, and prints each stack's seconds. `drive` writes log

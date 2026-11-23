@@ -738,7 +738,7 @@ Edge overhead is client TTFB minus ingress TTFB, per request, joined on the
 correlation id.
 
 A live and after-the-run view of these figures on one CloudWatch dashboard is
-proposed in [`docs/stress-dashboard.design.md`](./stress-dashboard.design.md)
+described in [`docs/stress-dashboard.design.md`](./stress-dashboard.design.md)
 (stress ADR-0022, Accepted; built as W-12, see `stress/dashboard/README.md`). It
 decides no pass criterion.
 

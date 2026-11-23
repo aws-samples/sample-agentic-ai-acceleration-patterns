@@ -18,9 +18,15 @@ export interface RunDashboardStackProps extends StackProps {
   readonly plan: DashboardPlan;
 }
 
+/**
+ * The tag every run dashboard stack carries. `dashboard.sh` updates and deletes a stack of the
+ * dashboard's name only when it has this tag, so a stack of another kind with that name is never touched.
+ */
+export const DASHBOARD_TAG = { key: 'stress:part', value: 'run-dashboard' } as const;
+
 export class RunDashboardStack extends Stack {
   constructor(scope: Construct, id: string, props: RunDashboardStackProps) {
-    super(scope, id, props);
+    super(scope, id, { ...props, tags: { ...props.tags, [DASHBOARD_TAG.key]: DASHBOARD_TAG.value } });
     new cloudwatch.CfnDashboard(this, 'Dashboard', {
       dashboardName: dashboardName(props.prefix),
       dashboardBody: JSON.stringify(dashboardBody(props.plan)),

@@ -119,3 +119,9 @@ Revisit when a spike shows the link breaks the account check, when a cell
 account is needed in a second Region (a second sink and link pair, or
 Option 2), or when a run needs a window of metrics older than the metric
 retention.
+
+## Note from the build (2026-11-23)
+The decision stands. The spikes measured what the Consequences leave open: a minute of k6 load is readable in
+CloudWatch 3 to 19 seconds after it ends in the spikes' loads, not about three minutes, and the link made no role
+in the cell account (design §15 and `stress/spikes/dashboard/README.md`). `RefusalsByReason` takes a fixed list of
+eight reasons, not "at most 16 values".

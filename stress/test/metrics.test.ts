@@ -7,10 +7,9 @@ import {
   DIMENSION_NAMES,
   Emitter,
   emitFromCli,
-  MAX_REASONS,
   METRICS,
   type MetricName,
-  ReasonMapper,
+  REFUSAL_REASONS,
   stampFor,
   toApi,
 } from '../src/metrics';
@@ -67,13 +66,12 @@ describe('the StressRun emitter (stress ADR-0022, design §3.1)', () => {
     });
   });
 
-  it('maps at most 16 distinct reasons and sends the rest to other', () => {
-    const m = new ReasonMapper();
-    const first = Array.from({ length: MAX_REASONS * 2 }, (_, i) => m.value(`reason-${i}`));
-    expect(new Set(first).size).toBe(MAX_REASONS);
-    expect(first.filter((r) => r === 'other').length).toBe(MAX_REASONS + 1);
-    expect(m.value('reason-0')).toBe('reason-0');
-    expect(m.value('HTTP 429!')).toBe('other');
+  it('takes a refusal reason from a short fixed list, so a run cannot publish an unbounded number of series', () => {
+    expect(REFUSAL_REASONS.length).toBeLessThanOrEqual(16);
+    for (const reason of REFUSAL_REASONS) expect(datum('RefusalsByReason', 1, { RunId: RUN, Scenario: 'PS-2', Reason: reason }).dimensions.Reason).toBe(reason);
+    for (const reason of ['http-418', 'reason-1', 'HTTP 429', '']) {
+      expect(() => datum('RefusalsByReason', 1, { RunId: RUN, Scenario: 'PS-2', Reason: reason })).toThrow(/Reason/);
+    }
   });
 
   it('stamps a point with its publish time once its own is over three hours old', () => {
@@ -144,6 +142,16 @@ describe('run.sh emit', () => {
     expect(await emitFromCli(['OnboardReadySeconds', '1', 'TenantId=x'], env, publish, (l) => warn.push(l))).toBe(2);
     expect(await emitFromCli(['OnboardReadySeconds'], env, publish, (l) => warn.push(l))).toBe(2);
     expect(await emitFromCli(['OnboardReadySeconds', '1', 'junk'], env, publish, (l) => warn.push(l))).toBe(2);
+  });
+
+  it('takes a plain decimal value only: an empty or hexadecimal one is not a zero or a sixteen', async () => {
+    const env = { STRESS_METRICS: '1', STRESS_RUN_ID: RUN };
+    for (const bad of ['', ' ', '0x10', '1e3', '-1', 'NaN', '1.']) {
+      expect(await emitFromCli(['BuildsInFlight', bad], env, publish, (l) => warn.push(l))).toBe(2);
+    }
+    expect(sent).toEqual([]);
+    expect(await emitFromCli(['BuildsInFlight', '12.5'], env, publish, (l) => warn.push(l))).toBe(0);
+    expect(sent.map((d) => d.value)).toEqual([12.5]);
   });
 
   it('warns and exits 0 when the publish fails', async () => {

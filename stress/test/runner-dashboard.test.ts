@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,7 +22,14 @@ function fixture(): { root: string; home: string } {
 interface Options {
   /** Dashboard verbs that exit 1. */
   failDashboard?: string[];
-  unattributed?: number;
+  /** Dashboard verbs whose exec rejects, as a script that cannot start does. */
+  rejectDashboard?: string[];
+  /** Slice verbs (`deploy`, `run PS-2`) that exit 1. */
+  failSlice?: string[];
+  /** A slice verb whose exec rejects. */
+  rejectSlice?: string;
+  /** A slice verb that sends the runner this signal while it runs. */
+  signalOn?: { call: string; bus: EventEmitter };
 }
 
 /** An exec stub: slice verbs write records, dashboard verbs are recorded with the env they saw. */
@@ -31,10 +39,14 @@ function stub(o: Options = {}) {
   const exec: Exec = async (script, args, env) => {
     if (script.endsWith('dashboard.sh')) {
       calls.push(`dashboard ${args[0]}`);
+      if (o.rejectDashboard?.includes(args[0]!)) throw new Error(`spawn ${args[0]} ENOENT`);
       if (args[0] === 'up') planSeen.push(fs.readFileSync(env.STRESS_DASHBOARD_PLAN_FILE!, 'utf8'));
       return { status: o.failDashboard?.includes(args[0]!) ? 1 : 0, stdout: '' };
     }
     calls.push(`a ${args.join(' ')}`);
+    if (o.rejectSlice === args.join(' ')) throw new Error('spawn failed');
+    if (o.signalOn?.call === args.join(' ')) o.signalOn.bus.emit('SIGTERM', 'SIGTERM');
+    if (o.failSlice?.includes(args.join(' '))) return { status: 1, stdout: '' };
     if (args[0] === 'budget') return { status: 0, stdout: JSON.stringify({ draws: [{ account: 'platform', quota: 'lambda-concurrency', amount: 40 }] }) };
     if (args[0] === 'run') {
       const r = record({ slice: 'a', scenario: args[1], runId: env.STRESS_RUN_ID!, mode: env.STRESS_MODE as 'slice' | 'platform', isolation: { assertions: 7, mismatches: 0 } });
@@ -132,6 +144,105 @@ describe('the runner and the dashboard (stress ADR-0022)', () => {
     expect(life).toEqual(expect.arrayContaining(['dashboard:deploy', 'a:deploy', 'a:destroy', 'dashboard:destroy']));
     // The unattributed count is for the k6 scenarios only: PS-5 is not one.
     expect(of('RefusalsUnattributed').map((d) => d.dimensions.Scenario)).toEqual(['PS-2']);
+  });
+
+  const withDash = (extra: object = {}) => ({ ...base, dashboard: { script: '/x/dashboard.sh', keep: false, region: 'eu-central-1', settleMs: 0 }, ...extra });
+
+  it('removes the dashboard after a slice step failed, and still tears the slice down first', async () => {
+    const { root, home } = fixture();
+    const { calls, exec } = stub({ failSlice: ['deploy'] });
+    const summary = await runStress({ ...withDash(), repoRoot: root, home, exec, metrics: emitter().e });
+    expect(summary.failures).toContain('a deploy exited 1');
+    expect(calls).toEqual(['a budget', 'dashboard up', 'a deploy', 'a teardown', 'dashboard snapshot', 'dashboard down']);
+  });
+
+  it('removes the dashboard after a signal in the middle of a scenario, and ends the scenario\'s strip', async () => {
+    const { root, home } = fixture();
+    const bus = new EventEmitter();
+    const { calls, exec } = stub({ signalOn: { call: 'run PS-2', bus } });
+    const { sent, e } = emitter();
+    const summary = await runStress({ ...withDash(), repoRoot: root, home, exec, metrics: e, signals: bus });
+    expect(summary.signal).toBe('SIGTERM');
+    expect(calls).toEqual(['a budget', 'dashboard up', 'a deploy', 'a seed', 'a run PS-2', 'a teardown', 'dashboard snapshot', 'dashboard down']);
+    expect(sent.filter((d) => d.name === 'ScenarioActive').map((d) => d.value)).toEqual([1, 0]);
+  });
+
+  it('ends the scenario\'s strip when its run verb cannot start, and the run fails on that, not on the dashboard', async () => {
+    const { root, home } = fixture();
+    const { calls, exec } = stub({ rejectSlice: 'run PS-2' });
+    const { sent, e } = emitter();
+    const summary = await runStress({ ...withDash(), repoRoot: root, home, exec, metrics: e });
+    expect(summary.failures).toEqual(expect.arrayContaining(['spawn failed']));
+    expect(sent.filter((d) => d.name === 'ScenarioActive').map((d) => d.value)).toEqual([1, 0]);
+    expect(calls.slice(-2)).toEqual(['dashboard snapshot', 'dashboard down']);
+  });
+
+  it('treats a dashboard script that cannot start as a failed step: a failed up goes on, a failed down is a leftover', async () => {
+    const { root, home } = fixture();
+    const up = await runStress({ ...withDash(), repoRoot: root, home, exec: stub({ rejectDashboard: ['up'] }).exec, metrics: emitter().e });
+    expect(up.failures).toEqual([]);
+    const down = await runStress({ ...withDash({ runId: 'r2' }), repoRoot: root, home, exec: stub({ rejectDashboard: ['down'] }).exec, metrics: emitter().e });
+    expect(down.failures).toEqual([expect.stringMatching(/dashboard down exited non-zero/)]);
+  });
+
+  it('removes the dashboard after a failed snapshot', async () => {
+    const { root, home } = fixture();
+    const { calls, exec } = stub({ failDashboard: ['snapshot'] });
+    await runStress({ ...withDash(), repoRoot: root, home, exec, metrics: emitter().e });
+    expect(calls.slice(-2)).toEqual(['dashboard snapshot', 'dashboard down']);
+  });
+
+  it('removes a dashboard that did not come up even with --keep-dashboard, so a half-made stack does not block the next run', async () => {
+    const { root, home } = fixture();
+    const { calls, exec } = stub({ failDashboard: ['up'] });
+    const keep = { dashboard: { script: '/x/dashboard.sh', keep: true, region: 'eu-central-1', settleMs: 0 } };
+    await runStress({ ...base, ...keep, repoRoot: root, home, exec, metrics: emitter().e });
+    expect(calls.filter((c) => c.startsWith('dashboard'))).toEqual(['dashboard up', 'dashboard down']);
+  });
+
+  it('does not wait for the last minutes when the run failed', async () => {
+    const { root, home } = fixture();
+    const { exec } = stub({ failSlice: ['deploy'] });
+    const started = Date.now();
+    await runStress({ ...base, dashboard: { script: '/x/dashboard.sh', keep: false, region: 'eu-central-1', settleMs: 60_000 }, repoRoot: root, home, exec, metrics: emitter().e });
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('runs a platform run of two slices with the dashboard around all of it', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-'));
+    for (const [name, decl] of Object.entries({ a: { scenarios: ['PS-2'], quotas: ['lambda-concurrency'] }, b: { needs: ['a'], scenarios: ['PS-5'], quotas: [] as string[] } })) {
+      const dir = path.join(root, 'samples', name, 'scripts', 'stress');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'slice.json'), JSON.stringify({ name, ...decl }));
+      fs.writeFileSync(path.join(dir, 'slice.sh'), '');
+    }
+    const calls: string[] = [];
+    const exec: Exec = async (script, args, env) => {
+      if (script.endsWith('dashboard.sh')) {
+        calls.push(`dashboard ${args[0]}`);
+        return { status: 0, stdout: '' };
+      }
+      const slice = script.split(path.sep).slice(-4)[0]!;
+      calls.push(`${slice} ${args.join(' ')}`);
+      if (args[0] === 'budget') return { status: 0, stdout: JSON.stringify({ draws: slice === 'a' ? [{ account: 'platform', quota: 'lambda-concurrency', amount: 4 }] : [] }) };
+      if (args[0] === 'run') {
+        const r = record({ slice, scenario: args[1], runId: env.STRESS_RUN_ID!, mode: 'platform', isolation: { assertions: 3, mismatches: 0 } });
+        fs.writeFileSync(path.join(env.STRESS_RESULTS!, `${slice}.${args[1]}.json`), JSON.stringify(r));
+      }
+      return { status: 0, stdout: '' };
+    };
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'home-'));
+    const { e } = emitter();
+    const summary = await runStress({ ...withDash(), slices: ['a', 'b'], repoRoot: root, home, exec, metrics: e });
+    expect(summary.mode).toBe('platform');
+    expect(summary.failures).toEqual([]);
+    expect(calls[0]).toBe('a budget');
+    expect(calls.indexOf('dashboard up')).toBeGreaterThan(calls.lastIndexOf('b budget'));
+    expect(calls.indexOf('dashboard up')).toBeLessThan(calls.indexOf('a deploy'));
+    expect(calls.indexOf('dashboard snapshot')).toBeGreaterThan(calls.lastIndexOf('a teardown'));
+    expect(calls[calls.length - 1]).toBe('dashboard down');
+    const plan = JSON.parse(fs.readFileSync(path.join(home, 'Stress', 'r1', 'dashboard-plan.json'), 'utf8')) as { runs: unknown[] };
+    expect(plan.runs).toEqual([{ slice: 'a', scenario: 'PS-2' }, { slice: 'b', scenario: 'PS-5' }]);
   });
 
   it('keeps a run without a dashboard or metrics exactly as it was, and tells the verbs the metrics are on only when they are', async () => {

@@ -54,19 +54,30 @@ the run's Region; a sink and a link work inside one Region, so a second Region n
    It prints `SinkArn=<arn>`. The sink's policy names the account ids of the cell accounts file and
    allows only metric links. Run it again after you add a cell account.
 
-2. The link, as each cell account's owner: deploy `CellAccountBase` again with the sink's ARN.
+2. The link, as each cell account's owner: deploy `CellAccountBase` again with the sink's ARN. **Repeat
+   every variable of the first deploy.** `CellAccountBase` writes the identity parameters only when it is
+   given `CELL_USER_POOL_ID` and `CELL_APP_CLIENT_ID`, and a deploy without them deletes the two parameters
+   the cells read; the same goes for `PLATFORM_ACCOUNT_ID` (the ingress reader role), `CELL_POLICY_SUFFIX` and
+   `CELL_OWNER_STACKS=base` (a second Region).
 
    ```bash
-   export AWS_REGION=eu-west-2 OBSERVABILITY_SINK_ARN=<the SinkArn> PLATFORM_ACCOUNT_ID=<platform account id>
+   export AWS_REGION=eu-west-2 OBSERVABILITY_SINK_ARN=<the SinkArn>
+   export PLATFORM_ACCOUNT_ID=<platform account id> CELL_USER_POOL_ID=<stress identity pool id> CELL_APP_CLIENT_ID=<its app client id>
    application/deploy-owner.sh
    ```
 
    The link shares the account's `AWS/Lambda`, `AWS/Bedrock-AgentCore` and `StressCell` metrics, no
-   log group. It creates no role in the cell account. Check with the account check
-   ([spec §3.7](../../docs/stress-test.spec.md)) before the next run: the link is a resource of a stack
-   on the owner's list, so it passes (spike SD-1, below).
+   log group. It creates no role in the cell account. Run the account check
+   ([spec §3.7](../../docs/stress-test.spec.md)) before and after, and compare: the link is a resource of a stack
+   on the owner's list and the spike's check named no problem about it, but the spike ran the check without a baseline
+   and not on the real `CellAccountBase` (see [the spike results](../spikes/dashboard/README.md), SD-1).
 
-3. Nothing else. A cell build adds the `StressCell` metric filters itself
+3. The driver host must have the `PutMetricData` statement: deploy the driver stack again if it is older than this
+   change (`driver/deploy.sh`); an old host gives `AccessDenied` for every minute and the relay tries the
+   oldest pending minute every poll, logging one line each time. The platform account must be CDK-bootstrapped for the Region,
+   as for the driver.
+
+4. Nothing else. A cell build adds the `StressCell` metric filters itself
    ([`../application/cell-metrics.ts`](../application/cell-metrics.ts)); the driver stack gives its host
    `cloudwatch:PutMetricData` limited to the `StressRun` namespace.
 
@@ -85,9 +96,15 @@ export AWS_REGION=eu-west-2 STRESS_CELL_ACCOUNTS=/path/to/cell-accounts.json
 |---|---|
 | (none, platform run) | The runner deploys the dashboard after `budget` passes and before the first slice `deploy`, publishes while it runs, takes the snapshots after the last teardown and removes the dashboard |
 | `--dashboard` | The same for a slice run. A slice run has no front door and no cell account, so only the runner's own series have data |
-| `--no-dashboard` | No dashboard and no metrics, as before |
-| `--keep-dashboard` | Keep the dashboard after the run (about $3 a month while it stays). The snapshots are taken anyway |
-| `--remove-fixtures` | Also removes a dashboard kept by an earlier run: `--keep-dashboard` is ignored |
+| `--no-dashboard` | No dashboard and no metrics, as before: the runner does not set `STRESS_METRICS`, so the relay does not start on the host either |
+| `--keep-dashboard` | Keep the dashboard after the run (about $3 a month while it stays). The snapshots are taken anyway. The next run's dashboard has the same stack name and replaces it |
+| `--remove-fixtures` | Also removes a dashboard kept by an earlier run, when this run has the dashboard on: `--keep-dashboard` is ignored |
+
+Without `STRESS_CELL_ACCOUNTS` the run goes on, with a warning, and the dashboard shows no cell account.
+`dashboard.sh` updates and deletes a stack named `<prefix>-dashboard` only when it carries the tag
+`stress:part=run-dashboard`, which the dashboard app gives it; any other stack of that name is left alone and the
+step fails. `run.sh report <results dir>` renders a results file from the records alone, so it has no verdict
+and no "Dashboard" section: use the `results.md` the run wrote.
 
 A failed dashboard step never fails a run: the metrics are a view. A dashboard that cannot be removed
 does, because it is a leftover. The run writes a `dashboard` row in the deploy and destroy table of its
@@ -129,9 +146,14 @@ link is attached).
 | D, each cell account | ingress, latency, refusals, Lambda, SDK retries, AgentCore | D6 sets the driver's 2xx against the cells' 200: compare the totals over a scenario, not one minute |
 | E, quotas | one panel for each budgeted quota, and the peaks | A quota with a retry signal only (STS, KMS) shows that calls were retried, not a rate |
 
-A live widget trails a minute of load: the relay waits until every VU has finished a minute or 90 seconds
-after it, and CloudWatch adds its own delay. At tier `small` a scenario lasts one minute, so its counts show
-after it ended. A 60-second period shows the 5-second herd of PS-3 as one point.
+A live widget trails a minute of load: the relay publishes a minute when every VU that has printed a line has
+printed one for it and a later minute exists, or 90 seconds after it ended, and CloudWatch adds its own delay.
+In the spikes that was 3 to 19 seconds (spike SD-2, with SD-2's load; a VU that has nothing to do for a while
+makes it wait for the 90 seconds). What arrives after a minute went out is published as an addition. At tier
+`small` a scenario lasts one minute, so its counts show a little after it ended. A 60-second period shows the
+5-second herd of PS-3 as one point. The A3 live gap (driver count against the cells' count) trails by up to 5 seconds
+for each VU, because a VU prints every 5 seconds: it is not final until the scenario has ended and its last
+minute has been published.
 
 ## Spike results
 
@@ -156,12 +178,46 @@ account and a test cell account, and their results are in
 - **Searched widgets lag.** The router, the distribution and the identity API are found by search, because the
   dashboard is deployed before the front door exists; a metric is listed up to 15 minutes after its first data
   point.
-- **`SEARCH` over a cell account.** AgentCore throttles are found by search in each cell account.
+- **The AgentCore throttle line is unverified.** `Throttles` has no aggregate series, so D7 sums a search over the
+  series with the dimensions `Operation` and `Protocol`, one of several sets. No cell account has produced a throttle
+  to show it returns data, and a series with other dimensions (`Resource`, `Name`, `TargetType`) is not in it.
+- **A VU's last calls can go unprinted.** k6 has no per-VU end hook. A VU prints what it counted every 5 seconds, at the
+  end of a minute, and in the last 5 % of a scenario a second after its last print, always at the first call of an
+  iteration and on the other calls of that iteration, so a request is never split. What a VU counts after its last
+  print is lost, as whole requests: up to 1 second of its requests when it is called in the last 5 %, up to 5 seconds
+  when it is not. The live counts of the last minute can therefore be a little low. For 16 requests a second, one
+  request an iteration and requests handed out round robin, a simulation of 100 VUs for one minute (tier `small`) lost
+  0 to 52 of 960 requests, by the second the load began in, and over 240 seconds none. The loss grows with the VUs in
+  use and with the requests an iteration (100 VUs, three requests an iteration, 240 seconds: up to 105 of 3,839) and
+  shrinks with the length of the run. The result records are not affected.
+- **A replaced output file.** The relay reads k6's output file by line count; k6 only appends to it. A file that is
+  replaced is not handled: a shorter one is read from its first line, a longer one loses its first lines.
+- **The relay has a bound.** It ends itself when its parent script ends or after `K6_TIMEOUT` plus 300 seconds, and the
+  script ends it on exit, so a cancelled Run Command does not leave one publishing under an old run id. The first pass
+  over a very large output file (200,000 refusal lines, 29 MB) takes about 9 seconds; a pass reads only the lines that
+  are new.
 - **A slice with its own k6 caller.** The relay sets `Slice` to `agentic-runtime-isolation`, the only slice that
   calls `driver/k6.sh` in platform mode. A second caller needs a `RELAY_SLICE` setting from its `run` verb.
 - **Quota signals.** STS, KMS and the AgentCore rate quotas have a retry or throttle signal and no rate. The
   Cognito cap on groups is shown by the planned draw only.
-- **Code Bar.** A hardened component, not a production one. A human SA peer review has not happened.
+- **Review.** A hardened component, not a production one. It has had no independent human review.
+
+## Security scan
+
+ProtoShield (v0.18.0, with the stress folder's own config, so the license check is for MIT-0) ran on the files of the
+dashboard build: 0 critical, secrets 0, Semgrep 0, CVE 0, license headers 0. Its IAM check reports high findings, and
+which ones it names differs from scan to scan (one to five). The statements it names are these; none is fixed, for
+these reasons:
+
+| Finding | Where | Why it stays |
+|---|---|---|
+| `cloudwatch:PutMetricData` on `*` | `PublishRunMetrics`, driver host role | The action has no resource type, so IAM takes only `*`. The condition `cloudwatch:namespace` limits it to `StressRun`, and a test pins both |
+| `ec2messages` and `ssmmessages` on `*` | `SsmAgentMessages`, driver host role | Existing (stress ADR-0009): those actions have no resource type |
+| `execute-api:Invoke` on every API, SSM parameter prefixes, the ingress reader's cell-id wildcard | `InvokeApis`, `ReadPublishedParameters` (driver host role), `ReadCellIngressParameters` (cell account) | Existing statements this work does not change, documented where they are made |
+
+The sink policy's `Resource` is the account's sinks in the Region (`sink/*`), not `*`: an earlier scan named it and it
+was narrowed. The scan was of a folder of the changed files, because a scan of a whole folder runs the tool out of
+tokens.
 
 ## Build
 

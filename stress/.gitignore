@@ -45,6 +45,7 @@ junit.xml
 cdk.driver.out/
 !/dashboard/tsconfig.json
 cdk.dashboard.out/
+cdk.dashboard.sink.out/
 cdk.application.out/
 cdk.context.json
 !/.projenrc.ts

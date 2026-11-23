@@ -179,7 +179,6 @@ export interface DashboardOptions {
   readonly settleMs?: number;
 }
 
-
 export interface RunSummary {
   readonly runId: string;
   readonly mode: 'slice' | 'platform';
@@ -441,8 +440,14 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
   let planSums: ReturnType<typeof sumDraws> = new Map();
   const dashboardVerb = async (v: 'up' | 'snapshot' | 'down'): Promise<boolean> => {
     log(`== dashboard ${v}`);
-    const r = await exec(dashboard!.script, [v], env, false, track, output);
-    return r.status === 0;
+    try {
+      const r = await exec(dashboard!.script, [v], env, false, track, output);
+      return r.status === 0;
+    } catch (e) {
+      // A script that cannot start is a failed step like any other: the dashboard is a view.
+      log(`dashboard ${v}: ${(e as Error).message}`);
+      return false;
+    }
   };
   /** What the dashboard is built from: one entry for each record the run will write, and the budget's quota pairs. */
   const writePlan = (sums: ReturnType<typeof sumDraws>, window?: { start: string; end: string }): void => {
@@ -475,11 +480,13 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     // The window a dashboard deployed again later shows (`run.sh dashboard up --run <id>`).
     writePlan(planSums, { start: dashboardStart, end: new Date(now().getTime() + 5 * 60_000).toISOString() });
     if (dashboardDeploySeconds !== undefined) {
-      await sleep(dashboard.settleMs ?? 150_000);
+      // The last minutes reach CloudWatch a little after the run; a run that was interrupted or failed has nothing to wait for.
+      if (signal === undefined && failures.length === 0) await sleep(dashboard.settleMs ?? 150_000);
       if (!(await dashboardVerb('snapshot'))) log('dashboard snapshot failed: the dashboard shows the run until it is removed');
     }
     let destroySeconds: number | undefined;
-    if (dashboard.keep) {
+    // A dashboard that did not come up is removed even with --keep-dashboard: a half-made stack would block the next run's up.
+    if (dashboard.keep && dashboardDeploySeconds !== undefined) {
       log(`dashboard kept: ${dashboardName(opts.prefix)} (stress/dashboard/README.md, "Remove a kept dashboard")`);
     } else {
       const t0 = Date.now();
@@ -580,8 +587,11 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
           fs.rmSync(path.join(resultsDir, early), { force: true });
         }
         const endBeat = beat(sc);
-        ran.set(`${s.name}.${sc}`, await verb(s, 'run', [sc]));
-        await endBeat();
+        try {
+          ran.set(`${s.name}.${sc}`, await verb(s, 'run', [sc]));
+        } finally {
+          await endBeat();
+        }
         own(s, sc);
         await publishFinals(s.name, sc);
         stopIfAborted();
@@ -623,6 +633,7 @@ export async function runStress(opts: RunOptions): Promise<RunSummary> {
     } finally {
       for (const t of timers) clearInterval(t);
       await metrics?.flush();
+      if (metrics !== undefined && metrics.failures > 0) log(`metrics: ${metrics.failures} publish(es) failed or were dropped; the dashboard may miss points (the records are unaffected)`);
       for (const sig of SIGNALS) signals.off(sig, onSignal);
       process.stderr.off('error', ignore);
       fs.rmSync(lock, { force: true });

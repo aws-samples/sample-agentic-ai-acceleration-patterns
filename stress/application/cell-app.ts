@@ -65,7 +65,11 @@ const stack = new RuntimeIsolationDemoStack(app, stackName, {
 
 // The run dashboard's metric filters on the cell's own log lines (stress ADR-0022, design §3.2):
 // the access, ingress and authoriser log groups of the `api-gateway` ingress, and the log group
-// of each tools gateway's interceptor. No per-tenant metric is added.
+// of each tools gateway's interceptor. No per-tenant metric is added. The filters are tested in
+// `test/cell-metrics.test.ts`; this wiring (the log group ids, the tools gateways) has no unit test,
+// because the app loads the sample's CDK and runs only in the cell build. It was checked by synthesising
+// the app with the sample's own `node_modules`: the template held the filters on the ingress, the
+// authoriser and both interceptor log groups (stress/spikes/dashboard/README.md, "The cell app's filters").
 const ingressOf = (stack as unknown as {
   ingress: {
     node: { tryFindChild(id: string): { logGroup?: ILogGroup } | ILogGroup | undefined };

@@ -18,6 +18,16 @@ for tool in aws; do
 done
 
 echo "account=$(aws sts get-caller-identity --query Account --output text) region=${AWS_REGION}"
+if ! described="$(aws cloudformation describe-stacks --stack-name StressRunSink --query 'Stacks[0].StackStatus' --output text 2>&1)"; then
+  if [[ "$described" == *"does not exist"* ]]; then
+    echo "no StressRunSink stack; nothing to remove"
+    exit 0
+  fi
+  echo "describe-stacks StressRunSink failed: ${described}" >&2
+  exit 1
+fi
+tag="$(aws cloudformation describe-stacks --stack-name StressRunSink --query "Stacks[0].Tags[?Key=='stress:part'].Value | [0]" --output text)"
+[[ "$tag" == run-sink ]] || { echo "StressRunSink is not the run dashboard's sink (no stress:part=run-sink tag): not touching it" >&2; exit 1; }
 sink="$(aws oam list-sinks --query "Items[?Name=='StressRunSink'].Arn | [0]" --output text)"
 if [[ -n "$sink" && "$sink" != None ]]; then
   links="$(aws oam list-attached-links --sink-identifier "$sink" --query 'length(Items)' --output text)"

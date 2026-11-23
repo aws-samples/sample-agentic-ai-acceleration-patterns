@@ -9,7 +9,7 @@
  * (`CellAccountBaseStack`, `observabilitySinkArn`) point at it.
  */
 
-import { CfnOutput, Stack, type StackProps } from 'aws-cdk-lib';
+import { Arn, ArnFormat, CfnOutput, Stack, type StackProps } from 'aws-cdk-lib';
 import * as oam from 'aws-cdk-lib/aws-oam';
 import type { Construct } from 'constructs';
 
@@ -21,11 +21,14 @@ export interface RunSinkStackProps extends StackProps {
   readonly cellAccountIds: readonly string[];
 }
 
+/** The tag of the sink stack; `remove-sink.sh` deletes a stack of its name only when it has it. */
+export const SINK_TAG = { key: 'stress:part', value: 'run-sink' } as const;
+
 export class RunSinkStack extends Stack {
   readonly sink: oam.CfnSink;
 
   constructor(scope: Construct, id: string, props: RunSinkStackProps) {
-    super(scope, id, props);
+    super(scope, id, { ...props, tags: { ...props.tags, [SINK_TAG.key]: SINK_TAG.value } });
     if (props.cellAccountIds.length === 0 || !props.cellAccountIds.every((a) => /^[0-9]{12}$/.test(a))) {
       throw new Error('cellAccountIds must list one or more 12-digit account ids');
     }
@@ -37,7 +40,8 @@ export class RunSinkStack extends Stack {
           {
             Effect: 'Allow',
             Principal: { AWS: [...props.cellAccountIds] },
-            Resource: '*',
+            // The sinks of this account and Region: the policy is part of the sink, so it cannot name the sink's own ARN.
+            Resource: Arn.format({ service: 'oam', resource: 'sink', resourceName: '*', arnFormat: ArnFormat.SLASH_RESOURCE_NAME }, this),
             Action: ['oam:CreateLink', 'oam:UpdateLink'],
             Condition: { 'ForAllValues:StringEquals': { 'oam:ResourceTypes': ['AWS::CloudWatch::Metric'] } },
           },

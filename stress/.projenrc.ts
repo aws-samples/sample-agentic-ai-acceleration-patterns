@@ -79,6 +79,7 @@ new javascript.TypescriptConfig(project, {
 });
 // Machine output of the dashboard app (dashboard/dashboard.sh).
 project.gitignore.exclude('cdk.dashboard.out/');
+project.gitignore.exclude('cdk.dashboard.sink.out/');
 // Machine output of the cell account apps (application/*.sh).
 project.gitignore.exclude('cdk.application.out/');
 project.gitignore.exclude('cdk.context.json');
