@@ -409,7 +409,7 @@ describe('tenantBuildManagedPolicyArns (ADR-022)', () => {
     expect(tenantRole.Properties.ManagedPolicyArns).toEqual([policyA, policyB]);
     // Cell provisioning gets none (the ADR is explicit about the tenant role only).
     expect(cellRole.Properties.ManagedPolicyArns).toBeUndefined();
-    // The build roles never carry them: they only assume the pair (ADR-025).
+    // The build roles never carry them: they only assume, and tag a session for, the pair (ADR-025, ADR-0051).
     expect(serviceRole(template, tenant).Properties.ManagedPolicyArns).toBeUndefined();
     expect(serviceRole(template, cell).Properties.ManagedPolicyArns).toBeUndefined();
     // No other role in the stack picks them up.
@@ -672,7 +672,7 @@ describe('build roles and the home account role pair (ADR-025)', () => {
     }
   });
 
-  test('each build role may ONLY assume its half of the pair, by name, in any account (N-8); no SSM grant', () => {
+  test('each build role may ONLY assume, and tag a session for, its half of the pair, by name, in any account (N-8); no SSM grant', () => {
     for (const kind of ['cell', 'tenant']) {
       const policy = policyFor(logicalIdOf(`control-plane-${kind}-build`));
       const statements = policy.Properties.PolicyDocument.Statement as any[];

@@ -336,9 +336,10 @@ export class ProvisioningWorkflow extends Construct {
     // Base source is NO_SOURCE + dummy buildspec: every execution overrides
     // both. The project roles carry NO application-plane permission: each
     // may only assume, and tag a session for, its half of the provisioning
-    // role pair, by name, in any registered account (N-8, ADR-0051). The pair in each account — installed by
-    // the account owner — is the provisioning blast radius and THE hardening
-    // point of the sample (P-12, §6.4).
+    // role pair, by name, in any registered account (N-8, ADR-0051). The
+    // pair in each account — installed by the account owner — is the
+    // provisioning blast radius and THE hardening point of the sample
+    // (P-12, §6.4).
     // ------------------------------------------------------------------
     // M15 (T13): explicit CodeBuild log groups with bounded retention —
     // the service-created default groups never expire.

@@ -5,8 +5,8 @@
 # the inline cell buildspec, as the cell provisioning role's session tagged
 # with CellId, and records what that session may do: its own cell namespace,
 # another cell's, a tenant namespace, the shared namespace, and two roles it
-# chains into. It cleans up what it wrote and always exits 0; the test
-# compares the recorded results.
+# chains into. It cleans up what it wrote, or prints what it could not
+# remove, and always exits 0; the test compares the recorded results.
 #
 # Environment (from the test's StartBuild): CELL_ID, PEER_CELL_ID,
 # PEER_TENANT_ID, APPLICATION_ID, FLEET_NAME, CHAIN_ROLE_ARN (the caller may

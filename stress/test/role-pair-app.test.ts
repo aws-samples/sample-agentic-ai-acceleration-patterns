@@ -7,7 +7,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 // The account check's own expectations, so the template and the check cannot drift apart.
 // eslint-disable-next-line import/no-relative-packages
-import { PAIR_INLINE, PAIR_INLINE_ACTIONS, PAIR_POLICY, pairTrustProblems } from '../../samples/control-plane/test/stress/account-check';
+import { PAIR_INLINE, PAIR_INLINE_ACTIONS, PAIR_PARAMETER_PATHS, PAIR_POLICY, pairTrustProblems } from '../../samples/control-plane/test/stress/account-check';
 
 /**
  * Synthesises `application/role-pair-app.ts` as `deploy-role-pair.sh` does and pins the
@@ -120,6 +120,7 @@ function synth(): any {
       expect(mine).toHaveLength(1);
       // CloudFormation names the inline policy by PolicyName, which the check matches.
       expect(mine[0].Properties.PolicyName).toMatch(PAIR_INLINE[half]);
+      const paths = new Set<string>();
       for (const st of mine[0].Properties.PolicyDocument.Statement as any[]) {
         expect(st.Effect).toBe('Allow');
         expect(st.NotAction).toBeUndefined();
@@ -133,8 +134,11 @@ function synth(): any {
           expect(parts[1]).toEqual({ Ref: 'AWS::Partition' });
           const rendered = parts.map((x) => (typeof x === 'string' ? x : x.Ref === 'AWS::AccountId' ? CELL : `<${x.Ref}>`)).join('');
           expect(rendered).toMatch(new RegExp(`^arn:<AWS::Partition>:ssm:[^:]+:${CELL}:parameter/application-plane/`));
+          paths.add(rendered.slice(rendered.indexOf(':parameter/') + ':parameter'.length));
         }
       }
+      // The template grants exactly the paths the account check accepts for this half (control-plane ADR-0051).
+      expect([...paths].sort()).toEqual([...PAIR_PARAMETER_PATHS[half]].sort());
     }
   });
 });

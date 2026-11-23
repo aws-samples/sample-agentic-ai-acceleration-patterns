@@ -779,7 +779,9 @@ npx projen integ
 A run takes about two hours (an estimate from its build count)
 across two non-production accounts and three applications, with global and
 application hooks, and costs under a dollar in throwaway resources; each run
-takes its own fleet name, so two runs can share the accounts and the Region.
+takes its own fleet name, but only one control plane stack fits in an
+account and Region at a time (the fixed `/control-plane/tenant-api-url`
+parameter above), so runs in one account and Region go one after another.
 See [integration-test.md](./integration-test.md) for the second account's
 bootstrap, what the run stands up in each account, its steps and its knobs.
 

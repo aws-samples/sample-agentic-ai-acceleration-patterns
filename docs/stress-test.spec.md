@@ -776,8 +776,9 @@ decides no pass criterion.
 | 12 | The stress cell deploys the front door's cell API origin, and the platform account reads the cell's ingress parameter with a reader role in the account base | the route hook needs a cell route, and phase two needs the ingress URL, which the control plane does not return | stress ADR-0019 |
 | 13 | PS-1 times a tenant to its first served `/api/whoami`, with the warm-up tenant timed apart | the agent path is not open for the first tenant, and a model call per tenant is not the onboarding | stress ADR-0020 |
 
-Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
-the account's CDK bootstrap roles. Each cell account carries one bootstrap,
+Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` and
+`sts:TagSession` on the account's CDK bootstrap roles (the build's session
+carries a transitive tag, control-plane ADR-0051). Each cell account carries one bootstrap,
 for cells only, whose execution role carries the cell permissions boundary
 and every role a cell creates the cell workload boundary (stress ADR-0011).
 The policies, the `/cell/` aspect and the scripts ship in

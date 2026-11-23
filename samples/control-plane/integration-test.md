@@ -98,7 +98,12 @@ repeated runs.
 
 ### Parallel runs
 
-Two runs can share accounts A and B and one Region. The run's fleet name
+Only one run, of this test or of the session tag test below, fits in
+account A and a Region at a time: every control plane stack creates the
+fixed `/control-plane/tenant-api-url` parameter (README, Deploy), so a
+second stack under test fails early validation. Runs in other Regions, or
+with another account A, can share account B. Apart from that parameter,
+the run's fleet name
 is in every stack name, the assertion stack's test name included, is the
 `fleetName` of the stack under test and of the role pair the account B
 stack installs, and is in every other name the test creates that must be
@@ -116,13 +121,13 @@ parameter namespace ends empty looks at that run's applications, cells and
 tenants only. Each run uses its own checkout or worktree, because
 integ-runner writes its snapshot and `cdk.out` beside the test.
 
-Runs in one account and Region share its quotas, and those limit how many
-fit at once: CodeBuild's concurrent builds per account and Region, which
+A run shares account A's quotas with every other workload in the account
+and Region: CodeBuild's concurrent builds per account and Region, which
 every run's script builds and hook builds draw on, and the API Gateway
 control plane request rate, which a deploy of several REST APIs at once can
 exceed.
 
-They also share state that per-run names do not separate. The stack under
+Runs one after another also share state that per-run names do not separate. The stack under
 test's REST API creates the API Gateway CloudWatch role and the
 `AWS::ApiGateway::Account` setting that names it. That setting is one per
 account and Region, goes to whichever run deployed last, and CDK retains
@@ -294,9 +299,12 @@ npx projen integ:session-tags
 
 The same prerequisites, guards and leftover check as the main test apply
 (How to run it, After an interruption). It cannot run while another control
-plane stack, of either test or a real deployment, exists in account A and
-the Region: every stack creates the fixed `/control-plane/tenant-api-url`
-parameter, and the second deploy fails early validation on it. A run takes about 10 minutes:
+plane stack exists in account A and the Region (from the main test, from
+this test, or a real deployment): every stack creates the fixed
+`/control-plane/tenant-api-url` parameter (Parallel runs). The last green
+run is in the [`architecture.md` status
+block](./architecture.md#verification-status); the run's cost is a few
+cents of short CodeBuild builds, Lambda calls and SSM parameters (estimate). A run takes about 10 minutes:
 about 4 to deploy, 2 for the builds and 3 to tear down.
 
 | Build | Project | Buildspec | What it checks |

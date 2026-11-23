@@ -148,7 +148,9 @@ export const PAIR_PARAMETER_PATHS: Readonly<Record<'cell' | 'tenant', readonly s
  * Problems with what the role pair half holds beyond its own stack's set: a managed policy
  * other than its owner policy, an inline policy other than the stack's default policy, or a
  * default policy that grants anything but the SSM namespace actions on the
- * {@link PAIR_PARAMETER_PATHS} of its half.
+ * {@link PAIR_PARAMETER_PATHS} of its half. Actions and paths are checked apart, not
+ * per path: a tenant role given a write on its own cell's path still passes
+ * (the unit tests of the stack pin the per-path actions).
  */
 export function pairPolicyProblems(half: 'cell' | 'tenant', role: RoleState, s: AccountState, suffix = ''): string[] {
   const problems: string[] = [];

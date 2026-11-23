@@ -150,10 +150,12 @@ export AWS_PROFILE=<cell account profile> AWS_REGION=eu-central-1
    The pair's trust requires the build's session tags (control-plane
    ADR-0051), so the pair and the control plane must come from versions that
    agree on them. Before the first run on a platform deployed from a newer
-   control-plane version, run this step again in every cell account, with no
-   build between that and the platform deploy; a pair that does not match
-   fails every cell build at AssumeRole (control-plane README, "Upgrading to
-   session-tagged builds").
+   control-plane version, run step 1 again (`cell-build-policy` must allow
+   `sts:TagSession` on the cell bootstrap roles) and then this step, in every
+   cell account, with no build between that and the platform deploy. A pair
+   that does not match fails every cell build at AssumeRole; a
+   `cell-build-policy` without `sts:TagSession` fails it at the `cdk deploy`
+   (control-plane README, "Upgrading to session-tagged builds").
 
 To change a policy, edit `cell-policies.ts` and run step 1 again: the
 managed policies get a new version in place. `CELL_POLICY_SUFFIX` (for
