@@ -255,6 +255,7 @@ export async function runaway(c: Ctx, u: Unit): Promise<void> {
       // nitro, T-89: a fill by every process slot can stall the runner past runTimeout + 5 s. The tool then stops the
       // tenant's task (overrun) and the next call starts a fresh one. That is the only other outcome that passes.
       const oldTask = String(row0?.handle ?? '').split('/').pop() ?? '';
+      c.rec.check('the row read before the fill has a handle and a bootId', typeof row0?.handle === 'string' && row0.bootId !== undefined);
       const lines = /^[0-9a-f]{32}$/.test(oldTask)
         ? await logEvidence(c, () => runnerGroups(c, 'run-code', backend), since, `@logStream like /${oldTask}/`)
         : [];

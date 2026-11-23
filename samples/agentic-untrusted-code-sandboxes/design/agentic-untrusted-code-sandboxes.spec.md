@@ -578,11 +578,10 @@ was right in all 85 fills. It costs about 0.06 % of one CPU at idle.
 
 A job that fills memory from every process slot at once (64 processes,
 each to A) can also stall the runner. In two of five integration runs
-(runs 15 to 20) of the `runaway` step on `nitro` the runner wrote no
-`job_done` line within `runTimeout` + 5 s, so no `memoryExceeded`
-reached the tool. The tool stopped the tenant's task as an overrun
-(§4.1 step 5) and returned `timedOut` with exit -9 and `memoryExceeded`
-false.
+of the `runaway` step on `nitro` the runner wrote no `job_done` line
+within `runTimeout` + 5 s, so no `memoryExceeded` reached the tool. The
+tool stopped the tenant's task as an overrun (§4.1 step 5) and returned
+`timedOut` with exit -9 and `memoryExceeded` false.
 The next call started a fresh task. The stall's cause inside the task is
 not known: the runner logged nothing between the last job and the stop.
 The damage stays in the tenant's own sandbox, and the tenant loses its

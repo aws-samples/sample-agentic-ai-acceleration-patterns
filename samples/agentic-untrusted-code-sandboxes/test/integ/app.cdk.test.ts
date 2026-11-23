@@ -37,10 +37,11 @@ describe('the integration app', () => {
     }
     names.push(outputKey('run-code', 'RunCodeFunction'));
     for (const n of names) expect(outputs).toHaveProperty([n]);
-    // the per-backend values the driver finds by pattern: image, cluster, runtime
+    // the per-backend values the driver finds by pattern: image, cluster, task definition, runtime
     const keys = Object.keys(outputs);
     expect(keys.filter((k) => k.startsWith(backendOutputKey('run-code', 'microvm', '')) && /image/i.test(k))).toHaveLength(1);
     expect(keys.filter((k) => k.startsWith(backendOutputKey('run-code', 'nitro', '')) && /cluster/i.test(k))).toHaveLength(1);
+    expect(keys.filter((k) => k.startsWith(backendOutputKey('run-code', 'nitro', '')) && /taskDefinition/i.test(k))).toHaveLength(1);
     expect(keys.filter((k) => k.startsWith(backendOutputKey('run-code', 'agentcore', '')) && /runtime/i.test(k))).toHaveLength(1);
     expect(keys.filter((k) => k.startsWith(backendOutputKey('run-code-files', 'agentcore', '')) && /runtime/i.test(k))).toHaveLength(1);
   });
