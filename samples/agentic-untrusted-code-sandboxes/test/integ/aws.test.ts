@@ -58,6 +58,18 @@ describe('aws.cli', () => {
     expect(e.message).toBe('aws route53resolver get-firewall-rule-group failed: the aws CLI exited with signal SIGKILL');
   });
 
+  test.each([
+    ['an exit code', { code: 255, stderr: '' }, 'the aws CLI exited with code 255'],
+    ['a buffer limit', { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', stderr: '' }, 'the aws CLI failed (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)'],
+    ['no code and no signal', { stderr: '' }, 'the aws CLI failed (undefined)'],
+  ])('a process with no stderr and %s is described by that', async (_shape, props, text) => {
+    (execFile as unknown as jest.Mock).mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Callback) => {
+      cb(Object.assign(new Error('Command failed: aws sts get-caller-identity --secret-arg'), props));
+    });
+    const e = await failure(['sts', 'get-caller-identity']);
+    expect(e.message).toBe(`aws sts get-caller-identity failed: ${text}`);
+  });
+
   test('the cause is read from the whole stderr, and the message carries its first 2000 characters', async () => {
     failWith(`${'Traceback line\n'.repeat(200)}An error occurred (ExpiredToken) when calling the GetServiceQuota operation`, 255);
     const e = await failure(['service-quotas', 'get-service-quota']);
@@ -82,5 +94,25 @@ describe('redact', () => {
 
   test('leaves a 13-digit number alone', () => {
     expect(redact(`${id}3`)).toBe(`${id}3`);
+  });
+
+  test.each([
+    ['a 41-character run', 'A'.repeat(41)],
+    ['a key id inside a longer capital run', `XAKIA${'B'.repeat(16)}`],
+    ['a key id followed by more capitals', `AKIA${'B'.repeat(17)}`],
+    ['a 40-character run inside a path', `/${'a'.repeat(40)}`],
+  ])('leaves %s alone', (_shape, text) => {
+    expect(redact(text)).toBe(text);
+  });
+
+  test.each(['FQoG', 'AQoD'])('replaces a session token that starts with %s', (prefix) => {
+    expect(redact(`t ${prefix}${'z'.repeat(80)} x`)).toBe('t <token> x');
+  });
+
+  test('a long input that repeats an X-Amz name without a value is handled in linear time', () => {
+    const text = 'x-amz-'.repeat(50_000);
+    const t0 = Date.now();
+    expect(redact(text)).toBe(text);
+    expect(Date.now() - t0).toBeLessThan(2000);
   });
 });

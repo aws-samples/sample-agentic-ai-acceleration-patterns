@@ -194,7 +194,7 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     expect(found).toEqual([{ kind: 'check-unavailable', id: FRG_ID, detail: 'no credentials found' }]);
     const text = formatFindings(found);
     expect(text).not.toMatch(/LEFT|nothing left/);
-    expect(text).toMatch(/could not run.*Repeat it once the credentials and the aws CLI work/);
+    expect(text).toMatch(/could not run.*Repeat it once the credentials and the AWS CLI work/);
     expect(found[0].known).toBeUndefined();
     expect(leftoverExitCode(found)).toBe(1);
   });
@@ -229,6 +229,7 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     ['RequestExpired', 'the credentials expired'],
     ['InvalidAccessKeyId', 'the credentials were refused'],
     ['CredentialsProviderError', 'no credentials found'],
+    ['SSOTokenLoadError', 'no credentials found'],
     ['TokenRefreshRequired', 'the credentials expired'],
     ['AuthFailure', 'the credentials were refused'],
     ['SignatureDoesNotMatch', 'the credentials were refused'],
@@ -249,6 +250,8 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     ['access denied', 'An error occurred (AccessDeniedException) when calling the GetFirewallRuleGroup operation: User is not authorized'],
     ['no credentials found', 'Error when retrieving credentials from custom-process: the command failed'],
     ['no credentials found', 'The config profile (work) could not be found'],
+    ['no credentials found', 'Token for my-sso does not exist'],
+    ['no credentials found', 'Error loading SSO Token'],
     ['the credentials expired', 'Error when retrieving token from sso: Token has expired and refresh failed'],
     ['the aws CLI could not be started', 'aws route53resolver get-firewall-rule-group failed: spawn aws EACCES'],
     ['no credentials found', 'Error loading SSO Token: Token for https://example.com/start does not exist'],
@@ -300,6 +303,12 @@ describe('the leftover check when the credentials or the CLI fail', () => {
 
   test('a not-found answer means the resource is gone', async () => {
     const aws = fake({ cli: async () => { throw cliError('An error occurred (ResourceNotFoundException) when calling the GetFirewallRuleGroup operation: not found'); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([]);
+  });
+
+  test('a not-found answer that follows a long stderr still means the resource is gone', async () => {
+    const stderr = `${'warning line\n'.repeat(300)}An error occurred (ResourceNotFoundException) when calling the GetFirewallRuleGroup operation: not found`;
+    const aws = fake({ cli: async () => { throw Object.assign(new Error(`aws route53resolver get-firewall-rule-group failed: ${stderr.slice(0, 2000)}`), { stderr }); } });
     expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([]);
   });
 

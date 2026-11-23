@@ -40,8 +40,8 @@ const execFileAsync = promisify(execFile);
 export function redact(text: string): string {
   return text
     .replace(/arn:aws[\w-]*:[^\s"']+/g, '<arn>')
-    .replace(/(X-Amz-[A-Za-z-]+=)[^&\s"']+/gi, '$1<redacted>')
-    .replace(/(?<![A-Za-z0-9+/])(?:IQoJ|FwoG)[A-Za-z0-9+/=]{40,}/g, '<token>')
+    .replace(/(X-Amz-[A-Za-z-]{1,128}=)[^&\s"']+/gi, '$1<redacted>')
+    .replace(/(?<![A-Za-z0-9+/])(?:IQoJ|FwoG|FQoG|AQoD)[A-Za-z0-9+/=]{40,}/g, '<token>')
     .replace(/(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])/g, '<key>')
     .replace(/(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/=])/g, '<secret>')
     .replace(/(?<!\d)\d{12}(?!\d)/g, '<account>');
@@ -149,7 +149,10 @@ export class Aws {
       const { stderr: raw, code, signal } = e as { stderr?: unknown; code?: unknown; signal?: unknown };
       const cause = typeof raw === 'string' && raw.trim() !== ''
         ? raw
-        : typeof code === 'string' ? `spawn aws ${code}` : `the aws CLI exited with ${code !== undefined && code !== null ? `code ${String(code)}` : `signal ${String(signal)}`}`;
+        : code === 'ENOENT' || code === 'EACCES' ? `spawn aws ${code}`
+          : typeof code === 'number' ? `the aws CLI exited with code ${code}`
+            : typeof signal === 'string' ? `the aws CLI exited with signal ${signal}`
+              : `the aws CLI failed (${String(code)})`;
       const stderr = redact(cause).trim();
       throw Object.assign(new Error(`aws ${args.slice(0, 2).join(' ')} failed: ${stderr.slice(0, 2000)}`), { stderr });
     }

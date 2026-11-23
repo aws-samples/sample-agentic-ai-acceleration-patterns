@@ -97,7 +97,7 @@ async function exists<T>(fn: () => Promise<T>): Promise<boolean> {
   } catch (e) {
     if (unavailableReason(e) !== undefined) throw e;
     const name = e instanceof Error ? e.name : '';
-    if (/ResourceNotFoundException|NotFoundException|ClusterNotFoundException/.test(name) || (e instanceof Error && /InvalidVpcID\.NotFound|InvalidVpcEndpointId\.NotFound|ResourceNotFoundException|does not exist/i.test(e.message))) return false;
+    if (/ResourceNotFoundException|NotFoundException|ClusterNotFoundException/.test(name) || (e instanceof Error && /InvalidVpcID\.NotFound|InvalidVpcEndpointId\.NotFound|ResourceNotFoundException|does not exist/i.test(`${e.message}\n${String((e as { stderr?: unknown }).stderr ?? '')}`))) return false;
     throw e;
   }
 }
@@ -293,7 +293,7 @@ export function formatFindings(findings: readonly Finding[]): string {
   const lines = findings.filter((f) => f.kind !== 'check-unavailable').map((f) => `${f.known ? 'known leftover' : 'LEFT'} ${f.kind} ${f.id}: ${f.detail}`);
   if (unavailable.length > 0) {
     lines.push(...unavailable.map((f) => `CHECK NOT RUN ${f.id}: ${f.detail}`));
-    lines.push(`The leftover check could not run for ${unavailable.length} item(s), so this list may be incomplete. Repeat it once the credentials and the aws CLI work (scripts/leftovers.sh).`);
+    lines.push(`The leftover check could not run for ${unavailable.length} item(s), so this list may be incomplete. Repeat it once the credentials and the AWS CLI work (scripts/leftovers.sh).`);
   }
   return lines.length === 0 ? 'nothing left' : lines.join('\n');
 }

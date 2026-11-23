@@ -409,9 +409,9 @@ unverified (ADR-0054).
 send and receive data in DNS lookups on every backend (T-29, T-91).
 
 **The integration leftover check can miss a leftover.** The lookups of
-container instances, task definitions and MicroVMs read a throttle or a
-network error as nothing there; a credentials error is reported. See
-[integration-test.md](integration-test.md).
+container instances, task definitions and MicroVMs read any other error, such
+as a throttle or a network error, as nothing there; a credentials, access or
+AWS CLI error is reported instead. See [integration-test.md](integration-test.md).
 
 ## Production hardening checklist
 

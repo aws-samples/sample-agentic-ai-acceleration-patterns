@@ -132,7 +132,7 @@ also on `run-code-files` (`rcf`, `agentcore`, firewall off). 28 steps give 59 un
 | offboard | rc | C's sandbox is started again on all three backends (its earlier ones may have idled out); the driver stops minting tokens for C, which stands in for removing its grant; `offboardTenant` stops the three sandboxes and deletes each row, or leaves it `STOPPING` while the sandbox is still alive (`agentcore` always; a `nitro` task for up to 78 s); a second call returns the same shape and stops nothing the first did not |
 | telemetry | rc × 3 | Logs Insights finds exactly one tool line for every call of the run on the backend, and the parse call's line has the §3.8 fields and the right `tenantId` and `backend` |
 | dns-platform | rc | every `BLOCK` line in `run-code`'s query log is for a name a test script looked up, or `*.amazon.pool.ntp.org`, or a PTR query by a sandbox for the reverse name of its own address; any other blocked name, and any other PTR, is a platform name missing from the allow list |
-| teardown | rc × 3, rcf | with sandboxes started for A and B on every backend, the stack is deleted; afterwards no MicroVM, task, container instance, runtime, VPC or endpoint, log group (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), DNS Firewall resource or construct-owned Logs resource policy of the sample is left; the `DescribeResourcePolicies` statements that name the query-log group match their state before the deploy (a difference is the §3.9 known leftover, reported and not failed); the step also fails when the leftover check could not run (the credentials or the AWS CLI failed) |
+| teardown | rc × 3, rcf | with sandboxes started for A and B on every backend, the stack is deleted; afterwards no MicroVM, task, container instance, runtime, VPC or endpoint, log group (the task and usage-log groups, `/aws/lambda-microvms/<imageName>`, the query-log group, every `/aws/bedrock-agentcore/runtimes/<runtimeName>-*` group), DNS Firewall resource or construct-owned Logs resource policy of the sample is left; the `DescribeResourcePolicies` statements that name the query-log group match their state before the deploy (a difference is the §3.9 known leftover, reported and not failed); the step also fails when the leftover check could not run (the credentials, access or the AWS CLI failed) |
 
 The run record lists every unit with its result, its seconds and its evidence,
 then the deploy and destroy times and the p50 cold and warm latency per
@@ -207,7 +207,9 @@ deleted). The tenant-identity `shared-pool` stays.
 
 Known limitation: the lookups of container instances, task definitions and
 MicroVMs read any other error (a throttle, a network error) as "nothing
-there", so those three can miss a leftover without a line.
+there", so those three can miss a leftover without a line. An AWS error on the
+stack list, a log group listing or the resource policy listing stops the check
+with that error and no list; run it again.
 
 ## Test-only shortcuts
 
