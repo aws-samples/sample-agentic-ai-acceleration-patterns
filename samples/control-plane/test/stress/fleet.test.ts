@@ -102,4 +102,16 @@ describe('paced', () => {
     expect(started).toEqual(['A', 'B', 'C', 'D', 'E']);
     expect(refused).toEqual(['E']);
   });
+
+  it('starts the whole wave at once when unpaced (STRESS_UNPACED=1)', async () => {
+    const started: string[] = [];
+    let peak = 0;
+    const { env } = fakeEnv(() => ok(200), () => started.map((t) => ({ tenantId: t, status: 'ACTIVE' })));
+    await paced({ ...env, unpaced: true }, ['A', 'B', 'C', 'D', 'E'], 2, 60, async (t) => {
+      started.push(t);
+      peak = started.length;
+      return true;
+    }, (d) => d?.status === 'ACTIVE');
+    expect(peak).toBe(5);
+  });
 });

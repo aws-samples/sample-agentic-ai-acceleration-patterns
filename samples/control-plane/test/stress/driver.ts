@@ -117,7 +117,10 @@ async function connect(): Promise<Connected> {
 }
 
 function fleetEnv(c: Connected, rec: Recorder): FleetEnv {
-  return { api: c.api(rec), rec, applicationId: APPLICATION_ID, platformAccount: c.platform, cellAccounts: c.accounts, region: region(), log };
+  return {
+    api: c.api(rec), rec, applicationId: APPLICATION_ID, platformAccount: c.platform, cellAccounts: c.accounts, region: region(), log,
+    unpaced: process.env.STRESS_UNPACED === '1',
+  };
 }
 
 function manifestFile(): string {
