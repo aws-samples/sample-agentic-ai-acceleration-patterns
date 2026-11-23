@@ -152,11 +152,10 @@ waits up to 60 minutes for one delete and retries a failed one once. Cost
 is dominated by the NAT gateway, the endpoints, `nitro` instance time and
 the DNS Firewall queries; the run record carries the timings.
 
-Last run: run 14, 2026-11-21, eu-central-1, on commit `5e8c213`: every
-step before the teardown passed on all three backends; the teardown ended `DELETE_FAILED` on two leftover Lambda
-network interfaces, the [README's known limitation](README.md#known-limitations).
-See the [`architecture.md` status block](architecture.md) for the coverage
-and the runs in the other Regions.
+Last run: run 21, 2026-11-23, eu-west-1: 61 of 61 steps passed on all
+three backends, the teardown included (deploy 1218 s, destroy 2398 s,
+nothing left). See the [`architecture.md` status block](architecture.md)
+for the coverage and the runs in the other Regions.
 
 If a stack of an earlier run still exists (an interrupted run), delete it
 first (see below) or use a new `INTEG_PREFIX`. A leftover `nitro` task makes

@@ -162,11 +162,11 @@ npx cdk destroy UntrustedCodeSandboxes --context backends=microvm,nitro,agentcor
 ```
 
 The delete runs the drain first, so it stops every live sandbox itself. See
-[Known limitations](#known-limitations) for the case where a delete stops on
-two Lambda network interfaces.
+[Known limitations](#known-limitations) for the cases where a delete can
+still stop on Lambda network interfaces.
 
 Measured times in a non-production test account (from the backend smoke
-deploys, the integration runs and the demo run, 2026-11-19 to 2026-11-22):
+deploys, the integration runs and the demo run, 2026-11-19 to 2026-11-23):
 
 | Deployment | Deploy | Destroy |
 |---|---|---|
@@ -174,7 +174,7 @@ deploys, the integration runs and the demo run, 2026-11-19 to 2026-11-22):
 | `microvm` only (the demo stack, tenants offboarded before the delete) | 635 to 645 s | 1374 to 1459 s |
 | `nitro` only | about 450 s (CloudFormation; image build not timed) | 1618 s |
 | `agentcore` (two instances, one with `sessionFiles`) | 924 to 989 s | 1895 s |
-| All three backends, two instances, gateway entry (integration stack) | 1123 to 1328 s | 2422 s in the one clean delete |
+| All three backends, two instances, gateway entry (integration stack) | 1123 to 1328 s | 2398 to 2472 s |
 
 In the `nitro` and `agentcore` deletes most of the time was the late
 release of the network interfaces of the functions in the tool subnets;
@@ -365,26 +365,17 @@ The threats, mitigations and the scan results are in
 
 ## Known limitations
 
-**A stack delete can stop on two Lambda network interfaces.** In 8 of 9
-integration stacks, across three Regions, the delete ended
-`DELETE_FAILED` on the tool subnets and the tool security group. Two
-Lambda-managed network interfaces (description
-`AWS Lambda VPC ENI-<stack>-...Reaper...` or `...Offboard...`, status
-`available`) stayed after every function was gone. In the one run traced
-with CloudTrail, the reaper role created both interfaces when the
-functions were created, and nothing ever tried to delete them; another
-role's interfaces in the same delete were deleted by Lambda with that role.
-
-The cause is not proven. Four smaller stacks deleted cleanly: one shared
-role, or three roles sharing one security group, each with and without a
-wait before the roles are deleted, invoked or not. One deploy of this
-construct with the `microvm` backend only also deleted cleanly, in 1449 s
-with no network interface left. It was deleted about 30 minutes after it
-was created, after three rounds of calls to its tool, reaper and offboard
-functions, with a MicroVM live. The `microvm` smoke deploy and the demo
-stack deleted cleanly too (see the times under Deploy); neither had the
-integration stack's second instance or its `nitro` and `agentcore`
-resources.
+**Some deletes can still stop on Lambda network interfaces.** Lambda
+deletes a VPC function's network interfaces with the function's role,
+some time after the function is gone. The construct keeps each such role,
+and its network interface policy, until the log drain's 90 s wait has
+passed (ADR-0073), and the integration stack then deleted cleanly. The
+90 s rests on few observations. Three cases fall outside that order: a
+stack update that removes a bound function or replaces its role, a
+function an app builds in the tool subnets without `bindRunCode`, and a
+release slower than the wait. Each shows as `DELETE_FAILED` on the tool
+subnets and the tool security group, with `available` interfaces whose
+description starts `AWS Lambda VPC ENI-<stack>-`.
 
 To finish a stuck delete, delete the `available` interfaces of the stack,
 then the stack again:

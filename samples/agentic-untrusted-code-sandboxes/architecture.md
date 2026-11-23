@@ -2,40 +2,32 @@
 <!-- SPDX-License-Identifier: MIT-0 -->
 # Implemented architecture
 
-**Status:** Implemented; verified except the teardown step. Last
-integration run: **2026-11-21, `eu-central-1`, run 14**, on commit
-`5e8c213` (`npx projen integ`). Every step of the spec §8 integration test passed on all three
-backends except `teardown`. Deploy took 1132 s. The teardown ended
-`DELETE_FAILED` on two leftover Lambda network interfaces in the tool
-subnets, which hold the subnets and the tool security group; the README's
-Known limitations section gives the symptom and the commands that finish
-the delete. The one clean teardown was run 9 (`eu-central-1`, destroy
-2422 s).
+**Status:** Implemented and verified. Last integration run:
+**2026-11-23, `eu-west-1`, run 21** (`npx projen integ`, 1071 unit
+tests in the build). All 61 steps of the spec §8 integration test passed
+on all three backends, `teardown` included: deploy 1218 s, destroy
+2398 s, and the leftover check found no stack, log group, network
+interface, DNS Firewall or query-log resource of the run.
 
-| Coverage of run 14 | Result |
+| Coverage of run 21 | Result |
 | --- | --- |
 | Build, synth, seed (`standalone-build`, `synth`, `seed`) | The packed core installs, compiles and synthesises with no `agentic-runtime-isolation` in its tree; two construct instances in one stack have unique names; the seed data is in place |
-| Cold and warm runs (`parse`, `reuse`) | All three backends. Cold: `microvm` 10.6 s, `nitro` 31.7 s, `agentcore` 7.5 s. Warm: 406 to 568 ms. `parse` also ran once through the sample agent on `microvm` |
+| Cold and warm runs (`parse`, `reuse`) | All three backends. Cold (p50): `microvm` 10.8 s, `nitro` 33.6 s, `agentcore` 7.5 s. Warm (p50): 298 to 582 ms. `parse` also ran once through the sample agent on `microvm` |
 | Tenant separation (`apart`, `race`, `prefix`, `iam-wall`) | B does not see A's files; two concurrent first calls start one sandbox; path-escape names are refused; IAM simulation denies another tenant's object, row and task |
-| Limits and boundary (`limits`, `no-credentials`, `no-egress`, `dns`, `runaway`) | All three backends. `agentcore` is included in `runaway` |
+| Limits and boundary (`limits`, `no-credentials`, `no-egress`, `dns`, `runaway`) | All three backends. `agentcore` is included in `runaway`. On `nitro` the memory fill returned `memoryExceeded`; in 2 of the 5 runs before, it ended as a tool overrun instead (README Known limitations) |
 | Session files (`session-files`) | `agentcore` with `sessionFiles`: own prefix allowed, another tenant's denied |
 | Entries (`standalone`, `forged`) | The standalone function with and without an invoke grant; a forged tenant context returns `context_invalid` |
-| Lifecycle (`dead-handle`, `recycled-address`, `idle`, `max-life`, `microvm-stop`, `cold-from-zero`, `failed-start`, `offboard`) | Dead handle on all three; the others on the backend each names. `nitro` start from zero instances took 37 s against the 300 s cap; `microvm` ended out of band reads `TERMINATED` |
+| Lifecycle (`dead-handle`, `recycled-address`, `idle`, `max-life`, `microvm-stop`, `cold-from-zero`, `failed-start`, `offboard`) | Dead handle on all three; the others on the backend each names. `nitro` start from zero instances took 39 s against the 300 s cap; `microvm` ended out of band reads `TERMINATED` |
 | Telemetry (`telemetry`, `dns-platform`) | One tool line per call with the fixed fields; no blocked lookup of a platform name outside the allow list |
-| `teardown` | Failed: `DELETE_FAILED` on two Lambda network interfaces (above) |
+| `teardown` | Passed: the stack deleted with sandboxes running, and nothing of the run was left (ADR-0073) |
 
-Runs 12 and 13 cover the other two Regions. Run 12 (`us-east-1`, commit
-`9702bf0`) passed every step except the teardown, a `no-credentials`
-lookup on `microvm` that had no answer and did not repeat in runs 13 and
-14, and `runaway` on `agentcore`, where the session after the `memfd`
-kill was marked dirty by reclaimable slab, which the dirty read at
-`5e8c213` leaves out; its DNS Firewall steps `dns` and
-`dns-platform` passed there. Run 13 (`eu-west-1`, commit `4795e7e`) passed
-every step except one check in `runaway` (the boot id baseline, read in
-the test after the session had idled out); run 14 on the final code commit
-passes that check. Run 13 also ended
-`DELETE_FAILED` on the same two interfaces. Deploys of the integration
-stack took 1123 to 1328 s across runs 5 to 14.
+The other Regions are covered by earlier runs. In `us-east-1` (run 12)
+the DNS Firewall steps `dns` and `dns-platform` passed; in
+`eu-central-1` (runs 14 and 20) every step before the teardown passed
+except, in run 20, the `nitro` memory fill that ended as a tool overrun.
+Deploys of the integration stack took 1123 to 1328 s across runs 5 to
+21, and deletes 2398 to 2472 s once ADR-0073 held each VPC function's
+role until its network interfaces were released.
 
 The demo stack (`src/main.ts`, `backends=microvm`, `standalone=true`) was
 deployed twice on 2026-11-22 in `eu-west-1` (635 s and 645 s);
