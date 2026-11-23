@@ -97,6 +97,8 @@ async function exists<T>(fn: () => Promise<T>): Promise<boolean> {
   } catch (e) {
     if (unavailableReason(e) !== undefined) throw e;
     const name = e instanceof Error ? e.name : '';
+    // The message holds only the first 2000 characters of a CLI stderr; the whole stderr is read too, so a not-found
+    // answer after a long warning still counts.
     if (/ResourceNotFoundException|NotFoundException|ClusterNotFoundException/.test(name) || (e instanceof Error && /InvalidVpcID\.NotFound|InvalidVpcEndpointId\.NotFound|ResourceNotFoundException|does not exist/i.test(`${e.message}\n${String((e as { stderr?: unknown }).stderr ?? '')}`))) return false;
     throw e;
   }

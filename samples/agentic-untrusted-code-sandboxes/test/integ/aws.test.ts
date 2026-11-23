@@ -30,10 +30,10 @@ describe('aws.cli', () => {
     expect(unavailableReason(e)).toBe('no credentials found');
   });
 
-  test('a missing aws binary is a check that could not run', async () => {
+  test.each([['ENOENT'], ['EACCES']])('an aws binary that cannot start (%s) is a check that could not run', async (code) => {
     (execFile as unknown as jest.Mock).mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Callback) => {
       // The shape a promisified execFile gives a process that never started: an empty stderr and stdout.
-      cb(Object.assign(new Error('spawn aws ENOENT'), { code: 'ENOENT', stdout: '', stderr: '' }));
+      cb(Object.assign(new Error(`spawn aws ${code}`), { code, stdout: '', stderr: '' }));
     });
     const e = await failure(['sts', 'get-caller-identity']);
     expect(unavailableReason(e)).toBe('the aws CLI could not be started');
@@ -60,6 +60,7 @@ describe('aws.cli', () => {
 
   test.each([
     ['an exit code', { code: 255, stderr: '' }, 'the aws CLI exited with code 255'],
+    ['a whitespace-only stderr', { code: 255, stderr: ' \n' }, 'the aws CLI exited with code 255'],
     ['a buffer limit', { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', stderr: '' }, 'the aws CLI failed (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)'],
     ['no code and no signal', { stderr: '' }, 'the aws CLI failed (undefined)'],
   ])('a process with no stderr and %s is described by that', async (_shape, props, text) => {
@@ -93,6 +94,10 @@ describe('redact', () => {
     ['the X-Amz query values of a presigned URL', 'https://h/?X-Amz-Security-Token=abc%2F&X-Amz-Signature=def', 'https://h/?X-Amz-Security-Token=<redacted>&X-Amz-Signature=<redacted>'],
     ['a secret key', `secret ${'A'.repeat(20)}/${'b'.repeat(19)} end`, 'secret <secret> end'],
     ['an account id glued to a word', `Role_${id}x`, 'Role_<account>x'],
+    ['a SigV4 signature in an Authorization header', `Authorization: AWS4-HMAC-SHA256 Credential=x/s, SignedHeaders=host, Signature=${'f'.repeat(64)}`, 'Authorization: AWS4-HMAC-SHA256 Credential=x/s, SignedHeaders=host, Signature=<redacted>'],
+    ['a lower-case signature query value', 'https://h/?signature=abc', 'https://h/?signature=<redacted>'],
+    ['a base64url token', `token ${'a-b_'.repeat(30)} sent`, 'token <token> sent'],
+    ['a key id inside a longer capital run', `XAKIA${'B'.repeat(16)}`, 'X<key>'],
   ])('replaces %s', (_shape, text, expected) => {
     expect(redact(text)).toBe(expected);
   });
@@ -103,7 +108,6 @@ describe('redact', () => {
 
   test.each([
     ['a 41-character run', 'A'.repeat(41)],
-    ['a key id inside a longer capital run', `XAKIA${'B'.repeat(16)}`],
     ['a key id followed by more capitals', `AKIA${'B'.repeat(17)}`],
     ['a 40-character run inside a path', `/${'a'.repeat(40)}`],
   ])('leaves %s alone', (_shape, text) => {
@@ -117,7 +121,7 @@ describe('redact', () => {
   test('a long input that repeats an X-Amz name without a value is handled in linear time', () => {
     const text = 'x-amz-'.repeat(50_000);
     const t0 = Date.now();
-    expect(redact(text)).toBe(text);
+    expect(redact(text)).toBe('<token>');
     expect(Date.now() - t0).toBeLessThan(2000);
   });
 });
@@ -147,6 +151,14 @@ describe('a long stderr', () => {
   test('keeps only its first and last 64 KB', async () => {
     failWith('x '.repeat(512 * 1024), 255);
     expect((await failure(['sts', 'get-caller-identity'])).stderr?.length).toBeLessThanOrEqual(2 * 64 * 1024 + 5);
+  });
+
+  test('does not split a secret at the cut', async () => {
+    const secret = `${'A'.repeat(20)}/${'b'.repeat(19)}`;
+    failWith(`${'x '.repeat(32_758)}${secret} ${'y '.repeat(40_000)}`, 255);
+    const { stderr } = await failure(['sts', 'get-caller-identity']);
+    expect(stderr).not.toContain('A'.repeat(20));
+    expect(stderr).not.toContain('b'.repeat(19));
   });
 
   test('keeps the cause at its end when the middle is cut', async () => {

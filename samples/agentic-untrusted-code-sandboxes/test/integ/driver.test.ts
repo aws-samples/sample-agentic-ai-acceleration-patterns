@@ -358,17 +358,20 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     expect(JSON.stringify(await checkLeftovers(aws as never, 'P', stateOf([FRG])))).not.toMatch(/marker-one-xyz/);
   });
 
-  test('the teardown step fails the run, and does not call a backend clean, when the check could not run', () => {
+  test.each([
+    ['microvm', 'no MicroVM image log group is left \\(not checked\\)'],
+    ['agentcore', 'no AgentCore runtime log group is left \\(not checked\\)'],
+  ])('the teardown step on %s fails the run, and does not call the backend clean, when the check could not run', (backend, logLine) => {
     const rec = new Recorder('r', () => 0, () => undefined);
     const findings = [{ kind: 'check-unavailable', id: 'stacks', detail: 'the credentials expired' }];
-    rec.begin('teardown:run-code:microvm');
-    teardownUnit(rec, { step: 'teardown', instance: 'run-code', backend: 'microvm' }, { findings, destroyed: true }, true);
+    rec.begin(`teardown:run-code:${backend}`);
+    teardownUnit(rec, { step: 'teardown', instance: 'run-code', backend }, { findings, destroyed: true }, true);
     const evidence = rec.toJSON('t').steps[0].evidence;
     expect(rec.failed).toBe(true);
-    expect(evidence).toMatch(/nothing left of microvm: not checked/);
+    expect(evidence).toMatch(new RegExp(`nothing left of ${backend}: not checked`));
     expect(evidence).toMatch(/the leftover check could run \(stacks: the credentials expired\)/);
     expect(evidence).not.toMatch(/no other resource/);
-    expect(evidence).toMatch(/no MicroVM image log group is left \(not checked\)/);
+    expect(evidence).toMatch(new RegExp(logLine));
   });
 });
 
