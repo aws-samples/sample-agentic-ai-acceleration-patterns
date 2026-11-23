@@ -2535,9 +2535,8 @@ times from 1 second, backoff rate 2, full jitter, at most 31 s of waits
 a `Retry` matches the error name only, so a cancellation by a failed
 condition is retried too and reaches the Catch up to 31 s later. The
 stable token and the item-state conditions make each try safe. Retry
-exhaustion is caught and routed
-through the same conditional `*_FAILED` transition when
-the record still exists. This shrinks — but does not eliminate — the
+exhaustion is caught and routed through the same conditional `*_FAILED`
+transition when the record still exists. This shrinks — but does not eliminate — the
 stranding window, because the failure write is itself a write that can
 exhaust retries (documented residual, §7.4).
 
@@ -2547,9 +2546,9 @@ at the project's `concurrentBuildLimit` (H-9), is retried every 30
 seconds or less (full jitter) 40 times, about 10 minutes and at most 20,
 before the refusal reaches the failure path with a reason that names it
 (ADR-0049). Step Functions starts the task timeout again on each attempt
-(it counts from the attempt's `TaskStarted` event), so the wait is not
-part of the 60-minute build. A hook attempt is bounded
-on both sides instead (R-46): CodeBuild stops the run at
+(it counts from the attempt's `TaskStarted` event, H-12), so the wait is
+not part of the 60-minute build. A hook attempt is bounded on both sides
+instead (R-46): CodeBuild stops the run at
 `timeoutMinutes`, refused starts end after 5 minutes, and CodeBuild
 stops a queued build at 10 minutes less the minutes its start was
 refused, never below 5, so refusals and queue together take at most
@@ -2588,7 +2587,8 @@ about 15.7 history events a minute and the 60-second poll's nine
 22,600 events, and polling throughout about 13,000, both inside the
 25,000-event quota of a Standard execution; the outputs guard adds six
 events per build (R-43), and a build start refused for its whole wait
-adds three per retry (`TaskScheduled`, `TaskStarted`, `TaskFailed`), 120, about 22,700 in all. A 30-second poll would pass it.
+adds three per retry (`TaskScheduled`, `TaskStarted`, `TaskFailed`,
+H-12), 120, about 22,700 in all. A 30-second poll would pass it.
 
 Refusals are capped at 5 minutes and the queued timeout is shortened
 by the minutes refused, so refusals and queue together never pass the

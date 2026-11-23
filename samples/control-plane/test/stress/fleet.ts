@@ -250,7 +250,8 @@ export async function paced(
     }
     // One operation runs one build at a time, so the operations in flight are the slice's
     // draw on the platform account's concurrent Linux/Small builds (spec §4.4).
-    f.rec.quotaPeak('platform', 'codebuild-linux-small', inflight.size);
+    // Unpaced, the operations past the limit wait in the workflow without a build.
+    f.rec.quotaPeak('platform', 'codebuild-linux-small', Math.min(inflight.size, limit));
     if (inflight.size === 0) continue;
     if (Date.now() > deadline) {
       f.rec.finding(`${inflight.size + queue.length} operations not settled within ${timeoutSeconds} s`);

@@ -103,15 +103,27 @@ describe('paced', () => {
     expect(refused).toEqual(['E']);
   });
 
-  it('starts the whole wave at once when unpaced (STRESS_UNPACED=1)', async () => {
+  it.each([
+    [false, 2],
+    [true, 5],
+  ])('unpaced=%s keeps at most %i operations in flight (STRESS_UNPACED=1 starts the whole wave at once)', async (unpaced, expected) => {
     const started: string[] = [];
+    const done = new Set<string>();
     let peak = 0;
-    const { env } = fakeEnv(() => ok(200), () => started.map((t) => ({ tenantId: t, status: 'ACTIVE' })));
-    await paced({ ...env, unpaced: true }, ['A', 'B', 'C', 'D', 'E'], 2, 60, async (t) => {
+    // Each read of the deployments finishes the oldest operation still running.
+    const { env } = fakeEnv(() => ok(200), () => {
+      const running = started.find((t) => !done.has(t));
+      if (running !== undefined) done.add(running);
+      return started.map((t) => ({ tenantId: t, status: done.has(t) ? 'ACTIVE' : 'CREATING' }));
+    });
+    await paced({ ...env, unpaced }, ['A', 'B', 'C', 'D', 'E'], 2, 60, async (t) => {
       started.push(t);
-      peak = started.length;
+      peak = Math.max(peak, started.filter((x) => !done.has(x)).length);
       return true;
     }, (d) => d?.status === 'ACTIVE');
-    expect(peak).toBe(5);
+    expect(peak).toBe(expected);
+    // The build draw stays at the limit: the operations past it wait in the workflow without a build.
+    const record = env.rec.toRecord({ runId: 'r', tier: 'small', mode: 'slice', slice: 'control-plane', commit: 'c' } as any, 's');
+    expect(record.quotas.platform['codebuild-linux-small']).toBe(2);
   });
 });

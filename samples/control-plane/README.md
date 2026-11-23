@@ -755,7 +755,9 @@ cd ../../stress
 ```
 
 `STRESS_REGIONS` (comma-separated, default `AWS_REGION`) names the Regions the
-account check lists stacks in: every Region the run uses (spec §3.7). A
+account check lists stacks in: every Region the run uses (spec §3.7).
+`STRESS_UNPACED=1` sends every wave of creates and deletes at once instead of
+at the build limit (below). A
 record's `quotas` holds the peak of operations the driver's paced waves kept in
 flight (onboarding and every removal), which bounds its draw on the platform
 account's concurrent Linux/Small builds. The unpaced bursts, the placement
@@ -799,12 +801,13 @@ also deregisters the accounts and the application and destroys both stacks. A
 seeded tenant left `CREATE_FAILED` stops every later seed with that status: run
 `slice.sh teardown --fixtures`, which deletes it, then seed again.
 
-The driver keeps every wave of creates and deletes at the build limit:
-CodeBuild refuses a build over a project's limit rather than queueing it, and
-the workflow then fails the operation. Concurrent placements and deletes on one
+The driver keeps every wave of creates and deletes at the build limit, unless
+`STRESS_UNPACED=1`: the workflow then holds the excess in its build-slot wait
+(ADR-0049). Concurrent placements and deletes on one
 cell also meet each other in DynamoDB: the control plane answers a cancelled
-placement transaction with a 500 "Deployment placement failed ambiguously" and
-a cancelled terminal write with `CREATE_FAILED` or `DELETE_FAILED`. The driver
+placement transaction with a 500 "Deployment placement failed ambiguously", and
+the workflow retries a cancelled terminal write five times before it leaves
+`CREATE_FAILED` or `DELETE_FAILED`. The driver
 retries them, a placement with its client token, and the records show them as
 `500:internal-server` requests with `ambiguous-placement` refusals and as
 `CREATE_FAILED:retried` and `DELETE_FAILED:retried` counts

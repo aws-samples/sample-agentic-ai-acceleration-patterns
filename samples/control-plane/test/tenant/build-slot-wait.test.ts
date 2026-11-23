@@ -14,13 +14,15 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import {
   BUILD_SLOT_WAIT,
+  BUILD_TIMEOUT,
+  EXECUTION_TIMEOUT,
   ProvisioningWorkflow,
   TRANSACTION_CANCELED_RETRY,
   buildStartRefusedReason,
 } from '../../src/tenant/tenant.sfn';
 import { simulate, TaskCall } from '../asl-simulator';
 
-function synth(): Record<string, any> {
+function synth(): { States: Record<string, any>; TimeoutSeconds: number } {
   const stack = new Stack();
   const table = new dynamodb.Table(stack, 'Table', { partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING } });
   const role = (id: string) => new iam.Role(stack, id, { assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com') });
@@ -28,10 +30,11 @@ function synth(): Record<string, any> {
   const machine = Object.values(Template.fromStack(stack).findResources('AWS::StepFunctions::StateMachine'))[0] as any;
   const text = (machine.Properties.DefinitionString['Fn::Join'][1] as unknown[])
     .map((part) => (typeof part === 'string' ? part : 'INTRINSIC')).join('');
-  return JSON.parse(text).States;
+  return JSON.parse(text);
 }
 
-const states = synth();
+const definition = synth();
+const states = definition.States;
 const BUILD_STATES = ['RunTenantBuild', 'RunTenantBuildPinned', 'RunCellBuild', 'RunCellBuildPinned'];
 const SLOT_RETRIER = {
   ErrorEquals: ['CodeBuild.AccountLimitExceededException'],
@@ -46,21 +49,25 @@ describe('the build-slot wait (ADR-0049, issue #95)', () => {
     expect(states[name].Resource).toBe('arn:aws:states:::codebuild:startBuild.sync');
     expect(states[name].Retry).toEqual([SLOT_RETRIER]);
     // The build budget stays on the task; Step Functions applies it to each attempt (R-23).
-    expect(states[name].TimeoutSeconds).toBe(3600);
+    expect(states[name].TimeoutSeconds).toBe(BUILD_TIMEOUT.toSeconds());
     // A refused start creates no build, so the retry sends no token (spec H-9).
-    expect(JSON.stringify(states[name].Arguments)).not.toContain('IdempotencyToken');
+    expect(JSON.stringify(states[name].Arguments)).not.toMatch(/idempotencytoken/i);
     expect(states[name].Catch).toHaveLength(1);
     expect(states[name].Catch[0].ErrorEquals).toEqual(['States.ALL']);
   });
 
-  test('the wait is about 10 minutes and at most 20, which the 26-hour execution timeout holds at the caps', () => {
-    const most = BUILD_SLOT_WAIT.intervalSeconds * BUILD_SLOT_WAIT.maxAttempts;
-    expect(most).toBe(1200);
-    // Full jitter picks each wait from 0 to the interval: half of it on average.
-    expect(most / 2).toBe(600);
-    // R-23: a delete at the caps is 1,500 minutes of hooks and script plus one wait; a new-cell create waits twice.
-    expect(1500 + most / 60).toBeLessThan(26 * 60);
-    expect(2 * (530 + most / 60)).toBe(1100);
+  test('the wait is at most 20 minutes, which the execution timeout holds at the caps (R-23)', () => {
+    const waitMinutes = (BUILD_SLOT_WAIT.intervalSeconds * BUILD_SLOT_WAIT.maxAttempts) / 60;
+    expect(waitMinutes).toBe(20);
+    const build = BUILD_TIMEOUT.toMinutes();
+    // R-23's hook figures at the caps: ten hooks of 47 minutes per create or update event, of 144 per delete.
+    const createEvent = 10 * 47 + waitMinutes + build;
+    const deleteEvent = 10 * 144 + waitMinutes + build;
+    expect(createEvent).toBe(550);
+    expect(2 * createEvent).toBe(1100);
+    expect(deleteEvent).toBe(1520);
+    expect(definition.TimeoutSeconds).toBe(EXECUTION_TIMEOUT.toSeconds());
+    expect(deleteEvent * 60).toBeLessThan(definition.TimeoutSeconds);
   });
 
   test.each([
@@ -78,16 +85,33 @@ describe('the build-slot wait (ADR-0049, issue #95)', () => {
     expect(pass.Result).toBe(buildStartRefusedReason(prefix));
     expect(pass.Result).toBe(
       `${prefix} provisioning failed: the build never started, CodeBuild refused it at the concurrent build limit `
-      + 'for 40 tries over at most 20 minutes (CodeBuild.AccountLimitExceededException)',
+      + 'after 40 retries over at most 20 minutes (CodeBuild.AccountLimitExceededException)',
     );
   });
 
-  test('the reason writes read $.failureReason, so the record names the refused start', () => {
-    expect(JSON.stringify(states.FailTenantWithReason.Parameters)).toContain('"S.$":"$.failureReason"');
-    const cellRouter = states.CellFailureHasTenantWithReason;
-    for (const next of [cellRouter.Default, ...cellRouter.Choices.map((c: any) => c.Next)]) {
-      expect(JSON.stringify(states[next].Parameters)).toContain('$.failureReason');
+  // The failure writes are JSONPath states, which the simulator does not run, so the path is checked by what each
+  // write reads: a reason write reads the same input fields as the generic write on the same Catch path, plus the
+  // reason the Pass state set. Tenant, cell only, and a new cell with its pending tenant.
+  const paths = (state: any): Set<string> => new Set((JSON.stringify(state.Parameters).match(/\$\.[A-Za-z.]+/g) ?? []));
+  test.each([
+    ['tenant', 'FailTenantWithReason', 'FailTenant'],
+    ['cell only', 'FailCellWithReason', 'FailCell'],
+    ['new cell with its tenant', 'FailCellAndTenantWithReason', 'FailCellAndTenant'],
+  ])('a refused start of a %s build is written by %s, reading only what %s reads plus $.failureReason', (_case, writer, generic) => {
+    const read = paths(states[writer]);
+    expect(read.has('$.failureReason')).toBe(true);
+    const genericReads = paths(states[generic]);
+    for (const p of read) {
+      if (p !== '$.failureReason') expect(genericReads.has(p)).toBe(true);
     }
+    expect(read.has('$.lastGlobalHooks')).toBe(true);
+  });
+
+  test('the cell reason router sends a new cell to the paired transaction and a cell alone to its own write', () => {
+    expect(states.CellFailureHasTenantWithReason.Choices).toEqual([
+      { Variable: '$.tenantBuild', IsPresent: true, Next: 'FailCellAndTenantWithReason' },
+    ]);
+    expect(states.CellFailureHasTenantWithReason.Default).toBe('FailCellWithReason');
   });
 
   // The build task, run against a CodeBuild that refuses the first `refusals` starts.
@@ -124,7 +148,7 @@ describe('the build-slot wait (ADR-0049, issue #95)', () => {
     }).then((result) => ({ result, starts }));
   };
 
-  test.each(BUILD_STATES)('%s: refused 39 times, the 40th retry starts the build and the script outputs are checked', async (name) => {
+  test.each(BUILD_STATES)('%s: refused 40 times, the 41st start (the last retry) starts the build and the outputs are checked', async (name) => {
     const { result, starts } = await run(name, 40);
     expect(starts).toHaveLength(41);
     expect(result.stoppedAt).toBe(name.startsWith('RunTenant') ? 'TenantScriptOutputs' : 'CellScriptOutputs');
@@ -134,7 +158,7 @@ describe('the build-slot wait (ADR-0049, issue #95)', () => {
     expect(new Set(starts.map((s) => JSON.stringify(s.args))).size).toBe(1);
   });
 
-  test.each(BUILD_STATES)('%s: refused 41 times, the Catch hands the refusal to the failure shape', async (name) => {
+  test.each(BUILD_STATES)('%s: refused on all 41 starts, the Catch hands the refusal to the failure shape', async (name) => {
     const { result, starts } = await run(name, 41);
     expect(starts).toHaveLength(41);
     expect(result.stoppedAt).toBe(name.startsWith('RunTenant') ? 'TenantBuildFailureShape' : 'CellBuildFailureShape');

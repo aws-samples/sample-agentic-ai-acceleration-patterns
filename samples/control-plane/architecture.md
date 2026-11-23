@@ -1110,8 +1110,8 @@ Design points:
   token's amplification cannot fan out. CodeBuild refuses a start over the
   cap; a script build's start is retried every 30 seconds or less (full
   jitter) for about 10 minutes, at most 20, then the operation fails with a
-  reason that names the refusal (ADR-0049). The projects log to explicit one-month-retention log
-  groups. Every build receives `OPERATOR_ID` (the verified JWT `sub`) so
+  reason that names the refusal (ADR-0049). The projects log to explicit
+  one-month-retention log groups. Every build receives `OPERATOR_ID` (the verified JWT `sub`) so
   application-plane changes attribute to the initiating operator, not just
   the shared fleet role. A stamped `sourceVersion` commit SHA pins what the
   build fetches. Action-less CloudWatch alarms watch execution-start rate

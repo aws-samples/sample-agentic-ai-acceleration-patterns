@@ -66,7 +66,7 @@ export interface ProvisioningWorkflowProps {
  * task). A timeout surfaces as States.Timeout and is caught like a build
  * failure (architecture.md §7).
  */
-const BUILD_TIMEOUT = Duration.hours(1);
+export const BUILD_TIMEOUT = Duration.hours(1);
 
 /**
  * A script build's `StartBuild` refused at the project's
@@ -103,7 +103,7 @@ export const TRANSACTION_CANCELED_RETRY = {
  * above and the hook attempt's own deadline (R-46). A tripped execution
  * timeout bypasses the Catch and strands records.
  */
-const EXECUTION_TIMEOUT = Duration.hours(26);
+export const EXECUTION_TIMEOUT = Duration.hours(26);
 
 /**
  * The inline buildspec — every execution overrides source and runs its
@@ -1358,7 +1358,7 @@ function attrReason(prefix: string): tasks.DynamoAttributeValue {
 export function buildStartRefusedReason(prefix: string): string {
   const minutes = (BUILD_SLOT_WAIT.intervalSeconds * BUILD_SLOT_WAIT.maxAttempts) / 60;
   return `${prefix} provisioning failed: the build never started, CodeBuild refused it at the concurrent build limit `
-    + `for ${BUILD_SLOT_WAIT.maxAttempts} tries over at most ${minutes} minutes (${BUILD_SLOT_WAIT.error})`;
+    + `after ${BUILD_SLOT_WAIT.maxAttempts} retries over at most ${minutes} minutes (${BUILD_SLOT_WAIT.error})`;
 }
 
 /**

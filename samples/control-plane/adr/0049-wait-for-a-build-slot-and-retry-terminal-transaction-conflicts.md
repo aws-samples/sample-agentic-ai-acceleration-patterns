@@ -38,9 +38,10 @@ seconds with full jitter, 40 times. Each wait is picked between 0 and 30
 seconds, so the wait is about 10 minutes and never more than 20. The
 terminal transactions retry `DynamoDb.TransactionCanceledException` 5 times
 from 1 second, backoff rate 2, full jitter: at most 31 seconds of waits.
-Pros: no new states; the Catch and the failure path stay as they are; the
-history grows by about three events per try (about 120 for a start refused
-for its whole wait). Cons: a cancellation by a failed condition is retried
+Pros: no loop; the Catch stays as it is, and the failure path gains one
+`Choice` rule and one `Pass` state per build (tenant and cell) that set
+the reason; the history grows by about three events per try (about 120
+for a start refused for its whole wait). Cons: a cancellation by a failed condition is retried
 too and fails the same way, so it reaches the Catch up to 31 seconds later.
 Waiting executions are served in no order, so a deployment started early
 can wait while a later one starts.
@@ -50,8 +51,8 @@ The build task catches the refusal and loops through a `Wait` state, as the
 hook runner does (R-46). The transactions catch the cancellation, parse its
 `Cause` for `TransactionConflict` and loop only then. Pros: a failed
 condition is never retried; the build wait can be cut by a deadline, not a
-count. Cons: three or four new states per task and per transaction, eight
-places in all; the `Cause` parse must never fail itself, or no failure
+count. Cons: three or four new states per task and per transaction, nine
+places in all (four build states, five transactions); the `Cause` parse must never fail itself, or no failure
 write runs (P-9).
 
 ### Option 3: No wait in the workflow
@@ -85,6 +86,13 @@ Such a client keeps its waves near the limit.
   cases at the caps grow by 20 minutes per script build: 1,520 minutes for a
   delete and 1,100 for a new-cell create, inside the 26-hour execution
   timeout (R-23).
+- Each waiting execution calls `StartBuild` about every 15 seconds. A
+  throttled `StartBuild` fails with `CodeBuild.AWSCodeBuildException`, an
+  error name the wait does not match, so the operation fails at once with
+  the generic reason. At 15 seconds per call a wave adds one call a second
+  per 15 waiting executions, far below the rate where H-11 saw throttling;
+  a wave of hundreds can reach it, which is one more reason to keep large
+  waves near the limit.
 - The global hook builds keep their own 5-minute refusal window (R-46). A
   hook start refused for all of it still fails the hook and its operation.
 - The typed single-item writes and the record-event writes (R-50) carry the
