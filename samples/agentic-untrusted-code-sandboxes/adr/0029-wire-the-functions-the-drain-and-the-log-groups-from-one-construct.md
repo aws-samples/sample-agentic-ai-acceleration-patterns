@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-20
-- Amended by: ADR-0071
+- Amended by: ADR-0071, ADR-0073
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -142,3 +142,5 @@ same statements on its own role instead, because a function's role is fixed
 when it is built. Revisit if the spec wants one role.
 
 Note 2026-11-23: amended by ADR-0071. Only the run function and functions bound with `bindRunCode` get the tool subnets and the network interface statement; the reaper, offboard and drain run outside the VPC.
+
+Note 2026-11-23: amended by ADR-0073. Every function in the tool subnets is deleted before a second waiter, `NetworkDrain`, and its role and policy after it, so Lambda can release the function's network interfaces with that role.

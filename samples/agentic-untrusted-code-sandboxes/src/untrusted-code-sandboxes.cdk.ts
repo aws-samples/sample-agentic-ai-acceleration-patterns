@@ -117,6 +117,8 @@ export class UntrustedCodeSandboxes extends Construct {
   private readonly toolStatements: iam.PolicyStatement[];
   private readonly insights: InsightRules;
   private readonly logDrain: LogDrain;
+  /** Holds a VPC function's role until Lambda has released the function's network interfaces (ADR-0073). */
+  private readonly networkDrain: LogDrain;
   private readonly drainResource: CustomResource;
   private readonly toolSubnets: ec2.SubnetSelection;
   private nagContext: KnownContext;
@@ -189,6 +191,12 @@ export class UntrustedCodeSandboxes extends Construct {
 
     // --- Log drain and Contributor Insights rules ---
     this.logDrain = new LogDrain(this, 'LogDrain');
+    // A second waiter for the VPC functions' roles (ADR-0073). It cannot be the log drain: a role's policy names backend
+    // resources that wait for the log drain themselves, which would be a cycle.
+    this.networkDrain = new LogDrain(this, 'NetworkDrain', {
+      delay: Duration.seconds(120),
+      description: 'Waits on stack delete so Lambda can release a VPC function\'s network interfaces with its role (ADR-0073)',
+    });
     this.insights = new InsightRules(this, 'Insights', nameFor);
 
     // --- Backends ---
@@ -486,6 +494,10 @@ export class UntrustedCodeSandboxes extends Construct {
     }
     // Only the function resource waits for the drain, not its role, which the tenant role's trust names.
     cfn.addResourceDependency(this.drainResource.node.defaultChild as CfnResource);
+    // Lambda releases the function's network interfaces with its role after the function is gone, so the role and its
+    // policy go only after the network drain's wait, and the function before it (ADR-0073).
+    this.networkDrain.protect(role);
+    this.networkDrain.writer(cfn);
     this.insights.addToolLogGroup(groupName);
     acknowledgeKnownFindings(role, this.nagContext);
     this.bound.push(fn);
@@ -618,6 +630,13 @@ export class UntrustedCodeSandboxes extends Construct {
     // The function waits for the role and its policy.
     fn.node.addDependency(role);
     this.logDrain.writer(fn);
+    // Lambda deletes a VPC function's network interfaces with the function's own role, about a minute after the
+    // function is gone. A role deleted at once leaves them `available`, and they hold the subnets (ADR-0073), so the
+    // role and its policy go only after the network drain's wait.
+    if (inVpc) {
+      this.networkDrain.writer(fn);
+      this.networkDrain.protect(role);
+    }
     return { fn, logGroup };
   }
 }

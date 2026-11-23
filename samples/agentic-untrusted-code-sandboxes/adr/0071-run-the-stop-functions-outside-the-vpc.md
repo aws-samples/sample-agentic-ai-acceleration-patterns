@@ -72,3 +72,5 @@ while the drain ran, the `nitro` instance lost its way to ECS, two stopped
 tasks never reported `STOPPED`, and the drain failed at its deadline. The
 drain resource now depends on the tool subnets' default routes, so the
 NAT gateway goes after it.
+
+Note 2026-11-23 (later): integration run 17 left the same two `available` interfaces, now the run function's, so this record does not remove the leak; ADR-0073 does. The stop functions stay outside the VPC: they need no network, and the stack has fewer interfaces to release.

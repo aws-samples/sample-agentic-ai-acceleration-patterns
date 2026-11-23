@@ -244,6 +244,17 @@ describe('functions (spec 3.1, 3.3, 3.7)', () => {
     expect(drain.DependsOn).toEqual(expect.arrayContaining(toolRoutes));
   });
 
+  test('a VPC function goes before the network drain, and its role and policy after it (ADR-0073)', () => {
+    const all = base.t.toJSON().Resources as Record<string, Json>;
+    const idOf = (suffix: string) => Object.entries(all).find(([, r]) => pathOf(r).endsWith(suffix))![0];
+    const waiter = all[idOf('/NetworkDrain/Resource/Default')];
+    expect(waiter.Properties.DelaySeconds).toBe(120);
+    expect(waiter.DependsOn).toEqual(expect.arrayContaining([idOf('/ToolRole/Resource'), idOf('/ToolRole/DefaultPolicy/Resource')]));
+    expect(waiter.DependsOn).not.toContain(idOf('/ReaperRole/Resource'));
+    expect(all[fnId(base.t, 'RunCode')].DependsOn).toContain(idOf('/NetworkDrain/Resource/Default'));
+    expect(all[fnId(base.t, 'Reaper')].DependsOn ?? []).not.toContain(idOf('/NetworkDrain/Resource/Default'));
+  });
+
   test('every function has the shared environment and JSON logs', () => {
     for (const name of ['RunCode', 'Reaper', 'Offboard', 'Drain']) {
       const fn = base.t.findResources('AWS::Lambda::Function')[fnId(base.t, name)] as Json;
@@ -338,6 +349,14 @@ describe('bindRunCode (spec 3.3)', () => {
     const runs = Object.values(s.t.findResources('AWS::CloudWatch::InsightRule')).map((r) => JSON.stringify((r as Json).Properties.RuleBody)).find((b) => b.includes('$.runId')) as string;
     expect(runs).toContain('BoundLogs0');
     expect(runs).toContain('BoundLogs1');
+    // Each bound function goes before the network drain, and its role and policy after it (ADR-0073).
+    const all = s.t.toJSON().Resources as Record<string, Json>;
+    const idOf = (suffix: string) => Object.entries(all).find(([, r]) => pathOf(r).endsWith(suffix))![0];
+    const waiter = all[idOf('/NetworkDrain/Resource/Default')];
+    for (const id of ['One', 'Two']) {
+      expect(waiter.DependsOn).toEqual(expect.arrayContaining([idOf(`/${id}Role/Resource`), idOf(`/${id}Role/DefaultPolicy/Resource`)]));
+      expect(all[idOf(`/${id}/Resource`)].DependsOn).toContain(idOf('/NetworkDrain/Resource/Default'));
+    }
   });
 
   test('a function built with the tool role needs no trust change, and a function with its own log group gets no second group', () => {

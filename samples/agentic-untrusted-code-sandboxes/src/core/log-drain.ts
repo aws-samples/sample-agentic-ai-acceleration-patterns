@@ -28,7 +28,7 @@ import { acknowledgeServiceTimeout } from './nag';
 export class LogDrain extends Construct {
   private readonly resource: CustomResource;
 
-  public constructor(scope: Construct, id: string, props: { readonly delay?: Duration } = {}) {
+  public constructor(scope: Construct, id: string, props: { readonly delay?: Duration; readonly description?: string } = {}) {
     super(scope, id);
     const delay = props.delay ?? Duration.seconds(90);
 
@@ -52,7 +52,7 @@ export class LogDrain extends Construct {
       role,
       timeout: delay.plus(Duration.seconds(30)),
       memorySize: 128,
-      description: 'Waits on stack delete so buffered logs land before their log groups go (ADR-0029)',
+      description: props.description ?? 'Waits on stack delete so buffered logs land before their log groups go (ADR-0029)',
       code: lambda.Code.fromInline(WAITER_SOURCE),
       loggingFormat: lambda.LoggingFormat.JSON,
       systemLogLevelV2: lambda.SystemLogLevel.WARN,
