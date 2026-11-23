@@ -232,6 +232,24 @@ describe('PutCellRoute', () => {
     expect(h.kvs.writes).toBe(0);
   });
 
+  test('§3.4 step 2: a control-plane read that fails once is retried, and the write is made', async () => {
+    const h = harness();
+    h.cp.cells.set(CELL, { status: 'CREATING' });
+    h.cp.failFirst = 1;
+    const res = await h.handler(restEvent('PUT', `/cells/${CELL}`, 'hook', { apiDomain: API_DOMAIN }));
+    expect(res.statusCode).toBe(200);
+    expect(h.kvs.writes).toBe(1);
+  });
+
+  test('§3.4 step 2 and §5.1: a read that fails twice is 503, nothing written', async () => {
+    const h = harness();
+    h.cp.cells.set(CELL, { status: 'CREATING' });
+    h.cp.failFirst = 2;
+    const res = await h.handler(restEvent('PUT', `/cells/${CELL}`, 'hook', { apiDomain: API_DOMAIN }));
+    expect(res.statusCode).toBe(503);
+    expect(h.kvs.writes).toBe(0);
+  });
+
   test('§3.4 step 5: on an ETag conflict the write-once check runs again on the re-read', async () => {
     const h = harness();
     h.cp.cells.set(CELL, { status: 'CREATING' });
@@ -412,6 +430,14 @@ describe('PutTenantRoute from the global hook role', () => {
     const res = await h.handler(restEvent('PUT', `/tenants/${TENANT}`, 'hook'));
     expect(res.statusCode).toBe(503);
     expect(h.kvs.writes).toBe(0);
+  });
+
+  test('§3.4 step 2: the deployment and tenant reads made at once are each retried once, and the write is made', async () => {
+    const h = ready();
+    h.cp.failFirst = 2;
+    const res = await h.handler(restEvent('PUT', `/tenants/${TENANT}`, 'hook'));
+    expect(res.statusCode).toBe(200);
+    expect(h.kvs.writes).toBe(1);
   });
 
   test.each([

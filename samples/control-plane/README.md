@@ -334,6 +334,11 @@ npx cdk deploy \
   --context demoApplicationIds='["demo"]'
 ```
 
+The stack is named `control-plane-dev`; `--context stackName=<name>` names
+it otherwise. One account and Region holds one control plane: each stack
+creates the fixed `/control-plane/tenant-api-url` parameter, so a second
+stack fails to deploy there whatever its name and `fleetName`.
+
 The stack carries no application: register one after the deploy with
 `PutApplication`. The definition is validated by the API (400 on a missing
 script path, `maxTenants` below one, or an id outside `[a-z0-9-]{1,32}`) and

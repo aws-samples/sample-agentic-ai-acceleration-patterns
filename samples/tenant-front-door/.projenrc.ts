@@ -114,6 +114,20 @@ const buildOnlyPlaceholderContext = [
   // An API id no API has, so the RouteHookAccess stack synthesises under cdk-nag too.
   '--context registrarUrl=https://0000000000.execute-api.eu-central-1.amazonaws.com/v1/',
 ].join(' ');
+// The integration test (spec §10, ADR-0028, integration-test.md): a bash
+// driver over two CDK apps, test/integ.single.ts and test/integ.host.ts.
+// It deploys real infrastructure in two accounts and runs for hours; start
+// it detached. Its cloud assemblies, logs and run state go to .integ/.
+project.addTask('integ', {
+  description: 'Run the integration test in single mode across the current account and $TFD_INTEG_ACCOUNT_B (hours; see integration-test.md)',
+  exec: 'bash scripts/integ.sh single',
+});
+project.addTask('integ:host', {
+  description: 'Run the integration test in host mode (integration-test.md)',
+  exec: 'bash scripts/integ.sh host',
+});
+project.gitignore.exclude('/.integ/');
+
 // Only the build's quiet synth: `npx projen synth` stays a plain `cdk synth`,
 // so it reads a deployer's own cdk.json inputs.
 project.tasks.tryFind('synth:silent')?.reset(`cdk synth -q ${buildOnlyPlaceholderContext}`);
