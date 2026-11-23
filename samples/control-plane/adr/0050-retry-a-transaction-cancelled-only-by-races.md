@@ -42,8 +42,8 @@ compensation or the hooks.
 
 ### Option 2: Send the same transaction again, then answer a retryable 409
 A cancellation with at least one race code and every other reason `None` is
-sent again on the same candidate, a few times with full jitter, inside the API's 29-second
-window. When every attempt races, the repository throws
+sent again on the same candidate, a few times with full jitter, inside the
+API's 29-second window. When every attempt races, the repository throws
 `TransactionRaceError` and the service answers `ConflictError` with the retry
 hint of R-14: nothing was written, so the caller's retry can succeed. One
 classifier and one retry helper serve all five callers. Pros: a race costs a
@@ -78,7 +78,10 @@ is part of every attempt and is written only by the one that commits.
 
 `TransactionConflictException` and `TransactionInProgressException` are not
 covered: the first does not arise on these calls, and the second may still
-end in a commit, so it stays ambiguous. The workflow's terminal writes run in
+end in a commit, so it stays ambiguous. A single-item write that meets one
+of these transactions in flight (a `PutHook` replace beside a `DeleteHook`, an
+`UpdateDeployment` beside a placement) gets `TransactionConflictException`
+and keeps its own error handling. The workflow's terminal writes run in
 Step Functions and are outside this decision.
 
 ## Consequences

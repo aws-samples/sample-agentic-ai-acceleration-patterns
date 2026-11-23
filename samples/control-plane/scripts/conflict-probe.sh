@@ -25,9 +25,9 @@
 #
 # Environment: PROBE_PREFIX (names the stacks and the fleet), AWS_REGION, credentials for the
 # account (AWS_PROFILE), PROBE_TENANTS (default 20: one warm-up tenant and 19 racers),
-# PROBE_HOME (default ~/.conflict-probe), INTEG_DEPLOY_CONCURRENCY (default 2). It needs bash,
-# curl, git, jq, openssl, zip, node and the AWS CLI, and `npm ci` (then `npx projen pre-compile`
-# for the generated Smithy code) in the sample before `deploy`. It prints ids, statuses and counts only, never a
+# PROBE_HOME (default ~/.conflict-probe), INTEG_DEPLOY_CONCURRENCY (default 2). It needs bash 4
+# or newer, curl, git, jq, openssl, zip, node and the AWS CLI; before `deploy`, run `npm ci`
+# and `npx projen pre-compile` (the generated Smithy code) in the sample. It prints ids, statuses and counts only, never a
 # token or a password, and never runs `set -x` (scripts/CONVENTIONS.md).
 #
 # shortcut: one cell, one Region and the no-op scripts; enough to make placements meet on one
@@ -95,11 +95,18 @@ sign_in() {
   # The password reaches jq through its environment, never its argv.
   PROBE_SECRET="$secret" jq -n --arg p "$pool" --arg u probe-operator \
     '{UserPoolId: $p, Username: $u, Password: $ENV.PROBE_SECRET, Permanent: true}' > "$INPUT"
-  aws cognito-idp admin-set-user-password --cli-input-json "file://${INPUT}" > /dev/null
+  # A failed call removes the file itself: in a wait_for subshell the EXIT trap does not run.
+  aws cognito-idp admin-set-user-password --cli-input-json "file://${INPUT}" > /dev/null || {
+    rm -f "$INPUT"
+    return 1
+  }
   PROBE_SECRET="$secret" jq -n --arg p "$pool" --arg c "$client" --arg u probe-operator \
     '{UserPoolId: $p, ClientId: $c, AuthFlow: "ADMIN_USER_PASSWORD_AUTH", AuthParameters: {USERNAME: $u, PASSWORD: $ENV.PROBE_SECRET}}' > "$INPUT"
   token="$(aws cognito-idp admin-initiate-auth --cli-input-json "file://${INPUT}" \
-    --query AuthenticationResult.IdToken --output text)"
+    --query AuthenticationResult.IdToken --output text)" || {
+    rm -f "$INPUT"
+    return 1
+  }
   rm -f "$INPUT"
   INPUT=""
   [ -n "$AUTH_HEADER" ] || AUTH_HEADER="$(mktemp)"
@@ -223,10 +230,14 @@ case "$verb" in
       '{source: {type: "S3", location: $l}, cellScripts: $s, tenantScripts: $s, maxTenants: $m, placementStrategy: "FILL", hooks: []}')"
     call PUT "/applications/${APP_ID}" "$definition"
     log "PutApplication: ${STATUS}"
-    log "application: $(wait_for "/applications/${APP_ID}" application 'ACTIVE|[A-Z]+_FAILED' 300)"
+    s="$(wait_for "/applications/${APP_ID}" application 'ACTIVE|[A-Z]+_FAILED' 300 || true)"
+    log "application: ${s}"
+    [ "$s" = ACTIVE ] || exit 1
     call PUT "/accounts/${account}" "$(jq -n --arg a "$APP_ID" '{owner: "VENDOR", maxCells: 2, applicationIds: [$a]}')"
     log "PutAccount: ${STATUS}"
-    log "account: $(wait_for "/accounts/${account}" account 'ACTIVE|[A-Z]+_FAILED' 300)"
+    s="$(wait_for "/accounts/${account}" account 'ACTIVE|[A-Z]+_FAILED' 300 || true)"
+    log "account: ${s}"
+    [ "$s" = ACTIVE ] || exit 1
     # A rerun keeps the tenants an earlier setup made.
     touch "$TENANTS_FILE"
     for i in $(seq "$(($(wc -l < "$TENANTS_FILE") + 1))" "$TENANTS"); do
