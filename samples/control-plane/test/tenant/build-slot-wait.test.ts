@@ -27,14 +27,14 @@ function synth(): { States: Record<string, any>; TimeoutSeconds: number } {
   const table = new dynamodb.Table(stack, 'Table', { partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING } });
   const role = (id: string) => new iam.Role(stack, id, { assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com') });
   new ProvisioningWorkflow(stack, 'Provisioning', { table, fleetName: 'control-plane', globalHookRole: role('GlobalHook'), appHookRole: role('AppHook'), concurrentBuildLimit: 5 });
-  const machine = Object.values(Template.fromStack(stack).findResources('AWS::StepFunctions::StateMachine'))[0] as any;
-  const text = (machine.Properties.DefinitionString['Fn::Join'][1] as unknown[])
+  const resource = Object.values(Template.fromStack(stack).findResources('AWS::StepFunctions::StateMachine'))[0] as any;
+  const text = (resource.Properties.DefinitionString['Fn::Join'][1] as unknown[])
     .map((part) => (typeof part === 'string' ? part : 'INTRINSIC')).join('');
   return JSON.parse(text);
 }
 
-const definition = synth();
-const states = definition.States;
+const machine = synth();
+const states = machine.States;
 const BUILD_STATES = ['RunTenantBuild', 'RunTenantBuildPinned', 'RunCellBuild', 'RunCellBuildPinned'];
 const SLOT_RETRIER = {
   ErrorEquals: ['CodeBuild.AccountLimitExceededException'],
@@ -66,8 +66,8 @@ describe('the build-slot wait (ADR-0049, issue #95)', () => {
     expect(createEvent).toBe(550);
     expect(2 * createEvent).toBe(1100);
     expect(deleteEvent).toBe(1520);
-    expect(definition.TimeoutSeconds).toBe(EXECUTION_TIMEOUT.toSeconds());
-    expect(deleteEvent * 60).toBeLessThan(definition.TimeoutSeconds);
+    expect(machine.TimeoutSeconds).toBe(EXECUTION_TIMEOUT.toSeconds());
+    expect(deleteEvent * 60).toBeLessThan(machine.TimeoutSeconds);
   });
 
   test.each([
