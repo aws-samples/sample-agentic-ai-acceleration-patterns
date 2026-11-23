@@ -585,8 +585,8 @@ export class UntrustedCodeSandboxes extends Construct {
   }
 
   /**
-   * Lambda deletes a VPC function's network interfaces with the function's own role, about a minute after the
-   * function is gone; a role deleted at once leaves them `available`, holding the subnets (ADR-0073). The function goes
+   * Lambda deletes a VPC function's network interfaces with the function's own role, after the function is gone
+   * (about 45 s in run 14); a role deleted at once leaves them `available`, holding the subnets (ADR-0073). The function goes
    * before the log drain's wait, and the role and its network interface policy after it. `bindRunCode` refuses a role in
    * another stack, so the role is always in this one.
    */

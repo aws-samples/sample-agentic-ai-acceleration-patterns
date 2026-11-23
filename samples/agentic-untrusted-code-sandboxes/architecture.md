@@ -133,7 +133,7 @@ SSM parameter; the demo stack writes one JSON parameter,
 
 | Role | Holds | Does not hold |
 | --- | --- | --- |
-| Tool role | `sts:AssumeRole` and `sts:TagSession` on the tool tenant role; per backend: MicroVM run, get, terminate and auth token on the image, `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only; `ecs:DescribeTasks` on the cluster's tasks; `InvokeAgentRuntime` and `StopRuntimeSession` on the runtime; in a policy of its own, the six network interface actions on `*` a VPC function needs (ADR-0073) | Direct access to the bucket or the registry; `ecs:RunTask` and `ecs:StopTask` |
+| Tool role | `sts:AssumeRole` and `sts:TagSession` on the tool tenant role; per backend: MicroVM run, get, terminate and auth token on the image, `lambda:PassNetworkConnector` on `HTTP_INGRESS` and the sample's connector only; `ecs:DescribeTasks` on the cluster's tasks; `InvokeAgentRuntime` and `StopRuntimeSession` on the runtime; in a policy of its own (`VpcNetworkInterfaces`), the six network interface actions on `*` a VPC function needs, which every role given to a function through `bindRunCode` also gets (ADR-0073) | Direct access to the bucket or the registry; `ecs:RunTask` and `ecs:StopTask` |
 | Tool tenant role | `inputs/${TenantId}/*` read, `outputs/${TenantId}/*` write, registry `GetItem`, `PutItem`, `UpdateItem` on `TENANT#${TenantId}` rows; `nitro`: `RunTask` on the pinned task definition revision with the request tag and cluster conditions, `TagResource` at `RunTask`, `StopTask` with the resource tag condition, `PassRole` on the execution role | Any key without its own tag; `DeleteItem` |
 | Reaper role | Registry `GetItem`, `Scan`, `UpdateItem`, `DeleteItem`; stop actions per backend (`ListTasks`, `DescribeTasks`, `StopTask`; `ListMicrovms`, `GetMicrovm`, `TerminateMicrovm`; `StopRuntimeSession`) | The input bucket; every instance action |
 | Drain role | The reaper role, plus `ecs:ListContainerInstances`, `DeregisterContainerInstance`, `DescribeContainerInstances` and `ec2:DescribeInstances` | The input bucket |
@@ -435,7 +435,8 @@ them (ADR-0029, ADR-0054). A delete with sandboxes live takes 23 to 32 minutes
 on one backend (spec §7.8, S-21), and the integration stack's destroy took 3500 to
 3800 s in the runs that ended `DELETE_FAILED` with a recorded time. Lambda
 releases the network interfaces of the functions in the tool subnets with
-each function's role, about a minute after the function is gone, so the
+each function's role after the function is gone (about 45 s in run 14, one
+observation), so the
 log drain holds each such role and its network interface policy for its
 90 s (ADR-0073).
 

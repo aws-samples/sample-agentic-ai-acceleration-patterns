@@ -1139,43 +1139,43 @@ runtime and the image are deleted, and the order matters. It stops every
 handle in the registry, then every task and MicroVM the orphan sweep
 finds, and waits until `ListTasks` shows every task `STOPPED` and
 `ListMicrovms` shows every MicroVM of the image `TERMINATED` (at most 10
-minutes). A MicroVM image cannot be deleted while MicroVMs of it are live
-(running or suspended), and a capacity provider cannot be deleted while a
-task is still stopping; in both cases CloudFormation fails the delete, the
-second after a 20-minute stall. It also fails while an idle managed
-instance still runs (S-14), and CloudFormation does not retry it. So once
-every task is `STOPPED`, the drain reads the cluster's container
-instances and their EC2 instance ids, deregisters each with `force`,
-which on ECS Managed Instances terminates the instance (ECS developer
-guide, Managed Instances draining), and waits until `DescribeInstances`
-shows every one of those ids `terminated`. It repeats the read,
-deregister and wait until `ListContainerInstances` is empty, within its
-10-minute bound. In S-16 an instance reached `terminated` 17 to 30 s
-after the deregister, no replacement started, and the stack delete then
-succeeded first time in 38 s. Without the drain, the capacity provider
-delete waits for scale-in (`ScaleInAfter` plus about 15 s, 162 s in
-all at 120 s) and fails when `ScaleInAfter` is long (S-14, 900 s). The
-sample sets `ScaleInAfter` to 120 s (S-7, S-16), so instances go about
-two minutes after the last task (ADR-0070). The
-capacity provider has no minimum-instances setting, so the sample
-keeps no warm instance. The `synth` test checks that the drain role may
+minutes). A MicroVM image cannot be deleted while MicroVMs of it are
+live (running or suspended), and a capacity provider cannot be deleted
+while a task is still stopping; in both cases CloudFormation fails the
+delete, the second after a 20-minute stall. It also fails while an idle
+managed instance still runs (S-14), and CloudFormation does not retry
+it. So once every task is `STOPPED`, the drain reads the cluster's
+container instances and their EC2 instance ids, deregisters each with
+`force`, which on ECS Managed Instances terminates the instance (ECS
+developer guide, Managed Instances draining), and waits until
+`DescribeInstances` shows every one of those ids `terminated`. It
+repeats the read, deregister and wait until `ListContainerInstances` is
+empty, within its 10-minute bound. In S-16 an instance reached
+`terminated` 17 to 30 s after the deregister, no replacement started,
+and the stack delete then succeeded first time in 38 s. Without the
+drain, the capacity provider delete waits for scale-in (`ScaleInAfter`
+plus about 15 s, 162 s in all at 120 s) and fails when `ScaleInAfter` is
+long (S-14, 900 s). The sample sets `ScaleInAfter` to 120 s (S-7, S-16),
+so instances go about two minutes after the last task (ADR-0070). The
+capacity provider has no minimum-instances setting, so the sample keeps
+no warm instance. The `synth` test checks that the drain role may
 deregister on the cluster and the reaper role may not, and that the
-offboard function runs as the reaper role. With sandboxes live, the whole
-stack delete takes 23 to 32 minutes (§7 S-21). In the `nitro` and
-`agentcore` runs most of it was the late release of Lambda network
-interfaces, then of the drain and reaper functions, which ADR-0071 took
-out of the VPC; the `microvm` run's cause was not isolated. The run
-function and bound functions keep their interfaces in the tool subnets,
-and Lambda releases them with the function's role about a minute after
-the function is gone, so the log drain holds each such role and its
-network interface policy for its 90 s (ADR-0073). Plan 30 to 40 minutes for a destroy. A
-`StopTask` takes 45 to 78 s, so the runner
-exits at once on `SIGTERM`. AgentCore sessions in rows are stopped with
-`StopRuntimeSession`; sessions with no row end within about 20 s of the
-runtime's delete, which takes about 200 s. Creating a runtime took 548
-to 553 s in S-13 and S-14, with and without the DNS Firewall, against
-201 to 204 s in S-9, cause unknown; with `agentcore` enabled it sets
-the deploy time.
+offboard function runs as the reaper role. With sandboxes live, the
+whole stack delete takes 23 to 32 minutes (§7 S-21). In the `nitro` and
+`agentcore` runs most of it was the late release of the network
+interfaces of the drain and reaper functions, which were in the VPC
+then; ADR-0071 has since taken them out of it. The `microvm` run's cause
+was not isolated. The run function and bound functions keep their
+interfaces in the tool subnets. Lambda releases them with the function's
+role after the function is gone (about 45 s in run 14, one observation),
+so the log drain holds each such role and its network interface policy
+for its 90 s (ADR-0073). Plan 30 to 40 minutes for a destroy. A
+`StopTask` takes 45 to 78 s, so the runner exits at once on `SIGTERM`.
+AgentCore sessions in rows are stopped with `StopRuntimeSession`;
+sessions with no row end within about 20 s of the runtime's delete,
+which takes about 200 s. Creating a runtime took 548 to 553 s in S-13
+and S-14, with and without the DNS Firewall, against 201 to 204 s in
+S-9, cause unknown; with `agentcore` enabled it sets the deploy time.
 
 Log groups. The construct owns the task log group and a log drain waits
 90 s on delete before it goes, as agentic-runtime-isolation ADR-0019 does.
