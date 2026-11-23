@@ -222,6 +222,29 @@ class SendOnlyQueueDestination implements lambda.IDestination {
 // ---------------------------------------------------------------------------
 
 /**
+ * The registrar's certificate request and its tagging, conditioned on the
+ * registrar's distribution tag (§3.4). The integration test's role holds
+ * the same two statements for its repeat-request probe (§10 step 14), so
+ * their conditions cannot drift apart.
+ */
+export function registrarCertificateRequestStatements(scope: IConstruct, distributionId: string): iam.PolicyStatement[] {
+  return [
+    new iam.PolicyStatement({
+      sid: 'CertificateRequest',
+      actions: ['acm:RequestCertificate'],
+      resources: ['*'],
+      conditions: registrarTagsOnCreate(distributionId, IN_CERTIFICATE_REGION.StringEquals),
+    }),
+    new iam.PolicyStatement({
+      sid: 'CertificateTagOnRequest',
+      actions: ['acm:AddTagsToCertificate'],
+      resources: [arns(scope).certificates],
+      conditions: registrarTagsOnOwn(distributionId),
+    }),
+  ];
+}
+
+/**
  * The registrar role's dedicated-domain actions (§3.4, the paragraph after
  * the hook's backfill): a policy of its own, so turning `dedicatedDomains`
  * off removes it in the update's cleanup, after the guard has passed.
@@ -264,18 +287,7 @@ export function registrarDedicatedDomainsPolicy(scope: Construct, id: string, ro
         conditions: IN_CERTIFICATE_REGION,
       }),
       // The ACM writes conditioned on the registrar's tag (§3.4).
-      new iam.PolicyStatement({
-        sid: 'CertificateRequest',
-        actions: ['acm:RequestCertificate'],
-        resources: ['*'],
-        conditions: registrarTagsOnCreate(distributionId, IN_CERTIFICATE_REGION.StringEquals),
-      }),
-      new iam.PolicyStatement({
-        sid: 'CertificateTagOnRequest',
-        actions: ['acm:AddTagsToCertificate'],
-        resources: [a.certificates],
-        conditions: registrarTagsOnOwn(distributionId),
-      }),
+      ...registrarCertificateRequestStatements(scope, distributionId),
       // Reads any certificate's tags: one tagged for another tenant or
       // distribution answers 409 (§3.4 step 4).
       new iam.PolicyStatement({

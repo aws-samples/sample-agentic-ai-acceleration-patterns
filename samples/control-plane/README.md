@@ -334,6 +334,11 @@ npx cdk deploy \
   --context demoApplicationIds='["demo"]'
 ```
 
+The stack is named `control-plane-dev`; `--context stackName=<name>` names
+it otherwise. One account and Region holds one control plane: each stack
+creates the fixed `/control-plane/tenant-api-url` parameter, so a second
+stack fails to deploy there whatever its name and `fleetName`.
+
 The stack carries no application: register one after the deploy with
 `PutApplication`. The definition is validated by the API (400 on a missing
 script path, `maxTenants` below one, or an id outside `[a-z0-9-]{1,32}`) and
@@ -756,7 +761,8 @@ budgeted (`slice.sh budget`) but not measured. The API Gateway control-plane
 draw of spec §4.4, each `set-build-limit` redeploy of the control plane, has no
 Service Quotas code, so the slice does not budget it. The platform account's
 CodeBuild quota for concurrent `BUILD_GENERAL1_SMALL` builds must hold the
-build limit times two (the cell and tenant projects; the service default is 1).
+build limit times two in slice mode (the cell and tenant projects) and times
+three in a platform run (plus the global hook project); the service default is 1.
 Scenarios: `PS-1` (the seeded tenants onboarded at the build limit; the first
 deployment creates the cell, whose build time answers spec Q-1),
 `placement-race` (twice as many `CreateDeployment` calls as free slots, at
@@ -777,7 +783,11 @@ edge has settled. The edge's and the registrar's answers are counted under
 `requests`, so `collect` weighs only the control plane's own 5xx against its access log.
 PS-5 reads the edge and registrar addresses from the front door's manifest
 (`stress/README.md`, "Platform mode: manifests") and stops with a message when they are
-missing. The driver is
+missing. A platform run also calls the slice's steps `hooks` (registers the
+front door's global route hooks, which run `route-hook.sh` at `STRESS_HOOK_COMMIT`),
+`register` (the application and the cell accounts), `warm-up` (one tenant that builds the
+cell) and, at teardown, `unhook`; PS-1 then gives each onboarded tenant an identity tenant
+and users (stress ADR-0017). The driver is
 [`test/stress/`](./test/stress/), the scripts
 [`scripts/stress/`](./scripts/stress/slice.sh); the manifest and the source zip
 stay outside the repository and hold no token or password. `--remove-fixtures`

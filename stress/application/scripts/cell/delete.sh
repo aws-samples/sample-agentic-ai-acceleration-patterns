@@ -74,6 +74,7 @@ start=$SECONDS
 echo "cell_delete_seconds=$((SECONDS - start))"
 
 delete_param "$(cell_param entitlements-api-url)"
+delete_param "$(cell_param api-domain)"
 delete_param "$(cell_param stack)"
 if [ -n "${OUTPUTS_FILE:-}" ]; then
   printf '{}\n' > "$OUTPUTS_FILE"

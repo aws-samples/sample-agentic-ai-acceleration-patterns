@@ -52,6 +52,15 @@ const project = new awscdk.AwsCdkTypeScriptApp({
     'aws-sdk-client-mock@4.1.0',
     // Local NodejsFunction bundling (no Docker) and the SPA build (build slice S4)
     'esbuild@0.28.2',
+    // The stress slice's driver (scripts/stress/, test/stress/): SigV4 calls to the
+    // platform API and the registrar, role sessions for the hook and operator roles,
+    // and the log and metric reads `collect` makes.
+    '@aws-crypto/sha256-js@5.2.0',
+    '@aws-sdk/client-cloudwatch@3.1125.0',
+    '@aws-sdk/client-cloudwatch-logs@3.1125.0',
+    '@aws-sdk/client-sts@3.1125.0',
+    '@aws-sdk/credential-providers@3.1125.0',
+    '@smithy/signature-v4@5.7.5',
   ],
 });
 
@@ -105,6 +114,20 @@ const buildOnlyPlaceholderContext = [
   // An API id no API has, so the RouteHookAccess stack synthesises under cdk-nag too.
   '--context registrarUrl=https://0000000000.execute-api.eu-central-1.amazonaws.com/v1/',
 ].join(' ');
+// The integration test (spec §10, ADR-0028, integration-test.md): a bash
+// driver over two CDK apps, test/integ.single.ts and test/integ.host.ts.
+// It deploys real infrastructure in two accounts and runs for hours; start
+// it detached. Its cloud assemblies, logs and run state go to .integ/.
+project.addTask('integ', {
+  description: 'Run the integration test in single mode across the current account and $TFD_INTEG_ACCOUNT_B (hours; see integration-test.md)',
+  exec: 'bash scripts/integ.sh single',
+});
+project.addTask('integ:host', {
+  description: 'Run the integration test in host mode (integration-test.md)',
+  exec: 'bash scripts/integ.sh host',
+});
+project.gitignore.exclude('/.integ/');
+
 // Only the build's quiet synth: `npx projen synth` stays a plain `cdk synth`,
 // so it reads a deployer's own cdk.json inputs.
 project.tasks.tryFind('synth:silent')?.reset(`cdk synth -q ${buildOnlyPlaceholderContext}`);

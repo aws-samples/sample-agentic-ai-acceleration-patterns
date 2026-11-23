@@ -10,10 +10,16 @@ door with one demo cell and a stand-in control plane in a test account,
 and check the edge, the cell and the registrar live without the control
 plane's hooks (design/spikes.md, Smoke run). `register-hooks.sh` puts or
 deletes the front door's two global hooks on the control plane (spec
-§5.2). What a script prints lands in the operator's terminal and, in CI,
-the job log; what the route hook prints lands in the control plane's
-hook build log. The scripts handle access tokens, temporary passwords and
-SigV4 credentials, so none of those ever reach output.
+§5.2). `integ.sh`, with its parts in `integ/`, is the integration test
+driver (spec §10, ADR-0028); the integration test's demo application
+scripts and its `tfd-probe` hook in `../test/integ/` follow these
+conventions too. `demo.sh` walks the tenants of a kept `host` run
+through the front door and suspends and resumes one of them (README,
+End-to-end demo); it sources `integ/lib.sh`. What a script prints lands
+in the operator's terminal and, in CI, the job log; what the route hook
+prints lands in the control plane's hook build log. The scripts handle
+access tokens, temporary passwords and SigV4 credentials, so none of
+those ever reach output.
 
 ## Log hygiene
 
@@ -37,6 +43,15 @@ SigV4 credentials, so none of those ever reach output.
 
 - One `mktemp -d` directory, files mode 0600, removed from the `EXIT` trap
   on every exit.
+- `integ.sh` also keeps `.integ/<run id>/` (gitignored): its CDK
+  assemblies, logs, deploy and destroy times, the CDK context and the
+  run's ids, so a teardown after an interruption can finish. The directory
+  is mode 0700. Nothing there holds a token, a password or a key. The one
+  exception is the run's random external id for the test's role pair: it
+  is on the `cdk deploy` command line and in the cell-account CDK assembly,
+  and it is valid only for that run's test accounts.
+- A password or a body that holds a token reaches the AWS CLI in a 0600
+  `--cli-input-json` or `fileb://` file, never as an argument.
 
 ## Failure behaviour and cleanup
 
@@ -52,6 +67,10 @@ SigV4 credentials, so none of those ever reach output.
   exit status is non-zero when any check failed.
 - The stacks stay up after `check`. The operator removes them with
   `cdk destroy` in the order dns, cell, front door, control plane, support.
+- `demo.sh` arms its `EXIT` trap before its first change. The trap resumes
+  tenant `b` when the run stops while `b` is suspended, then removes the
+  temp directory. The run's stacks and tenants belong to the integration
+  test, which removes them with `scripts/integ.sh teardown`.
 
 ## Shared fixtures
 
@@ -76,7 +95,18 @@ Its credentials reach `curl` through a mode-0600 `-K` file in its own
 `test/hooks/` runs `hooks/route-hook.sh` and `register-hooks.sh` with
 bash against stub `curl`, `aws` and `sleep` commands placed first on
 `PATH`. A change to either script keeps those tests passing. The smoke
-scripts are checked by running them live.
+scripts and `demo.sh` are checked by running them live.
+
+## The stress slice
+
+`stress/` follows the log hygiene and temp file rules above, and differs
+in two places. The runner calls its verbs one at a time, so the stacks it
+deploys stay up for the `teardown` verb, not for an `EXIT` trap, and
+`teardown` removes the run's tenants, routes, parameters and stacks and
+lists what it leaves. `seed` registers the vendor scope `app/use` on the
+shared pool when the catalogue lacks it and leaves it there, because a
+later run reuses it; it changes nothing else in the pool. See
+[`stress/README.md`](./stress/README.md).
 
 ## Scope
 

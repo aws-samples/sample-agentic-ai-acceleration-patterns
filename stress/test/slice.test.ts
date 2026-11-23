@@ -6,16 +6,17 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadSlice, orderSlices, parseDeclaration, type SliceDeclaration } from '../src/slice';
 
-const decl = (name: string, needs: string[] = []): SliceDeclaration => ({ name, needs, scenarios: ['PS-1'], platformOnly: [], quotas: [] });
+const decl = (name: string, needs: string[] = []): SliceDeclaration => ({ name, needs, scenarios: ['PS-1'], platformOnly: [], steps: [], quotas: [] });
 
 describe('slice declaration (spec §3.4)', () => {
   it('parses a declaration', () => {
     const d = parseDeclaration(JSON.stringify({ name: 'control-plane', needs: ['tenant-identity'], scenarios: ['PS-1', 'PS-5', 'placement-race'], platformOnly: ['PS-5'], quotas: ['codebuild-linux-small'] }), 'f');
-    expect(d).toEqual({ name: 'control-plane', needs: ['tenant-identity'], scenarios: ['PS-1', 'PS-5', 'placement-race'], platformOnly: ['PS-5'], quotas: ['codebuild-linux-small'] });
+    expect(d).toEqual({ name: 'control-plane', needs: ['tenant-identity'], scenarios: ['PS-1', 'PS-5', 'placement-race'], platformOnly: ['PS-5'], steps: [], quotas: ['codebuild-linux-small'] });
   });
 
-  it('defaults platformOnly to none', () => {
-    expect(parseDeclaration(JSON.stringify({ name: 'a', scenarios: ['S1'] }), 'f').platformOnly).toEqual([]);
+  it('defaults platformOnly and steps to none, and reads the steps a slice implements', () => {
+    expect(parseDeclaration(JSON.stringify({ name: 'a', scenarios: ['S1'] }), 'f')).toMatchObject({ platformOnly: [], steps: [] });
+    expect(parseDeclaration(JSON.stringify({ name: 'a', scenarios: ['S1'], steps: ['hooks', 'warm-up'] }), 'f').steps).toEqual(['hooks', 'warm-up']);
   });
 
   it.each([
@@ -27,6 +28,8 @@ describe('slice declaration (spec §3.4)', () => {
     ['unknown quota', { name: 'a', scenarios: [], quotas: ['sqs'] }, /unknown quotas sqs/],
     ['reserved scenario', { name: 'a', scenarios: ['lifecycle'] }, /runner's own record/],
     ['platform-only scenario the slice does not declare', { name: 'a', scenarios: ['S1'], platformOnly: ['PS-2'] }, /"platformOnly" names PS-2/],
+    ['bad step name', { name: 'a', scenarios: [], steps: ['Phase Two'] }, /"steps" must be an array/],
+    ['duplicate step', { name: 'a', scenarios: [], steps: ['hooks', 'hooks'] }, /"steps" has duplicates/],
     ['bad platform-only entry', { name: 'a', scenarios: ['S1'], platformOnly: 'S1' }, /"platformOnly" must be an array/],
   ])('refuses %s', (_n, doc, pattern) => {
     expect(() => parseDeclaration(JSON.stringify(doc), 'f')).toThrow(pattern);

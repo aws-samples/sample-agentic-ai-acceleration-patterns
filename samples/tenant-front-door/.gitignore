@@ -49,4 +49,5 @@ src/smithy/
 TODO.md
 .kiro/
 /build/
+/.integ/
 !/.projenrc.ts

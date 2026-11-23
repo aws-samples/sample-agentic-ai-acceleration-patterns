@@ -189,6 +189,24 @@
         }
       ]
     },
+    "integ": {
+      "name": "integ",
+      "description": "Run the integration test in single mode across the current account and $TFD_INTEG_ACCOUNT_B (hours; see integration-test.md)",
+      "steps": [
+        {
+          "exec": "bash scripts/integ.sh single"
+        }
+      ]
+    },
+    "integ:host": {
+      "name": "integ:host",
+      "description": "Run the integration test in host mode (integration-test.md)",
+      "steps": [
+        {
+          "exec": "bash scripts/integ.sh host"
+        }
+      ]
+    },
     "package": {
       "name": "package",
       "description": "Creates the distribution package"
@@ -306,6 +324,12 @@
           "execArgs": [
             "npm",
             "update",
+            "@aws-crypto/sha256-js",
+            "@aws-sdk/client-cloudwatch-logs",
+            "@aws-sdk/client-cloudwatch",
+            "@aws-sdk/client-sts",
+            "@aws-sdk/credential-providers",
+            "@smithy/signature-v4",
             "@stylistic/eslint-plugin",
             "@types/aws-lambda",
             "@types/jest",

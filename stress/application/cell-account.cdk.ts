@@ -9,7 +9,8 @@
  *   the cell tenant build policy (stress ADR-0012). It deploys before the cell bootstrap,
  *   which names the first two.
  * - `CellAccountBaseStack`: the API Gateway account's CloudWatch Logs role and setting,
- *   and the identity parameters a cell reads (`/application-plane/shared/identity/*`).
+ *   the identity parameters a cell reads (`/application-plane/shared/identity/*`) and, for
+ *   a platform run, the ingress reader role the platform account assumes.
  *
  * Both use the CDK's legacy synthesizer: an asset-free template deployed inline with the
  * owner's credentials, so the account never needs a default CDK bootstrap (path spike
@@ -18,7 +19,7 @@
  * cell boundary.
  */
 
-import { LegacyStackSynthesizer, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
+import { ArnFormat, CfnOutput, LegacyStackSynthesizer, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -31,7 +32,7 @@ import {
   cellWorkloadBoundaryDocument,
   type CellPolicyNames,
 } from './cell-policies';
-import { acknowledgeGranularFinding } from '../driver/nag';
+import { acknowledgeGranularFinding, nagFindingResource } from '../driver/nag';
 
 /** The stack tag of every account-base stack (spec §3.7). */
 export const ACCOUNT_BASE_TAG = { key: 'stress:part', value: 'account-base' } as const;
@@ -144,16 +145,34 @@ export interface CellAccountBaseStackProps extends OwnerStackProps {
   readonly userPoolId?: string;
   /** The stress identity's app client id. */
   readonly appClientId?: string;
+  /**
+   * The platform account (12 digits) of a platform run. When set, the stack also holds the
+   * ingress reader role that account may assume (spec §3.5, §3.7); unset, no such role exists.
+   */
+  readonly platformAccountId?: string;
 }
 
-/** The API Gateway account's CloudWatch Logs role and setting, and the identity parameters. */
+/**
+ * The cell ingress parameters the reader role may read: each cell's published ingress
+ * interface, one JSON document with `baseUrl`. The demo stack of a cell, `StressCell-<cell id>`
+ * with `publishParameters=false`, publishes it under `<registry prefix><stack name>/ingress`
+ * (`shared-ingress.cdk.ts`, `PUBLISHED.ingress`).
+ */
+export const INGRESS_PARAMETER_PATTERN = 'application-plane/shared/agent-runtime/StressCell-*/ingress';
+
+/** The API Gateway account's CloudWatch Logs role and setting, the identity parameters and the ingress reader role. */
 export class CellAccountBaseStack extends Stack {
   readonly apiGatewayLogsRole: iam.Role;
+  /** The role the platform account assumes to read a cell's ingress parameter; only with `platformAccountId`. */
+  readonly ingressReaderRole?: iam.Role;
 
   constructor(scope: Construct, id: string, props: CellAccountBaseStackProps = {}) {
     super(scope, id, ownerProps(props));
     if ((props.userPoolId === undefined) !== (props.appClientId === undefined)) {
       throw new Error('give both userPoolId and appClientId, or neither');
+    }
+    if (props.platformAccountId !== undefined && !/^[0-9]{12}$/.test(props.platformAccountId)) {
+      throw new Error('platformAccountId must be a 12-digit account id');
     }
 
     // Every runtime-isolation stage writes access and execution logs (path spike CP-4).
@@ -173,6 +192,23 @@ export class CellAccountBaseStack extends Stack {
     if (props.userPoolId !== undefined && props.appClientId !== undefined) {
       new ssm.StringParameter(this, 'UserPoolId', { parameterName: IDENTITY_PARAMETERS.userPoolId, stringValue: props.userPoolId });
       new ssm.StringParameter(this, 'AppClientId', { parameterName: IDENTITY_PARAMETERS.appClientId, stringValue: props.appClientId });
+    }
+
+    if (props.platformAccountId !== undefined) {
+      // Read-only, one action, the cells' ingress parameters of this Region only. No role name:
+      // IAM names are account-wide, and each Region's base stack makes its own role.
+      this.ingressReaderRole = new iam.Role(this, 'IngressReader', {
+        assumedBy: new iam.AccountPrincipal(props.platformAccountId),
+        description: 'The platform account reads a cell ingress parameter (spec §3.5): ssm:GetParameter on the cells\' published ingress only',
+      });
+      const parameters = this.formatArn({ service: 'ssm', resource: 'parameter', resourceName: INGRESS_PARAMETER_PATTERN, arnFormat: ArnFormat.SLASH_RESOURCE_NAME });
+      this.ingressReaderRole.addToPolicy(new iam.PolicyStatement({ sid: 'ReadCellIngressParameters', actions: ['ssm:GetParameter'], resources: [parameters] }));
+      acknowledgeGranularFinding(
+        this.ingressReaderRole,
+        `AwsSolutions-IAM5[Resource::${nagFindingResource(this.ingressReaderRole, parameters)}]`,
+        'One parameter per cell, StressCell-<cell id>, which the platform account does not know before the cell exists; the action is read-only and the name is fixed to the cell stacks\' published ingress.',
+      );
+      new CfnOutput(this, 'IngressReaderRoleArn', { value: this.ingressReaderRole.roleArn });
     }
   }
 }

@@ -24,6 +24,9 @@ import { TenantFrontDoor, TenantFrontDoorProps } from './index';
  * `--context registrarUrl=<the edge parameter's registrarUrl>`, the app adds
  * `TenantFrontDoor-route-hook-access` in the control plane's account, which
  * the deployer deploys with that account's credentials (spec §3.1, §6.1).
+ * With `--context stackNamePrefix=<name>` every stack name starts with
+ * `<name>` instead of `TenantFrontDoor`, and so does the construct id; the
+ * stress slice names its stacks by run prefix (ADR-0030).
  */
 const app = new App();
 
@@ -50,13 +53,16 @@ const props: TenantFrontDoorProps = {
   reportingEndpoint: optional('reportingEndpoint'),
   alarmTopicArn: optional('alarmTopicArn'),
   registrarUrl: optional('registrarUrl'),
+  stackNamePrefix: optional('stackNamePrefix'),
   // Seams to the router (build slice S1) and the registrar (S3): their
   // defaults are src/router/router.js and src/registrar/registrar.function.ts.
   routerSourcePath: optional('routerSourcePath'),
   registrarEntry: optional('registrarEntry'),
 };
 
-new TenantFrontDoor(app, 'TenantFrontDoor', props);
+// The construct id names the CloudFront policies and other account-wide names the stacks create, so two
+// front doors in one account (another Region) need different ids: a stack name prefix gives the id.
+new TenantFrontDoor(app, props.stackNamePrefix ?? 'TenantFrontDoor', props);
 
 app.synth();
 

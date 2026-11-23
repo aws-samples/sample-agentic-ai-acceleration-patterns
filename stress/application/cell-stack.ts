@@ -30,6 +30,8 @@ export function cellAppContext(stackName: string): Record<string, string> {
     ingress: 'api-gateway',
     tvm: 'true',
     publishParameters: 'false',
+    // The platform run sends `{conversationId, prompt}`: the ingress accepts a conversation id only with a session scope, and one session per tenant keeps the Runtime's active sessions at the tenant count.
+    session: 'tenant',
     owner: stackName,
   };
 }

@@ -24,3 +24,30 @@ export function readJsonContext<T>(node: Node, key: string): T | undefined {
   }
   return value as T;
 }
+
+/** The control plane stack's name when the deployer gives none. */
+export const DEFAULT_STACK_NAME = 'control-plane-dev';
+
+/** A CloudFormation stack name: a letter, then letters, digits and hyphens, at most 128 characters. */
+const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
+
+/**
+ * Reads the OPTIONAL `stackName` context: the name of the control plane
+ * stack, default `control-plane-dev`. Another sample's integration run
+ * names the control plane it deploys through this app. An account and
+ * Region still hold one control plane, because the stack's
+ * `/control-plane/tenant-api-url` parameter has a fixed name. Fails
+ * synthesis on a name CloudFormation would refuse.
+ */
+export function readStackName(node: Node): string {
+  const value: unknown = node.tryGetContext('stackName');
+  if (value === undefined || value === '') {
+    return DEFAULT_STACK_NAME;
+  }
+  if (typeof value !== 'string' || !STACK_NAME_PATTERN.test(value)) {
+    throw new Error(
+      `Invalid stackName ${JSON.stringify(value)}: a CloudFormation stack name starts with a letter and holds letters, digits and hyphens, at most 128 characters`,
+    );
+  }
+  return value;
+}

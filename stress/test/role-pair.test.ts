@@ -37,7 +37,7 @@ describe('the role pair (spec §3.7, stress ADR-0012)', () => {
 describe('the cell stack (spec §3.3)', () => {
   it('is named after the cell and deploys the api-gateway ingress with the TVM and no account-wide parameters', () => {
     expect(cellStackName('01KAAAAAAAAAAAAAAAAAAAAAAA')).toBe('StressCell-01KAAAAAAAAAAAAAAAAAAAAAAA');
-    expect(cellAppContext('S')).toEqual({ ingress: 'api-gateway', tvm: 'true', publishParameters: 'false', owner: 'S' });
+    expect(cellAppContext('S')).toEqual({ ingress: 'api-gateway', tvm: 'true', publishParameters: 'false', session: 'tenant', owner: 'S' });
     expect(CELL_TAG).toEqual({ key: 'stress:part', value: 'cell' });
   });
   it('refuses anything but a ULID, so the id never reaches a stack name unchecked', () => {
