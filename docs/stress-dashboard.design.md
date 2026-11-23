@@ -156,16 +156,16 @@ Never a tenant id, user name, agent id, token, host name or address.
 |---|---|---|---|
 | `ScenarioActive` | Count (1 or 0) | `RunId`, `Scenario` | runner: 1 every 60 s while a scenario's `run` verb runs, 0 when it ends |
 | `IsolationAssertions`, `IsolationMismatches` | Count | `RunId`, `Slice`, `Scenario` | host relay, per minute, for k6 scenarios only |
-| `IsolationAssertionsFinal`, `IsolationMismatchesFinal` | Count | `RunId`, `Slice`, `Scenario` | runner, once per scenario record when `run` returns, stamped at the minute the scenario's window ends; every slice, k6 or not, no slice code |
+| `IsolationAssertionsFinal`, `IsolationMismatchesFinal` | Count | `RunId`, `Slice`, `Scenario` | runner, once per scenario record (not the `lifecycle` records) when `run` returns, stamped at the minute the scenario's window ends; every slice, k6 or not, no slice code |
 | `Requests` | Count | `RunId`, `Scenario`, `StatusClass` | host relay |
 | `RefusalsSeen`, `RefusalsNamed` | Count | `RunId`, `Scenario` | host relay: every refusal the driver counted (4xx, 5xx, and a refusal inside a 200), and those whose line names a tenant and a status or a reason |
 | `RefusalsByReason` | Count | `RunId`, `Scenario`, `Reason` | host relay |
-| `RefusalsUnattributed` | Count | `RunId`, `Slice`, `Scenario` | runner, once per record after the slice's `collect` (spec P-7), stamped like the final isolation counts |
+| `RefusalsUnattributed` | Count | `RunId`, `Slice`, `Scenario` | runner, once per k6 scenario record after the slice's `collect` (spec P-7), stamped at the scenario's window end, or at the publish time when that end is more than 3 hours old (§3.1) |
 | `ClientLatencyMs` | Milliseconds | `RunId`, `Scenario` | host relay, as a histogram (`Values` and `Counts`): at most 150 buckets a datum, so the percentiles are bucket-resolution, not the exact figures of the record |
 | `OnboardReadySeconds` | Seconds | `RunId` | control-plane driver: one value per tenant (PS-1, spec §5.1) |
 | `BuildsInFlight` | Count | `RunId` | control-plane driver: the builds it has started and not seen end, every 15 s (it already paces waves at the build limit, stress ADR-0013) |
 | `RoutableSeconds`, `SuspendedSeconds`, `RemovedSeconds` | Seconds | `RunId` | control-plane driver (PS-5): one value per churn tenant |
-| `LifecycleSeconds` | Seconds | `RunId`, `Slice`, `Phase` | runner: after each slice's `deploy`, `teardown` and platform step, and for the dashboard stack itself under slice `dashboard` |
+| `LifecycleSeconds` | Seconds | `RunId`, `Slice`, `Phase` | runner: the running deploy total after each set-up step of a slice (the runner adds interleaved steps up), the final deploy total, and the destroy seconds after the slice's teardown, which is when the runner has them; the dashboard stack itself under slice `dashboard`. `Phase` has no other value, so platform steps fold into `deploy` |
 | `QuotaPlannedDraw`, `QuotaLimit` | Count | `RunId`, `Account`, `Quota` | runner: from the budget's sums and the `--limits` file, at the start and every 60 s |
 
 Two CloudWatch rules shape how the dashboard names these series
@@ -192,9 +192,11 @@ are as old as the scenario phase, which is under the 93 minutes of the one
 `small` run (`stress/results/2026-11-21-small.md`) and longer at `large`. A data point three to
 24 hours old can take up to two hours to become readable, and one older than a
 day at least 48 hours. So the runner stamps `RefusalsUnattributed` with its
-publish time when the scenario phase has lasted more than 3 hours, and the
-dashboard shows the number once, after `collect`. SD-2 checks the age rule. The
-runner never backfills a finished run.
+publish time instead of the window end when the window end is more than 3 hours
+old at publish time, and the dashboard shows the number once, after `collect`. The
+age rule rests on the PutMetricData documentation; it is unproven here (§14), and
+a `small` run is shorter than 3 hours, so it only matters at `large`. The runner
+never backfills a finished run.
 
 ### 3.2 `StressCell`, published in each cell account
 
@@ -230,9 +232,15 @@ A value outside the list shows in the total and not in the breakdown.
 signal that a quota is near, not a measure of it. The authoriser signs with KMS
 (its role is the one allowed `kms:Sign`), and the signer logs its retries as
 `sdk retried` lines (`src/shared/jws.ts` calls `logRetries('kms', 'Sign', ...)`;
-`src/shared/logger.ts` writes the line), so the KMS retries are in the
-authoriser's log group and not the ingress's. The filter reads both groups. That
-the line reaches the `AuthorizerLogs` group is settled by a synth check in W-12d.
+`src/shared/logger.ts` writes the line), so the KMS retries of minting are in the
+authoriser's log group and not the ingress's. Two more kinds of function sign with
+KMS: each tools gateway's interceptor signs every tool call's context with the
+context key (`tools-gateway.cdk.ts`, `tools/interceptor.function.ts`), and the demo
+stack creates two tools gateways, so two interceptor log groups. KMS rate limits are
+per account, so these retries draw on the same quota. The `SdkRetryLines` filter
+reads the ingress, the authoriser and both interceptor log groups. W-12d's synth
+test checks that the filter is on each group; that the lines arrive is checked in
+SD-3.
 
 ### 3.3 Native metrics
 
@@ -272,7 +280,7 @@ drivers and feed only the runner's own series.
 |---|---|---|---|---|---|---|
 | A1 | Run header: run id, tier, commits (text), and the scenario strip. The only widget that shows when each scenario's `run` verb ran, which includes its set-up and idle time, not the load window (§9) | `ScenarioActive` | `RunId`, `Scenario` | Maximum | every scenario | near-live |
 | A2 | Isolation: a graph of assertions and mismatches per minute with a line at 0, and a number for the run's total mismatches from the final series | live: `IsolationAssertions`, `IsolationMismatches`; number: `IsolationAssertionsFinal`, `IsolationMismatchesFinal` | `RunId`, `Slice`, `Scenario` | Sum | graph: PS-2, PS-3, PS-4, PS-6, PS-8; number: PS-1 to PS-8 | graph near-live, number after each scenario |
-| A3 | Refusals: seen against named, and their gap; the record's unattributed count as a number | `RefusalsSeen`, `RefusalsNamed`, math `FILL(seen, 0) - FILL(named, 0)`; `RefusalsUnattributed` | `RunId`, `Scenario`, and `Slice` for the number | Sum | PS-2, PS-3, PS-4, PS-6, PS-8 | gap near-live, number once after the slice's `collect` |
+| A3 | Refusals: seen against named, and their gap; the record's unattributed count as a number | `RefusalsSeen`, `RefusalsNamed`, math `RUNNING_SUM(FILL(seen, 0)) - RUNNING_SUM(FILL(named, 0))`, read over the scenario (one minute can show a negative gap from minute-boundary skew, so the cumulative sum is the figure); `RefusalsUnattributed` | `RunId`, `Scenario`, and `Slice` for the number | Sum | PS-2, PS-3, PS-4, PS-6, PS-8 | gap near-live, number once after the slice's `collect` |
 | A4 | Requests by status class | `Requests` | `RunId`, `Scenario`, `StatusClass` | Sum | PS-2, PS-3, PS-4, PS-6, PS-8 | near-live |
 | A5 | Refusals by reason | `RefusalsByReason` | `RunId`, `Scenario`, `Reason` | Sum | PS-2, PS-3, PS-4, PS-6, PS-8; most use in PS-4 (noisy neighbour) and PS-3 (herd) | near-live |
 | A6 | Client latency p50, p95, p99 (bucketed, so approximate) | `ClientLatencyMs` | `RunId`, `Scenario` | p50, p95, p99 | PS-2, PS-3, PS-4, PS-6, PS-8 | near-live |
@@ -364,7 +372,7 @@ twice.
 | Isolation assertions and mismatches | k6's own lines. The k6 library keeps one counter per assertion and prints a line per mismatch (`isolation_mismatch`, `stress/k6/lib.js`). A relay on the driver host reads k6's output file, sums by minute, and calls `PutMetricData` (`IsolationAssertions`, `IsolationMismatches`). | The runner reads each record when `run` returns and publishes its `isolation` totals as `IsolationAssertionsFinal` and `IsolationMismatchesFinal`, stamped at the end of the scenario's window. This covers PS-1, PS-5 and PS-7 as well, with no slice code. |
 | Refusals seen, named and unattributed | The k6 library counts every 4xx, 5xx and refusal inside a 200 (`refusals_seen`) and prints a `body_refusal` line for a refusal inside a 200; the runtime-isolation sample's `scripts/stress/k6/edge-refusals.js` prints an `edge_refusal` line for each refusal the edge or a cell answers. Each line names a tenant and a status or a reason. The relay publishes `RefusalsSeen` and `RefusalsNamed`; their gap is the live estimate of the unattributed count. | The record's `refusals.unattributed`, which the runner publishes as `RefusalsUnattributed` once, after the slice's `collect`, which runs after every scenario of the run. |
 
-In platform mode the record's figure and the live gap are the same arithmetic:
+In platform mode the record's figure and the live gap are the same arithmetic over a whole scenario (the record is clamped at 0):
 `collect-platform.sh` counts the driver's lines and treats the rest as
 unattributed, and joins no hop log. So A3 shows one number twice, at two times.
 It is not a second check. The independent check on the request count is D6. In
@@ -384,13 +392,18 @@ existing code. The runtime-isolation sample's
 
 1. The k6 library flushes one more line per VU per minute (the existing
    `tenant_minute` ledger flushes the same way): the count by status class, the
-   assertion count, the refusals seen (every status of 400 or more, and the
+   assertion count, the mismatch count (a mismatch line itself has no minute, so
+   the count joins the same minute line), the refusals seen (every status of 400 or more, and the
    refusals inside a 200, as `refusals_seen` counts them), and a latency histogram. The histogram has fixed
    log-spaced buckets, at most 150 and about 12 % wide from 1 ms to 120 s, so a
    percentile is right to the bucket. The relay sums the lines of all VUs for a
    minute and publishes the minute once every VU has passed it, or after a grace
    of 90 s.
-2. `stress/driver/k6.sh` starts the relay before k6 and stops it after.
+2. `stress/driver/k6.sh` starts the relay before k6 and, when it stops it, has the
+   relay publish every pending minute, so the last minute is not lost. `k6.sh`
+   mirrors only `stress/k6/` and the script's own folder to the host, inside Run
+   Command parameters under a size guard of 60 KB; so the relay lives in
+   `stress/k6/` (already mirrored) and counts against that guard.
 3. The driver host role gains `cloudwatch:PutMetricData`, limited by the condition
    key `cloudwatch:namespace` to `StressRun`. The action has no resource type, so
    the statement's resource is `*`, as for the Run Command actions (stress
@@ -430,10 +443,10 @@ limitations).
 | `lambda-concurrency` | `AWS/Lambda` `ConcurrentExecutions`, Maximum, no dimension | C4, D4 | none; read today |
 | `codebuild-linux-small` | `BuildsInFlight` from the control-plane driver | A7 | CodeBuild publishes no concurrency metric that this design found; the driver's own count stands in (unproven) |
 | `sts-assume-role-rps` | `SdkRetryLines` for `Service` `sts` | D5 | STS publishes no rate metric; the signal is that calls were retried, not the rate or the percent of 600 |
-| `kms-rsa-rps`, `kms-ecc-rps` | `SdkRetryLines` for `Service` `kms` | D5 | the same: a retry signal only; the authoriser logs the KMS retries (`jws.ts`), and W-12d checks that the filter is on its log group (§3.2) |
+| `kms-rsa-rps`, `kms-ecc-rps` | `SdkRetryLines` for `Service` `kms` | D5 | the same: a retry signal only; the authoriser and the two tools interceptors log the KMS retries (`jws.ts`), and W-12d checks that the filter is on each of those log groups (§3.2) |
 | `agentcore-new-sessions-rps`, `agentcore-active-sessions`, `agentcore-runtime-tps` | `AWS/Bedrock-AgentCore`: aggregated sessions (new sessions a second from the sum over 60 s), `ActiveSessionCount`, `Throttles` and aggregated invocations (calls a second) | D7, E1 | the AgentCore documentation lists these metrics; exact names and dimensions are unproven (§14) |
 | `cognito-groups` | the planned draw against the 10,000 hard cap | E1 | a count of groups is no metric; the cap is shown, not the use |
-| `cognito-user-authentication-rps` | Cognito's own throttle metric, if it exists as assumed | C3, E1 | unproven (§14) |
+| `cognito-user-authentication-rps` | Cognito's own throttle metric, if it exists as assumed | E1 (a Cognito panel in E1, not C3) | unproven (§14) |
 | not budgeted today: API Gateway control plane, CloudFront Functions compute, KeyValueStore size | `FunctionComputeUtilization` (a percent already), `RouteTableBytes` | B1, B4 | the API Gateway control plane has no signal; the budget has no id for these (`stress/README.md`) |
 
 E2 ranks the quotas by observed peak over limit. Where a quota has a retry
@@ -578,7 +591,7 @@ cannot confirm a few cents.
 | Item | Basis | Per run (3 hours at most) |
 |---|---|---|
 | Dashboard | about $3 a dashboard-month, prorated by the hour; the first three dashboards of up to 50 metrics are free, this one has more | about $0.01 |
-| `StressRun` series | about 110 to 240 series at $0.30 a series-month, charged only for the hours in which data is sent. From §3.1, a k6 scenario has 11 to 30 series (`ScenarioActive` 1, live isolation 2, final isolation 2, `Requests` 1 to 5, seen and named 2, `RefusalsByReason` 1 to 16, unattributed 1, latency 1) and any other scenario 4. At `small` that is 5 k6 and 3 other scenarios, 67 to 162. Run level adds 40 to 75: 25 to 60 for the planned draw and the limit (up to 10 quotas for 2 or 3 accounts), about 10 for lifecycle and 5 for the driver. 110 to 240 series x $0.30 x 3 / 730 | $0.13 to $0.30 |
+| `StressRun` series | about 105 to 235 series at $0.30 a series-month, charged only for the hours in which data is sent. From §3.1, a k6 scenario has 11 to 30 series (`ScenarioActive` 1, live isolation 2, final isolation 2, `Requests` 1 to 5, seen and named 2, `RefusalsByReason` 1 to 16, unattributed 1, latency 1) and any other scenario 3 (`ScenarioActive` and the two final isolation series; `RefusalsUnattributed` is published for k6 scenarios only). At `small` that is 5 k6 and 3 other scenarios, 64 to 159. Run level adds 40 to 75: 25 to 60 for the planned draw and the limit (up to 10 quotas for 2 or 3 accounts), about 10 for lifecycle and 5 for the driver. 105 to 235 series x $0.30 x 3 / 730 | $0.13 to $0.29 |
 | `StressCell` series | about 35 series for each cell account (§3.2: the status, reason, service and mint breakdowns with their totals), one cell account at `small` and two at `medium` and `large`: 35 x $0.30 x 3 / 730 each | about $0.04 at `small`, $0.09 at `medium` and `large` |
 | Metric filters | no charge for the filter itself | $0 |
 | `PutMetricData` | one call a minute from the relay, a few hundred from the runner | under $0.01 |
@@ -658,8 +671,8 @@ to the spec's work table (spec §9) when ADR-0022 is accepted.
 |---|---|---|---|---|
 | W-12a | Emitter and runner publishing: `ScenarioActive`, `LifecycleSeconds` (and the `dashboard` entry in `result.ts` and `runner.ts`, §8), the `...Final` and `RefusalsUnattributed` totals from records, `QuotaPlannedDraw`, `QuotaLimit`; the dimension allowlist; `run.sh emit` for slices; `--keep-dashboard` | `stress/src/` | §3.1 table. Input: records, budget sums, limits file. Output: `PutMetricData` calls. Test: allowlist refuses any other dimension | ready |
 | W-12b | The dashboard CDK app: one stack, one dashboard, widgets A to E as data | `stress/dashboard/` (its own app, like the driver, stress ADR-0009) | Input: run id, tier, commits, cell account ids, prefix, the plan's slices and scenarios, the Region. Output: one dashboard `<prefix>-run`. Test: synth has no resource but the dashboard, and every `StressRun` series is named, none searched | ready (the metric contract is fixed here); widgets marked unproven wait for SD-3 |
-| W-12c | Host relay (bash), started and stopped by `k6.sh`, and the k6 library's minute line. The relay reads `RECORD_SCENARIO` and `STRESS_RUN_ID` from the host environment and the `edge_refusal` lines of the runtime-isolation sample's `edge-refusals.js` as they are | `stress/driver/`, `stress/k6/` | Input: k6's output file. Output: `Requests`, `IsolationAssertions`, `IsolationMismatches`, `RefusalsSeen`, `RefusalsNamed`, `RefusalsByReason`, `ClientLatencyMs`. Test: a recorded output file in, the expected calls out | ready; needs spike SD-2 for the lag |
-| W-12d | Cell metric filters of §3.2, on the ingress, authoriser and access log groups | `stress/application/cell-app.ts` | §3.2 table. Test: synth holds the filters, none with a tenant dimension, and the `sdk retried` filter exists on `AuthorizerLogs` as well as `IngressLogs` | ready |
+| W-12c | Host relay (bash), started and stopped by `k6.sh`, and the k6 library's minute line. The relay reads `RECORD_SCENARIO` and `STRESS_RUN_ID` from the host environment and the `edge_refusal` lines of the runtime-isolation sample's `edge-refusals.js` as they are | the relay and the minute line in `stress/k6/`; the start and stop in `stress/driver/k6.sh` | Input: k6's output file. Output: `Requests`, `IsolationAssertions`, `IsolationMismatches`, `RefusalsSeen`, `RefusalsNamed`, `RefusalsByReason`, `ClientLatencyMs`. Test: a recorded output file in, the expected calls out | ready; needs spike SD-2 for the lag |
+| W-12d | Cell metric filters of §3.2, on the ingress, authoriser and access log groups | `stress/application/cell-app.ts` | §3.2 table. Test: synth holds the filters, none with a tenant dimension, and the `sdk retried` filter exists on the ingress, authoriser and both interceptor log groups | ready |
 | W-12e | Sink fixture, the link in `CellAccountBaseStack`, and the deploy scripts | `stress/application/`, `stress/dashboard/` | sink ARN in, link out; the sink policy names the cell account ids | blocked: the maintainer's decision on ADR-0022, the cell owners' step, and spike SD-1 |
 | W-12f | Slice emitters in the control-plane slice: `BuildsInFlight`, `OnboardReadySeconds` and the PS-5 times. No other slice emits: the runner reads their records | `samples/control-plane/scripts/stress/` and its driver | `run.sh emit <metric> <value> [dim=value]` from W-12a | ready after W-12a's CLI is merged |
 | W-12g | The runner's dashboard step (platform runs only): deploy and remove the stack, `run.sh dashboard up --run <id>`, removal of a kept dashboard by `--remove-fixtures`, the snapshots, the results file's "Dashboard window" line, the new leftover check (§8), and `cost.sh` for the platform run | `stress/src/`, runtime-isolation `cost.sh` | §8, §9, §10 | ready after W-12a and W-12b |
@@ -690,6 +703,7 @@ front door's spikes `S-2`, `S-3`, `S-5` and `S-7`.
 | A Contributor Insights widget can show a cell account's rule, or a platform-account rule over shared cell log groups | not designed (§7); the documentation shows only the second | a change to ADR-0022 |
 | A metric filter can publish `$.totalMs` as a value whose p95 and p99 CloudWatch computes | standard feature, not run here | SD-3 |
 | A dashboard `RunId` variable can switch a dimension | not run | SD-3 |
+| A point stamped more than 3 hours back becomes readable only after up to two hours, which is why `RefusalsUnattributed` is stamped with its publish time past that age | from the PutMetricData documentation; not tried | the first `large` run |
 | The live view trails a minute of load by under 3 minutes, and a 60-second period shows a 5-second herd as one point | not measured; the period is CloudWatch's standard resolution | SD-2 |
 | Searched widgets (B1 to B4, C1 to C3) show data from the first minute of PS-1 | a new metric can take up to 15 minutes to be listed | SD-2 |
 | `GetMetricWidgetImage` renders cross-account widgets | not run | SD-3 |

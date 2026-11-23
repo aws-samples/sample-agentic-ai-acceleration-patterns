@@ -32,7 +32,7 @@ The decision is where a person looks, and how the other places feed it. The
 constraints are the spec's: a cell account holds four kinds of stack and
 nothing else (spec §3.7), a cell build can change any cell in its account
 and no more, per-tenant custom metrics stay opt-in (runtime-isolation
-ADR-0021), and a run leaves nothing behind (spec §7).
+ADR-0021), and a slice leaves nothing it owned (spec §7).
 
 ## Options considered
 ### Option 1: One dashboard in the platform account, cell accounts shared through cross-account observability
