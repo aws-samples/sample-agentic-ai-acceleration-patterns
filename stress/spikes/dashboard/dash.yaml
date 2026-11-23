@@ -1,0 +1,29 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Spike SD-3: one dashboard resource, timed, with a RunId variable and a cross-account series.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Stress dashboard spike SD-3, one dashboard
+Parameters:
+  CellAccountId:
+    Type: String
+Resources:
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: StressDashSpike
+      DashboardBody: !Sub |
+        {
+          "variables": [
+            {"type": "property", "property": "RunId", "inputType": "select", "id": "RunId", "label": "Run", "visible": true,
+             "search": "{StressRun,RunId} MetricName=\"ScenarioActive\"", "populateFrom": "RunId", "defaultValue": "none"}
+          ],
+          "widgets": [
+            {"type": "metric", "x": 0, "y": 0, "width": 12, "height": 6, "properties": {
+              "title": "run series", "region": "${AWS::Region}", "view": "timeSeries", "stat": "Maximum", "period": 60,
+              "metrics": [["StressRun", "ScenarioActive", "RunId", "none", "Scenario", "PS-2"]]}},
+            {"type": "metric", "x": 12, "y": 0, "width": 12, "height": 6, "properties": {
+              "title": "cell series", "region": "${AWS::Region}", "view": "timeSeries", "stat": "Sum", "period": 60,
+              "metrics": [["StressCell", "IngressRequests", "Status", "200", {"accountId": "${CellAccountId}"}]]}}
+          ]
+        }

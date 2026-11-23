@@ -4,7 +4,7 @@ SPDX-License-Identifier: MIT-0
 -->
 # ADR-0022: Show a run on one dashboard in the platform account
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-23
 - Deciders: Dave Roberts (PSA)
 

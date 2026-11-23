@@ -132,6 +132,7 @@
             "build-tools",
             "driver",
             "application",
+            "dashboard",
             "projenrc",
             ".projenrc.ts"
           ],

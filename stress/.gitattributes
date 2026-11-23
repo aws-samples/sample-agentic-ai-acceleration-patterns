@@ -11,6 +11,7 @@
 /.projen/files.json linguist-generated
 /.projen/tasks.json linguist-generated
 /application/tsconfig.json linguist-generated linguist-language=JSON-with-Comments
+/dashboard/tsconfig.json linguist-generated linguist-language=JSON-with-Comments
 /driver/tsconfig.json linguist-generated linguist-language=JSON-with-Comments
 /LICENSE linguist-generated
 /package-lock.json linguist-generated

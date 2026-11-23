@@ -739,7 +739,8 @@ correlation id.
 
 A live and after-the-run view of these figures on one CloudWatch dashboard is
 proposed in [`docs/stress-dashboard.design.md`](./stress-dashboard.design.md)
-(stress ADR-0022, Proposed). It is not built and decides no pass criterion.
+(stress ADR-0022, Accepted; built as W-12, see `stress/dashboard/README.md`). It
+decides no pass criterion.
 
 ## 7. Pass criteria
 
@@ -821,6 +822,7 @@ Q-5, answered by the first platform run at `small` (`stress/results/2026-11-21-s
 | W-7 front-door slice | the front door merged; its spikes S-2, S-3, S-5, S-7 passed; W-1; W-11's ingress reader role for phase two in the platform run | done |
 | W-8 correlation header in the ingress and the front door | decision 6 | ingress part done; front-door part yes, now |
 | W-9 first platform run at `small`: also the control-plane driver's identity calls (§3.3 step 4) and the record of them that the runtime-isolation slice reads (§4.2), the cleanup of those identity tenants in the `control-plane` teardown (§4.2), and a check that the front door's hooks are unregistered (the control plane's step `unhook`, before the front door's teardown) before the control plane deletes cells (§3.5) | W-3, W-5, W-6, W-7, W-8, W-11; the platform set-up order in the runner (§3.5) | done (`stress/results/2026-11-21-small.md`) |
+| W-12 a CloudWatch dashboard of a platform run, built as `stress/dashboard/`, the runner's emitter and the relay (stress ADR-0022, `docs/stress-dashboard.design.md` §12) | ADR-0022 accepted | built; see `stress/dashboard/README.md` for what ran live and what did not |
 
 ## 10. Open questions
 

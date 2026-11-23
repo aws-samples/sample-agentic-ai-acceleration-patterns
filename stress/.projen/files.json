@@ -8,6 +8,7 @@
     ".projen/files.json",
     ".projen/tasks.json",
     "application/tsconfig.json",
+    "dashboard/tsconfig.json",
     "driver/tsconfig.json",
     "LICENSE",
     "projenrc/tsconfig.json",
