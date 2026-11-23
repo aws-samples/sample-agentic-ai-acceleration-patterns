@@ -100,7 +100,7 @@ export function knownWildcards(ctx: KnownContext): readonly KnownWildcard[] {
     {
       matches: re(/^\*$/),
       actions: /^(ecr:GetAuthorizationToken|ec2:DescribeInstances|lambda:ListMicrovms|ecs:ListTasks|ecs:DiscoverPollEndpoint|logs:DescribeLogGroups)$/,
-      reason: 'These actions take no resource (spec 3.6, ADR-0011, ADR-0030): ECR token, EC2 and MicroVM listing, the ECS poll endpoint, log group listing. ecs:ListTasks carries an ecs:cluster condition. None reads tenant data.',
+      reason: 'These actions take no resource (spec 3.6, ADR-0011, ADR-0030): ECR token, EC2 and MicroVM listing, the ECS poll endpoint, log group listing. The exception is ecs:ListTasks, whose only resource type is a container instance with no id at synth; it carries an ecs:cluster condition. None reads tenant data.',
     },
     {
       matches: re(/^\*$/),

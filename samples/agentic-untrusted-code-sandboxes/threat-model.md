@@ -174,14 +174,13 @@ Scope and assumptions:
 
 ## Security review
 
-Run on 2026-11-22 on the built tree of commit `7319447` (a clean export with
-the synthesised `cdk.out`, its cdk-nag validation report included); later
-commits on the branch change documents only:
+Run on 2026-11-23 on the built tree of commit `ca96c16` (a clean export with
+the synthesised `cdk.out`, its cdk-nag validation report included):
 
 | Scanner | Critical | High | Medium | Low | Result |
 |---|---|---|---|---|---|
 | ASH 3.1.2 (bandit, cdk-nag, checkov, detect-secrets, npm-audit, semgrep), `.ash/.ash.yaml` | 0 | 0 | 0 | 16 (bandit, below threshold) | passed, 0 actionable at the medium threshold; 54 suppressed |
-| ProtoShield 0.18.0 (`.protoshield/config.yaml`) | 0 | 22 | 17 | 17 | full coverage; every high dispositioned below |
+| ProtoShield 0.18.0 (`.protoshield/config.yaml`) | 0 | 27 | 14 | 16 | full coverage; every high dispositioned below |
 
 ASH's cfn-nag, grype, opengrep and syft did not run (their dependencies are
 not installed); cdk-nag at synth and ProtoShield's checkov, CVE and IAM
@@ -204,8 +203,9 @@ rated high, most of them on actions that take no resource:
 | `logs:DescribeLogGroups` on `*` (log cleanup role) | 1 | Accepted. No resource type in the [Service Authorization Reference for CloudWatch Logs](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazoncloudwatchlogs.html); the role deletes only the groups named in spec §3.6. Acknowledged in cdk-nag (`AwsSolutions-IAM5[Resource::*]`, "these actions take no resource") |
 | `ecr:GetAuthorizationToken` on `*` (task execution role, AgentCore runtime role, ECR endpoint policies) | high in other passes | Accepted. No resource type in the [Service Authorization Reference for Amazon ECR](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticcontainerregistry.html); image pulls are scoped to the runner repository by `BatchGetImage` and `GetDownloadUrlForLayer` on its ARN (spec §3.6). Acknowledged the same way |
 | `ec2:DescribeInstances` on `*` (drain role) | high in other passes | Accepted. No resource type in the [Service Authorization Reference for Amazon EC2](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonec2.html); the drain reads only to wait for the instances it deregistered to be `terminated`, and holds no other EC2 action (ADR-0049). Acknowledged the same way |
+| `ecs:ListTasks` on `*` with an `ecs:cluster` condition (`nitro` reaper role) | 1 | Accepted. The [Service Authorization Reference for Amazon ECS](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonelasticcontainerservice.html) gives `ListTasks` only the `container-instance` resource type, whose ids are not known at synth; the `ArnEquals` condition on `ecs:cluster` limits the call to the sample's cluster, and the action only lists task ARNs. Acknowledged in cdk-nag (`AwsSolutions-IAM5[Resource::*]`) |
 | `lambda:ListMicrovms` on `*` (reaper and drain roles) | high in other passes | Accepted. No resource type in the [Service Authorization Reference for Lambda](https://docs.aws.amazon.com/service-authorization/latest/reference/list_awslambda.html); the code filters the answer by the sample's image. Acknowledged the same way |
-| `ec2:CreateNetworkInterface`, `DescribeNetworkInterfaces`, `DescribeSubnets`, `DeleteNetworkInterface`, `AssignPrivateIpAddresses`, `UnassignPrivateIpAddresses` on `*` (the `VpcNetworkInterfaces` policy of each role of a function in the tool subnets) | not yet rated (the policy is new since the last scan) | Accepted. These are the actions of the managed `AWSLambdaVPCAccessExecutionRole` policy without its log writes; Lambda creates, attaches and deletes the function's interfaces with the function's role. The two `Describe*` actions take no resource; the interfaces the other four act on have no id at synth. A narrower resource or condition was not tested. Residual: the grant spans every network interface of the account in every Region, so a defect in a bound function could delete or re-address another tenant's sandbox interface: an availability effect, with no data access. The policy holds no other action (ADR-0029, ADR-0073). Acknowledged in cdk-nag with that reason |
+| `ec2:CreateNetworkInterface`, `DescribeNetworkInterfaces`, `DescribeSubnets`, `DeleteNetworkInterface`, `AssignPrivateIpAddresses`, `UnassignPrivateIpAddresses` on `*` (the `VpcNetworkInterfaces` policy of each role of a function in the tool subnets) | medium | Accepted. These are the actions of the managed `AWSLambdaVPCAccessExecutionRole` policy without its log writes; Lambda creates, attaches and deletes the function's interfaces with the function's role. The two `Describe*` actions take no resource; the interfaces the other four act on have no id at synth. A narrower resource or condition was not tested. Residual: the grant spans every network interface of the account in every Region, so a defect in a bound function could delete or re-address another tenant's sandbox interface: an availability effect, with no data access. The policy holds no other action (ADR-0029, ADR-0073). Acknowledged in cdk-nag with that reason |
 
 The mediums are the same classes, accepted for the same reasons: the bandit
 B310 and B108 probe findings and the checkov Dockerfile rules (suppressed
@@ -213,6 +213,9 @@ above), wildcard resources on actions that take none, `AnyPrincipal` in
 endpoint policies that are scoped to the endpoint and the sample's
 resources (ADR-0067), and two dependency advisories (`minimatch`, `glob`) in
 build and synth-time packages (`aws-cdk-lib`, the lint and test tools) that
-no Lambda bundle or sandbox image contains. The `S-n` results are spike
+no Lambda bundle or sandbox image contains. The two deny statements in
+`src/core/runner-image.ts` (`s3:*` on the input bucket, and ECR writes
+outside the runner repository) are rated medium for their wildcard action
+or `notResources`; they deny and grant nothing. The `S-n` results are spike
 measurements on throwaway stacks; the integration steps cited above are the
 deployed evidence.
