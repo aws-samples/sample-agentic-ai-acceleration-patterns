@@ -137,6 +137,15 @@ describe('deleteHook', () => {
     await expect(transactions.deleteHook(params)).rejects.toBeInstanceOf(AmbiguousTransactionError);
   });
 
+  test('a race on the shared counter is sent again, then succeeds (ADR-0050)', async () => {
+    ddbMock
+      .on(TransactWriteCommand)
+      .rejectsOnce(canceled(['None', 'TransactionConflict']))
+      .resolves({});
+    await transactions.deleteHook(params);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(2);
+  });
+
   test('races on every attempt are a TransactionRaceError (ADR-0050)', async () => {
     ddbMock.on(TransactWriteCommand).rejects(canceled(['TransactionConflict', 'TransactionConflict']));
     await expect(transactions.deleteHook(params)).rejects.toBeInstanceOf(TransactionRaceError);
