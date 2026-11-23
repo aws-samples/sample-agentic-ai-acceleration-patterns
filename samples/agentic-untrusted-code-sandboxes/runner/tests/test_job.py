@@ -244,12 +244,15 @@ class SettledDirtyTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.0)
 
     def test_a_drain_slower_than_one_second_is_still_clean(self):
-        # A group whose freed memory shows for more than 1 s is still clean within the budget.
+        # A group whose freed memory shows for more than 1 s is still clean, and the poll stops at the first clean read.
+        # The budget is widened from 3 s to 6 s so a loaded build host that fires the timer late does not fail the
+        # test; it failed once that way during a full build (2026-11-23).
         self.drain_after(1.3)
         started = time.monotonic()
-        self.assertFalse(self.ex.settled_dirty(time.monotonic() + 3))
+        with mock.patch.object(jb, "DIRTY_POLL_S", 6.0):
+            self.assertFalse(self.ex.settled_dirty(time.monotonic() + 6))
         self.assertGreaterEqual(time.monotonic() - started, 1.25)
-        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertLess(time.monotonic() - started, 5.0)
 
     def test_a_group_that_stays_full_is_dirty_after_the_poll_time(self):
         with mock.patch.object(jb, "DIRTY_POLL_S", 0.2):

@@ -143,7 +143,7 @@ export class UntrustedCodeSandboxes extends Construct {
     }
     const toolSecurityGroup = new ec2.SecurityGroup(this, 'ToolSecurityGroup', {
       vpc: this.vpc,
-      description: 'run_code tool, reaper, drain and offboard functions (spec 3.7)',
+      description: 'run_code tool: the standalone run function and bound functions (spec 3.7, ADR-0071)',
       allowAllOutbound: true,
     });
     this.toolSecurityGroup = toolSecurityGroup;

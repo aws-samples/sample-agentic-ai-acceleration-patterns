@@ -678,6 +678,37 @@ describe('network (spec 3.7, ADR-0012)', () => {
     });
     new UntrustedCodeSandboxes(stack, 'Sandboxes', { standalone: true, vpc, backends: ['nitro'], createEndpoints: false });
     Template.fromStack(stack).resourceCountIs('AWS::EC2::VPC', 1);
+    // A VPC in its own stack: the sample's stack depends on it, so the network goes after the drain (ADR-0071).
+    const app = new App();
+    const net = new Stack(app, 'Net');
+    const own = new ec2.Vpc(net, 'Own', {
+      maxAzs: 2,
+      natGateways: 1,
+      subnetConfiguration: [
+        { name: 'Public', subnetType: ec2.SubnetType.PUBLIC },
+        { name: 'Tool', subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        { name: 'Sandbox', subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+      ],
+    });
+    const consumer = new Stack(app, 'Consumer');
+    new UntrustedCodeSandboxes(consumer, 'Sandboxes', { standalone: true, vpc: own, backends: ['nitro'], createEndpoints: false });
+    // Cross-stack references, and so the stack dependency, resolve at synth.
+    app.synth();
+    expect(consumer.dependencies.map((d) => d.stackName)).toContain('Net');
+    // An imported VPC has no routes the construct can see; the drain then has no route dependency, and synth works.
+    const imp = new Stack(new App(), 'Imported');
+    const imported = ec2.Vpc.fromVpcAttributes(imp, 'Imp', {
+      vpcId: 'vpc-1',
+      availabilityZones: ['eu-central-1a', 'eu-central-1b'],
+      privateSubnetIds: ['subnet-t1', 'subnet-t2'],
+      privateSubnetNames: ['Tool'],
+      isolatedSubnetIds: ['subnet-s1', 'subnet-s2'],
+      isolatedSubnetNames: ['Sandbox'],
+    });
+    expect(() => {
+      new UntrustedCodeSandboxes(imp, 'Sandboxes', { standalone: true, vpc: imported, backends: ['nitro'], createEndpoints: false });
+      Template.fromStack(imp);
+    }).not.toThrow();
     const bad = new Stack(new App(), 'B');
     const noSandbox = new ec2.Vpc(bad, 'Own', {
       maxAzs: 2,

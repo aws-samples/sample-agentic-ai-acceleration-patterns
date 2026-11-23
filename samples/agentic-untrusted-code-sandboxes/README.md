@@ -18,7 +18,11 @@ Each listed name needs two labels; that refuses only a bare top-level domain,
 not a public suffix such as `co.uk` or a shared zone, so you are responsible
 for listing only names you control (threats T-29, T-32 and T-91).
 With a supplied `vpc`, set `createEndpoints` explicitly: the endpoints use
-private DNS that applies to the whole VPC (T-92).
+private DNS that applies to the whole VPC (T-92). The drain needs the tool
+subnets' way to ECS until it ends, and waits only for the routes CDK marks
+as internet routes. Put a supplied VPC in its own stack, or make the
+construct depend on any other egress you built (a hand-made route, your own
+ECS endpoints) with `sandboxes.node.addDependency(...)` (ADR-0071).
 
 What this sample is NOT: an egress allowlist for sandboxed code, a
 confidential-computing setup, a runtime for languages other than Python 3,
