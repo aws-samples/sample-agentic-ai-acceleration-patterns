@@ -32,7 +32,7 @@ describe('the Lambda entry', () => {
     });
     const log = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const { handler } = await import('../../src/registrar/registrar.function');
-    const res = await handler(restEvent('DELETE', '/cells/01HZX8K9P0QRST7VWXYZ1A2B3D', {
+    const res = await handler(restEvent('DELETE', '/cells/01HZX8K9P0QRST7VWXYZ1A2B3D', { // pragma: allowlist secret
       userArn: `arn:aws:sts::${EDGE_ACCOUNT}:assumed-role/Admin/s`,
       accountId: EDGE_ACCOUNT,
     }));

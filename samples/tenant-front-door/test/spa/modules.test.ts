@@ -24,7 +24,7 @@ const hostPooled = configCase('host, pooled tenant host').body;
 
 describe('encoding and PKCE (§3.5, RFC 7636)', () => {
   test('S256 challenge matches RFC 7636 appendix B', async () => {
-    expect(await codeChallenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk')).toBe('E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM');
+    expect(await codeChallenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk')).toBe('E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'); // pragma: allowlist secret
   });
 
   test('verifier is 43 base64url characters and differs per call', () => {
@@ -213,7 +213,7 @@ describe('cell API calls (§3.2, §7.2, ADR-0011)', () => {
   });
 
   test('an empty POST body hashes the empty string', async () => {
-    expect(await contentSha256('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    expect(await contentSha256('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'); // pragma: allowlist secret
   });
 
   test('GET whoami sends only Authorization and returns the answer (§10 step 4)', async () => {

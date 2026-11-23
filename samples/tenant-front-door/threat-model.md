@@ -681,8 +681,11 @@ check is model-based and groups and grades the same statements differently
 from one run to the next, so the table also holds findings of earlier scans
 of the same code. The count in brackets is the number of findings of the
 last scan the row covers; a row marked "earlier scan only" was not reported
-by it. The counts of the other rows sum to 5 high, 7 medium and 0 low. Each
-finding:
+by it. Rows marked "ASH scan of 2026-11-23 only" come from the
+whole-sample ASH scan described below the table and are counted apart.
+The ProtoShield rows, that is all rows with neither marker, sum to 5 high,
+7 medium and 0 low. The ASH rows sum to 91 high: 1 semgrep, 30
+detect-secrets and 60 checkov. Each finding:
 
 | Finding | Severity | Outcome |
 |---|---|---|
@@ -696,7 +699,15 @@ finding:
 | IAM: the integration test's access role reads `/application-plane/tenants/*/<applicationId>` and describes the stacks named `<prefix>-*` and `<fleet>-*` | medium (earlier scan only) | Accepted. The run's tenant ids are minted during the run, and the prefix and fleet carry the run id, so these are the run's own namespaces and stacks; the role exists for one run. |
 | semgrep `unknown-value-with-script-tag` in `spa/build.ts` | medium (2) | False positive. The build fills its own `index.html` with constants and digests at build time; no request value reaches it. |
 | semgrep `path-join-resolve-traversal` in `spa/build.ts` (`writeSpa`, `path.join(outDir, rel)`; ASH scan of 2026-11-23 only) | high (1) | False positive. `outDir` is the build's command-line argument, set by the deployer at build time, never request data. `rel` is limited to the build's own output names: `buildSpa` throws for any script output that does not match `^assets/[A-Z0-9]+\.js$`, and the other names are a SHA-256 hex stylesheet name, `index.html` and `csp.json`. `writeSpa` refuses to clear a directory that holds anything but an earlier build. |
-| detect-secrets: 30 findings in `src/main.ts`, `src/shared/contracts.ts`, `README.md` and 16 test and fixture files (ASH scan of 2026-11-23 only) | high (30) | False positives, no secret among them. They are placeholders in usage text and the README (`clientSecretArn: "arn:..."`, `<SECRET_NAME>-<SUFFIX>`, `VENDOR_IDP_SECRET_ARN`), the AWS documentation's example keys (`ASIAIOSFODNN7EXAMPLE`, `AKIDEXAMPLE`, `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`), base64url and base32 alphabets, signed `state` fixtures made from test keys, test-only HMAC keys and SigV4 test vectors, a stub `curl` user string and the name of an AWS managed policy. The `src/main.ts` placeholder sits on a line of a shell usage example that ends in a `\` continuation, so an allowlist comment cannot go on that line without breaking the example; the others carry no allowlist comment yet, so a rescan reports them again. |
+| detect-secrets: 30 findings in `src/main.ts`, `src/shared/contracts.ts`, `README.md` and 16 test and fixture files (ASH scan of 2026-11-23 only) | high (30) | False positives, no secret among them. They are placeholders in usage text and the README (`clientSecretArn: "arn:..."`, `<SECRET_NAME>-<SUFFIX>`, `VENDOR_IDP_SECRET_ARN`), the AWS documentation's example keys (`ASIAIOSFODNN7EXAMPLE`, `AKIDEXAMPLE`, `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`), base64url and base32 alphabets, signed `state` fixtures made from test keys, test-only HMAC keys and SigV4 test vectors, a stub `curl` user string and the name of an AWS managed policy. Every flagged line in `src/shared/contracts.ts`, `README.md` and the test files carries the scanner's `pragma: allowlist secret` comment, except three where a comment would change what the line is: the `src/main.ts` usage example (the line ends in a shell `\` continuation), the JSON fixture `test/fixtures/signin-state.json` (JSON has no comments) and the stub shell script inside a template literal at `test/integ/scripts.test.ts:536`. A rescan reports those three again; they stay accepted here. |
+| checkov `CKV_AWS_115`, `CKV_AWS_116`, `CKV_AWS_117` on the 14 Lambda functions of the synthesized main, edge and edge logging templates: no reserved concurrency, no dead-letter queue, not in a VPC (ASH scan of 2026-11-23 only) | high (42) | Accepted. The functions call only AWS APIs over their public endpoints and reach no data store in a VPC, so a VPC adds network paths to run, not isolation. Most are CDK custom resource and provider functions, invoked synchronously by CloudFormation; the registrar is invoked synchronously by API Gateway, whose stage throttle (10 a second, burst 100) bounds it; the sweeper's asynchronous pages fail into its own on-failure queue (M-24, ADR-0020). Reserved concurrency would take capacity from the account's other functions without a tenant-facing benefit, since no tenant request reaches these functions. |
+| checkov `CKV_AWS_158` on 8 log groups: not encrypted with a customer-managed KMS key (ASH scan of 2026-11-23 only) | high (8) | Accepted. CloudWatch Logs encrypts every log group at rest. No log line carries a token, a credential or a request body (M-21, M-38); the access log leaves out the query string, the referrer and the cookie. A deployer whose policy asks for a customer-managed key adds one. |
+| checkov `CKV_AWS_173` on 5 Lambda functions: environment variables not encrypted with a customer-managed KMS key (ASH scan of 2026-11-23 only) | high (5) | Accepted. Lambda encrypts environment variables at rest. They hold ARNs, ids, names and URLs, never a secret: the registrar reads its client secret from Secrets Manager at run time (M-14). |
+| checkov `CKV_AWS_18` on the SPA bucket: no S3 server access logging (ASH scan of 2026-11-23 only) | high (1) | Accepted, as the cdk-nag acknowledgement `AwsSolutions-S1` in `src/edge/main.cdk.ts` says: reads reach the bucket only through the distribution, whose standard logging v2 records every request (ADR-0010), and the bucket policy limits writes to the two deployment roles, which CloudTrail records (M-44). |
+| checkov `CKV_AWS_86` on the distribution: no access logging (ASH scan of 2026-11-23 only) | high (1) | False positive. The check looks for the legacy `Logging` property, which a multi-tenant distribution does not have; the edge logging stack delivers standard logging v2 with a closed field list. The cdk-nag acknowledgement `AwsSolutions-CFR3` in `src/edge/main.cdk.ts` records the same reason (ADR-0010, M-21). |
+| checkov `CKV_AWS_120` on the registrar's API stage: no API Gateway caching (ASH scan of 2026-11-23 only) | high (1) | Accepted. Every registrar call is a signed write or a delete; a cache would answer a write with a stale result. |
+| checkov `CKV_AWS_111` on the default policy of the dedicated-domains teardown provider's waiter state machine role (ASH scan of 2026-11-23 only) | high (1) | False positive. The policy is CDK's provider framework policy, and its write action, `lambda:InvokeFunction`, names the provider's own functions by ARN. |
+| checkov `CKV_AWS_192` on the web ACL: no rule against the Log4j message lookup (ASH scan of 2026-11-23 only) | high (1) | Accepted. The web ACL carries the per-tenant rate rules (ADR-0009, ADR-0021); no origin behind the edge runs Java or Log4j. A deployer adds AWS managed rule groups, this one included, when its cells need them. |
 | CVE: `minimatch` 10.2.6 in `aws-cdk-lib`, `glob` 10.5.0 in `test-exclude` (Jest's coverage instrumentation) | medium (2) | Accepted. Build and test time only; neither is in a Lambda bundle or the SPA. They clear with the next `aws-cdk-lib` and Jest upgrades. |
 | IAM: the CDK-generated policy of the `BucketDeployment` that stages the integration test's source zip (`s3:GetObject*`, `s3:List*`, `s3:DeleteObject*`, `s3:Abort*`; `test/integ/stacks.ts`) | low (earlier scan only) | Accepted. The wildcards are CDK's own for a bucket deployment, scoped to the run's one source bucket and the CDK asset bucket; the role exists for one run and the finding is acknowledged in the code. |
 | IAM: the sweeper's table actions (`BatchWriteItem` among them); its fan-out Lambda invoke of itself and the scheduler role's invoke on the sweeper's versions | low (earlier scan only) | Accepted. One table and one function each, and the re-check uses each of the four table actions (`src/sweeper/recheck.ts`); the schedules invoke the unqualified function only (M-16, M-24). |
@@ -721,18 +732,20 @@ usage comment of `src/main.ts`, has no allowlist comment: it is recorded
 here as a false positive, and a rescan reports it again.
 
 ASH 3.1.2 also scanned the whole sample on 2026-11-23 with its default
-configuration. Most of its findings are in generated or installed paths
-(`cdk.out/`, `node_modules/`, `build/spa`, `src/smithy`), which the
-sample does not ship. Its findings in the sample's own files are the two
-rows marked "ASH scan of 2026-11-23 only" above and the
-`unknown-value-with-script-tag` row.
+configuration, with `cdk.out/` present. Its findings in the sample's own
+files and in the synthesized templates in `cdk.out/`, which are what a
+deploy creates, are the rows marked "ASH scan of 2026-11-23 only" above
+and the `unknown-value-with-script-tag` row. Its other findings are in
+installed or generated paths the sample does not ship: `node_modules/`,
+`build/spa` (the build's output of `spa/`) and `src/smithy` (the code
+generated from `model/`). The ProtoShield checkov run on the same
+templates reported none of the checkov rows.
 
 The last green integration run (2026-11-21), the ProtoShield scan
 (2026-11-22) and the file-list ASH scan (2026-11-21) are dated before the
 latest change to `src/`, made on 2026-11-23 (see the
-[`architecture.md`](./architecture.md) status block).
-That is an open gap: rerun the integration test and both scans on the
-current code.
+[`architecture.md`](./architecture.md) status block). That is an open
+gap: rerun the integration test and both scans on the current code.
 
 ## Links
 

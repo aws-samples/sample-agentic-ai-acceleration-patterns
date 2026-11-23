@@ -2235,7 +2235,7 @@ ingress behind `/agents/*` needs its URL form checked first.
 ### 6.4 Published interface
 
 - **Constructs** `TenantFrontDoor`, `CellRouteAccess` and `RouteHookAccess`
-  (`src/index.ts`). `src/index.ts` also exports `DemoCellApi` and its the
+  (`src/index.ts`). `src/index.ts` also exports `DemoCellApi` and the
   `CellApiIssuer` interface of its `issuer` prop, for the demo cell and the
   tests only; they are not part of the published interface.
   `TenantFrontDoor` exposes `distributionId`, `distributionArn`,

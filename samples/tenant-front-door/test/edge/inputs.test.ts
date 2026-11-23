@@ -86,7 +86,7 @@ describe('deployment inputs (spec §3.6)', () => {
       [{ region: 'Europe' }, /controlPlane.region/],
       [{ vendorIdp: undefined }, /controlPlane.vendorIdp is required/],
       [{ vendorIdp: { ...base.controlPlane.vendorIdp, tokenUrl: 'ftp://x.example.com' } }, /vendorIdp.tokenUrl/],
-      [{ vendorIdp: { ...base.controlPlane.vendorIdp, clientSecretArn: 'arn:aws:secretsmanager:eu-central-1:111111111111:secret:nosuffix' } }, /clientSecretArn/],
+      [{ vendorIdp: { ...base.controlPlane.vendorIdp, clientSecretArn: 'arn:aws:secretsmanager:eu-central-1:111111111111:secret:nosuffix' } }, /clientSecretArn/], // pragma: allowlist secret
       [{ vendorIdp: { ...base.controlPlane.vendorIdp, clientId: 'a"b' } }, /vendorIdp.clientId/],
     ])('refuses %j', (patch, error) => {
       expect(() => validateInputs(withControlPlane(patch))).toThrow(error);

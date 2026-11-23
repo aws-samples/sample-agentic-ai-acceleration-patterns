@@ -22,7 +22,7 @@ const TENANT = '01KAF5M0000000000000000T01';
 const PEER = '01KAF5M0000000000000000T02';
 const CELL = '01KAF5M0000000000000000C01';
 // AWS documentation example values, not real credentials.
-const CREDS = { Version: 1, AccessKeyId: 'ASIAIOSFODNN7EXAMPLE', SecretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', SessionToken: 'TESTSESSIONTOKENEXAMPLE=' };
+const CREDS = { Version: 1, AccessKeyId: 'ASIAIOSFODNN7EXAMPLE', SecretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', SessionToken: 'TESTSESSIONTOKENEXAMPLE=' }; // pragma: allowlist secret
 
 /**
  * An aws stub that also takes `ssm put-parameter` and `ssm delete-parameter`

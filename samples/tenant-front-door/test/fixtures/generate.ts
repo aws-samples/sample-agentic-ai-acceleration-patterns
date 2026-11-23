@@ -25,7 +25,7 @@ const goodState = mintState(signin, good);
 // A 32-byte MAC is 43 base64url characters; the last carries 2 unused bits,
 // so a neighbouring character decodes to the same bytes.
 function flipLast(s: string): string {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'; // pragma: allowlist secret
   const i = alphabet.indexOf(s[s.length - 1]);
   // Same top 4 bits, other low 2 bits: index i - i % 4 + (i + 1) % 4.
   const j = i - (i % 4) + ((i + 1) % 4);

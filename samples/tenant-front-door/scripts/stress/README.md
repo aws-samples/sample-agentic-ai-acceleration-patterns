@@ -210,7 +210,8 @@ tenant-identity's `IssueToken`, signed with the run's own credentials, and are
 never written down. The probes of slice mode (control, forged payload, client
 route header, client token header, `tenants` list, unrouted ghost tenant, direct
 call to the cell origin with a token) run against the real cell; the cell origin
-is `https://<warmUp.cellApiDomain>/`. Two probes per round are new:
+is `https://<warmUp.cellApiDomain>/`. Two probes per round exist only in
+platform mode:
 
 | Probe | Sends | Pass |
 |---|---|---|

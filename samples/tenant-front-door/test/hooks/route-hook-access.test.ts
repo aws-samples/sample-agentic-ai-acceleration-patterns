@@ -146,7 +146,7 @@ describe('RouteHookAccess construct', () => {
   });
 
   it('parses a registrar stage URL', () => {
-    expect(parseRegistrarUrl(REGISTRAR)).toEqual({ apiId: 'abcde12345', region: 'eu-central-1', stage: 'v1' });
+    expect(parseRegistrarUrl(REGISTRAR)).toEqual({ apiId: 'abcde12345', region: 'eu-central-1', stage: 'v1' }); // pragma: allowlist secret
     expect(parseRegistrarUrl('https://abcde12345.execute-api.cn-north-1.amazonaws.com.cn/v1/').region).toBe('cn-north-1');
   });
 });

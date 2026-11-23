@@ -24,7 +24,7 @@ export const BASE_PROPS: TenantFrontDoorProps = {
     vendorIdp: {
       tokenUrl: 'https://vendor.auth.example.com/oauth2/token',
       clientId: 'registrar-client',
-      clientSecretArn: `arn:aws:secretsmanager:eu-central-1:${EDGE_ACCOUNT}:secret:registrar-client-AbCdEf`,
+      clientSecretArn: `arn:aws:secretsmanager:eu-central-1:${EDGE_ACCOUNT}:secret:registrar-client-AbCdEf`, // pragma: allowlist secret
     },
   },
   fleet: 'demo-fleet',

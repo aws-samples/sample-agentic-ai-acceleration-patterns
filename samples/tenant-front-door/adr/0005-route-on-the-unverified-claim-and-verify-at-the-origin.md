@@ -111,15 +111,17 @@ Option 3 loses the agreement check.
 - Revisit when the origin cannot verify tokens, or when forged-token load
   on origins becomes a cost problem.
 
+Spike S-7 passed 2026-11-13 (eu-central-1): a cloudfront-js-2.0 function decoded a real `tenant-identity` shared-pool access token (1,184 bytes) with `TestFunction` at 13 % compute utilisation, 14 % with a forged client `x-tenant-route` header, which it replaced with the lower-cased claim. A malformed token, no token and a token with its signature segment removed each got 401 at 9-10 %. The decode code is 1.9 KB of the 10 KB function limit. The measurement covers the decode and header handling only; the three KeyValueStore reads are measured in S-1. Create took 1 s and teardown, function and throwaway tenant, finished 32 s after the start.
+
 Note 2026-11-20: CloudFront Functions can now make network calls with
-`cf.fetch()` ([What's
-New](https://aws.amazon.com/about-aws/whats-new/2026/11/cloudfront-functions-network-calls/),
+`cf.fetch()`
+([What's New](https://aws.amazon.com/about-aws/whats-new/2026/11/cloudfront-functions-network-calls/),
 [blog](https://aws.amazon.com/blogs/networking-and-content-delivery/introducing-network-calls-in-amazon-cloudfront-functions/)).
 This adds a fourth option: the router sends the token to an
-authorisation origin and routes only on its verdict, with no
-Lambda@Edge. A function can call only an origin configured on the same
-distribution, and each call costs $0.10 per million on top of the
-function invocation. It does not change the decision:
+authorisation origin and routes only on its verdict, with no Lambda@Edge.
+A function can call only an origin configured on the same distribution,
+and each call costs $0.10 per million on top of the function invocation.
+It does not change the decision:
 
 - The cell must still verify the token, because a cell in a
   tenant-owned account cannot trust that the edge did (Option 2's cons).
@@ -134,7 +136,5 @@ function invocation. It does not change the decision:
   first option to try, before Lambda@Edge.
 
 Note 2026-11-23: spike S-7 passed on 2026-11-13, so the decision is
-Option 1 with no fallback needed: the router reads `tenant_id` from a
-real 1,184-byte access token at 13-14 % compute and answers 401 on a
-malformed one. The figures are in the [spike
-record](../design/spikes.md#s-7).
+Option 1 with no fallback needed. The figures are in the paragraph above
+and in the [spike record](../design/spikes.md#s-7).

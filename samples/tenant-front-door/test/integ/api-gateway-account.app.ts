@@ -34,7 +34,7 @@ const stack = new Stack(app, 'TfdIntegApiGatewayAccount', {
 });
 const role = new iam.Role(stack, 'Role', {
   assumedBy: new iam.ServicePrincipal('apigateway.amazonaws.com'),
-  managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonAPIGatewayPushToCloudWatchLogs')],
+  managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonAPIGatewayPushToCloudWatchLogs')], // pragma: allowlist secret
   description: 'Lets API Gateway write access and execution logs in this account and Region',
 });
 role.applyRemovalPolicy(RemovalPolicy.RETAIN);

@@ -62,5 +62,5 @@ because no client header is logged or forwarded.
   Functions join a trace.
 
 Note 2026-11-23: the proof of this record is the join test of the stress
-driver (`test/stress/stress.test.ts`, `join`) and the live run at `small`
-(`stress/results/2026-11-21-small.md`).
+driver (`test/stress/stress.test.ts`, `join`) and
+[the live run at `small`](../../../stress/results/2026-11-21-small.md).

@@ -54,7 +54,7 @@ export function testConfig(overrides: Partial<RegistrarConfig> = {}): RegistrarC
     controlPlaneRegion: 'eu-central-1',
     vendorIdpTokenUrl: 'https://auth.example.com/oauth2/token',
     vendorIdpClientId: 'registrarclient',
-    vendorIdpSecretArn: `arn:aws:secretsmanager:eu-central-1:${EDGE_ACCOUNT}:secret:registrar-AbCdEf`,
+    vendorIdpSecretArn: `arn:aws:secretsmanager:eu-central-1:${EDGE_ACCOUNT}:secret:registrar-AbCdEf`, // pragma: allowlist secret
     fleet: 'fleet1',
     edgeOperatorRoleArn: `arn:aws:iam::${EDGE_ACCOUNT}:role/ops/EdgeOperator`,
     dedicatedDomains: false,
@@ -268,7 +268,7 @@ export function harness(config: RegistrarConfig = testConfig(), domains?: Dedica
   const kvs = new MemoryKvs();
   installKvs(kvs);
   secretsMock.reset();
-  secretsMock.on(GetSecretValueCommand).resolves({ SecretString: 'client-secret-value' });
+  secretsMock.on(GetSecretValueCommand).resolves({ SecretString: 'client-secret-value' }); // pragma: allowlist secret
   const cp = new FakeControlPlane();
   const sleeps: number[] = [];
   const fakeDomains = {

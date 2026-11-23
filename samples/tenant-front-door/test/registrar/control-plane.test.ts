@@ -16,7 +16,7 @@ function reader(cp: FakeControlPlane, now: () => number = () => 0, sleep: Sleep 
     baseUrl: 'https://cp.example.com/prod',
     tokenUrl: 'https://auth.example.com/oauth2/token',
     clientId: 'registrarclient',
-    secretArn: 'arn:aws:secretsmanager:eu-central-1:123456789012:secret:registrar-AbCdEf',
+    secretArn: 'arn:aws:secretsmanager:eu-central-1:123456789012:secret:registrar-AbCdEf', // pragma: allowlist secret
     secrets: new SecretsManagerClient({}),
     fetch: cp.fetch as unknown as typeof fetch,
     now,
@@ -28,7 +28,7 @@ function reader(cp: FakeControlPlane, now: () => number = () => 0, sleep: Sleep 
 beforeEach(() => {
   sleeps.length = 0;
   secretsMock.reset();
-  secretsMock.on(GetSecretValueCommand).resolves({ SecretString: 'client-secret-value' });
+  secretsMock.on(GetSecretValueCommand).resolves({ SecretString: 'client-secret-value' }); // pragma: allowlist secret
 });
 
 describe('ADR-0015: the client-credentials reader token', () => {

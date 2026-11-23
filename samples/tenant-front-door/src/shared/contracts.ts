@@ -312,7 +312,7 @@ export const REGISTRAR_ENV = {
   vendorIdpTokenUrl: 'VENDOR_IDP_TOKEN_URL',
   vendorIdpClientId: 'VENDOR_IDP_CLIENT_ID',
   /** Secrets Manager ARN of the client secret. */
-  vendorIdpSecretArn: 'VENDOR_IDP_SECRET_ARN',
+  vendorIdpSecretArn: 'VENDOR_IDP_SECRET_ARN', // pragma: allowlist secret
   /** Names the admitted `<fleet>-global-hook` role. */
   fleet: 'FLEET',
   edgeOperatorRoleArn: 'EDGE_OPERATOR_ROLE_ARN',

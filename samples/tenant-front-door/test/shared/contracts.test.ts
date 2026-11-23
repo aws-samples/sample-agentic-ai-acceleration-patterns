@@ -39,7 +39,7 @@ describe('substituteRouterTokens', () => {
 describe('paramTenantNamespace', () => {
   test('uses the upper-case control-plane id', () => {
     expect(paramTenantNamespace('01hzx8k9p0qrst7vwxyz1a2b3c', 'demo')).toBe(
-      '/application-plane/tenants/01HZX8K9P0QRST7VWXYZ1A2B3C/demo/',
+      '/application-plane/tenants/01HZX8K9P0QRST7VWXYZ1A2B3C/demo/', // pragma: allowlist secret
     );
   });
 });

@@ -148,8 +148,8 @@ checks, the data model and the sign-in flows in depth.
   - the application registered with `PutApplication`, whose cell create and
     update scripts write `frontDoorApiDomain` to `OUTPUTS_FILE`: the host
     name of the cell's API, a Lambda function URL host in the control
-    plane's Region. [`test/integ/app/cell/create.sh`](./test/integ/app/cell/create.sh)
-    is a worked script.
+    plane's Region. "Deploy a demo cell" below shows how; the integration
+    test's script for it is test-only.
 - **A secret** in the edge account and the control plane's Region, in Secrets
   Manager, that holds the registrar client's secret as a plain string. Its
   full ARN is `controlPlane.vendorIdp.clientSecretArn`.
@@ -194,7 +194,7 @@ section marks (§) in the table refer to the
 | `spaSource` | no | `build/spa` | Path of the built SPA, with `index.html` and `csp.json` at its root. The default is where `npx projen spa:build` writes the demo SPA |
 | `agentIngress` | no | off | The agent ingress's base URL, `https://<host>/<stage>`, with a plain origin path (a trailing slash is ignored); omit to leave `/agents/*` off, and the router then answers 404 for every `/agents` path (§3.3 step 3) |
 | `dedicatedDomains` | no | off | Lets the edge operator role set a tenant's `customDomain` (§3.4 step 5, ADR-0018). Off: any `customDomain` gets 400, the registrar role holds no ACM or distribution-tenant action, and the sweeper, its role, its table, its schedules and the starter are not deployed. A stack update that turns it off fails while any `tenant#` entry holds a `d` or the sweeper has a distribution tenant or certificate left to delete; the operator drops every dedicated domain first (§3.4) |
-| `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate. `host` mode: the edge's per-host rule. `single` mode: no edge rule; each cell limits verified tenants and must be given the same value, and synth warns to say so (ADR-0009). An integer from 10 to 2,000,000,000 |
+| `tenantRequestsPer5Min` | no | 2,000 | Per-tenant rate. `host` mode: the edge's per-host rule. `single` mode: no edge rule; each cell limits verified tenants and must be given the same value, and synth warns when you set it (ADR-0009). An integer from 10 to 2,000,000,000 |
 | `ipRequestsPer5Min` | no | 500 | `host` mode only: the most requests one client IP may send to one tenant host's `/api/*` and `/agents/*` in 5 minutes before the edge answers 429, counted ahead of the per-host count (ADR-0021). One value for every tenant host; there is no per-tenant setting. A chosen value, not a measured one. Keep it below `tenantRequestsPer5Min`. A tenant whose users all reach the edge through one office NAT address shares one count: at 500 its whole user base gets about 1.7 requests per second before `tenantRequestsPer5Min` applies. Raising it raises it for every host. An integer from 10 to 2,000,000,000; set in `single` mode, synth fails |
 | `reportingEndpoint` | no | off | URL for CSP and other browser reports, on for the whole session in both modes. No report carries the callback's code, because the first inline script removes it from the URL before anything loads (§7.1 Reports) |
 | `registrarUrl` | no | none | The `registrarUrl` of this front door's edge parameter (§6.4), `https://<api id>.execute-api.<control plane Region>.amazonaws.com/v1/`, known once the main stack is deployed. Set, the app adds the `RouteHookAccess` stack in the control plane's account and Region (§3.1, ADR-0027); validated at synth |
@@ -327,7 +327,10 @@ it to the registrar.
 
 - Give `DemoCellApi` the issuer (`issuer`, `jwksUrl`, `clientIds`), the
   `applicationId`, the `cellId`, and the front door's `distributionArn`
-  (omit it to read the cell account's front door parameter).
+  (from the `distributionArn` field of the edge parameter
+  `/application-plane/shared/front-door/edge`; omit it once the
+  application's shared stack has copied the ARN to the cell account, see
+  "Use the constructs").
 - In `host` mode set `tenantRequestsPer5Min: 0`, because the edge limits
   each host. In `single` mode give it the front door's
   `tenantRequestsPer5Min`, because the cell is the only per-tenant limit.
@@ -443,7 +446,7 @@ new TenantFrontDoor(app, 'TenantFrontDoor', {
     vendorIdp: {
       tokenUrl: 'https://<VENDOR_IDP_HOST>/oauth2/token',
       clientId: '<REGISTRAR_CLIENT_ID>',
-      clientSecretArn: 'arn:aws:secretsmanager:<REGION>:<EDGE_ACCOUNT_ID>:secret:<SECRET_NAME>-<SUFFIX>',
+      clientSecretArn: 'arn:aws:secretsmanager:<REGION>:<EDGE_ACCOUNT_ID>:secret:<SECRET_NAME>-<SUFFIX>', // pragma: allowlist secret
     },
   },
   fleet: '<FLEET_NAME>',

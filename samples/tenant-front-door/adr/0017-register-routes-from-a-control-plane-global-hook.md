@@ -4,6 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-18
+- Supersedes: ADR-0013
 - Amends: ADR-0002, ADR-0003, ADR-0012, ADR-0014, ADR-0015
 - Amended by: ADR-0025
 - Deciders: Dave Roberts (PSA)
@@ -259,6 +260,4 @@ because the two hooks name only cell and deployment events.
 Note 2026-11-23: ADR-0025 amends this record. The registrar reads the
 control plane on every hook write; `UpdateTenantRouteStatus`, an edge
 operator call that writes only the status, skips that read, so a
-suspension works while the control plane cannot be read. This record
-supersedes ADR-0013, as its Decision says; the header carries no
-`Supersedes` field, which the template does not have.
+suspension works while the control plane cannot be read.

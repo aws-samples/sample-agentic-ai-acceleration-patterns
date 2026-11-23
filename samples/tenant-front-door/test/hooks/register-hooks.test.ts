@@ -15,7 +15,7 @@ import { HOOK_POST, HOOK_POST_EVENTS, HOOK_PRE, HOOK_PRE_EVENTS, ROUTE_HOOK_SCRI
 const SCRIPT = path.join(SAMPLE_ROOT, 'scripts', 'register-hooks.sh');
 const API = 'https://cp.example.com/prod';
 const TOKEN = 'test-operator-token-example';
-const SHA = '0123456789abcdef0123456789abcdef01234567';
+const SHA = '0123456789abcdef0123456789abcdef01234567'; // pragma: allowlist secret
 const REPO = 'https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns.git';
 
 const env = (over: Record<string, string | undefined> = {}): Record<string, string | undefined> => ({
@@ -193,7 +193,7 @@ describe('put', () => {
     ['no commit', { HOOK_SOURCE_VERSION: undefined }, /set HOOK_SOURCE_VERSION/],
     ['a branch for the commit', { HOOK_SOURCE_VERSION: 'main' }, /full commit SHA/],
     ['a short SHA', { HOOK_SOURCE_VERSION: '0123456' }, /full commit SHA/],
-    ['a location with userinfo', { HOOK_SOURCE_LOCATION: 'https://user:token@github.com/x/y.git' }, /without userinfo/],
+    ['a location with userinfo', { HOOK_SOURCE_LOCATION: 'https://user:token@github.com/x/y.git' }, /without userinfo/], // pragma: allowlist secret
     ['an unknown source type', { HOOK_SOURCE_TYPE: 'NO_SOURCE' }, /git source type or S3/],
     ['an S3 source with no location', { HOOK_SOURCE_TYPE: 'S3' }, /set HOOK_SOURCE_LOCATION/],
     ['an S3 folder, which has no version', { HOOK_SOURCE_TYPE: 'S3', HOOK_SOURCE_LOCATION: 'tfd-integ-src/src/' }, /<bucket>\/<key>\.zip/],

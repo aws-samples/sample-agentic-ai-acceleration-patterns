@@ -22,8 +22,8 @@ const API_DOMAIN = `${'a1'.repeat(16)}.lambda-url.${REGION}.on.aws`;
 const CREDS = {
   Version: 1,
   // AWS documentation example values, not real credentials.
-  AccessKeyId: 'ASIAIOSFODNN7EXAMPLE',
-  SecretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+  AccessKeyId: 'ASIAIOSFODNN7EXAMPLE', // pragma: allowlist secret
+  SecretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', // pragma: allowlist secret
   SessionToken: 'TESTSESSIONTOKENEXAMPLE=',
   Expiration: '2026-11-20T12:00:00Z',
 };

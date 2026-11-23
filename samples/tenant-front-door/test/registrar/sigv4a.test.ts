@@ -24,7 +24,7 @@ describe('the KeyValueStore client signs with SigV4A (no CRT)', () => {
     };
     const client = new CloudFrontKeyValueStoreClient({
       region: 'eu-central-1',
-      credentials: { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' },
+      credentials: { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' }, // pragma: allowlist secret
       requestHandler: requestHandler as never,
       maxAttempts: 1,
     });

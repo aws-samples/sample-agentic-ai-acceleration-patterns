@@ -52,7 +52,7 @@ const FULL: IntegInputs = {
   vendorIdp: {
     tokenUrl: 'https://vendor.integ-placeholder.example.com/oauth2/token',
     clientId: 'placeholderreader',
-    clientSecretArn: `arn:aws:secretsmanager:${R}:${EDGE}:secret:placeholder-AAAAAA`,
+    clientSecretArn: `arn:aws:secretsmanager:${R}:${EDGE}:secret:placeholder-AAAAAA`, // pragma: allowlist secret
   },
   controlPlaneApiUrl: 'https://cp.integ-placeholder.example.com/prod/',
   agentIngressUrl: 'https://0000000000.execute-api.eu-central-1.amazonaws.com/prod',
