@@ -92,12 +92,15 @@ export class Recorder {
    * names no tenant a person can act on: it is unattributed and a finding. A status the
    * caller expected (`expected`) is counted by status and reason but is no refusal. A
    * server error with a reason a client acts on (`ATTRIBUTABLE_SERVER_ERRORS`) is a refusal
-   * attributed to its tenant.
+   * attributed to its tenant. `plane` names a call that is not the control plane's own.
    */
-  observe(hop: string, r: CallResult, tenant: string, expected = false): void {
+  observe(hop: string, r: CallResult, tenant: string, expected = false, plane?: string): void {
     const ok = expected || (r.status >= 200 && r.status < 400);
     const reason = reasonOf(r.status, r.errorType);
-    const key = r.status >= 200 && r.status < 400 ? String(r.status) : `${r.status}:${reason}${expected ? ':expected' : ''}`;
+    const status = r.status >= 200 && r.status < 400 ? String(r.status) : `${r.status}:${reason}${expected ? ':expected' : ''}`;
+    // A call to another plane (the edge, the route registrar) is counted under its plane's name,
+    // so `collect` weighs only the control plane's own 5xx against its access log.
+    const key = plane === undefined ? status : `${plane}:${status}`;
     this.requests.set(key, (this.requests.get(key) ?? 0) + 1);
     this.sample(hop, r.seconds);
     if (ok) return;

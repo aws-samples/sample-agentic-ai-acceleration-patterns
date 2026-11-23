@@ -9,7 +9,7 @@ import { record } from './result.test';
 import { type Exec, groupExec, planRun, runStress, scenarioOrder, spawnExec } from '../src/runner';
 import { loadSlice } from '../src/slice';
 
-type Decl = { needs?: string[]; scenarios: string[]; quotas?: string[] };
+type Decl = { needs?: string[]; scenarios: string[]; platformOnly?: string[]; quotas?: string[] };
 
 /** A repository with fake slices, and a home folder for the run. */
 function fixture(slices: Record<string, Decl>, scripts: Record<string, string> = {}) {
@@ -83,10 +83,85 @@ describe('runner (spec §3.5)', () => {
   it('orders platform scenarios by number, then the slices own scenarios', () => {
     const { root } = fixture(slices);
     const loaded = ['tenant-identity', 'control-plane'].map((n) => loadSlice(root, n));
-    expect(scenarioOrder(loaded)).toEqual(['PS-1', 'PS-5', 'placement-race']);
+    expect(scenarioOrder(loaded, 'slice')).toEqual(['PS-1', 'PS-5', 'placement-race']);
   });
 
-  it('runs every verb in dependency order and tears down in reverse', async () => {
+  it('runs only the PS scenarios in a platform run and leaves the platform-only ones out of a slice run', () => {
+    const { root } = fixture({
+      'tenant-identity': { scenarios: ['PS-1', 'token-rate'] },
+      'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-5', 'PS-1', 'placement-race'], platformOnly: ['PS-5'] },
+    });
+    const pair = ['tenant-identity', 'control-plane'].map((n) => loadSlice(root, n));
+    expect(scenarioOrder(pair, 'platform')).toEqual(['PS-1', 'PS-5']);
+    expect(scenarioOrder(pair, 'slice')).toEqual(['PS-1', 'token-rate', 'placement-race']);
+  });
+
+  it('refuses a need that is no slice, and a need left out of --slices', () => {
+    const { root } = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity', 'tenant-front-door'], scenarios: ['PS-5'] }, 'tenant-front-door': { scenarios: ['PS-7'] } });
+    expect(() => planRun({ repoRoot: root, tier: 'small', slices: ['control-plane', 'tenant-identity'] })).toThrow(/control-plane needs tenant-front-door, which the run does not include: add it to --slices/);
+    const bare = fixture({ 'tenant-identity': { scenarios: ['PS-1'] }, 'control-plane': { needs: ['tenant-identity', 'nowhere'], scenarios: ['PS-5'] } });
+    expect(() => planRun({ repoRoot: bare.root, tier: 'small', slices: ['control-plane', 'tenant-identity'] })).toThrow(/needs nowhere, which is not a slice/);
+    expect(planRun({ repoRoot: bare.root, tier: 'small', slices: ['control-plane'] }).mode).toBe('slice');
+  });
+
+  it('refuses a cycle in the needs', () => {
+    const { root } = fixture({ a: { needs: ['b'], scenarios: [] }, b: { needs: ['a'], scenarios: [] } });
+    expect(() => planRun({ repoRoot: root, tier: 'small', slices: ['a', 'b'] })).toThrow(/cycle: a -> b -> a/);
+  });
+
+  it('runs a slice-mode run without the platform-only scenarios and refuses one named there', async () => {
+    const { root, home } = fixture({ 'control-plane': { needs: ['tenant-identity'], scenarios: ['PS-1', 'PS-5', 'placement-race'], platformOnly: ['PS-5'] } });
+    const { calls, exec } = stub();
+    const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['control-plane'], exec });
+    expect(summary.mode).toBe('slice');
+    expect(calls.filter((c) => c.includes(' run '))).toEqual(['control-plane run PS-1', 'control-plane run placement-race']);
+    const refused = stub();
+    await expect(runStress({ ...base, runId: 'r2', repoRoot: root, home, tier: 'small', slices: ['control-plane'], scenarios: ['PS-5'], exec: refused.exec })).rejects.toThrow(
+      /PS-5 runs in platform mode only: name every slice it needs/,
+    );
+    expect(refused.calls).toEqual([]);
+    expect(fs.existsSync(path.join(home, 'stress', 'r2'))).toBe(false);
+  });
+
+  it('runs only the PS scenarios in a platform run, and a named slice scenario when asked', async () => {
+    const { root, home } = fixture(slices);
+    const platform = stub();
+    await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec: platform.exec });
+    expect(platform.calls.filter((c) => c.includes(' run '))).toEqual(['tenant-identity run PS-1', 'control-plane run PS-1', 'control-plane run PS-5']);
+    const named = stub();
+    await runStress({ ...base, runId: 'r2', repoRoot: root, home, tier: 'small', slices: both, scenarios: ['placement-race'], exec: named.exec });
+    expect(named.calls.filter((c) => c.includes(' run '))).toEqual(['control-plane run placement-race']);
+  });
+
+  it('refuses a platform run in which no slice declares a PS scenario', async () => {
+    const { root, home } = fixture({ a: { scenarios: ['x'] }, b: { needs: ['a'], scenarios: ['y'] } });
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['a', 'b'], exec })).rejects.toThrow(/nothing to run/);
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a slice run whose scenarios are all platformOnly, before anything runs', async () => {
+    const { root, home } = fixture({ a: { scenarios: ['PS-7'], platformOnly: ['PS-7'] } });
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: ['a'], exec })).rejects.toThrow(/declares no scenario to run in slice mode/);
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses an empty --scenarios list in a platform run with its own message', async () => {
+    const { root, home } = fixture(slices);
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, scenarios: [], exec })).rejects.toThrow(/--scenarios names no scenario/);
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a scenario no slice in the run declares', async () => {
+    const { root, home } = fixture(slices);
+    const { calls, exec } = stub();
+    await expect(runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, scenarios: ['PS-2'], exec })).rejects.toThrow(/no slice in the run declares PS-2/);
+    expect(calls).toEqual([]);
+  });
+
+  it('deploys and seeds one slice before the next starts, and tears down in reverse', async () => {
     const { root, home } = fixture(slices);
     const { calls, envs, exec } = stub();
     const summary = await runStress({ ...base, repoRoot: root, home, tier: 'small', slices: both, exec });
@@ -94,20 +169,19 @@ describe('runner (spec §3.5)', () => {
       'tenant-identity budget',
       'control-plane budget',
       'tenant-identity deploy',
-      'control-plane deploy',
       'tenant-identity seed',
+      'control-plane deploy',
       'control-plane seed',
       'tenant-identity run PS-1',
       'control-plane run PS-1',
       'control-plane run PS-5',
-      'control-plane run placement-race',
       'tenant-identity collect',
       'control-plane collect',
       'control-plane teardown',
       'tenant-identity teardown',
     ]);
     expect(summary.failures).toEqual([]);
-    expect(JSON.parse(envs[2].STRESS_TIER_JSON!).maxTenants).toBe(25);
+    expect(JSON.parse(envs[3].STRESS_TIER_JSON!).maxTenants).toBe(25);
     const md = fs.readFileSync(summary.resultsFile!, 'utf8');
     expect(md).toContain('| control-plane | PS-5 |');
     expect(md).toMatch(/\| tenant-identity \| \d+ \| \d+ \|/);
