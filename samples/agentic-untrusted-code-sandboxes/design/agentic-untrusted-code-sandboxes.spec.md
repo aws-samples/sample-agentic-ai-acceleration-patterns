@@ -577,7 +577,7 @@ It did not kill a 64-process job that held 176 MiB. `memoryExceeded`
 was right in all 85 fills. It costs about 0.06 % of one CPU at idle.
 
 A job that fills memory from every process slot at once (64 processes,
-each to A) can also stall the runner. In two of five integration runs
+each to A) can also stall the runner. In two of six integration runs
 of the `runaway` step on `nitro` the runner wrote no `job_done` line
 within `runTimeout` + 5 s, so no `memoryExceeded` reached the tool. The
 tool stopped the tenant's task as an overrun (§4.1 step 5) and returned

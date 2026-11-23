@@ -14,7 +14,7 @@ interface, DNS Firewall or query-log resource of the run.
 | Build, synth, seed (`standalone-build`, `synth`, `seed`) | The packed core installs, compiles and synthesises with no `agentic-runtime-isolation` in its tree; two construct instances in one stack have unique names; the seed data is in place |
 | Cold and warm runs (`parse`, `reuse`) | All three backends. Cold (p50): `microvm` 10.8 s, `nitro` 33.6 s, `agentcore` 7.5 s. Warm (p50): 298 to 582 ms. `parse` also ran once through the sample agent on `microvm` |
 | Tenant separation (`apart`, `race`, `prefix`, `iam-wall`) | B does not see A's files; two concurrent first calls start one sandbox; path-escape names are refused; IAM simulation denies another tenant's object, row and task |
-| Limits and boundary (`limits`, `no-credentials`, `no-egress`, `dns`, `runaway`) | All three backends. `agentcore` is included in `runaway`. On `nitro` the memory fill returned `memoryExceeded`; in 2 of the 5 runs before, it ended as a tool overrun instead (README Known limitations) |
+| Limits and boundary (`limits`, `no-credentials`, `no-egress`, `dns`, `runaway`) | All three backends. `agentcore` is included in `runaway`. On `nitro` the memory fill returned `memoryExceeded`; in 2 of 6 runs it ended as a tool overrun instead (README Known limitations) |
 | Session files (`session-files`) | `agentcore` with `sessionFiles`: own prefix allowed, another tenant's denied |
 | Entries (`standalone`, `forged`) | The standalone function with and without an invoke grant; a forged tenant context returns `context_invalid` |
 | Lifecycle (`dead-handle`, `recycled-address`, `idle`, `max-life`, `microvm-stop`, `cold-from-zero`, `failed-start`, `offboard`) | Dead handle on all three; the others on the backend each names. `nitro` start from zero instances took 39 s against the 300 s cap; `microvm` ended out of band reads `TERMINATED` |
@@ -23,11 +23,12 @@ interface, DNS Firewall or query-log resource of the run.
 
 The other Regions are covered by earlier runs. In `us-east-1` (run 12)
 the DNS Firewall steps `dns` and `dns-platform` passed; in
-`eu-central-1` (runs 14 and 20) every step before the teardown passed
-except, in run 20, the `nitro` memory fill that ended as a tool overrun.
-Deploys of the integration stack took 1123 to 1328 s across runs 5 to
-21, and deletes 2398 to 2472 s once ADR-0073 held each VPC function's
-role until its network interfaces were released.
+`eu-central-1` (runs 14 and 20) every step before the teardown passed,
+except that run 20 failed `runaway` on `nitro`: its memory fill ended as
+a tool overrun. Deploys of the integration stack took 1123 to 1328 s
+across runs 5 to 21. With ADR-0073's order (each VPC function's role kept
+until after the log drain's wait), runs 20 and 21 deleted their stacks in
+2398 to 2472 s.
 
 The demo stack (`src/main.ts`, `backends=microvm`, `standalone=true`) was
 deployed twice on 2026-11-22 in `eu-west-1` (635 s and 645 s);
@@ -384,15 +385,15 @@ sequenceDiagram
 nonce, and starts the sandbox. It waits up to `startWait` (15 s by default)
 for the sandbox to answer; if it does not, the call returns
 `sandbox_starting` with `retryAfterSeconds` 5 and the caller retries. The
-retry finds the `STARTING` row, probes it, and runs. Cold times in run 14:
-7.5 s on `agentcore`, 10.6 s on `microvm`, 31.7 s on `nitro`; `nitro` from
-zero instances took 37 s with a 300 s cap. Concurrent first calls for one
+retry finds the `STARTING` row, probes it, and runs. Cold times (p50) in
+run 21: 7.5 s on `agentcore`, 10.8 s on `microvm`, 33.6 s on `nitro`;
+`nitro` from zero instances took 39 s with a 300 s cap. Concurrent first calls for one
 tenant start one sandbox: one wins the conditional write and the others read
 its row.
 
 **Warm reuse.** A later call reads a `READY` row, marks `lastUsedAt`, and
 sends the job on the same sandbox, so files in `/work` persist. The result
-reports `sandbox` = `reused`. Warm calls took 406 to 568 ms in run 14.
+reports `sandbox` = `reused`. Warm calls took 298 to 582 ms (p50) in run 21.
 
 **Idle and maximum life.** `microvm` and `agentcore` stop themselves: the
 platform suspends a MicroVM at `sandboxIdle` and an AgentCore session ends

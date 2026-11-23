@@ -370,7 +370,7 @@ deletes a VPC function's network interfaces with the function's role,
 some time after the function is gone. The construct keeps each such role,
 and its network interface policy, until the log drain's 90 s wait has
 passed (ADR-0073), and the integration stack then deleted cleanly. The
-90 s rests on few observations. Three cases fall outside that order: a
+90 s rests on one observation (ADR-0073). Three cases fall outside that order: a
 stack update that removes a bound function or replaces its role, a
 function an app builds in the tool subnets without `bindRunCode`, and a
 release slower than the wait. Each shows as `DELETE_FAILED` on the tool
@@ -390,13 +390,12 @@ aws cloudformation wait stack-delete-complete --stack-name <stack>
 
 **A `nitro` memory fill can stall the runner.** When code fills memory
 from all 64 process slots at once, the runner sometimes does not answer
-within `runTimeout` + 5 s (2 of 5 integration runs of the `runaway`
-step). The tool then stops
-the tenant's task and returns `timedOut` with `memoryExceeded` false, and
-the next call starts a fresh task without the tenant's `/work` files.
-Nothing reaches another tenant. The cause inside the task is not known;
-locking the runner's memory is an untested fix (spec §3.5, threat model
-T-89).
+within `runTimeout` + 5 s (2 of 6 integration runs of the `runaway`
+step). The tool then stops the tenant's task and returns `timedOut` with
+`memoryExceeded` false, and the next call starts a fresh task without the
+tenant's `/work` files. Nothing reaches another tenant. The cause inside
+the task is not known; locking the runner's memory is an untested fix
+(spec §3.5, threat model T-89).
 
 **The AgentCore usage record is not checked.** The cost join for
 `agentcore` reads the AgentCore usage logs in the log group the construct

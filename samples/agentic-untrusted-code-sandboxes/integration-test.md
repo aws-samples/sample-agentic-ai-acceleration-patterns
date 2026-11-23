@@ -142,9 +142,9 @@ is recorded as a failure with the error's class and message.
 ## Runtime and cost
 
 One run takes about 20 minutes to deploy (1123 to 1328 s), about 35
-minutes of steps, and 40 to 65 minutes to delete (2422 s in the clean
-delete, about 3700 s in the deletes that stopped on the leftover network
-interfaces). The waits in the steps are `sandboxIdle` (2 min, three times,
+minutes of steps, and about 40 minutes to delete (2398 to 2472 s in
+runs 20 and 21; a delete that stops on leftover network interfaces runs
+to about 3700 s). The waits in the steps are `sandboxIdle` (2 min, three times,
 partly overlapped) and the `nitro` scale-in before `cold-from-zero` (at
 most 15 minutes, the driver's wait). Most of the delete is the release of
 the network interfaces of the functions in the tool subnets. The driver
