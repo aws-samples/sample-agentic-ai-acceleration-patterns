@@ -2,7 +2,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 -->
-# ADR-0054: Bundle from the package directory, not the working directory
+# ADR-0055: Bundle from the package directory, not the working directory
 
 - Status: Accepted
 - Date: 2026-11-20

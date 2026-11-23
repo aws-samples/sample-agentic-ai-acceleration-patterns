@@ -11,7 +11,7 @@ import { bundlingRoot } from '../../src/shared/bundling-root.cdk';
 
 /**
  * A consumer app in another folder constructs `ToolTarget` and `SharedIngress`
- * (ADR-0054). `NodejsFunction` finds a lock file from the working directory
+ * (ADR-0055). `NodejsFunction` finds a lock file from the working directory
  * unless told where it is, and fails with `PathNotUnderRoot` when this
  * package's entry files are not under it. The constructs pass their own
  * package directory, so the working directory does not matter.

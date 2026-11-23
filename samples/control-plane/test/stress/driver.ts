@@ -10,7 +10,7 @@
  *   check-accounts           the cell account check (spec §3.7), before every run
  *   register                 PutApplication (the stress application) and PutAccount (each cell account)
  *   seed                     the tier's tenant records, from the manifest when it exists
- *   run <scenario>           PS-1, placement-race, read-rate or build-limit-scaling
+ *   run <scenario>           PS-1, placement-race, read-rate or build-limit-scaling; PS-5, churn through the edge (platform mode only)
  *   collect                  server-side 5xx in each record's window (P-7)
  *   sweep [--seeded]         remove the run's deployments, cells and tenants
  *   unregister               DeleteAccount and DeleteApplication
@@ -26,6 +26,7 @@ import * as path from 'node:path';
 import { type AccountState, accountProblems, type RoleState, type StackState } from './account-check';
 import { ControlPlaneApi, operatorToken } from './api';
 import { aws, AwsError, sleep } from './aws';
+import { type Edge, liveEdge, readEdgeInputs } from './edge';
 import { cellsOf, deploymentsOf, type FleetEnv, removeAll } from './fleet';
 import { allTenants, emptyManifest, type Manifest, manifestPath, readManifest, writeManifest } from './manifest';
 import {
@@ -290,6 +291,12 @@ function identity(): Identity {
   return { runId: need('STRESS_RUN_ID'), tier: tier().name, mode: parseMode(process.env.STRESS_MODE), slice: SLICE, commit: need('STRESS_COMMIT') };
 }
 
+/** The front door's edge and registrar for PS-5, from the front-door slice's manifest (platform mode only). */
+function edgeOf(): Edge {
+  if (parseMode(process.env.STRESS_MODE) !== 'platform') throw new Error('PS-5 runs in platform mode only: it needs the front door');
+  return liveEdge(readEdgeInputs(need('STRESS_HOME'), need('STRESS_PREFIX')), region());
+}
+
 function setBuildLimitCommand(limit: number): Promise<number> {
   const script = need('STRESS_SLICE_SCRIPT');
   return new Promise((resolve, reject) => {
@@ -306,6 +313,9 @@ function setBuildLimitCommand(limit: number): Promise<number> {
 async function run(scenario: string): Promise<number> {
   const fn = SCENARIOS[scenario];
   if (fn === undefined) throw new Error(`unknown scenario ${scenario}`);
+  // PS-5 reads the edge, which only a platform run has: take its address from the front-door
+  // manifest before anything is created, so a missing one stops the scenario with the fix.
+  const edge = scenario === 'PS-5' ? edgeOf() : undefined;
   const c = await connect();
   const rec = new Recorder();
   const s: ScenarioEnv = {
@@ -314,6 +324,7 @@ async function run(scenario: string): Promise<number> {
     manifest: loadManifest(),
     buildLimit: buildLimit(),
     setBuildLimit: setBuildLimitCommand,
+    ...(edge === undefined ? {} : { edge }),
   };
   try {
     await fn(s);

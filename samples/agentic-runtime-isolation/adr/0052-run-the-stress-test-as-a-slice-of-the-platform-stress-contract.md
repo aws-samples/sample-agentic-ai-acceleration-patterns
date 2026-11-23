@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT-0
 - Status: Accepted
 - Date: 2026-11-19
 - Amends: the stress-test plan (`design/agentic-runtime-isolation.stress-test.md`, §8)
+- Amended by: ADR-0054
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -50,3 +51,5 @@ Easier: one command (`stress/run.sh run --tier small --slices agentic-runtime-is
 Harder: the slice and the platform run measure different shapes at `medium` and `large` (one ingress against several cells); a refusal that has no log line with a tenant (an API Gateway throttle, a Lambda throttle in S2's herd, a cached authoriser deny) now fails the run as unattributed, where the earlier pass table counted it as expected; `collect.sh` matches refusals to log lines by count, not by correlation id, because the ingress does not log `x-correlation-id` yet (stress ADR-0005, W-8). Each tenant's 429 lines are credited only up to the driver's own 429 count for that tenant (`tenant_429{tenant:<id>}` in the k6 summary, one threshold per tenant the scenario's plan uses, S7's doubled set included), so one tenant's excess lines cannot hide another's unattributed 429; lines with other statuses have no per-tenant driver count and are credited as logged.
 
 Revisit when: the ingress logs the correlation id (join per request, drop the count match); W-5 lets the platform run deploy this sample as a cell (platform mode, the stress identity); or a slice run at `medium` shows the 10,000-group cap of the shared pool in the way.
+
+**2026-11-21.** Amended by ADR-0054: in platform mode the slice reads the other slices' manifests and drives the platform scenarios through the front door's edge; ADR-0054's decision replaces the platform-mode bullet above.

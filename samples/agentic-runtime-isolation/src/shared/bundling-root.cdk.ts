@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT-0
 
 /**
- * Where `NodejsFunction` bundles from (ADR-0054). Without these two props it
+ * Where `NodejsFunction` bundles from (ADR-0055). Without these two props it
  * looks for a lock file upward from the process working directory, so a
  * consumer app in another folder that constructs `ToolTarget` or
  * `SharedIngress` fails with `PathNotUnderRoot`: this package's entry files

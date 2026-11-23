@@ -211,15 +211,20 @@ scripts/stress/
   deploy.sh          cdk deploy of the stress stack (§3.1 props); the driver stack through stress/driver/deploy.sh; prints both deploy times
   seed.sh            Phase 1 steps 1.2 and 1.3; writes tenant ids and usernames to a local manifest (no tokens)
   count.sh           Phase 1 steps 1.4 to 1.7
-  slice.json         the slice declaration: S1 to S7 and the quotas it draws on (ADR-0052)
+  slice.json         the slice declaration: S1 to S7, the platform scenarios PS-2, PS-3, PS-4, PS-6 and PS-8 it owns, the slices it needs and the quotas it draws on (ADR-0052)
   slice.sh           the six verbs of the platform stress contract; run calls stress/driver/k6.sh; the budget and the sample's tier come from test/stress/slice-cli.ts
   window.sh          the window maths slice.sh run and collect.sh share: a scenario's CloudWatch minutes, the next scenario's start, ISO timestamps
   attribute.jq       P-7: the refusals the hops log with a tenant, matched with the driver's count
   caps.jq            the driver's 429 count per tenant from the k6 summary, for attribute.jq
   noisy.jq           S3: the noisy tenant is refused and no other tenant is
   delivered.jq       S3: the steady VUs sent at least 95 % of steadyRps x seconds
+  platform.sh        platform mode: reads the other slices' manifests (tenant-front-door.json, identity.json, tenant-identity.json, control-plane.json) and picks the tenants to drive
+  platform-tenants.jq  platform mode: the tenants the identity and the control plane both know, with the refusal reason of each other one
+  attribute-edge.jq  platform mode: the refusals the driver printed by tenant and reason, matched with its count
+  collect-platform.sh  platform mode: `collect` from the driver's own refusal lines (the edge's and the cells' logs are not joined)
   k6/
     probe.js         the ingress call, the probes and their isolation assertions, warm-up and step (token refresh, pacing and counters are in stress/k6/lib.js)
+    edge-refusals.js platform mode: prints one `edge_refusal` line, with its tenant, status and minute, for each refused request
     noisy-pace.js    S3's pacing arithmetic, no k6 import (test/stress/slice.test.ts checks it)
     s1-steady.js ... s7-eviction.js
   collect.sh         Section 7 for each record's window; fills the record's late fields; prints the pass table
@@ -231,7 +236,10 @@ The scripts run as a slice of the platform stress contract (ADR-0052): the
 runner, `stress/run.sh run --tier <tier> --slices agentic-runtime-isolation`,
 calls `slice.sh` for `deploy`, `seed`, `run S1`..`S7`, `collect` and
 `teardown`. `run` fails on k6's thresholds; `collect` fills each record's late
-fields and decides the §4 pass table from the settled logs and metrics.
+fields and decides the §4 pass table from the settled logs and metrics. In a
+platform run (`STRESS_MODE=platform`, ADR-0054) the same verbs read the other
+slices' manifests, `run` takes `PS-2`, `PS-3`, `PS-4`, `PS-6` and `PS-8`, and
+`collect` reads the refusals from the driver's own lines.
 
 The driver host and the shared k6 library are the repository's stress assets, `stress/driver/` and `stress/k6/` (stress ADR-0007, ADR-0008, ADR-0009). This slice deploys the host through `stress/driver/deploy.sh` and keeps only its own calls and assertions, in `k6/probe.js`.
 
@@ -344,7 +352,7 @@ synthesised into `cdk.stress.out/` (gitignored), as `integ.sh` does.
 | `slice.sh deploy` (`deploy.sh`) | checks the shared identity deployment exists (as `integ.sh`, never deploys or destroys it); synth and deploy `<prefix>-ingress` with `STRESS_AGENTS=false`; then synth again and deploy the agents stacks (concurrency 1), then the driver stack through `stress/driver/deploy.sh` | one line per stack: name, deploy seconds; the `PolicySecondsToActive*` outputs |
 | `slice.sh seed` (`seed.sh`) | §8.2 reuse; `CreateTenant` with `app/use` at 4 a second for the tier's seeded count, `PutTenantSubscription` on the Entitlements API (`agents: ['default', 'a001', ...]` all agents, `tools: ['<target>/*']` all targets) for the active tenants, `BatchWriteItem` one demo-table row per tenant (`PK`, a `label`, `crmAccount`); `CreateUser` to the tier's users per active tenant; writes the manifest; `--tenants N` overrides the seeded count | counts created and reused, wall seconds, status histogram |
 | `count.sh` | Phase 1 steps 1.4 to 1.7 at the tier's size | the step table |
-| `slice.sh run S1..S7` (`slice.sh`) | runs `stress/driver/k6.sh` on the scenario's script: it mirrors `k6/` and the shared `stress/k6/` on the host at their repository-relative paths, passes the seed manifest as an input file and the sample's tier as `STRESS_TIER_JSON`, runs k6 through Run Command and brings the records and the k6 summary back; `S2` first applies the §13 recipe (env marker on the authoriser, the ingress function and every interceptor; `flush-stage-authorizers-cache`; 60 s idle) | the scenario's record and its counters |
+| `slice.sh run S1..S7` (`slice.sh`; `PS-2`, `PS-3`, `PS-4`, `PS-6` and `PS-8` in platform mode, sent to the front door's edge) | runs `stress/driver/k6.sh` on the scenario's script: it mirrors `k6/` and the shared `stress/k6/` on the host at their repository-relative paths, passes the seed manifest as an input file and the sample's tier as `STRESS_TIER_JSON`, runs k6 through Run Command and brings the records and the k6 summary back; `S2` first applies the §13 recipe (env marker on the authoriser, the ingress function and every interceptor; `flush-stage-authorizers-cache`; 60 s idle) | the scenario's record and its counters |
 | `slice.sh collect` (`collect.sh`) | for each record, over the window it names: Logs Insights on the ingress and authoriser log groups (`request served` percentiles, `request refused` by tenant, reason and status (each tenant's 429 lines credited up to the driver's `tenant_429` count for it), 429 by tenant and minute, `sdk retried` sums by service), CloudWatch metrics (API Gateway, Lambda, DynamoDB), the k6 summary; fills the record's `refusals` (P-7), `latency.ingress` and `quotas`; writes `design/stress-results/<YYYY-MM-DD>-<scale>.md` after a redaction check (`[0-9]{12}`, tenant ids and user names from the manifest, `eyJ`, `https://`) | the pass table |
 | `slice.sh teardown [--fixtures]` (`teardown.sh [--tenants]`) | `slice.sh` passes `--tenants` when the tier onboards every run (`small`, `medium`) or on `--fixtures`, and keeps the seeded fleet at `large` (ADR-0052); destroys driver, agents, ingress stacks in that order (concurrency 1); with `--tenants`, first deletes the manifest's tenants at 2 a second, 4 in flight, in up to three passes; after the destroy removes the Runtime log groups a late line recreated (ADR-0047) and the CDK provider functions' log groups, which no stack owns, and fails on any stack, log group a stack owned (ADR-0019), other log group with the stacks' names, agent runtime or registry parameter left | one line per stack: name, destroy seconds; the leftover check |
 
