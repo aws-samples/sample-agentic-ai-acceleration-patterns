@@ -82,8 +82,8 @@ Such a client keeps its waves near the limit.
 - A wave over the limit waits for free slots, for about 10 minutes per
   start. The record stays `CREATING`, `UPDATING` or `DELETING` while it
   waits.
-- Step Functions starts a task's `TimeoutSeconds` again on each attempt,
-  so the wait is outside the one-hour build budget. The execution's worst
+- Step Functions starts a task's `TimeoutSeconds` again on each attempt
+  (spec H-12), so the wait is outside the one-hour build budget. The execution's worst
   cases at the caps grow by 20 minutes per script build: 1,520 minutes for a
   delete and 1,100 for a new-cell create, inside the 26-hour execution
   timeout (R-23).
