@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-18
-- Amended by: ADR-0011, ADR-0016
+- Amended by: ADR-0011, ADR-0016, ADR-0023
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -119,3 +119,7 @@ role, trusted by the platform account, that allows `ssm:GetParameter` on
 the stress cells' ingress parameters only, for front-door phase two. It
 deploys in an owner stack tagged `stress:part=account-base`, like the
 rest of the base.
+
+Note 2026-11-23: ADR-0023 (Proposed) sets out how cells share a stress
+account once the control plane tags each build, and recommends keeping two
+cells in each `large` account.
