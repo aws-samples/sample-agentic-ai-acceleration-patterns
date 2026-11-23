@@ -31,6 +31,7 @@ that change a sample are recorded in that sample's `adr/`.
 | [0019](./0019-give-the-stress-cell-a-cell-api-origin-and-read-its-ingress-with-a-reader-role.md) | Give the stress cell a cell API origin, and read its ingress with a reader role | Accepted | 2026-11-21 |
 | [0020](./0020-time-a-tenant-to-its-first-served-api-call-and-keep-the-warm-up-tenant-apart.md) | Time a tenant to its first served API call, and keep the warm-up tenant apart | Accepted | 2026-11-21 |
 | [0021](./0021-run-churn-and-cross-cell-probes-on-their-own-not-beside-the-load.md) | Run churn and cross-cell probes on their own, not beside the load | Accepted | 2026-11-21 |
+| [0022](./0022-show-a-run-on-one-dashboard-in-the-platform-account.md) | Show a run on one dashboard in the platform account | Proposed | 2026-11-23 |
 
 In `samples/control-plane/adr/`:
 
