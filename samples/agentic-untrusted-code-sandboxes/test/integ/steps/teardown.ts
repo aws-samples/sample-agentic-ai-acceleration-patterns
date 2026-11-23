@@ -52,7 +52,9 @@ export async function destroyAndCheck(aws: Aws, rec: Recorder, prefix: string, s
 export function teardownUnit(rec: Recorder, u: Unit, outcome: TeardownOutcome, isFirst: boolean): void {
   const backend = u.backend as Backend;
   const mine = outcome.findings.filter((f) => !f.known && KINDS[backend].includes(f.kind));
-  rec.check(`the stack deleted (nothing left of ${backend}: ${mine.map((f) => `${f.kind} ${f.id}`).join(', ') || 'clean'})`, outcome.destroyed && mine.length === 0);
+  const unavailable = outcome.findings.filter((f) => f.kind === 'check-unavailable');
+  const state = mine.map((f) => `${f.kind} ${f.id}`).join(', ') || (unavailable.length > 0 ? 'not checked, the leftover check could not run' : 'clean');
+  rec.check(`the stack deleted (nothing left of ${backend}: ${state})`, outcome.destroyed && mine.length === 0 && unavailable.length === 0);
   if (u.instance === 'run-code' && backend === 'agentcore') {
     const logs = outcome.findings.filter((f) => f.kind === 'log-group' && f.id.startsWith('/aws/bedrock-agentcore/'));
     rec.check(`no AgentCore runtime log group is left (${logs.length})`, logs.length === 0);
@@ -62,7 +64,8 @@ export function teardownUnit(rec: Recorder, u: Unit, outcome: TeardownOutcome, i
     rec.check(`no MicroVM image log group is left (${logs.length})`, logs.length === 0);
   }
   if (isFirst) {
-    const other = outcome.findings.filter((f) => !f.known && !Object.values(KINDS).some((k) => k.includes(f.kind)) && f.kind !== 'log-group');
+    rec.check(`the leftover check could run (${unavailable.map((f) => `${f.id}: ${f.detail}`).join('; ') || 'yes'})`, unavailable.length === 0);
+    const other = outcome.findings.filter((f) => !f.known && !Object.values(KINDS).some((k) => k.includes(f.kind)) && f.kind !== 'log-group' && f.kind !== 'check-unavailable');
     rec.check(`no other resource of the run is left (${other.map((f) => `${f.kind} ${f.id}`).join(', ') || 'none'})`, other.length === 0);
     const groups = outcome.findings.filter((f) => f.kind === 'log-group' && !f.id.startsWith('/aws/bedrock-agentcore/') && !f.id.startsWith('/aws/lambda-microvms/'));
     rec.check(`no log group of the sample is left (${groups.length})`, groups.length === 0);

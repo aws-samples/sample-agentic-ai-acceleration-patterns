@@ -118,10 +118,22 @@ export class Aws {
     return r.Item;
   }
 
-  /** Runs the AWS CLI for the few calls no declared SDK client covers (Service Quotas, Route 53 Resolver). */
+  /**
+   * Runs the AWS CLI for the few calls no declared SDK client covers (Service Quotas, Route 53 Resolver). A failure
+   * keeps the CLI's own `stderr` (the cause: missing or expired credentials, a not-found answer) on the error, with
+   * ARNs and account ids replaced, and names the service and operation in the message. A process that never started
+   * has no stderr, and the error's own text stands in for it.
+   */
   public async cli(args: string[]): Promise<string> {
-    const { stdout } = await execFileAsync('aws', [...args, '--region', this.region, '--output', 'json'], { maxBuffer: 16 * 1024 * 1024 });
-    return stdout;
+    try {
+      const { stdout } = await execFileAsync('aws', [...args, '--region', this.region, '--output', 'json'], { maxBuffer: 16 * 1024 * 1024 });
+      return stdout;
+    } catch (e) {
+      const raw = (e as { stderr?: unknown }).stderr;
+      const cause = typeof raw === 'string' && raw.trim() !== '' ? raw : e instanceof Error ? e.message : String(e);
+      const stderr = cause.replace(/arn:aws[\w-]*:[^\s"']+/g, '<arn>').replace(/\b\d{12}\b/g, '<account>').replace(/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, '<key>').trim().slice(0, 2000);
+      throw Object.assign(new Error(`aws ${args.slice(0, 2).join(' ')} failed: ${stderr}`), { stderr, code: (e as { code?: unknown }).code });
+    }
   }
 }
 

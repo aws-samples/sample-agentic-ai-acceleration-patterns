@@ -10,9 +10,10 @@
 # instances, MicroVMs, runtimes, VPCs and endpoints, DNS Firewall resources
 # and Logs resource policies a run left in the account and Region. It deletes
 # nothing. With no state file of a run on this machine it lists only the
-# stacks that carry INTEG_PREFIX. Exit status 1 when something is left; the
-# one known leftover (a statement in a shared Logs resource policy, spec
-# section 3.9) is listed and does not count.
+# stacks that carry INTEG_PREFIX. Exit status 1 when something is left or the
+# check could not run (the credentials or the AWS CLI failed); the one known
+# leftover (a statement in a shared Logs resource policy, spec section 3.9) is
+# listed and does not count.
 set -euo pipefail
 
 : "${AWS_REGION:?Set AWS_REGION to the single Region that was tested (for example export AWS_REGION=eu-central-1)}"
