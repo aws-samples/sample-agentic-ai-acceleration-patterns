@@ -37,7 +37,7 @@ POST_JOB_DEADLINE_S = 3.0
 DIRTY_POLL_S = POST_JOB_DEADLINE_S
 READ_CHUNK = 65536
 CURRENT_READ = 64  # one pread of memory.current, a single number
-GROUP_READ = 16384  # one pread of memory.stat, about 2 KiB
+GROUP_READ = 8192  # one pread of memory.stat, about 2 KiB
 CPU_LIMIT_SLACK_MS = 100
 # mlockall(2) flags (linux/mman.h).
 MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT = 1, 2, 4
@@ -466,8 +466,8 @@ class Executor:
         """
         try:
             self._above_l()
-        except (OSError, ValueError, KeyError):
-            pass
+        except (OSError, ValueError, KeyError) as e:
+            log("watchdog_open_failed", error=type(e).__name__)
 
     def _open_group_files(self) -> Tuple[int, int]:
         group = self.task_group or ""

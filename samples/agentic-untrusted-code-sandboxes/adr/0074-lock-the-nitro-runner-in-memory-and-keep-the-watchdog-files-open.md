@@ -85,14 +85,18 @@ Option 1, with the watchdog's files kept open:
 4. The `nitro` watchdog opens `memory.current` and `memory.stat` and
    reads them once when the sandbox is claimed, before any job, keeps
    them open for the task's life, and reads them with `pread`. A read
-   error closes them, and the next poll opens them again. The decision
-   of ADR-0022 (the watchdog at L on `memory.current` less the file
-   cache, A = L − 64 MiB) is unchanged.
+   error closes them, and the next poll opens them again. Both are
+   opened with `O_CLOEXEC` and the job is started with `close_fds`, so
+   the job never holds them. The decision of ADR-0022 (the watchdog at L
+   on `memory.current` less the file cache, A = L − 64 MiB) is
+   unchanged.
 
 Measured on the same stack: with the lock and the open files, 0 of 58
 such fills overran. 32 of them ran with the side process, 14 of those
-with one of the two variants below. 12 ran with a runner that opened
-the files at the first poll instead of at claim. The last 14 are this
+with one of the two variants below; they took 0.55 to 13.9 s, and the
+slowest of them also logged each watchdog poll, which itself waited.
+12 ran with a runner that opened the files at the first poll instead
+of at claim, in 0.65 to 7.4 s. The last 14 are this
 decision's runner, without the side process, 4 of them as the first
 call of a new sandbox: all 14 answered `memoryExceeded` true in 0.54 to
 7.4 s on the same task, and every file the tenant had written to
@@ -109,11 +113,14 @@ the job at nice 19. Neither shortened the fills measurably.
 ## Consequences
 
 The `runaway` step requires `memoryExceeded` on `nitro` again; a tool
-overrun there is a failure. A fill from every slot still takes up to
-about 7 s on a 1 vCPU task, because the runner's own allocations wait
-while the group is full; the slowest seen is well inside the
-integration test's 20 s `runTimeout` and the 30 s default. The runner's locked memory comes out of the 256 MiB margin
-between L and the task limit, as its resident memory already did.
+overrun there is a failure. The integration test has not run the step
+with this change yet. A fill from every slot still takes up to about
+7 s on a 1 vCPU task, because the runner's own allocations wait while
+the group is full; the slowest of this runner's 14 fills took 7.4 s,
+inside the integration test's 20 s `runTimeout` and the 30 s default.
+The runner's resident memory, locked or not (about 36 MiB), comes out
+of the 256 MiB margin between L and the task limit, as it already did;
+the locked address space beyond it uses no memory.
 
 Revisit if the runner grows past the margin, if a fill again ends as an
 overrun, or if the platform offers a writable cgroup for the job

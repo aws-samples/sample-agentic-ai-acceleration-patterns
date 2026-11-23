@@ -55,7 +55,10 @@ class ConstantsTest(unittest.TestCase):
             jb.lock_memory(Libc())
 
     def test_the_sysv_sweep_locks_no_memory(self):
-        self.assertIn("resource.setrlimit(resource.RLIMIT_MEMLOCK, (0, 0))", jb.SYSV_SWEEP)
+        # The first statement after the imports, before libc or any SysV call.
+        lines = [line for line in jb.SYSV_SWEEP.splitlines() if line.strip()]
+        self.assertEqual(lines[1].split("#")[0].strip(), "resource.setrlimit(resource.RLIMIT_MEMLOCK, (0, 0))")
+        self.assertEqual(lines[0], "import ctypes, resource")
 
     def test_a_refused_lock_ends_the_nitro_start(self):
         from runner import runner as rn
@@ -137,8 +140,10 @@ class MonitorTest(unittest.TestCase):
 
     def test_nitro_watchdog_open_failure_is_left_to_the_first_poll(self):
         ex = self.executor("nitro", task_group=os.path.join(self.group, "missing"))
-        ex.open_watchdog()  # no raise: the watchdog fails open, as before
+        with mock.patch.object(jb, "log") as logged:
+            ex.open_watchdog()  # no raise: the watchdog fails open, as before, and says so
         self.assertIsNone(ex._group_fds)
+        logged.assert_called_once_with("watchdog_open_failed", error="FileNotFoundError")
 
     def test_nitro_watchdog_reopens_after_a_read_error(self):
         ex = self.executor("nitro", task_group=self.group)

@@ -585,16 +585,19 @@ runner wrote no `job_done` line within `runTimeout` + 5 s in 5 of 8
 such fills on a `nitro`-only stack (and in 2 of 6 integration runs of
 `runaway`), the tool stopped the task as an overrun (§4.1 step 5), and
 the tenant lost `/work`. So on `nitro` the runner locks its pages once
-it is claimed (`mlockall(MCL_CURRENT)`, then `MCL_FUTURE | MCL_ONFAULT`),
-the task definition sets the container's `memlock` ulimit to unlimited
-(a ulimit, not a capability), each job child and the SysV sweep set
-`RLIMIT_MEMLOCK` to 0 on every backend, and the watchdog keeps `memory.current` and
-`memory.stat` open and reads them with `pread`, because an open per poll
-allocates and an allocation in the full group waited 6 to 19 s. It
-opens and reads them once at claim, before any job. A runner whose lock
-the kernel refuses ends at start. With both, 0 of 58 such fills
-overran; the 14 fills of the final runner answered `memoryExceeded` in
-0.54 to 7.4 s on the same task with `/work` kept (ADR-0074).
+it is claimed (`mlockall(MCL_CURRENT)`, then `MCL_FUTURE |
+MCL_ONFAULT`), and the task definition sets the container's `memlock`
+ulimit to unlimited (a ulimit, not a capability). Each job child and
+the SysV sweep set `RLIMIT_MEMLOCK` to 0 on every backend. A runner
+whose lock the kernel refuses ends at start. With the lock alone, the
+14 fills tried ended but took up to 23.7 s, because the watchdog opened
+its files on every poll, and an open allocates: in the full group it
+waited 6 to 19 s. So the watchdog opens `memory.current` and
+`memory.stat` and reads them once at claim, before any job, keeps them
+open and reads them with `pread`. With the lock and the open files, 0
+of 58 such fills overran; the 14 fills of the final runner answered
+`memoryExceeded` in 0.54 to 7.4 s on the same task with `/work` kept
+(ADR-0074).
 
 Mounts (S-16). On every backend `/dev/shm` is the only tmpfs uid 1001
 can write: 64 MiB on `microvm` and `agentcore`, 576 MiB on `nitro`

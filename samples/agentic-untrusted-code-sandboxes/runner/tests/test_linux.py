@@ -149,7 +149,7 @@ class MicrovmLinux(Base):
             out = run_json(self.executor(), calls_code())
         finally:
             os.chmod("/dev/shm", 0o1777)  # nosec B103 B108 - restores the default mode in the test container
-        for name in ("memfd_create", "socket_unix", "listen_9", "sndbuf", "semget", "shmget", "unshare_user"):
+        for name in ("memfd_create", "socket_unix", "listen_9", "sndbuf", "semget", "shmget", "unshare_user", "mlockall"):
             self.assertEqual(out[name], "EPERM", name)
         for name in ("socket_inet", "socketpair", "listen_5", "reuseaddr", "thread", "subprocess", "fork"):
             self.assertEqual(out[name], "ok", name)
@@ -197,7 +197,7 @@ class NitroLinux(Base):
         out = run_json(self.executor(), calls_code())
         for name in ("semget", "shmget"):
             self.assertEqual(out[name], "EPERM", name)
-        self.assertIn(out["mlockall"], ("EPERM", "ENOMEM"))  # RLIMIT_MEMLOCK 0 (ADR-0074)
+        self.assertEqual(out["mlockall"], "EPERM")  # RLIMIT_MEMLOCK 0 and no CAP_IPC_LOCK (ADR-0074)
         for name in ("memfd_create", "socket_unix", "listen_9", "sndbuf", "thread", "subprocess"):
             self.assertEqual(out[name], "ok", name)
 
@@ -238,6 +238,16 @@ class NitroLinux(Base):
                 if time.monotonic() > deadline:
                     raise
                 time.sleep(0.1)
+
+    @staticmethod
+    def fd_links(pid):
+        out = []
+        for fd in os.listdir("/proc/%d/fd" % pid):
+            try:
+                out.append(os.readlink("/proc/%d/fd/%s" % (pid, fd)))
+            except OSError:  # closed between the listing and the read
+                pass
+        return out
 
     @staticmethod
     def connect(timeout=20):
@@ -287,8 +297,12 @@ class NitroLinux(Base):
         proc = self.start_runner(nonce)
         conn = self.connect(timeout=30)
         _, hello = self.hello(conn, nonce)
-        opened = [os.readlink("/proc/%d/fd/%s" % (proc.pid, fd)) for fd in os.listdir("/proc/%d/fd" % proc.pid)]
+        opened = self.fd_links(proc.pid)
         self.assertTrue(any(p.endswith("/memory.current") for p in opened), opened)
+        # The job does not get them: O_CLOEXEC and close_fds.
+        links = self.post_run(conn, nonce, "r0", "import os\nfor f in os.listdir('/proc/self/fd'):\n    try:\n"
+                              "        print(os.readlink('/proc/self/fd/' + f))\n    except OSError:\n        pass\n")
+        self.assertFalse([p for p in links["stdout"].split() if p.endswith(("/memory.current", "/memory.stat"))], links)
         self.assertEqual(self.post_run(conn, nonce, "r1", "open('/work/keep', 'w').write('kept')")["exitCode"], 0)
         fill = ("import os, sys, time\n"
                 "def hog():\n    held = []\n    try:\n        while True:\n            held.append(bytearray(b'x') * (16 << 20))\n"
@@ -309,9 +323,9 @@ class NitroLinux(Base):
                 head = line.split()
                 if head and "-" in head[0] and len(head) >= 5:
                     path = head[5] if len(head) > 5 else ""
-                elif head[:1] == ["Locked:"] and os.path.basename(path).startswith("libc.so"):
+                elif head[:1] == ["Locked:"] and os.path.basename(path).startswith(("libc.so", "libc-")):
                     locked += int(head[1])
-        self.assertGreater(locked, 0, "the runner's libc pages are not locked")
+        self.assertGreater(locked, 0, "the runner's libc pages are not locked (or no glibc libc is mapped)")
         conn.close()
 
 
