@@ -17,8 +17,9 @@
  * `iam:GetRolePolicy`, and this decides.
  */
 
-import { sessionTagConditions, sessionTagRequestConditions } from '../../src/shared/fleet';
-import { OWN_CELL_PATH, OWN_DEPLOYMENT_PATH } from '../../src/shared/ssm-namespaces';
+// fleet.ts has no imports: this file must load without aws-cdk-lib, so the
+// stress package can run its tests when samples/control-plane is not installed.
+import { OWN_CELL_PATH, OWN_DEPLOYMENT_PATH, sessionTagConditions, sessionTagRequestConditions } from '../../src/shared/fleet';
 
 export const CELL_TOOLKIT_STACK = 'CDKToolkit-cell';
 export const ACCOUNT_BASE_TAG = { key: 'stress:part', value: 'account-base' } as const;

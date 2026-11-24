@@ -280,7 +280,8 @@ through its CloudFormation execution role, which carries no tags
 (Production hardening checklist, Accounts). The CodeBuild build assumes
 the role before your script runs, so the script executes **in** the cell's
 account with exactly what that account's owner installed. One pair serves
-every application the account admits. A customer installs the pair with the `CellAccountStack` in their own account, registers it (or
+every application the account admits. A customer installs the pair with
+the `CellAccountStack` in their own account, registers it (or
 has the vendor register it) with the same external id, and can revoke the
 control plane at any time by deleting the pair; the control plane holds no
 customer credentials, only the account id. `PutAccount` checks the handshake
@@ -311,7 +312,8 @@ account: both script sets read the account-wide `/application-plane/shared/*`
 identity platform) and their application's
 `/application-plane/applications/<applicationId>/shared/*` (ADR-034, ADR-038);
 the cell create script publishes shared resource identifiers to
-`/application-plane/cells/<cellId>/*`; tenant scripts read that namespace and
+`/application-plane/cells/<cellId>/*`; tenant scripts read their own
+cell's path and
 write their own state under
 `/application-plane/tenants/<tenantId>/<applicationId>/*` (ADR-037).
 
@@ -442,7 +444,9 @@ it. The role pair stack takes the control plane's account id (the
 require. A customer's account must have one: `PutAccount` refuses
 `"owner": "TENANT"` without it (ADR-029); a second vendor account may omit it.
 It is the standard confused-deputy guard for a role handed to a third party
-(ADR-025):
+(ADR-025). Each half's trust holds the id twice, once per AssumeRole
+statement, so an id longer than about 450 characters can push the trust
+past IAM's default trust policy size quota (2,048 characters):
 
 ```bash
 npx cdk deploy control-plane-cell-account \
@@ -753,7 +757,8 @@ the pair role assume it. A policy in `cellBuildManagedPolicyArns` or
 `tenantBuildManagedPolicyArns` that allows only `sts:AssumeRole` on such a
 role is refused once the builds are tagged; add `sts:TagSession` on the
 same roles, as the `cellBuildManagedPolicyArns` example under Adding an
-account does, before step 3.
+account does, in step 2 for each other account, and before step 3 for the
+control plane's own account.
 
 ### Example: mounting tenant-identity
 

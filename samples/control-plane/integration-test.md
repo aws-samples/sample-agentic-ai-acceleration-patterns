@@ -314,12 +314,16 @@ SSM parameters (estimate). The last green run is in the
 | Build | Project | Buildspec | What it checks |
 |---|---|---|---|
 | `cell-negatives` | cell | a test buildspec that does not assume the pair, so the script holds the build role's own credentials. The build role's grant carries the same TagSession conditions as B's trust, so a request with the wrong keys is refused by both; the untagged request and the one without the external id are refused by B's trust alone (the unit tests check each policy on its own) | The pair refuses an AssumeRole that is untagged, has `CellId` not transitive, adds another key (transitive or not), passes the tenant keys, or omits the external id; it admits `CellId`, transitive, with the external id (the positive control) |
-| `tenant-negatives` | tenant | the same | The pair refuses an AssumeRole that is untagged, passes `CellId` alone, omits `TenantId`, has the three tags not transitive, or omits the external id; it admits the three tags with only `CellId` transitive (the trust allows any subset as transitive, the buildspec makes all three) and the three transitive (the positive control) |
+| `tenant-negatives` | tenant | the same | The pair refuses an AssumeRole that is untagged, passes `CellId` alone, omits `TenantId`, has the three tags not transitive, or omits the external id; it admits the three tags with only `CellId` transitive (the trust allows any non-empty subset as transitive, the buildspec makes all three) and the three transitive (the positive control) |
 | `cell-1`, `cell-2` | cell | the sample's own cell buildspec (`INLINE_BUILDSPECS.cell`) | Two cells in one account. Each cell's session writes, lists and deletes its own `/application-plane/cells/<cellId>` parameters and reads the shared namespace; it cannot write or list the other cell's namespace or write a tenant namespace. It cannot chain into a role on which its policy allows `sts:AssumeRole` alone. It chains into a role on which its policy also allows `sts:TagSession`, and that session writes only under its own `CellId` (a policy that names `${aws:PrincipalTag/CellId}`), so the tag reached the next hop with the cell's value. Setting `CellId` on that chained AssumeRole is refused with `InvalidParameterValue` |
 | `tenant-1` | tenant | the sample's own tenant buildspec (`INLINE_BUILDSPECS.tenant`) | The tenant's session writes and deletes its own `/application-plane/tenants/<tenantId>/<applicationId>` and the parameters under it, and lists its own cell's namespace; it cannot write another application's or another tenant's deployment namespace, list another cell's namespace or write its own cell's |
 
 Every script cleans up what it wrote, a write that should have been refused
-included, so the run leaves no parameter in B. The chained role's
+included, so the run leaves no parameter in B. A cleanup that fails prints
+`Left behind in this account: <name>` in that build's log. The leftover
+check reads account A only, so after a failed run look in B for parameters
+under `/application-plane/cells/`, `/application-plane/tenants/` and
+`/cp-integ/<fleet>/chain/`. The chained role's
 `sts:TagSession` grant on the cell role names the `CellId` key only, as the
 stress test's `cell-build-policy` does.
 

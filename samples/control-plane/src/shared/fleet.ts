@@ -85,6 +85,21 @@ export function sessionTagConditions(kind: ProvisioningRoleKind): Record<string,
   };
 }
 
+/**
+ * The build session's own cell namespace, `/application-plane/cells/<cellId>`,
+ * named by the session's `CellId` tag (ADR-0051). IAM resolves the policy
+ * variable per request; a session without the tag is expected to match
+ * nothing (no integration probe asks an untagged session for SSM access).
+ */
+export const OWN_CELL_PATH = '/application-plane/cells/${aws:PrincipalTag/CellId}';
+
+/**
+ * The build session's own deployment namespace,
+ * `/application-plane/tenants/<tenantId>/<applicationId>` (ADR-037), named by
+ * the session's `TenantId` and `ApplicationId` tags (ADR-0051).
+ */
+export const OWN_DEPLOYMENT_PATH = '/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}';
+
 /** Name of the provisioning role an account installs for one half of the pair. */
 export function provisioningRoleName(fleetName: string, kind: ProvisioningRoleKind): string {
   return `${fleetName}-${kind}-provisioning`;

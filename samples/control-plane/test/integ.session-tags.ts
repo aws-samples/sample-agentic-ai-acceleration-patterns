@@ -145,6 +145,11 @@ const runProbe = new lambda.Function(setup, 'RunProbe', {
       if (build.buildStatus === 'IN_PROGRESS') {
         return { status: 'IN_PROGRESS' };
       }
+      if (build.buildStatus !== 'SUCCEEDED') {
+        // Fail the assertion on this poll, with the build id, instead of
+        // polling a finished build until the total timeout.
+        throw new Error(event.label + ': build ' + build.id + ' ended ' + build.buildStatus);
+      }
       const raw = (build.exportedEnvironmentVariables || []).find((v) => v.name === 'SCRIPT_OUTPUTS')?.value;
       let outputs;
       try { outputs = JSON.parse(raw || '{}'); } catch { outputs = { unparsable: String(raw) }; }
@@ -281,7 +286,11 @@ const allowed = 'allowed';
 const refused = 'refused';
 
 // The build role's grant and the pair's trust refuse every request a
-// correct cell build never makes, and admit the correct one.
+// correct cell build never makes, and admit the correct one. Only
+// `untagged` and `noExternalId` isolate the trust: the other refusals
+// come from the trust and the build role's own TagSession grant together,
+// which carry the same conditions. The trust's tag conditions alone are
+// pinned by the evaluator in test/shared/session-tags.test.ts.
 expectBuild('cell-negatives', 'cell', NEGATIVES_BUILDSPEC, { KIND: 'cell', CELL_ID: CELL_1, TENANT_ID: TENANT_1, APPLICATION_ID: APP }, {
   untagged: refused,
   notTransitive: refused,

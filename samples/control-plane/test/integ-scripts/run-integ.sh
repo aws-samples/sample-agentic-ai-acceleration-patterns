@@ -61,7 +61,7 @@ export CDK_DEFAULT_ACCOUNT="${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity
 # CloudFormation early validation after the runner has started. Refuse up
 # front instead (integration-test.md, Sharing accounts between runs).
 if param_err=$(aws ssm get-parameter --name /control-plane/tenant-api-url --region "$AWS_REGION" --query Parameter.Name --output text 2>&1 >/dev/null); then
-  echo "/control-plane/tenant-api-url already exists in account ${CDK_DEFAULT_ACCOUNT} ${AWS_REGION}: another control plane stack (an integ run in progress or a deployment) owns it. Use another account or Region, or wait for that run to finish"
+  echo "/control-plane/tenant-api-url already exists in this account (${AWS_REGION}): another control plane stack (an integ run in progress or a deployment) owns it. Use another account or Region, or wait for that run to finish"
   exit 1
 elif ! grep -q ParameterNotFound <<<"$param_err"; then
   echo "Could not check for /control-plane/tenant-api-url: ${param_err}"

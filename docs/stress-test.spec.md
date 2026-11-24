@@ -513,8 +513,7 @@ role; one allowing `sts:AssumeRole` conditioned on `aws:PrincipalArn`
 being the fleet's build role for that half and on that half's session tag
 keys; and one allowing `sts:TagSession` to the same build role only with
 exactly that half's tag keys, at least one of them transitive,
-control-plane ADR-0051; and nothing
-else), or a `/cell/` role trusted from
+control-plane ADR-0051; and nothing else), or a `/cell/` role trusted from
 outside (above). The stack list, `iam:ListRoles`, and for the role pair
 `iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and
 `iam:GetRolePolicy` give all of it.

@@ -48,7 +48,7 @@ if [ "${RESULTS[chainTaggedAssume]}" = allowed ]; then
   probe chainPeerWrite as_chain aws ssm put-parameter --name "$ledger/$PEER_CELL_ID" --type String --value probe --overwrite
   probe chainOwnDelete as_chain aws ssm delete-parameter --name "$ledger/$CELL_ID"
   # A write that should have been refused is removed again, so a regression leaves nothing in the account.
-  if [ "${RESULTS[chainPeerWrite]}" = allowed ]; then as_chain aws ssm delete-parameter --name "$ledger/$PEER_CELL_ID" || true; fi
+  if [ "${RESULTS[chainPeerWrite]}" = allowed ]; then as_chain aws ssm delete-parameter --name "$ledger/$PEER_CELL_ID" || echo "Left behind in this account: $ledger/$PEER_CELL_ID"; fi
   if [ "${RESULTS[chainOwnWrite]}" = allowed ] && [ "${RESULTS[chainOwnDelete]}" != allowed ]; then
     echo "Left behind in this account: $ledger/$CELL_ID"
   fi
@@ -62,6 +62,6 @@ probe chainOverride aws sts assume-role --role-arn "$CHAIN_TAGGED_ROLE_ARN" --ro
 
 probe ownCellDelete aws ssm delete-parameter --name "$own/probe"
 # Writes that should have been refused are removed again (best effort).
-if [ "${RESULTS[peerCellWrite]}" = allowed ]; then aws ssm delete-parameter --name "$peer/probe" || true; fi
-if [ "${RESULTS[tenantWrite]}" = allowed ]; then aws ssm delete-parameter --name "/application-plane/tenants/$PEER_TENANT_ID/$APPLICATION_ID" || true; fi
+if [ "${RESULTS[peerCellWrite]}" = allowed ]; then aws ssm delete-parameter --name "$peer/probe" || echo "Left behind in this account: $peer/probe"; fi
+if [ "${RESULTS[tenantWrite]}" = allowed ]; then aws ssm delete-parameter --name "/application-plane/tenants/$PEER_TENANT_ID/$APPLICATION_ID" || echo "Left behind in this account: /application-plane/tenants/$PEER_TENANT_ID/$APPLICATION_ID"; fi
 write_results

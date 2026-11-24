@@ -153,7 +153,7 @@ export AWS_PROFILE=<cell account profile> AWS_REGION=eu-central-1
    control-plane version, run step 1 again (`cell-build-policy` must allow
    `sts:TagSession` on the cell bootstrap roles) and then this step, in every
    cell account, with no build between that and the platform deploy. A pair
-   that does not match fails every cell build at AssumeRole; a
+   that does not match fails every build at AssumeRole; a
    `cell-build-policy` without `sts:TagSession` fails it at the `cdk deploy`
    (control-plane README, "Upgrading to session-tagged builds").
 

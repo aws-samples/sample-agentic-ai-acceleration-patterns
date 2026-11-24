@@ -4,6 +4,7 @@
 import { ArnFormat, Stack } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
+import { OWN_CELL_PATH, OWN_DEPLOYMENT_PATH } from './fleet';
 import { acknowledgeGranularFinding, nagFindingResource } from './nag';
 
 /**
@@ -25,19 +26,9 @@ export function readSharedResourcesStatement(scope: Construct): iam.PolicyStatem
   });
 }
 
-/**
- * The build session's own cell namespace, `/application-plane/cells/<cellId>`,
- * named by the session's `CellId` tag (ADR-0051). IAM resolves the policy
- * variable per request; a session without the tag matches nothing.
- */
-export const OWN_CELL_PATH = '/application-plane/cells/${aws:PrincipalTag/CellId}';
-
-/**
- * The build session's own deployment namespace,
- * `/application-plane/tenants/<tenantId>/<applicationId>` (ADR-037), named by
- * the session's `TenantId` and `ApplicationId` tags (ADR-0051).
- */
-export const OWN_DEPLOYMENT_PATH = '/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}';
+// Defined in the import-free fleet.ts, so the stress account check can load
+// them without aws-cdk-lib installed.
+export { OWN_CELL_PATH, OWN_DEPLOYMENT_PATH };
 
 /** A tagged namespace and everything under it: the path itself is a parameter or a `GetParametersByPath` path. */
 function namespaceArns(scope: Construct, path: string): string[] {
