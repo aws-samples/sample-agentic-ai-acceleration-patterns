@@ -99,6 +99,8 @@ describe('redact', () => {
     ['a base64url token', `token ${'a-b_'.repeat(30)} sent`, 'token <token> sent'],
     ['a JWT with short parts', `token eyJhbGciOiJSUzI1NiJ9.${'p'.repeat(60)}.${'s'.repeat(60)} sent`, 'token <token> sent'],
     ['a JWT under 100 characters', `token eyJ${'a'.repeat(10)}.${'b'.repeat(10)}.${'c'.repeat(10)} sent`, 'token <token> sent'],
+    ['a JWT glued to a URL-encoded =', `t%3DeyJ${'a'.repeat(10)}.${'b'.repeat(10)}.${'c'.repeat(10)}`, 't%3D<token>'],
+    ['a JWT with the shortest first part', `token eyJ${'a'.repeat(8)}.b.c sent`, 'token <token> sent'],
     ['a lower-case x-amz query value', 'https://h/?x-amz-security-token=abc', 'https://h/?x-amz-security-token=<redacted>'],
     ['a short FwoG session token', `token FwoG${'b'.repeat(60)} sent`, 'token <token> sent'],
     ['a long base64 run ending in =', `token ${'b'.repeat(120)}== sent`, 'token <token> sent'],
@@ -114,6 +116,7 @@ describe('redact', () => {
   test.each([
     ['a 41-character run', 'A'.repeat(41)],
     ['a key id followed by more capitals', `AKIA${'B'.repeat(17)}`],
+    ['a JWT-like run with a first part too short', `eyJ${'a'.repeat(7)}.b.c`],
     ['a 40-character run inside a path', `/${'a'.repeat(40)}`],
   ])('leaves %s alone', (_shape, text) => {
     expect(redact(text)).toBe(text);
