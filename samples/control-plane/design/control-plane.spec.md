@@ -690,7 +690,7 @@ script path and no tenant limit.
 |---|---|
 | `controlPlaneAccountId` | the account the control plane stack runs in; 12 digits |
 | `fleetName` | MUST equal the control plane's `fleetName` |
-| `externalId` | `[\w+=,.@:/-]{2,1224}`, checked at synth; when set, the roles' trust policies require it and the operator supplies the same value at `PutAccount`. Each half's trust holds it twice, so above about 400 characters the tenant half's trust passes IAM's default 2,048-character quota (synth warns). MUST be set for a tenant-owned account (`PutAccount` refuses `owner: TENANT` without one, §6.4); optional for a vendor-owned one |
+| `externalId` | `[\w+=,.@:/-]{2,1224}`, checked at synth; when set, the roles' trust policies require it and the operator supplies the same value at `PutAccount`. Each half's trust holds it twice, so above about 420 characters (about 400 in `aws-us-gov`) the tenant half's trust passes IAM's default 2,048-character quota (synth warns). MUST be set for a tenant-owned account (`PutAccount` refuses `owner: TENANT` without one, §6.4); optional for a vendor-owned one |
 | `tenantBuildManagedPolicyArns` (optional) | as above, in *this* account; attached to this account's tenant provisioning role |
 | `cellBuildManagedPolicyArns` (optional) | as above, in *this* account; attached to this account's cell provisioning role |
 

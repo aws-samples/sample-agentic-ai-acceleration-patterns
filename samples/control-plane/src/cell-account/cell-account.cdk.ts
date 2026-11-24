@@ -120,7 +120,7 @@ export class CellAccountRoles extends Construct {
         Annotations.of(this).addWarningV2(
           'control-plane:trustPolicySize',
           `The external id is ${externalId.length} characters: the tenant provisioning role's trust holds it twice and `
-          + `is about ${tenantTrustChars} characters, over IAM's default trust policy size quota of `
+          + `is ${Token.isUnresolved(partition) ? 'up to' : 'about'} ${tenantTrustChars} characters, over IAM's default trust policy size quota of `
           + `${TRUST_POLICY_DEFAULT_QUOTA}. Use a shorter id, or raise the account's quota (up to 4,096) before deploying.`,
         );
       }

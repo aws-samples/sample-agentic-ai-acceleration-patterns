@@ -1833,7 +1833,7 @@ their own credentials):
 |---|---|
 | `cellAccount.controlPlaneAccountId` | the trust policies: the control plane account, narrowed to its build roles and API role |
 | `fleetName` | MUST match the control plane's |
-| `cellAccount.externalId` (required for a tenant-owned account, ADR-029) | `sts:ExternalId` condition on the AssumeRole statements of both trust policies (ADR-0051), validated against the STS pattern at synth, with a synth warning when the id (held twice) pushes the tenant half's trust past IAM's default 2,048-character quota (about 400 characters); the operator supplies the same value at `PutAccount` |
+| `cellAccount.externalId` (required for a tenant-owned account, ADR-029) | `sts:ExternalId` condition on the AssumeRole statements of both trust policies (ADR-0051), validated against the STS pattern at synth, with a synth warning when the id (held twice) passes IAM's default 2,048-character quota (about 420 characters, about 400 in `aws-us-gov`); the operator supplies the same value at `PutAccount` |
 | `cellAccount.tenantBuildManagedPolicyArns` (optional) | attached to this account's tenant provisioning role; validated to be in this account |
 | `cellAccount.cellBuildManagedPolicyArns` (optional) | attached to this account's cell provisioning role; validated to be in this account (ADR-0047) |
 | `cellAccount.demoApplicationIds` (optional, default none) | publishes the demo `/application-plane/applications/<applicationId>/shared/base-domain` in this account for each listed id; absent, a customer's account gets the two roles and nothing else |

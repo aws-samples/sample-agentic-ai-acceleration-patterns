@@ -155,9 +155,10 @@ export AWS_PROFILE=<cell account profile> AWS_REGION=eu-central-1
    cell account, with no build between that and the platform deploy. A pair
    that does not match fails every build at AssumeRole; a
    `cell-build-policy` without `sts:TagSession`, or a cell bootstrap whose
-   role trust lacks it, fails it at the `cdk deploy`. Check the
-   `cdk-cell-deploy-role-*` trust with `aws iam get-role` and, if it lacks
-   `sts:TagSession`, run step 2 again with a current CDK CLI before step 4
+   role trust lacks it, fails it at the `cdk deploy`. Check with
+   `aws iam get-role --role-name cdk-cell-deploy-role-<ACCOUNT_ID>-<REGION>`;
+   if its trust lacks `sts:TagSession`, run step 2 again (it uses the CDK
+   CLI pinned in `stress/package.json`, whose template has it) before step 4
    (control-plane README, "Upgrading to session-tagged builds").
 
 To change a policy, edit `cell-policies.ts` and run step 1 again: the

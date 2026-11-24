@@ -1038,13 +1038,17 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
 
   test('warns at synth exactly when the external id pushes the tenant trust over the 2,048-character quota', () => {
     const cases: Array<[number, string | undefined, string | undefined]> = [
-      [300, undefined, undefined], [400, undefined, undefined], [421, undefined, undefined], [422, undefined, undefined],
+      [300, undefined, undefined], [400, undefined, undefined], [422, undefined, undefined], [423, undefined, undefined],
       [430, undefined, undefined], [410, 'f'.repeat(32), undefined], [401, undefined, 'us-gov-west-1'], [402, undefined, 'us-gov-west-1'],
     ];
     for (const [length, fleetName, region] of cases) {
       const { chars, warned } = tenantTrustChars('x'.repeat(length), fleetName, region);
       expect([length, fleetName, region, warned]).toEqual([length, fleetName, region, chars > TRUST_POLICY_DEFAULT_QUOTA]);
     }
+    // With no env the partition is a token: counted as the longest, and the message says "up to".
+    const agnostic = new CellAccountStack(new App(), 'account-b', { controlPlaneAccountId, externalId: 'x'.repeat(410) });
+    expect(Annotations.fromStack(agnostic).findWarning('*', Match.stringLikeRegexp('trust policy size')).map((w) => String(w.entry.data)))
+      .toEqual([expect.stringContaining('is up to 2066 characters')]);
   });
 
   test('installs the pair trusting the control plane account narrowed to the API role and the build roles, with the external id on both', () => {

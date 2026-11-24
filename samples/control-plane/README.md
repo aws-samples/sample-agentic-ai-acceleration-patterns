@@ -444,10 +444,10 @@ require. A customer's account must have one: `PutAccount` refuses
 `"owner": "TENANT"` without it (ADR-029); a second vendor account may omit it.
 It is the standard confused-deputy guard for a role handed to a third party
 (ADR-025). Each half's trust holds the id twice, once per AssumeRole
-statement, so an id longer than about 400 characters (less with a longer
-fleet name) pushes the tenant half's trust past IAM's default trust policy
-size quota (2,048 characters, adjustable to 4,096); `cdk synth` warns when
-it does:
+statement, so an id longer than about 420 characters (about 400 in
+`aws-us-gov`, less with a longer fleet name) pushes the tenant half's
+trust past IAM's default trust policy size quota (2,048 characters,
+adjustable to 4,096); `cdk synth` warns when it does:
 
 ```bash
 npx cdk deploy control-plane-cell-account \
