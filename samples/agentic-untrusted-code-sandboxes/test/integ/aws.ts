@@ -37,12 +37,13 @@ const STDERR_KEPT = 64 * 1024;
 
 /**
  * Replaces what a CLI error can carry about the account and its credentials: ARNs (any partition), session tokens
- * (an `IQoJ`, `FwoG`, `FQoG` or `AQoD` token, and any base64, base64url or dotted JWT run of 100 characters or more), `X-Amz-*`
- * query values and any `Signature=` value (a SigV2 presigned URL or a SigV4 `Authorization` header), access key ids
- * (also inside a longer capital run), 40-character secret keys and 12-digit account ids (also next to a letter or
- * `_`). Pure. The rules also replace other text of the same shape: a git commit id (40 characters), a long path or
- * hyphenated word (100 or more), any 12-digit number, and the `,` `)` `.` after an ARN. A message loses detail,
- * nothing more. shortcut: a deny-list of known shapes; profile, role and portal names pass through.
+ * (an `IQoJ`, `FwoG`, `FQoG` or `AQoD` token, any base64, base64url or dotted run of 100 characters or more, and a
+ * JWT of any length), `X-Amz-*` query values and any `Signature=` value (a SigV2 presigned URL or a SigV4
+ * `Authorization` header), access key ids (also inside a longer capital run), 40-character secret keys and 12-digit
+ * account ids (also next to a letter or `_`). Pure. The rules also replace other text of the same shape: a git commit
+ * id (40 characters), a long path, hyphenated word or dotted name (100 or more), any 12-digit number, and the `,`
+ * `)` `.` after an ARN. A message loses detail, nothing more. shortcut: a deny-list of known shapes; profile, role
+ * and portal names pass through, and so does a short secret of another shape (such as 32 hex characters).
  */
 export function redact(text: string): string {
   return text
@@ -51,6 +52,7 @@ export function redact(text: string): string {
     .replace(/(\bSignature=)[^&\s"',]+/gi, '$1<redacted>')
     .replace(/(?<![A-Za-z0-9+/])(?:IQoJ|FwoG|FQoG|AQoD)[A-Za-z0-9+/=]{40,}/g, '<token>')
     .replace(/(?<![A-Za-z0-9+/_.-])[A-Za-z0-9+/_.-]{100,}={0,2}/g, '<token>')
+    .replace(/(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, '<token>')
     .replace(/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])/g, '<key>')
     .replace(/(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/])/g, '<secret>')
     .replace(/(?<!\d)\d{12}(?!\d)/g, '<account>');

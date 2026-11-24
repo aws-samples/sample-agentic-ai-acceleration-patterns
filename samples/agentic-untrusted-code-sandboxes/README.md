@@ -420,6 +420,11 @@ a profile, role or portal name in the error text passes through. From a
 stderr over 128 KB it keeps only the first and last 64 KB. Read the run
 log before you share it.
 
+**The leftover check's "could not run" path has no full live run.** It is
+tested through a fake AWS client and by `scripts/leftovers.sh` run by hand
+with a missing profile (it prints `CHECK NOT RUN` and exits 1); a full
+integration run with a failing credential has not been made.
+
 ## Production hardening checklist
 
 - Turn on `dnsFirewall` and list only names you control in `allowDomains`

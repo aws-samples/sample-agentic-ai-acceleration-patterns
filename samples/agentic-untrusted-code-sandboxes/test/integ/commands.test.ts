@@ -1,6 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
+import { spawnSync } from 'node:child_process';
+import * as path from 'node:path';
 import { destroyOnly, leftoversOnly } from './driver';
 import { checkLeftovers } from './leftovers';
 import { readState, writeState, type RunState } from './state';
@@ -33,4 +35,15 @@ describe('the leftovers and destroy commands', () => {
     expect(await destroyOnly()).toBe(code);
     expect(writeState).toHaveBeenCalledWith(expect.objectContaining({ destroyed }));
   });
+});
+
+describe('the driver as the entry point', () => {
+  // Starts the real entry the way scripts/integ.sh and scripts/leftovers.sh do. An unknown command reaches main()
+  // and calls no AWS API, so a dead entry guard (no output, exit 0) is told apart from a live one.
+  test('runs main() when ts-node starts it', () => {
+    const sample = path.join(__dirname, '..', '..');
+    const r = spawnSync('npx', ['ts-node', '-P', 'test/tsconfig.json', '--prefer-ts-exts', 'test/integ/driver.ts', 'bogus'], { cwd: sample, encoding: 'utf8', timeout: 120_000 });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/unknown command bogus/);
+  }, 130_000);
 });

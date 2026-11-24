@@ -184,6 +184,7 @@ export async function destroyOnly(): Promise<number> {
   process.stdout.write(`stack ${prefix}: ${r.status}${r.failures.length > 0 ? ` (${r.failures.join(' | ')})` : ''}\n`);
   const findings = await checkLeftovers(aws, prefix, state);
   process.stdout.write(`${formatFindings(findings)}\n`);
+  // A stack that did not delete is a `stack` finding of its own, so `true` here does not hide it.
   if (state) writeState(withState(state, { destroyed: cleanAfter(true, findings) }));
   return leftoverExitCode(findings);
 }
@@ -217,7 +218,8 @@ async function main(): Promise<void> {
   process.exitCode = await fn();
 }
 
-// Run only as the entry point, so a unit test can import the commands.
+// Run only as the entry point, so a unit test can import the commands. Keep scripts/integ.sh and
+// scripts/leftovers.sh starting this file directly: a wrapper that requires it runs nothing and exits 0.
 if (require.main === module) {
   main().catch((e: unknown) => {
     process.stderr.write(`${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}\n`);

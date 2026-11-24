@@ -98,6 +98,7 @@ describe('redact', () => {
     ['a lower-case signature query value', 'https://h/?signature=abc', 'https://h/?signature=<redacted>'],
     ['a base64url token', `token ${'a-b_'.repeat(30)} sent`, 'token <token> sent'],
     ['a JWT with short parts', `token eyJhbGciOiJSUzI1NiJ9.${'p'.repeat(60)}.${'s'.repeat(60)} sent`, 'token <token> sent'],
+    ['a JWT under 100 characters', `token eyJ${'a'.repeat(10)}.${'b'.repeat(10)}.${'c'.repeat(10)} sent`, 'token <token> sent'],
     ['a lower-case x-amz query value', 'https://h/?x-amz-security-token=abc', 'https://h/?x-amz-security-token=<redacted>'],
     ['a short FwoG session token', `token FwoG${'b'.repeat(60)} sent`, 'token <token> sent'],
     ['a long base64 run ending in =', `token ${'b'.repeat(120)}== sent`, 'token <token> sent'],
@@ -120,6 +121,17 @@ describe('redact', () => {
 
   test.each(['FQoG', 'AQoD'])('replaces a session token that starts with %s', (prefix) => {
     expect(redact(`t ${prefix}${'z'.repeat(80)} x`)).toBe('t <token> x');
+  });
+
+  test.each([
+    ['only dots', '.'.repeat(1024 * 1024)],
+    ['a dotted mix', 'ab.cd+ef/gh_ij-kl.'.repeat(60_000)],
+    ['JWT prefixes', 'eyJ'.repeat(350_000)],
+    ['short JWT-like runs', 'eyJabcdefgh.x '.repeat(80_000)],
+  ])('a long input of %s is redacted in under a second', (_shape, text) => {
+    const t0 = Date.now();
+    redact(text);
+    expect(Date.now() - t0).toBeLessThan(1000);
   });
 
   test('a long input that repeats an X-Amz name without a value is handled in linear time', () => {
