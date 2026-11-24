@@ -408,6 +408,23 @@ unverified (ADR-0054).
 **DNS is open by default.** With `dnsFirewall` off, sandboxed code can
 send and receive data in DNS lookups on every backend (T-29, T-91).
 
+**The integration leftover check can miss a leftover.** The lookups of
+container instances, task definitions and MicroVMs read any other error, such
+as a throttle or a network error, as nothing there; a credentials or access
+error is reported instead. See [integration-test.md](integration-test.md).
+
+**The integration driver's redaction is a list of known shapes.** The
+driver removes ARNs, account ids, access key ids, secret keys, session
+tokens and signature values from AWS CLI errors before it prints them;
+a profile, role or portal name in the error text passes through. From a
+stderr over 128 KB it keeps only the first and last 64 KB. Read the run
+log before you share it.
+
+**The leftover check's "could not run" path has no full live run.** It is
+tested through a fake AWS client and by `scripts/leftovers.sh` run by hand
+with a missing profile (it prints `CHECK NOT RUN` and exits 1); a full
+integration run with a failing credential has not been made.
+
 ## Production hardening checklist
 
 - Turn on `dnsFirewall` and list only names you control in `allowDomains`

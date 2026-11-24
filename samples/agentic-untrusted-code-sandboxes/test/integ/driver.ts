@@ -24,7 +24,7 @@ import { Aws } from './aws';
 import { deployConcurrency, runRegion, stackPrefix } from './common';
 import { Ctx } from './ctx';
 import { deployStacks, destroyStack, serviceNames, snapshotResources, synth } from './deploy';
-import { checkLeftovers, formatFindings } from './leftovers';
+import { checkLeftovers, cleanAfter, formatFindings, leftoverExitCode } from './leftovers';
 import { formatRecord, Recorder } from './record';
 import { runPhase, skipPhase } from './runner';
 import { readState, stateDir, withState, writeState, type RunState } from './state';
@@ -72,7 +72,7 @@ async function runAll(): Promise<number> {
       else rec.check('the stack was destroyed', false);
       rec.end();
     });
-    if (outcome) writeState(withState(state, { destroyed: outcome.destroyed && outcome.findings.every((f) => f.known) }));
+    if (outcome) writeState(withState(state, { destroyed: cleanAfter(outcome.destroyed, outcome.findings) }));
   };
   /** One teardown per run, whoever asks first; a signal during it waits for the same one. */
   const teardown = (): Promise<void> => {
@@ -175,7 +175,7 @@ function finish(rec: Recorder, startedAt: string): number {
 }
 
 /** After an interruption: destroy the stack the state names (or the prefix's), then list what is left. */
-async function destroyOnly(): Promise<number> {
+export async function destroyOnly(): Promise<number> {
   const region = runRegion();
   const prefix = stackPrefix();
   const aws = new Aws(region);
@@ -184,16 +184,18 @@ async function destroyOnly(): Promise<number> {
   process.stdout.write(`stack ${prefix}: ${r.status}${r.failures.length > 0 ? ` (${r.failures.join(' | ')})` : ''}\n`);
   const findings = await checkLeftovers(aws, prefix, state);
   process.stdout.write(`${formatFindings(findings)}\n`);
-  if (state) writeState(withState(state, { destroyed: findings.every((f) => f.known) }));
-  return findings.some((f) => !f.known) ? 1 : 0;
+  // A stack that did not delete is a `stack` finding of its own, so `true` here does not hide it.
+  if (state) writeState(withState(state, { destroyed: cleanAfter(true, findings) }));
+  return leftoverExitCode(findings);
 }
 
-async function leftoversOnly(): Promise<number> {
+/** After an interruption: list what is left, read-only. */
+export async function leftoversOnly(): Promise<number> {
   const region = runRegion();
   const prefix = stackPrefix();
   const findings = await checkLeftovers(new Aws(region), prefix, readState(prefix, region));
   process.stdout.write(`${formatFindings(findings)}\n`);
-  return findings.some((f) => !f.known) ? 1 : 0;
+  return leftoverExitCode(findings);
 }
 
 async function main(): Promise<void> {
@@ -216,7 +218,11 @@ async function main(): Promise<void> {
   process.exitCode = await fn();
 }
 
-main().catch((e: unknown) => {
-  process.stderr.write(`${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}\n`);
-  process.exitCode = 1;
-});
+// Run only as the entry point, so a unit test can import the commands. Keep scripts/integ.sh and
+// scripts/leftovers.sh starting this file directly: a wrapper that requires it runs nothing and exits 0.
+if (require.main === module) {
+  main().catch((e: unknown) => {
+    process.stderr.write(`${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}\n`);
+    process.exitCode = 1;
+  });
+}

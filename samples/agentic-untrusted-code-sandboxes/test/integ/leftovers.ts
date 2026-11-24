@@ -95,11 +95,49 @@ async function exists<T>(fn: () => Promise<T>): Promise<boolean> {
     await fn();
     return true;
   } catch (e) {
+    if (unavailableReason(e) !== undefined) throw e;
     const name = e instanceof Error ? e.name : '';
-    if (/ResourceNotFoundException|NotFoundException|ClusterNotFoundException/.test(name) || (e instanceof Error && /InvalidVpcID\.NotFound|InvalidVpcEndpointId\.NotFound|ResourceNotFoundException|does not exist/i.test(e.message))) return false;
+    // The message holds only the first 2000 characters of a CLI stderr; the whole stderr is read too, so a not-found
+    // answer after a long warning still counts.
+    if (/ResourceNotFoundException|NotFoundException|ClusterNotFoundException/.test(name) || (e instanceof Error && /InvalidVpcID\.NotFound|InvalidVpcEndpointId\.NotFound|ResourceNotFoundException|does not exist/i.test(`${e.message}\n${String((e as { stderr?: unknown }).stderr ?? '')}`))) return false;
     throw e;
   }
 }
+
+const UNAVAILABLE: ReadonlyArray<{ readonly pattern: RegExp; readonly reason: string }> = [
+  { pattern: /Unable to locate credentials|CredentialsProviderError|Could not load credentials|Error when retrieving credentials|config profile [^\n]{0,200} could not be found|Error loading SSO Token|SSOTokenLoadError|Token for [^\n]{0,200} does not exist/i, reason: 'no credentials found' },
+  { pattern: /ExpiredToken|RequestExpired|TokenRefreshRequired|security token included in the request is expired|SSO session [^\n]{0,200}(expired|invalid)|SSO access token has (either )?expired|Error when retrieving token from sso/i, reason: 'the credentials expired' },
+  { pattern: /InvalidClientTokenId|InvalidAccessKeyId|UnrecognizedClientException|AuthFailure|SignatureDoesNotMatch|IncompleteSignature|MissingAuthenticationToken|InvalidSignatureException|security token included in the request is invalid/i, reason: 'the credentials were refused' },
+  { pattern: /AccessDenied|UnauthorizedOperation|UnauthorizedException|NotAuthorized/i, reason: 'access denied' },
+  { pattern: /spawn aws (ENOENT|EACCES)/, reason: 'the aws CLI could not be started' },
+];
+
+/**
+ * Why a leftover check could not run, or undefined when the error is an answer about one resource. Reads the error's
+ * name, message and CLI `stderr` (so an SDK client and the CLI are told apart by cause, not by origin) and returns a
+ * fixed phrase: the text of the error is never copied into a finding.
+ */
+export function unavailableReason(e: unknown): string | undefined {
+  const text = [e instanceof Error ? e.name : '', e instanceof Error ? e.message : String(e), String((e as { stderr?: unknown } | null)?.stderr ?? '')].join('\n');
+  return UNAVAILABLE.find((u) => u.pattern.test(text))?.reason;
+}
+
+/** The AWS error code of a failed call: the error's name, or for a CLI failure the code in its `stderr`. */
+function errorCode(e: unknown): string {
+  if (!(e instanceof Error)) return 'error';
+  if (e.name !== 'Error') return e.name;
+  return /An error occurred \(([\w.]+)\)/.exec(String((e as { stderr?: unknown }).stderr ?? e.message))?.[1] ?? 'the call failed without an AWS error code';
+}
+
+/**
+ * A lookup whose failure means "nothing there", unless the call could not run at all (that error is rethrown).
+ * shortcut: any other error (throttling, a network error) still reads as "nothing there"; list the not-found
+ * errors of each call and rethrow the rest when the lookups are made strict.
+ */
+const orGone = <T>(p: Promise<T>): Promise<T | undefined> => p.catch((e: unknown) => {
+  if (unavailableReason(e) !== undefined) throw e;
+  return undefined;
+});
 
 /**
  * The log group prefixes of the groups AgentCore and Lambda create for the run's runtimes and MicroVM images.
@@ -129,16 +167,33 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
   const findings: Finding[] = [];
   const add = (kind: string, id: string, detail: string): void => void findings.push({ kind, id, detail });
 
-  // Stacks, including any in DELETE_FAILED.
-  let token: string | undefined;
-  do {
-    const r = await aws.cfn.send(new DescribeStacksCommand({ NextToken: token }));
-    for (const s of r.Stacks ?? []) {
-      if (s.StackName?.startsWith(prefix) && s.StackStatus !== 'DELETE_COMPLETE') add('stack', s.StackName, s.StackStatus ?? 'unknown');
+  // A call that could not run (the credentials or the CLI failed) is a finding of its own, so the report does not
+  // read it as a resource that is gone or as one that is left. Any other error is rethrown to the caller.
+  const unlessUnavailable = async (id: string, fn: () => Promise<void>): Promise<boolean> => {
+    try {
+      await fn();
+      return true;
+    } catch (e) {
+      const why = unavailableReason(e);
+      if (why === undefined) throw e;
+      add('check-unavailable', id, why);
+      return false;
     }
-    token = r.NextToken;
-  } while (token);
-  if (!state) return findings;
+  };
+
+  // Stacks, including any in DELETE_FAILED. A stack list that cannot run ends the check with one finding: the report
+  // says to repeat it. This also covers an access denied on this call alone; the rest is not tried.
+  const stacksListed = await unlessUnavailable('stacks', async () => {
+    let token: string | undefined;
+    do {
+      const r = await aws.cfn.send(new DescribeStacksCommand({ NextToken: token }));
+      for (const s of r.Stacks ?? []) {
+        if (s.StackName?.startsWith(prefix) && s.StackStatus !== 'DELETE_COMPLETE') add('stack', s.StackName, s.StackStatus ?? 'unknown');
+      }
+      token = r.NextToken;
+    } while (token);
+  });
+  if (!state || !stacksListed) return findings;
 
   for (const r of state.resources) {
     try {
@@ -149,12 +204,12 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
         case 'AWS::ECS::Cluster': {
           const d = await aws.ecs.send(new DescribeClustersCommand({ clusters: [r.physicalId] }));
           if (d.clusters?.some((c) => c.status === 'ACTIVE')) add('ecs-cluster', r.physicalId, 'ACTIVE');
-          const ci = await aws.ecs.send(new ListContainerInstancesCommand({ cluster: r.physicalId })).catch(() => undefined);
+          const ci = await orGone(aws.ecs.send(new ListContainerInstancesCommand({ cluster: r.physicalId })));
           if ((ci?.containerInstanceArns?.length ?? 0) > 0) add('container-instance', r.physicalId, `${ci?.containerInstanceArns?.length} registered`);
           break;
         }
         case 'AWS::ECS::TaskDefinition': {
-          const d = await aws.ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: r.physicalId })).catch(() => undefined);
+          const d = await orGone(aws.ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: r.physicalId })));
           if (d?.taskDefinition?.status === 'ACTIVE') add('task-definition', r.physicalId, 'ACTIVE (a task definition cannot be deleted; deregister it)');
           break;
         }
@@ -168,7 +223,7 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
           if (await exists(() => aws.agentcoreControl.send(new GetAgentRuntimeCommand({ agentRuntimeId: r.physicalId.split('/').pop() ?? r.physicalId })))) add('runtime', r.physicalId, 'still there');
           break;
         case 'AWS::Lambda::MicrovmImage': {
-          const live = await aws.microvms.send(new ListMicrovmsCommand({ imageIdentifier: r.physicalId })).catch(() => undefined);
+          const live = await orGone(aws.microvms.send(new ListMicrovmsCommand({ imageIdentifier: r.physicalId })));
           for (const m of live?.items ?? []) if (m.state !== 'TERMINATED') add('microvm', m.microvmId ?? r.physicalId, String(m.state));
           break;
         }
@@ -191,7 +246,9 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
           break;
       }
     } catch (e) {
-      add('check-failed', `${r.type}:${r.physicalId}`, e instanceof Error ? e.name : 'error');
+      const why = unavailableReason(e);
+      if (why === undefined) add('check-failed', `${r.type}:${r.physicalId}`, errorCode(e));
+      else add('check-unavailable', `${r.type}:${r.physicalId}`, why);
     }
   }
   // Log groups the services create after the deploy. An empty name would widen the prefix to every such group of
@@ -201,17 +258,22 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
       add('check-failed', p.kind, 'an empty service name in the run state; its log groups were not checked');
       continue;
     }
-    for (const g of await logGroupsWithPrefix(aws, p.prefix)) add('log-group', g, `${p.kind === 'runtime' ? 'an AgentCore runtime' : 'a MicroVM image'} group is still there`);
+    const prefixOfGroups = p.prefix;
+    await unlessUnavailable(`${p.kind}-log-groups`, async () => {
+      for (const g of await logGroupsWithPrefix(aws, prefixOfGroups)) add('log-group', g, `${p.kind === 'runtime' ? 'an AgentCore runtime' : 'a MicroVM image'} group is still there`);
+    });
   }
 
   // The Logs resource policies, compared with the state before the deploy.
   const current: Array<{ name: string; document: string }> = [];
-  let pt: string | undefined;
-  do {
-    const r = await aws.logs.send(new DescribeResourcePoliciesCommand({ nextToken: pt }));
-    for (const p of r.resourcePolicies ?? []) if (p.policyName) current.push({ name: p.policyName, document: p.policyDocument ?? '' });
-    pt = r.nextToken;
-  } while (pt);
+  await unlessUnavailable('logs-resource-policies', async () => {
+    let pt: string | undefined;
+    do {
+      const r = await aws.logs.send(new DescribeResourcePoliciesCommand({ nextToken: pt }));
+      for (const p of r.resourcePolicies ?? []) if (p.policyName) current.push({ name: p.policyName, document: p.policyDocument ?? '' });
+      pt = r.nextToken;
+    } while (pt);
+  });
   if (state.resources.length === 0) {
     findings.push(...newPolicyFindings(state.policyBaseline, current));
   } else {
@@ -221,7 +283,22 @@ export async function checkLeftovers(aws: Aws, prefix: string, state: RunState |
   return findings;
 }
 
+/** The exit status of `leftovers` and `destroy`: 1 for any finding that is not the known leftover, a check that could not run included. */
+export const leftoverExitCode = (findings: readonly Finding[]): number => (findings.some((f) => !f.known) ? 1 : 0);
+
+/** The `destroyed` flag a run state records: the stack delete ended and the check found nothing but the known leftover. `cleanup` repeats the check when it is false. */
+export const cleanAfter = (stackDeleted: boolean, findings: readonly Finding[]): boolean => stackDeleted && leftoverExitCode(findings) === 0;
+
+/**
+ * One line per finding. A check that could not run is not a leftover: it is listed apart, and a closing line says
+ * that the check must be repeated with working credentials (no line says "nothing left" then).
+ */
 export function formatFindings(findings: readonly Finding[]): string {
-  if (findings.length === 0) return 'nothing left';
-  return findings.map((f) => `${f.known ? 'known leftover' : 'LEFT'} ${f.kind} ${f.id}: ${f.detail}`).join('\n');
+  const unavailable = findings.filter((f) => f.kind === 'check-unavailable');
+  const lines = findings.filter((f) => f.kind !== 'check-unavailable').map((f) => `${f.known ? 'known leftover' : 'LEFT'} ${f.kind} ${f.id}: ${f.detail}`);
+  if (unavailable.length > 0) {
+    lines.push(...unavailable.map((f) => `CHECK NOT RUN ${f.id}: ${f.detail}`));
+    lines.push(`The leftover check could not run for ${unavailable.length} item(s), so this list may be incomplete. Repeat it once the credentials and the AWS CLI work (scripts/leftovers.sh).`);
+  }
+  return lines.length === 0 ? 'nothing left' : lines.join('\n');
 }

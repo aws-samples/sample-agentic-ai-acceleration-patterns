@@ -32,6 +32,32 @@ import { REGISTRY, registryPk, registrySk } from '../../src/env';
 
 const execFileAsync = promisify(execFile);
 
+/** How much of each end of a long CLI stderr `cli()` keeps (characters). */
+const STDERR_KEPT = 64 * 1024;
+
+/**
+ * Replaces what a CLI error can carry about the account and its credentials: ARNs (any partition), session tokens
+ * (an `IQoJ`, `FwoG`, `FQoG` or `AQoD` token, any base64, base64url or dotted run of 100 characters or more, and a
+ * JWT of any length, also glued to the text before it; a 5-part JWE keeps its last two parts), `X-Amz-*` query values and any `Signature=` value (a SigV2 presigned URL or a SigV4
+ * `Authorization` header), access key ids (also inside a longer capital run), 40-character secret keys and 12-digit
+ * account ids (also next to a letter or `_`). Pure. The rules also replace other text of the same shape: a git commit
+ * id (40 characters), a long path, hyphenated word or dotted name (100 or more), any 12-digit number, and the `,`
+ * `)` `.` after an ARN. A message loses detail, nothing more. shortcut: a deny-list of known shapes; profile, role
+ * and portal names pass through, and so does a short secret of another shape (such as 32 hex characters).
+ */
+export function redact(text: string): string {
+  return text
+    .replace(/arn:aws[\w-]*:[^\s"']+/g, '<arn>')
+    .replace(/(X-Amz-[A-Za-z-]{1,64}=)[^&\s"']+/gi, '$1<redacted>')
+    .replace(/(\bSignature=)[^&\s"',]+/gi, '$1<redacted>')
+    .replace(/(?<![A-Za-z0-9+/])(?:IQoJ|FwoG|FQoG|AQoD)[A-Za-z0-9+/=]{40,}/g, '<token>')
+    .replace(/(?<![A-Za-z0-9+/_.-])[A-Za-z0-9+/_.-]{100,}={0,2}/g, '<token>')
+    .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, '<token>')
+    .replace(/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])/g, '<key>')
+    .replace(/(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/])/g, '<secret>')
+    .replace(/(?<!\d)\d{12}(?!\d)/g, '<account>');
+}
+
 export class Aws {
   public readonly cfn: CloudFormationClient;
   public readonly lambda: LambdaClient;
@@ -118,10 +144,33 @@ export class Aws {
     return r.Item;
   }
 
-  /** Runs the AWS CLI for the few calls no declared SDK client covers (Service Quotas, Route 53 Resolver). */
+  /**
+   * Runs the AWS CLI for the few calls no declared SDK client covers (Service Quotas, Route 53 Resolver). A failure
+   * keeps the CLI's own `stderr` (the cause: missing or expired credentials, a not-found answer) on the error, with
+   * ARNs, account ids, access key ids, secret keys, session tokens and signature values replaced (see `redact`), and
+   * names the service and operation in the message. The redacted `stderr` (up to its first and last 64 KB) stays on
+   * the error, so the cause is read from all of it; the message carries its first 2000 characters. A process with no
+   * stderr (it never started, or a signal stopped it) is described by its exit code, signal or error code, never by
+   * its command line.
+   */
   public async cli(args: string[]): Promise<string> {
-    const { stdout } = await execFileAsync('aws', [...args, '--region', this.region, '--output', 'json'], { maxBuffer: 16 * 1024 * 1024 });
-    return stdout;
+    try {
+      const { stdout } = await execFileAsync('aws', [...args, '--region', this.region, '--output', 'json'], { maxBuffer: 16 * 1024 * 1024 });
+      return stdout;
+    } catch (e) {
+      const { stderr: raw, code, signal } = e as { stderr?: unknown; code?: unknown; signal?: unknown };
+      const cause = typeof raw === 'string' && raw.trim() !== ''
+        ? raw
+        : code === 'ENOENT' || code === 'EACCES' ? `spawn aws ${code}`
+          : typeof code === 'number' ? `the aws CLI exited with code ${code}`
+            : typeof signal === 'string' ? `the aws CLI exited with signal ${signal}`
+              : `the aws CLI failed (${code === undefined || code === null ? 'no exit code' : String(code)})`;
+      // The whole stderr is redacted before the cut, so no secret is split by it (every rule is linear). shortcut: a
+      // redacted stderr over 128 KB keeps its first and last 64 KB; a cause in the middle of a longer one is not read.
+      const redacted = redact(cause);
+      const stderr = (redacted.length > 2 * STDERR_KEPT ? `${redacted.slice(0, STDERR_KEPT)}\n...\n${redacted.slice(-STDERR_KEPT)}` : redacted).trim();
+      throw Object.assign(new Error(`aws ${args.slice(0, 2).join(' ')} failed: ${stderr.slice(0, 2000)}`), { stderr });
+    }
   }
 }
 
