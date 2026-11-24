@@ -19,8 +19,10 @@ compromised cell build can change any cell in its account, which is the
 role pair's scope, and spec §3.7 adds that it can change nothing else in
 the account, because the account holds only cells.
 
-The control plane's per-build identity change (control-plane ADR-0051, the
-number reserved for that change, which is not on main yet) narrows that for
+The control plane's per-build identity change (control-plane ADR-0051,
+written in
+[PR 149](https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns/pull/149)
+and not on main until that PR merges) narrows that for
 some calls. It tags a cell build with a transitive `CellId` and a tenant
 build with `CellId`, `TenantId` and `ApplicationId`, and it scopes the role
 pair's own SSM grants by the tag. An owner can then write policies for
@@ -55,14 +57,27 @@ and the cell build receives it as `CELL_ID`. The account owner cannot know
 a cell id before a run, so the owner cannot provision anything named for
 one.
 
-Under every option the role pair in each stress cell account is
-redeployed once with the control plane's new trust, since a trust without
-`sts:TagSession` refuses a tagged assume-role call
-(`stress/application/deploy-role-pair.sh`). The pre-run account check
-(`pairTrustProblems` in `samples/control-plane/test/stress/account-check.ts`,
-and the account check text of spec §3.7) accepts one statement allowing
-`sts:AssumeRole` only, so it must accept the new trust first. That change
-comes with the control-plane change, not with this record.
+Under every option each stress cell account takes two changes once, before
+the first run on a control plane with the per-build tags, and no build runs
+between them and the platform deploy:
+
+1. `CellPolicies` is deployed again, because `cell-build-policy` gains
+   `sts:TagSession` on the three `cdk-cell-*` roles, limited to the
+   `CellId` key. The build's session carries the tag, and chaining into
+   the cell bootstrap with it needs that action on the caller.
+2. The role pair is redeployed with the control plane's new trust
+   (`stress/application/deploy-role-pair.sh`). Each half's trust has three
+   statements: the API role may `sts:AssumeRole` with no tags; the build
+   role may `sts:AssumeRole` only with its half's tag keys and the external
+   id; and the build role may `sts:TagSession` only with those keys, at
+   least one of them transitive, with no external id (STS does not
+   evaluate the external id on `sts:TagSession`). A pair with the old
+   single `sts:AssumeRole` statement refuses every tagged build.
+
+The pre-run account check (`pairTrustProblems` in
+`samples/control-plane/test/stress/account-check.ts`, and the account check
+text of spec §3.7) accepts the three statements, and PR 149 carries that
+change and the policy change, not this record.
 
 ## Options considered
 ### Option 1: One cell per account
@@ -128,8 +143,8 @@ deploy role pass only that role (`iam:PassRole` limited by the build's
      owner and to point 1.
   3. A per-cell bootstrap qualifier means one `cdk bootstrap` for each
      cell, and the cell build cannot run one: `cell-build-policy` allows
-     `sts:AssumeRole` on three `cdk-cell-*` roles and nothing else
-     (spec §8, decision 7).
+     `sts:AssumeRole` and `sts:TagSession` (the `CellId` key only) on three
+     `cdk-cell-*` roles and nothing else (spec §8, decision 7).
 
 ### Option 3: Keep two cells in each `large` account, and record the residual
 Change nothing in the tiers. Record that two cells in one account share
@@ -180,11 +195,12 @@ wall, and a cell build can change any cell in its account.
 
 Harder: the isolation claim for two cells in one account stays at
 ADR-0006's level for the CDK path, and the tags narrow script calls only
-as far as the owner's policies go. Every stress cell account redeploys its
-role pair before the first run that uses a control plane with the
-per-build tags, and the account check accepts the new trust before that
-run. The first `large` run, not this record, shows whether two cells in
-one account raise a per-account quota problem.
+as far as the owner's policies go. Every stress cell account redeploys
+`CellPolicies` and then its role pair before the first run that uses a
+control plane with the per-build tags, and the account check accepts the
+three-statement trust before that run. The first `large` run, not this
+record, shows whether two cells in one account raise a per-account quota
+problem.
 
 Revisit when a stress run builds a cell script outside the pinned
 commit, when the first `large` run shows a per-account quota that two
