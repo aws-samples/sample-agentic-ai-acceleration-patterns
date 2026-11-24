@@ -186,11 +186,10 @@ describes, and say why that is acceptable here.
   other cell's stacks and write its assets. Through the role pair, a
   direct call can write only its own cell's SSM namespace and read the
   shared ones. The owner's `cell-build-policy` adds nothing beyond the
-  bootstrap roles. The accounts hold
-  only stress cells from one pinned commit, and the cross-cell probes
-  (PS-7, spec §5.1) test the run-time path through the edge, not the
-  build path. A hostile build in a stress account is outside what the
-  test measures.
+  bootstrap roles. The accounts hold only stress cells from one pinned
+  commit, and the cross-cell probes (PS-7, spec §5.1) test the run-time
+  path through the edge, not the build path. A hostile build in a stress
+  account is outside what the test measures.
 - Stress code and text: no tier or code change. The redeploy and the
   account check above apply under every option. Spec §3.7 and the
   "Known limitations" of `stress/application/README.md` name the shared
