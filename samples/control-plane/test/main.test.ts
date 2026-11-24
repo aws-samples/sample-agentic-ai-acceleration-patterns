@@ -843,17 +843,25 @@ describe('the workflow assumes the account role before every script and releases
     }
   });
 
-  /** The AssumeRole arguments the buildspec builds, run in bash with the given build environment. */
+  /**
+   * The arguments the buildspec's own `aws sts assume-role` line passes after
+   * the role ARN and session name, run in bash with the given build
+   * environment against a stub `aws` that prints its argv. It runs the real
+   * assume-role line, so a line that drops `"$@"` fails (ADR-0051).
+   */
   const assumeRoleArguments = (buildspec: string, env: Record<string, string>): string[] => {
     const lines = buildspec.split('\n').map((l) => l.trim());
     const from = lines.indexOf('set --');
     const to = lines.findIndex((l) => l.startsWith('CREDENTIALS=$(aws sts assume-role'));
-    const run = spawnSync('bash', ['-c', `set -euo pipefail\n${lines.slice(from, to).join('\n')}\nprintf '%s\\n' "$@"`], {
-      env: { PATH: process.env.PATH ?? '', ...env },
+    const stub = 'aws() { printf \'%s\\n\' "$@"; }';
+    const run = spawnSync('bash', ['-c', `set -euo pipefail\n${stub}\n${lines.slice(from, to + 1).join('\n')}\nprintf '%s\\n' "$CREDENTIALS"`], {
+      env: { PATH: process.env.PATH ?? '', PROVISIONING_ROLE_ARN: 'arn:aws:iam::222222222222:role/p', OPERATOR_SESSION_NAME: 'op', ...env },
       encoding: 'utf8',
     });
     expect(run.status).toBe(0);
-    return run.stdout.split('\n').slice(0, -1);
+    const argv = run.stdout.split('\n').filter((l) => l !== '');
+    expect(argv.slice(0, 6)).toEqual(['sts', 'assume-role', '--role-arn', 'arn:aws:iam::222222222222:role/p', '--role-session-name', 'op']);
+    return argv.slice(6, argv.indexOf('--query'));
   };
   const ids = { CELL_ID: '01KCELL0000000000000000001', TENANT_ID: '01KTENANT00000000000000001', APPLICATION_ID: 'app-x' };
 
@@ -999,6 +1007,42 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
     });
     return Template.fromStack(stack);
   }
+
+  /** The tenant half's trust as IAM stores it: compact JSON with the partition resolved to `aws`. */
+  function tenantTrustChars(externalId: string, fleetName?: string): { chars: number; warned: boolean } {
+    const stack = new CellAccountStack(new App(), 'account-b', {
+      controlPlaneAccountId,
+      env: { account: '222222222222', region: 'eu-central-1' },
+      externalId,
+      ...(fleetName ? { fleetName } : {}),
+    });
+    const roles = Template.fromStack(stack).findResources('AWS::IAM::Role') as Record<string, any>;
+    const tenant = Object.values(roles).find((r) => r.Properties.RoleName.endsWith('-tenant-provisioning'));
+    const resolve = (v: any): any => {
+      if (Array.isArray(v)) return v.map(resolve);
+      if (v && typeof v === 'object') {
+        if (v.Ref === 'AWS::Partition') return 'aws';
+        if (v['Fn::Join']) return (v['Fn::Join'][1] as any[]).map(resolve).join(v['Fn::Join'][0]);
+        return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, resolve(x)]));
+      }
+      return v;
+    };
+    const chars = JSON.stringify(resolve(tenant.Properties.AssumeRolePolicyDocument)).length;
+    const warned = Annotations.fromStack(stack).findWarning('*', Match.stringLikeRegexp('trust policy size')).length > 0;
+    return { chars, warned };
+  }
+
+  test('warns at synth when the external id pushes the tenant trust over the 2,048-character quota, and the estimate tracks the real size', () => {
+    for (const [length, fleetName] of [[300, undefined], [400, undefined], [430, undefined], [410, 'f'.repeat(32)]] as const) {
+      const { chars, warned } = tenantTrustChars('x'.repeat(length), fleetName);
+      const fleet = fleetName ?? 'control-plane';
+      const estimate = 1165 + 3 * fleet.length + 2 * length;
+      expect(Math.abs(chars - estimate)).toBeLessThanOrEqual(10);
+      expect(warned).toBe(estimate > 2048);
+    }
+    expect(tenantTrustChars('x'.repeat(430)).warned).toBe(true);
+    expect(tenantTrustChars('x'.repeat(300)).warned).toBe(false);
+  });
 
   test('installs the pair trusting the control plane account narrowed to the API role and the build roles, with the external id on both', () => {
     const template = synthAccountStack({ externalId: 'customer-handshake-1' });

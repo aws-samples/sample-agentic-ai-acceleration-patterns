@@ -146,8 +146,9 @@ const runProbe = new lambda.Function(setup, 'RunProbe', {
         return { status: 'IN_PROGRESS' };
       }
       if (build.buildStatus !== 'SUCCEEDED') {
-        // Fail the assertion on this poll, with the build id, instead of
-        // polling a finished build until the total timeout.
+        // A finished build that did not succeed will not change. Throw, so
+        // the final assertion failure names the build and its status (the
+        // poll still runs to the total timeout).
         throw new Error(event.label + ': build ' + build.id + ' ended ' + build.buildStatus);
       }
       const raw = (build.exportedEnvironmentVariables || []).find((v) => v.name === 'SCRIPT_OUTPUTS')?.value;

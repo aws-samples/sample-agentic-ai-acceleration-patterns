@@ -2586,8 +2586,8 @@ const waitForCell4Gone = integ.assertions
 // Cell 4's last event is its delete: the script, then G's CELL_DELETE. G
 // recorded a CELL_DELETE for every cell, in the order the cells were deleted.
 // This run's tenant and cell namespaces are empty in A (a check looks at this
-// run's ids only: another run may share the account and Region, spec §10), and
-// in B just below.
+// run's ids only, as other control-plane stacks' cells may share the
+// namespaces), and in B just below.
 const cellsDeleted = probeBatch([
   ledger('story after the cell deletes', 'story', storyCellDeleted, { cell: 'cell4' }),
   ledger(

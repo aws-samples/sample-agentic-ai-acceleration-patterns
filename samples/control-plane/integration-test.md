@@ -323,9 +323,11 @@ included, so the run leaves no parameter in B. A cleanup that fails prints
 `Left behind in this account: <name>` in that build's log. The leftover
 check reads account A only, so after a failed run look in B for parameters
 under `/application-plane/cells/`, `/application-plane/tenants/` and
-`/cp-integ/<fleet>/chain/`. The chained role's
-`sts:TagSession` grant on the cell role names the `CellId` key only, as the
-stress test's `cell-build-policy` does.
+`/cp-integ/<fleet>/chain/`.
+
+The cell session chains through a test policy on B's cell role whose
+`sts:TagSession` grant names the `CellId` key only, as the stress test's
+`cell-build-policy` does.
 
 What it does not prove:
 

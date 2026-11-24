@@ -313,8 +313,7 @@ identity platform) and their application's
 `/application-plane/applications/<applicationId>/shared/*` (ADR-034, ADR-038);
 the cell create script publishes shared resource identifiers to
 `/application-plane/cells/<cellId>/*`; tenant scripts read their own
-cell's path and
-write their own state under
+cell's path and write their own state under
 `/application-plane/tenants/<tenantId>/<applicationId>/*` (ADR-037).
 
 Every API operation requires a JWT from your **vendor IdP**, validated by a
@@ -445,8 +444,10 @@ require. A customer's account must have one: `PutAccount` refuses
 `"owner": "TENANT"` without it (ADR-029); a second vendor account may omit it.
 It is the standard confused-deputy guard for a role handed to a third party
 (ADR-025). Each half's trust holds the id twice, once per AssumeRole
-statement, so an id longer than about 450 characters can push the trust
-past IAM's default trust policy size quota (2,048 characters):
+statement, so an id longer than about 400 characters (less with a longer
+fleet name) pushes the tenant half's trust past IAM's default trust policy
+size quota (2,048 characters, adjustable to 4,096); `cdk synth` warns when
+it does:
 
 ```bash
 npx cdk deploy control-plane-cell-account \
@@ -752,7 +753,9 @@ A cell script that assumes a further role in its account (a CDK bootstrap
 role, for example) keeps the tags on that session, because they are
 transitive, and no later session can replace them. That chained AssumeRole
 needs `sts:TagSession` on both sides: in the next role's trust, which the
-current default CDK bootstrap template allows, and in the policy that lets
+current default CDK bootstrap template allows (check an older bootstrap
+with `aws iam get-role` on the deploy role and re-bootstrap before step 2
+if its trust lacks `sts:TagSession`), and in the policy that lets
 the pair role assume it. A policy in `cellBuildManagedPolicyArns` or
 `tenantBuildManagedPolicyArns` that allows only `sts:AssumeRole` on such a
 role is refused once the builds are tagged; add `sts:TagSession` on the
@@ -1392,7 +1395,7 @@ application's cells (threat T5, the highest-consequence open item).
       IPs to vendor operator networks, so a stolen token alone is not
       sufficient to reach the API.
 
-### Accounts (M19, M20)
+### Accounts (M19, M20, M35)
 
 - [ ] **Hand each tenant-owned account's external id to the operator out of
       band** (the pair and `PutAccount` both require it, T22), and treat the
@@ -1420,6 +1423,10 @@ application's cells (threat T5, the highest-consequence open item).
       [Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/reference_policies_actions-resources-contextkeys.html)
       for which condition keys each action supports; an action that supports
       neither a tag key nor a name you control cannot be scoped per cell.
+      A policy that lets the pair role chain with `sts:TagSession` should
+      also require a tagged caller (`"Null": { "aws:PrincipalTag/CellId":
+      "false" }`), so the API role's untagged probe session cannot pass a
+      `CellId` of its choosing.
 - [ ] **Know what the tags do not cover.** A `cdk deploy` (or any
       CloudFormation stack) creates resources as the stack's execution role,
       which acts without the build's tags, so a per-cell policy on the cell

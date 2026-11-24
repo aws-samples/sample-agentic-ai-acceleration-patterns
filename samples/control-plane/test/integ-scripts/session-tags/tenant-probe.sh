@@ -24,6 +24,8 @@ probe peerCellRead aws ssm get-parameters-by-path --path "/application-plane/cel
 probe ownCellWrite put "/application-plane/cells/$CELL_ID/tenant-probe"
 probe ownStateDelete aws ssm delete-parameter --name "$own/state"
 probe ownDeploymentDelete aws ssm delete-parameter --name "$own"
+if [ "${RESULTS[ownStateWrite]}" = allowed ] && [ "${RESULTS[ownStateDelete]}" != allowed ]; then echo "Left behind in this account: $own/state"; fi
+if [ "${RESULTS[ownDeploymentWrite]}" = allowed ] && [ "${RESULTS[ownDeploymentDelete]}" != allowed ]; then echo "Left behind in this account: $own"; fi
 # Writes that should have been refused are removed again (best effort), so a regression leaves nothing in the account.
 if [ "${RESULTS[otherApplicationWrite]}" = allowed ]; then aws ssm delete-parameter --name "/application-plane/tenants/$TENANT_ID/$PEER_APPLICATION_ID" || echo "Left behind in this account: /application-plane/tenants/$TENANT_ID/$PEER_APPLICATION_ID"; fi
 if [ "${RESULTS[otherTenantWrite]}" = allowed ]; then aws ssm delete-parameter --name "/application-plane/tenants/$PEER_TENANT_ID/$APPLICATION_ID" || echo "Left behind in this account: /application-plane/tenants/$PEER_TENANT_ID/$APPLICATION_ID"; fi

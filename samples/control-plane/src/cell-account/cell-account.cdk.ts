@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { CfnOutput, Stack, StackProps } from 'aws-cdk-lib';
+import { Annotations, CfnOutput, Stack, StackProps } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
@@ -67,6 +67,11 @@ export interface CellAccountRolesProps {
   readonly identity: StackIdentity;
 }
 
+/** IAM's default role trust policy size quota, in characters (adjustable to 4,096). */
+export const TRUST_POLICY_DEFAULT_QUOTA = 2048;
+/** The tenant half's trust without the fleet name and external id, measured by synth. */
+const TENANT_TRUST_BASE_CHARS = 1165;
+
 /**
  * The account role pair (spec §6.4, ADR-025): `<fleet>-cell-provisioning`
  * and `<fleet>-tenant-provisioning`, installed in every account that hosts
@@ -101,6 +106,21 @@ export class CellAccountRoles extends Construct {
     validateCellBuildManagedPolicyArns(props.cellBuildManagedPolicyArns, props.identity);
     const externalId = props.externalId === undefined ? undefined : validateExternalId(props.externalId);
     const partition = props.identity.partition;
+    if (externalId !== undefined) {
+      // Each half's trust holds the external id twice (one per AssumeRole
+      // statement). The tenant half is the larger: measured by synth at
+      // about 1,165 characters plus 3 per fleet name character, plus the id
+      // twice. Warn at synth rather than fail at CloudFormation deploy.
+      const tenantTrustChars = TENANT_TRUST_BASE_CHARS + 3 * this.fleetName.length + 2 * externalId.length;
+      if (tenantTrustChars > TRUST_POLICY_DEFAULT_QUOTA) {
+        Annotations.of(this).addWarningV2(
+          'control-plane:trustPolicySize',
+          `The external id is ${externalId.length} characters: the tenant provisioning role's trust holds it twice and `
+          + `is about ${tenantTrustChars} characters, over IAM's default trust policy size quota of `
+          + `${TRUST_POLICY_DEFAULT_QUOTA}. Use a shorter id, or raise the account's quota (up to 4,096) before deploying.`,
+        );
+      }
+    }
 
     // Each half trusts two control-plane roles in three statements: the API
     // role (the PutAccount handshake probe, ADR-027/028) may assume it with

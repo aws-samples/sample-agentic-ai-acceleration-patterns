@@ -222,3 +222,13 @@ describe('the pair\'s own SSM grants reach only the session\'s own cell and depl
     expect(allows(tenant, TENANT_TAGS, 'ssm:DeleteParameter', '/application-plane/tenants/t2/app-x')).toBe(false);
   });
 });
+
+// The stress package loads test/stress/account-check.ts, which imports
+// fleet.ts, without samples/control-plane installed. fleet.ts must stay
+// free of imports for that to work.
+test('src/shared/fleet.ts has no imports (the stress account check loads it without aws-cdk-lib)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const source: string = require('node:fs').readFileSync(require('node:path').join(__dirname, '../../src/shared/fleet.ts'), 'utf8');
+  expect(source).not.toMatch(/^\s*import\s/m);
+  expect(source).not.toMatch(/\brequire\(/);
+});

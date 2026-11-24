@@ -294,8 +294,8 @@ function inlineBuildspec(kind: ProvisioningRoleKind): string {
  * builds from tenant builds (ADR-002, ADR-012). The project roles hold no
  * application-plane permission (ADR-025): each may only assume, and tag a
  * session for (ADR-0051), its half of the provisioning role pair in the
- * cell's account (`accountId`,
- * `cellRoleArn` / `tenantRoleArn`, `externalId` in the input), and the
+ * cell's account (`accountId`, `cellRoleArn` / `tenantRoleArn`,
+ * `externalId` in the input), and the
  * buildspec does so before the script runs. Every lifecycle transition is
  * compare-and-set on the exact expected status; failure writes are
  * conditional on attribute_exists(PK); the deployment-delete and cell-delete

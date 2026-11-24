@@ -61,6 +61,9 @@ probe chainOverride aws sts assume-role --role-arn "$CHAIN_TAGGED_ROLE_ARN" --ro
   --tags "Key=CellId,Value=$PEER_CELL_ID"
 
 probe ownCellDelete aws ssm delete-parameter --name "$own/probe"
+if [ "${RESULTS[ownCellWrite]}" = allowed ] && [ "${RESULTS[ownCellDelete]}" != allowed ]; then
+  echo "Left behind in this account: $own/probe"
+fi
 # Writes that should have been refused are removed again (best effort).
 if [ "${RESULTS[peerCellWrite]}" = allowed ]; then aws ssm delete-parameter --name "$peer/probe" || echo "Left behind in this account: $peer/probe"; fi
 if [ "${RESULTS[tenantWrite]}" = allowed ]; then aws ssm delete-parameter --name "/application-plane/tenants/$PEER_TENANT_ID/$APPLICATION_ID" || echo "Left behind in this account: /application-plane/tenants/$PEER_TENANT_ID/$APPLICATION_ID"; fi
