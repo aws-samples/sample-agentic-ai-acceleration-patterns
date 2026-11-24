@@ -173,6 +173,9 @@ export class NitroBackendResources extends Construct implements BackendConstruct
         // The runner serves three backends from one image and exits at start without this (ADR-0037).
         // The nonce hash is not here: it is set per start by the container override (ADR-0018).
         environment: [{ name: 'RUNNER_BACKEND', value: 'nitro' }],
+        // The runner locks its own pages, so a job that fills the task group cannot evict them and stall it
+        // (ADR-0074). A ulimit, not a capability: the runner sets the job's memlock limit to 0.
+        ulimits: [{ name: 'memlock', softLimit: -1, hardLimit: -1 }],
         logConfiguration: {
           logDriver: 'awslogs',
           options: {

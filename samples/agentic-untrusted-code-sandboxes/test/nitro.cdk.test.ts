@@ -240,6 +240,8 @@ describe('task definition (ADR-0023, spec §3.4)', () => {
     const def = Object.values(t.findResources('AWS::ECS::TaskDefinition'))[0].Properties.ContainerDefinitions[0];
     expect(def.LinuxParameters).toBeUndefined();
     expect(def.Privileged).toBeUndefined();
+    // The runner locks its pages (ADR-0074); without this limit its start fails.
+    expect(def.Ulimits).toEqual([{ Name: 'memlock', SoftLimit: -1, HardLimit: -1 }]);
   });
 
   test('the image is the construct repository at the tag the core made for the architecture', () => {

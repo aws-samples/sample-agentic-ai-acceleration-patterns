@@ -49,6 +49,7 @@ def become_tenants(backend: str):
     elif backend == "nitro":
         size = sizing.Sizing(backend, sizing.memory_m(backend, meminfo, job.task_memory_max(group)))
         executor = job.Executor(backend, size, Filter(backend, platform.machine()), task_group=group)
+        executor.open_watchdog()
     else:
         size = sizing.Sizing(backend, sizing.memory_m(backend, meminfo, None))
         job_group = job.prepare_agentcore_groups(group, size.l)
@@ -115,8 +116,11 @@ def main() -> int:
         try:
             sandbox.claim()
             context, sandbox.fingerprint = tls_context()
+            # Last, so the TLS libraries are mapped too. The task definition raises memlock; a task without it
+            # does not start, rather than run a runner a memory fill can stall (ADR-0074).
+            job.lock_memory()
         except Exception as e:  # a nitro task that cannot claim itself ends, and the start fails
-            job.log("start_failed", error=type(e).__name__)
+            job.log("start_failed", error=type(e).__name__, errno=getattr(e, "errno", None))
             return 1
         serve(sandbox, TLS_PORT, "jobs", tls=context)
     else:

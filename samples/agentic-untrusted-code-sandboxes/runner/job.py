@@ -1,6 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
-"""Run one job as uid 1001 and sweep after it (spec §3.5 steps 1 to 4, ADR-0010, ADR-0019 to ADR-0022).
+"""Run one job as uid 1001 and sweep after it (spec §3.5 steps 1 to 4, ADR-0010, ADR-0019 to ADR-0022, ADR-0074).
 
 Needs root and Linux; the Docker test (scripts/test-runner-docker.sh)
 exercises it. Python 3.9 compatible.
@@ -36,14 +36,21 @@ POST_JOB_DEADLINE_S = 3.0
 # all that is left of it, so slowly freed memory is not called a leftover (ADR-0064).
 DIRTY_POLL_S = POST_JOB_DEADLINE_S
 READ_CHUNK = 65536
+CURRENT_READ = 64  # one pread of memory.current, a single number
+GROUP_READ = 8192  # pread size for memory.stat (about 2 KiB); a longer file takes more reads
 CPU_LIMIT_SLACK_MS = 100
+# mlockall(2) flags (linux/mman.h).
+# shortcut: the x86_64 and arm64 values, the only architectures the images build for; others (e.g. sparc) differ.
+MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT = 1, 2, 4
 PR_SET_NO_NEW_PRIVS = 38
 JOB_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 # Runs as uid 1001 with no filter: removes every SysV object uid 1001 owns
 # or created. The root runner on microvm may not (no CAP_SYS_ADMIN, S-17).
+# The script is the runner's own code, never the tenant's.
 SYSV_SWEEP = r"""
-import ctypes
+import ctypes, resource
+resource.setrlimit(resource.RLIMIT_MEMLOCK, (0, 0))  # uid 1001 locks no memory, here too (ADR-0074)
 libc = ctypes.CDLL(None, use_errno=True)
 removed = 0
 for name, ctl in (("msg", libc.msgctl), ("sem", libc.semctl), ("shm", libc.shmctl)):
@@ -230,14 +237,21 @@ class Executor:
         self.python = python
         self._exceeded = threading.Event()
         self._libc = ctypes.CDLL(None, use_errno=True)
+        self._group_fds: Optional[Tuple[int, int]] = None  # nitro: memory.current and memory.stat, open for the task's life
+        # A monitor that outlives its job (_collect joins it for at most the deadline) may poll beside the next one;
+        # the lock keeps one from closing a pair the other still reads.
+        self._group_lock = threading.Lock()
 
     # Step 1 and 2: the job child.
 
     def _limits(self, timeout_ms: int):
-        """The limits the child sets before the drop; RLIMIT_NOFILE and RLIMIT_AS come last (ADR-0038)."""
+        """The limits the child sets before the drop; RLIMIT_NOFILE and RLIMIT_AS come last (ADR-0038).
+
+        RLIMIT_MEMLOCK 0: the job locks no memory, also on nitro, where the runner's own limit is raised (ADR-0074).
+        """
         s = self.sizing
         return ((resource.RLIMIT_CPU, cpu_seconds(timeout_ms)), (resource.RLIMIT_NPROC, s.n),
-                (resource.RLIMIT_FSIZE, sz.FSIZE))
+                (resource.RLIMIT_FSIZE, sz.FSIZE), (resource.RLIMIT_MEMLOCK, 0))
 
     def _preexec(self, input_bytes: bytes, timeout_ms: int) -> Callable[[], None]:
         limits = self._limits(timeout_ms)
@@ -433,9 +447,46 @@ class Executor:
         return sz.meminfo(read_text("/proc/meminfo"))["MemAvailable"] < sz.MICROVM_FLOOR
 
     def _above_l(self) -> bool:
+        # The two files stay open and are read with pread: an open per poll allocates in the kernel and in the
+        # runner, and an allocation while the job holds the task group at its limit waited seconds (ADR-0074).
+        with self._group_lock:
+            if self._group_fds is None:
+                self._group_fds = self._open_group_files()
+            fds = self._group_fds
+            try:
+                current = os.pread(fds[0], CURRENT_READ, 0).decode("ascii")
+                stat = _pread_all(fds[1], GROUP_READ).decode("ascii")
+            except OSError:
+                # shortcut: the next poll opens them again, and that open allocates while the group may be full.
+                # A read error on a held cgroup file has not been seen (ADR-0074).
+                self._group_fds = None
+                for fd in fds:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass  # the read error is the one to raise; the other file still gets closed
+                raise
+        return sz.counted(current, stat) > self.sizing.l
+
+    def open_watchdog(self) -> None:
+        """nitro: open the watchdog's files and read them once, when the sandbox is claimed and before any job.
+
+        The first open and read allocate; done here, they never happen while a job fills the group (ADR-0074).
+        A failure leaves the files to the first poll, as before.
+        """
+        try:
+            self._above_l()
+        except (OSError, ValueError, KeyError) as e:
+            log("watchdog_open_failed", error=type(e).__name__)
+
+    def _open_group_files(self) -> Tuple[int, int]:
         group = self.task_group or ""
-        used = sz.counted(read_text(os.path.join(group, "memory.current")), read_text(os.path.join(group, "memory.stat")))
-        return used > self.sizing.l
+        current = os.open(os.path.join(group, "memory.current"), os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            return current, os.open(os.path.join(group, "memory.stat"), os.O_RDONLY | os.O_CLOEXEC)
+        except OSError:
+            os.close(current)
+            raise
 
     # Step 3: kill, sweep and reap.
 
@@ -567,6 +618,34 @@ class Executor:
     def kill_all(self) -> None:
         """On SIGTERM: end any job. No reap here: a job thread may still be in Popen.wait()."""
         self._kill_uid()
+
+
+def _pread_all(fd: int, size: int, limit: int = 1 << 20) -> bytes:
+    """Read a whole file from offset 0 with pread, size bytes at a time; one read when the file is shorter.
+
+    A cgroup file fills each read in full, so a short read is its end. Stops at limit bytes either way.
+    """
+    data = os.pread(fd, size, 0)
+    while len(data) % size == 0 and data and len(data) < limit:
+        more = os.pread(fd, size, len(data))
+        if not more:
+            break
+        data += more
+    return data
+
+
+def lock_memory(libc=None) -> None:
+    """nitro: keep the runner's pages in memory (ADR-0074). Raises OSError when the kernel refuses.
+
+    The job shares the task group with the runner. A job that holds the group at its limit leaves only file pages to
+    reclaim, the runner's code among them; they were evicted and read back for 30 s and more, and the runner did not
+    answer. MCL_CURRENT locks what is mapped now; MCL_FUTURE with MCL_ONFAULT locks later mappings (thread stacks,
+    modules loaded later) page by page as they are touched, so nothing is filled in ahead. A job child is not locked:
+    neither fork nor exec keeps the lock.
+    """
+    libc = libc if libc is not None else ctypes.CDLL(None, use_errno=True)
+    if libc.mlockall(MCL_CURRENT) != 0 or libc.mlockall(MCL_FUTURE | MCL_ONFAULT) != 0:
+        raise OSError(ctypes.get_errno(), "mlockall")
 
 
 def prepare_work(work: str = WORK, uid: int = UID) -> None:

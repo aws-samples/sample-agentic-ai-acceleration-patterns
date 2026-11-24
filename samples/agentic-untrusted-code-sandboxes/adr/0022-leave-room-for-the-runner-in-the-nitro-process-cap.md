@@ -5,6 +5,7 @@
 - Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0019, ADR-0021
+- Amended by: ADR-0074
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -58,3 +59,5 @@ pages still counted. The watchdog records `memoryExceeded` before it
 sends the kill.
 
 Note 2026-11-23: accepted. The integration test's `runaway` step runs the real runner on `nitro`: one process that allocates past its own address-space limit gets `MemoryError` with `memoryExceeded` false (the watchdog silent), and the next call on the same sandbox works. That passed in run 14, which is the S-20 check repeated with the real runner. The runner's own footprint was not measured separately.
+
+Note 2026-11-23: amended by [ADR-0074](0074-lock-the-nitro-runner-in-memory-and-keep-the-watchdog-files-open.md). A fill from all 64 process slots stalled the runner, because the job held the task group at its limit and the kernel evicted the runner's code pages over and over. The runner now locks its pages, the task definition raises the `memlock` ulimit, the job's `RLIMIT_MEMLOCK` is 0, and the watchdog keeps its two files open. The watchdog's threshold and A are unchanged.

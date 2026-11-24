@@ -53,6 +53,7 @@ job filter, which is built for aarch64, has run only on a real MicroVM.
 | the job uid, own session and process group, every rlimit soft = hard, `oom_score_adj`, `NoNewPrivs` on every backend, job environment, input written as uid 1001 through a planted link | Docker, x86_64 |
 | `microvm` filter on x86_64: blocked calls `EPERM`, `clone3` fallback, threads, `subprocess` and `fork` work; `/dev/shm` locked; an allow-all filter fails closed | Docker, x86_64, Python 3.13 and 3.9 |
 | `nitro` filter (SysV `EPERM`), the watchdog kills a fill above L and marks it | Docker, x86_64 |
+| `nitro` memory lock (ADR-0074): the runner locks its pages, a refused lock ends the start, the job's `RLIMIT_MEMLOCK` is 0 and its `mlockall` is refused, the watchdog's files are opened at claim, kept open and reopened after a read error, and the job holds none of them; a fill from all 64 slots through the runner entry answers `memoryExceeded` with `/work` and the `bootId` kept | unit tests (lock calls, refused lock in `main()`, watchdog files), Docker, x86_64 (the rest) |
 | `agentcore` job group: setup, a kernel kill in the group is marked and the runner lives | Docker, x86_64, cgroup v2 |
 | SysV, `/tmp` and `/dev/shm` sweep (links to `/etc` left alone), `/work` kept, zombies reaped, survivors killed, CPU-limit and wall timeouts, exit codes | Docker, x86_64 |
 | Runner entry per backend (`microvm` hook then job, `nitro` TLS, `agentcore` session) | Docker, x86_64 |
@@ -61,4 +62,6 @@ job filter, which is built for aarch64, has run only on a real MicroVM.
 Not checked here: the aarch64 table in a kernel (only against the generic
 header), the `microvm` floor firing on a real fill, the `agentcore` `dirty`
 threshold after a real job, the real platforms' cgroup layout, hook calls
-and ports, and the runner as PID 1. Those wait for the integration test.
+and ports, the runner as PID 1, and the `nitro` stall itself (the Docker
+host does not thrash the way a 1 vCPU task does). Those wait for the
+integration test.

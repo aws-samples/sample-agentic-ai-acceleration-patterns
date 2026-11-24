@@ -31,6 +31,116 @@ class ConstantsTest(unittest.TestCase):
     def test_job_uid_is_1001(self):
         self.assertEqual(jb.UID, 1001)
 
+    def test_the_job_locks_no_memory(self):
+        ex = jb.Executor("nitro", sz.Sizing("nitro", 1024 * MIB), FakeFilter())
+        self.assertIn((jb.resource.RLIMIT_MEMLOCK, 0), ex._limits(1000))
+
+    def test_lock_memory_locks_current_then_future_on_fault(self):
+        calls = []
+
+        class Libc:
+            def mlockall(self, flags):
+                calls.append(flags)
+                return 0
+
+        jb.lock_memory(Libc())
+        self.assertEqual(calls, [jb.MCL_CURRENT, jb.MCL_FUTURE | jb.MCL_ONFAULT])
+
+    def test_lock_memory_raises_when_refused(self):
+        class Libc:
+            def mlockall(self, flags):
+                return -1
+
+        with self.assertRaises(OSError):
+            jb.lock_memory(Libc())
+
+    def test_the_sysv_sweep_locks_no_memory(self):
+        # The first statement after the imports, before libc or any SysV call.
+        lines = [line for line in jb.SYSV_SWEEP.splitlines() if line.strip()]
+        self.assertEqual(lines[1].split("#")[0].strip(), "resource.setrlimit(resource.RLIMIT_MEMLOCK, (0, 0))")
+        self.assertEqual(lines[0], "import ctypes, resource")
+        # Run those two lines: the limit they leave is 0, soft and hard. The rest of the sweep removes SysV objects,
+        # so it is not run here.
+        probe = "\n".join(lines[:2]) + "\nprint(resource.getrlimit(resource.RLIMIT_MEMLOCK))\n"
+        out = subprocess.run([jb.sys.executable, "-I", "-c", probe], capture_output=True, text=True, check=True)
+        self.assertEqual(out.stdout.strip(), "(0, 0)")
+
+    def test_nitro_claim_opens_the_watchdog(self):
+        # become_tenants opens the watchdog's files at claim, before any job (ADR-0074).
+        from runner import runner as rn
+
+        made = []
+
+        class FakeExecutor:
+            def __init__(self, *a, **kw):
+                self.opened = 0
+                made.append(self)
+
+            def open_watchdog(self):
+                self.opened += 1
+
+        size = sz.Sizing("nitro", 1024 * MIB)
+        with mock.patch("builtins.open", mock.mock_open(read_data="0::/task\n")), \
+                mock.patch.object(rn.job, "read_text", return_value=""), \
+                mock.patch.object(rn.job, "prepare_work"), \
+                mock.patch.object(rn.job, "task_memory_max", return_value=None), \
+                mock.patch.object(rn.sizing, "memory_m", return_value=size.m), \
+                mock.patch.object(rn.job, "Executor", FakeExecutor), \
+                mock.patch.object(rn, "Filter"), mock.patch.object(rn.job, "log"):
+            ex = rn.become_tenants("nitro")
+        self.assertIs(ex, made[0])
+        self.assertEqual(ex.opened, 1)
+
+    def test_the_lock_comes_after_claim_and_tls(self):
+        # Last, so the TLS libraries are mapped when MCL_CURRENT locks them (ADR-0074).
+        from runner import runner as rn
+
+        order = []
+
+        class FakeSandbox:
+            def __init__(self, *a, **kw):
+                self.fingerprint = None
+                self.boot_failed = threading.Event()
+                self.executor = None
+
+            def claim(self):
+                order.append("claim")
+
+        def stop_waiting(*a):
+            raise SystemExit(0)
+
+        env = {rn.BACKEND_ENV: "nitro", rn.wire.NONCE_HASH_ENV: "0" * 64}
+        with mock.patch.dict(os.environ, env), mock.patch.object(rn, "own_process_setup"), \
+                mock.patch.object(rn, "Sandbox", FakeSandbox), \
+                mock.patch.object(rn, "tls_context", side_effect=lambda: (order.append("tls"), (None, b""))[1]), \
+                mock.patch.object(rn.job, "lock_memory", side_effect=lambda: order.append("lock")), \
+                mock.patch.object(rn.signal, "signal"), \
+                mock.patch.object(rn, "serve", side_effect=lambda *a, **kw: order.append("serve")), \
+                mock.patch.object(rn.job, "log"), mock.patch.object(rn.threading.Event, "wait", side_effect=stop_waiting):
+            with self.assertRaises(SystemExit):
+                rn.main()
+        self.assertEqual(order, ["claim", "tls", "lock", "serve"])
+
+    def test_a_refused_lock_ends_the_nitro_start(self):
+        from runner import runner as rn
+
+        class FakeSandbox:
+            def __init__(self, *a, **kw):
+                self.fingerprint = None
+
+            def claim(self):
+                pass
+
+        env = {rn.BACKEND_ENV: "nitro", rn.wire.NONCE_HASH_ENV: "0" * 64}
+        with mock.patch.dict(os.environ, env), mock.patch.object(rn, "own_process_setup"), \
+                mock.patch.object(rn, "Sandbox", FakeSandbox), mock.patch.object(rn, "tls_context", return_value=(None, b"")), \
+                mock.patch.object(rn.job, "lock_memory", side_effect=OSError(12, "mlockall")), \
+                mock.patch.object(rn.signal, "signal"), \
+                mock.patch.object(rn, "serve") as serve, mock.patch.object(rn.job, "log") as logged:
+            self.assertEqual(rn.main(), 1)
+        serve.assert_not_called()
+        logged.assert_any_call("start_failed", error="OSError", errno=12)
+
     def test_cpu_seconds_round_up(self):
         self.assertEqual([jb.cpu_seconds(t) for t in (1, 1000, 1001, 30000, 60000)], [1, 1, 2, 30, 60])
 
@@ -53,7 +163,9 @@ class MonitorTest(unittest.TestCase):
     def executor(self, backend, **kw):
         size = sz.Sizing(backend, 1024 * MIB)
         f = None if backend == "agentcore" else FakeFilter()
-        return jb.Executor(backend, size, f, uid=os.getuid() + 100000, **kw)
+        ex = jb.Executor(backend, size, f, uid=os.getuid() + 100000, **kw)
+        self.addCleanup(lambda: [os.close(fd) for fd in ex._group_fds or ()])  # the watchdog's files, if it opened them
+        return ex
 
     def test_nitro_watchdog_counts_without_page_cache(self):
         ex = self.executor("nitro", task_group=self.group)
@@ -62,6 +174,91 @@ class MonitorTest(unittest.TestCase):
         self.assertFalse(ex._above_l())  # 510 MiB counted, L = 768 MiB
         write(os.path.join(self.group, "memory.stat"), "file %d\nshmem %d\n" % (1500 * MIB, 300 * MIB))
         self.assertTrue(ex._above_l())  # 800 MiB counted
+
+    def test_nitro_watchdog_opens_the_group_files_once(self):
+        # Every poll reads the same open files (ADR-0074): no open, so no new allocation, while the group is full.
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))
+        write(os.path.join(self.group, "memory.stat"), "file 0\nshmem 0\n")
+        real_open = os.open
+        with mock.patch.object(jb.os, "open", side_effect=real_open) as opened:
+            self.assertFalse(ex._above_l())
+            write(os.path.join(self.group, "memory.current"), str(800 * MIB))
+            self.assertTrue(ex._above_l())  # the new value, read through the same descriptor
+        self.assertEqual(opened.call_count, 2)
+
+    def test_nitro_watchdog_files_open_at_claim_not_at_the_first_poll(self):
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))
+        write(os.path.join(self.group, "memory.stat"), "file 0\nshmem 0\n")
+        ex.open_watchdog()
+        self.assertIsNotNone(ex._group_fds)
+        with mock.patch.object(jb.os, "open") as opened:
+            self.assertFalse(ex._above_l())
+        opened.assert_not_called()
+
+    def test_nitro_watchdog_open_failure_is_left_to_the_first_poll(self):
+        ex = self.executor("nitro", task_group=os.path.join(self.group, "missing"))
+        with mock.patch.object(jb, "log") as logged:
+            ex.open_watchdog()  # no raise: the watchdog fails open, as before, and says so
+        self.assertIsNone(ex._group_fds)
+        logged.assert_called_once_with("watchdog_open_failed", error="FileNotFoundError")
+
+    def test_nitro_watchdog_reopens_after_a_read_error(self):
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))
+        write(os.path.join(self.group, "memory.stat"), "file 0\nshmem 0\n")
+        ex.open_watchdog()
+        with mock.patch.object(jb.os, "pread", side_effect=OSError(5, "EIO")):
+            with self.assertRaises(OSError):
+                ex._above_l()
+        self.assertIsNone(ex._group_fds)
+        self.assertFalse(ex._above_l())  # opened again
+
+    def test_nitro_watchdog_closes_a_half_open_pair(self):
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))  # no memory.stat
+        closed = []
+        real_close = os.close
+        with mock.patch.object(jb.os, "close", side_effect=lambda fd: (closed.append(fd), real_close(fd))):
+            with self.assertRaises(FileNotFoundError):
+                ex._above_l()
+        self.assertEqual(len(closed), 1)
+        self.assertIsNone(ex._group_fds)
+
+    def test_nitro_watchdog_reads_a_long_memory_stat(self):
+        # A memory.stat longer than one read is read whole, so shmem past the first chunk still counts.
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))
+        padding = "".join("pad_%04d 0\n" % i for i in range(jb.GROUP_READ // 10 + 1))
+        write(os.path.join(self.group, "memory.stat"), "file 0\n" + padding + "shmem %d\n" % (100 * MIB))
+        self.assertGreater(os.path.getsize(os.path.join(self.group, "memory.stat")), jb.GROUP_READ)
+        self.assertTrue(ex._above_l())  # 800 MiB counted, L = 768 MiB; one read would have counted 700
+
+    def test_pread_all_reads_whole_files_and_stops_at_the_limit(self):
+        path = os.path.join(self.group, "f")
+        for n in (0, 10, 8191, 8192, 8193, 16384):
+            with open(path, "wb") as f:
+                f.write(b"x" * n)
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                self.assertEqual(len(jb._pread_all(fd, 8192)), n)
+                self.assertEqual(len(jb._pread_all(fd, 8192, limit=8192)), min(n, 8192))
+            finally:
+                os.close(fd)
+
+    def test_nitro_watchdog_serialises_its_files(self):
+        # A monitor that outlives its job and the next one's take turns, so neither closes a pair the other reads.
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))
+        write(os.path.join(self.group, "memory.stat"), "file 0\nshmem 0\n")
+        done = threading.Event()
+        with ex._group_lock:
+            t = threading.Thread(target=lambda: (ex._above_l(), done.set()))
+            t.start()
+            self.assertFalse(done.wait(0.2))  # waits for the lock
+        t.join(2)
+        self.assertTrue(done.is_set())
 
     def test_microvm_floor(self):
         ex = self.executor("microvm")

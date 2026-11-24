@@ -82,3 +82,4 @@ line and a dated trailing note saying what changed
 | [0071](0071-run-the-stop-functions-outside-the-vpc.md) | Run the reaper, offboard and drain functions outside the VPC | Accepted | 2026-11-23 |
 | [0072](0072-send-the-nonce-only-in-the-ready-hello.md) | Send the nonce only in the `ready` probe's `/hello` | Accepted | 2026-11-23 |
 | [0073](0073-keep-a-vpc-functions-role-until-its-network-interfaces-are-released.md) | Keep a VPC function's role until its network interfaces are released | Accepted | 2026-11-23 |
+| [0074](0074-lock-the-nitro-runner-in-memory-and-keep-the-watchdog-files-open.md) | Lock the `nitro` runner in memory and keep the watchdog's files open | Accepted | 2026-11-23 |
