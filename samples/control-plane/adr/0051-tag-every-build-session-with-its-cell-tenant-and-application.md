@@ -137,10 +137,11 @@ Option 3 for their own account; this record does not choose for them.
 - The tags hold for defects and scripts that stay in their session. The
   build role sets them, and the script runs in the same container as the
   agent that holds the build role's credentials (threat model T29). A
-  script that reaches those credentials can assume the pair in any
-  registered account with any cell's or tenant's tags. Nothing in the
-  sample stops it; that is the CodeBuild trust boundary the sample accepts
-  (T29, M35), and `maxCells: 1` does not change it.
+  script that has reached those credentials (a container escape or
+  `/proc` access to the agent) can assume the pair in any registered
+  account with any cell's or tenant's tags. The sample does not stop a
+  script that has reached them; that is the CodeBuild trust boundary the
+  sample accepts (T29, M35), and `maxCells: 1` does not change it.
 - The API role's refusal of a tagged AssumeRole is shown by the trust
   evaluator in the unit tests only; the integration test does not call the
   pair as the API role with tags.

@@ -272,16 +272,15 @@ TagSession with those tags (STS does not evaluate the external id there).
 The pair's own grants name each session's own namespace by its tags, so
 through them cell 1's session cannot write cell 2's parameters in the same
 account. This holds for defects and scripts that stay in their session.
-A script that reaches the build role's credentials can assume the pair in
-any registered account with any cell's or tenant's tags; the sample
-accepts that as the CodeBuild trust boundary (threat model T29, M35). A
-stack the script deploys acts through its CloudFormation execution role,
-which carries no tags (Production hardening checklist, Accounts). The
-CodeBuild build assumes the role before your script runs,
-so the script executes **in** the cell's
+A script that reaches the build role's credentials (a container escape or
+`/proc` access to the agent) can assume the pair in any registered account
+with any cell's or tenant's tags; the sample accepts that as the CodeBuild
+trust boundary (threat model T29, M35). A stack the script deploys acts
+through its CloudFormation execution role, which carries no tags
+(Production hardening checklist, Accounts). The CodeBuild build assumes
+the role before your script runs, so the script executes **in** the cell's
 account with exactly what that account's owner installed. One pair serves
-every application the account admits. A customer installs
-the pair with the `CellAccountStack` in their own account, registers it (or
+every application the account admits. A customer installs the pair with the `CellAccountStack` in their own account, registers it (or
 has the vendor register it) with the same external id, and can revoke the
 control plane at any time by deleting the pair; the control plane holds no
 customer credentials, only the account id. `PutAccount` checks the handshake
@@ -1206,10 +1205,10 @@ generated from it (`smithy build`).
   registered account with any cell's or tenant's tags, T29, M35). The
   sample scopes both to the demo SSM namespaces; the account owner widens
   them deliberately for real provisioning (this is THE hardening point).
-  The CodeBuild roles themselves hold nothing but
-  `sts:AssumeRole` and `sts:TagSession` (with the build's tag keys only) on
-  those two role names, so the owner's trust policy — not a vendor-side list
-  — decides which accounts the fleet can reach (ADR-025). One pair serves
+  The CodeBuild roles themselves hold nothing but `sts:AssumeRole` and
+  `sts:TagSession` (with the build's tag keys only) on those two role
+  names, so the owner's trust policy — not a vendor-side list — decides
+  which accounts the fleet can reach (ADR-025). One pair serves
   every application an account admits, so the scripts of one application can
   read another's shared namespaces in that account; they are trusted vendor
   code.
