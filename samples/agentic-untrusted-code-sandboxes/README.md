@@ -399,9 +399,9 @@ files kept (ADR-0074). In a test account 0 of 26 such fills of this
 runner overran, against 5 of 8 before the lock. With this runner such
 a fill still takes up to about 7 s at the default task size, because
 the runner's own allocations wait while the group is full. With a
-`runTimeout` below that, the time cap may end the job first (ADR-0074;
-measurements in spec §3.5 and threat model T-89). The fix was measured in one Region at the
-default task size only.
+`runTimeout` below that, the time cap may end the job first
+(ADR-0074; measurements in spec §3.5 and threat model T-89). The fix
+was measured in one Region at the default task size only.
 
 **The AgentCore usage record is not checked.** The cost join for
 `agentcore` reads the AgentCore usage logs in the log group the construct

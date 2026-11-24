@@ -461,7 +461,10 @@ class Executor:
                 # A read error on a held cgroup file has not been seen (ADR-0074).
                 self._group_fds = None
                 for fd in fds:
-                    os.close(fd)
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass  # the read error is the one to raise; the other file still gets closed
                 raise
         return sz.counted(current, stat) > self.sizing.l
 
@@ -617,10 +620,13 @@ class Executor:
         self._kill_uid()
 
 
-def _pread_all(fd: int, size: int) -> bytes:
-    """Read a whole file from offset 0 with pread, size bytes at a time; one read when the file is shorter."""
+def _pread_all(fd: int, size: int, limit: int = 1 << 20) -> bytes:
+    """Read a whole file from offset 0 with pread, size bytes at a time; one read when the file is shorter.
+
+    A cgroup file fills each read in full, so a short read is its end. Stops at limit bytes either way.
+    """
     data = os.pread(fd, size, 0)
-    while len(data) % size == 0 and data:
+    while len(data) % size == 0 and data and len(data) < limit:
         more = os.pread(fd, size, len(data))
         if not more:
             break

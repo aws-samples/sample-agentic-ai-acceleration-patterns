@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-23
-- Amends: [ADR-0022](0022-leave-room-for-the-runner-in-the-nitro-process-cap.md), [ADR-0038](0038-prepare-the-job-child-as-uid-1001-and-set-the-address-space-cap-last.md), [ADR-0046](0046-write-the-nitro-task-definition-in-l1-with-no-task-role.md)
+- Amends: ADR-0022, ADR-0038, ADR-0046
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -47,10 +47,10 @@ cannot evict them; with nothing left to reclaim, the kernel kills job
 processes at once. The job does not inherit the lock. Cons: the task
 definition must raise the `memlock` ulimit, and the job must get it back
 to 0. With the lock alone, a fill still took 1.2 to 23.7 s (14 fills,
-before the variants below and not counted among them):
-the watchdog opened its two cgroup files on every poll, and those reads
-waited 6 to 19 s, because an open allocates and every allocation in the
-full group waits.
+before the variants below and not counted among them): the watchdog
+opened its two cgroup files on every poll, and those reads waited 6 to
+19 s, because an open allocates and every allocation in the full group
+waits.
 
 ### Option 2: A job cgroup under the task group, as on `agentcore`
 Pros: the job's limit would no longer be the runner's. Cons: the cgroup
@@ -93,13 +93,13 @@ Option 1, with the watchdog's files kept open:
    at claim fails, the runner logs `watchdog_open_failed` and the first
    poll opens the files, as before this decision. A poll that reopens
    them after a read error allocates while the group may be full; that
-   is a known shortcut, since a read error on a held cgroup file has not
-   been seen. The watchdog holds a lock across the open, read and close,
-   so a monitor that outlives its job cannot close a pair the next one
-   uses. Both are opened with
-   `O_CLOEXEC` and the job is started with `close_fds`, so no job code
-   ever holds them. The decision of ADR-0022 (the watchdog at L on
-   `memory.current` less the file cache, A = L − 64 MiB) is unchanged.
+   is a known shortcut, since a read error on a held cgroup file has
+   not been seen. The watchdog holds a lock across the open, read and
+   close, so a monitor that outlives its job cannot close a pair the
+   next one uses. Both are opened with `O_CLOEXEC` and the job is
+   started with `close_fds`, so no job code ever holds them. The
+   decision of ADR-0022 (the watchdog at L on `memory.current` less the
+   file cache, A = L − 64 MiB) is unchanged.
 
 Measured on the same stack: with the lock and the open files, 0 of 70
 such fills overran. 32 of them ran with the side process, 14 of those

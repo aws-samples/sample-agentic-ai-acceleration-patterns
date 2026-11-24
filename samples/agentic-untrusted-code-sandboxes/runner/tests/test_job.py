@@ -235,6 +235,18 @@ class MonitorTest(unittest.TestCase):
         self.assertGreater(os.path.getsize(os.path.join(self.group, "memory.stat")), jb.GROUP_READ)
         self.assertTrue(ex._above_l())  # 800 MiB counted, L = 768 MiB; one read would have counted 700
 
+    def test_pread_all_reads_whole_files_and_stops_at_the_limit(self):
+        path = os.path.join(self.group, "f")
+        for n in (0, 10, 8191, 8192, 8193, 16384):
+            with open(path, "wb") as f:
+                f.write(b"x" * n)
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                self.assertEqual(len(jb._pread_all(fd, 8192)), n)
+                self.assertEqual(len(jb._pread_all(fd, 8192, limit=8192)), min(n, 8192))
+            finally:
+                os.close(fd)
+
     def test_nitro_watchdog_serialises_its_files(self):
         # A monitor that outlives its job and the next one's take turns, so neither closes a pair the other reads.
         ex = self.executor("nitro", task_group=self.group)
