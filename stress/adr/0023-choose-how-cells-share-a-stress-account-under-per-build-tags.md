@@ -6,7 +6,6 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Proposed
 - Date: 2026-11-23
-- Amends: ADR-0006
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -14,7 +13,8 @@ SPDX-License-Identifier: MIT-0
 [`docs/stress-test.spec.md`](../../docs/stress-test.spec.md).
 
 A cell account holds one role pair, and every cell build in the account
-assumes the pair's cell role (spec §3.7). ADR-0006 accepts the result: a
+assumes the pair's cell role (spec §3.7). Stress ADR-0006 accepts the
+result: a
 compromised cell build can change any cell in its account, which is the
 role pair's scope, and spec §3.7 adds that it can change nothing else in
 the account, because the account holds only cells.
@@ -22,19 +22,36 @@ the account, because the account holds only cells.
 The control plane's per-build identity change (control-plane ADR-0051,
 written in
 [PR 149](https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns/pull/149)
-and not on main until that PR merges) narrows that for some calls. It tags a cell build with a transitive `CellId` and a tenant
-build with `CellId`, `TenantId` and `ApplicationId`, and it scopes the role
-pair's own SSM grants by the tag. An owner can then write policies for
+and not on main until that PR merges) narrows that for some calls. It
+tags a cell build with a transitive `CellId` and a tenant build with
+`CellId`, `TenantId` and `ApplicationId`, and it scopes the role pair's
+own SSM grants by the tag. An owner can then write policies for
 `cellBuildManagedPolicyArns` and `tenantBuildManagedPolicyArns` that match
-the tag. The change leaves one path open. A `cdk deploy` hands the work to
-the CloudFormation execution role, which CloudFormation assumes as a
-service, with no caller tags. The tag cannot reach the roles and resources
-the stacks create, so two cells in one account still share that one role's
-reach through the CDK.
+the tag.
 
-The stress cell bootstrap creates that role (`CDKToolkit-cell`, spec §8,
-decision 7). Its execution policy and boundary are scoped to cell
-resources and to cell roles on the IAM path `/cell/`, never to one cell.
+The change leaves the CDK path open. The stress cell bootstrap
+(`CDKToolkit-cell`, spec §8, decision 7) is one standard CDK bootstrap
+per account, shared by every cell in it:
+
+- The deploy role may create, update and delete any stack in the account.
+  CloudFormation runs an update or delete of an existing stack with that
+  stack's own execution role, so a build can change or remove the other
+  cell's stacks.
+- The file and image publishing roles write the one staging bucket and
+  repository, which hold both cells' assets.
+- The CloudFormation execution role is assumed by CloudFormation as a
+  service, with no caller tags, so the tag cannot reach the roles and
+  resources the stacks create.
+
+The build's sessions on these roles carry the `CellId` tag, but no policy
+of the standard bootstrap checks it. Two cells in one account therefore
+share the bootstrap's reach.
+
+The execution policy and boundary allow the cell's services on any
+resource in the account, and IAM writes on roles under the path `/cell/`
+only. The standalone account, not the policy, keeps that reach to cells,
+and neither names one cell.
+
 The tiers put cells in accounts as follows (`stress/src/tiers.ts`):
 
 | Tier | Cell accounts | Cells | Cells per account |
@@ -86,10 +103,10 @@ accounts, where `large` has 2 (spec §4.1). `small` and `medium` already
 work this way.
 
 - Accounts: 4 cell accounts (plus the platform account) at `large`. Each
-  new account needs the owner stacks, `CDKToolkit-cell`, the role pair,
-  the account base (which holds the ingress reader role and the
-  observability link of stress ADR-0022) and an entry in the cell accounts
-  file. That is W-11 repeated twice.
+  new account needs the owner stacks (`CellPolicies`, and the account
+  base, which holds the ingress reader role and the observability link of
+  stress ADR-0022), `CDKToolkit-cell`, the role pair and an entry in the
+  cell accounts file. That is W-11 again, for two more accounts.
 - Cost: no charge for an account. The same four cells run, so the compute
   and storage of a run stay the same. Each extra account adds the idle
   items of one cell account (the bootstrap, the base stacks, the reader
@@ -104,9 +121,11 @@ work this way.
   result exists yet (only `stress/results/2026-11-21-small.md`), so
   nothing breaks. The rule becomes the same at every tier: one cell, one
   account.
-- Residual threat: closed for cell against cell, by script call and by
-  CDK. A compromised build still changes its own cell and nothing else
-  in the account.
+- Residual threat: closed for a build that stays in its own sessions,
+  by script call and by CDK. It still changes its own cell and nothing
+  else in the account. A script that reaches the build role's credentials
+  still reaches every registered cell account, under every option
+  (control-plane ADR-0051, threat model T29 and M35).
 - Stress code and text: `tiers.ts` (`large.cellAccounts` 4) and its test,
   the spec's tier table (§4.1), the account rows of §3.1, §3.2 and §3.6,
   W-11, the cell accounts file and `check-accounts`, the seeded-fleet
@@ -126,39 +145,47 @@ deploy role pass only that role (`iam:PassRole` limited by the build's
 - Cost: no new account. Each cell adds one execution role, its policy and
   its boundary in a cell account, with no meter of their own.
 - Quota and comparability: none. The load per account is unchanged.
-- Residual threat: closed, if the other cell cannot rewrite a per-cell
-  role (see the reasons below).
+- Residual threat: not closed by the execution role alone. The shared
+  deploy role can still update or delete the other cell's stacks, and the
+  publishing roles still write the shared assets (Context). Closing the
+  path needs per-cell deploy and publishing roles as well, which is a
+  per-cell bootstrap (reason 3).
 - It does not fit this test, for three reasons:
   1. The owner cannot create the role beforehand, because the cell id is
      minted when the cell is created (above). A fixed set of slots
      (`cell-exec-1`, `cell-exec-2`) would need the control plane to hand a
-     slot to each cell, which it does not do. The cell's own execution
-     role can create a `/cell/` role at cell time (ADR-0006), but
-     that role cannot be protected from the other cell, as the next point
-     shows.
-  2. The `/cell/` path rule lets a cell's execution role write any
-     `/cell/` role (ADR-0006, spec §8 decision 7). A per-cell execution
-     role on `/cell/` can be rewritten by the other cell's execution
-     role, which removes the separation. A role off `/cell/` cannot be
-     created by a cell build under the path rule, so it returns to the
-     owner and to point 1.
+     slot to each cell, which it does not do. The cell execution role
+     can create a `/cell/` role at cell time (stress ADR-0006), but such
+     a role must carry the workload boundary, which denies `iam:*`, and
+     the execution role may pass `/cell/` roles only to Lambda and
+     AgentCore, not to CloudFormation (stress ADR-0011). It cannot serve
+     as an execution role.
+  2. The `/cell/` path rule lets the cell execution role write any
+     `/cell/` role (stress ADR-0006, spec §8 decision 7). A per-cell
+     execution role on `/cell/` can be rewritten by the other cell's
+     execution role, which removes the separation. A role off `/cell/`
+     cannot be created by a cell build under the path rule, so it returns
+     to the owner and to point 1.
   3. A per-cell bootstrap qualifier means one `cdk bootstrap` for each
      cell, and the cell build cannot run one: `cell-build-policy` allows
      `sts:AssumeRole` and `sts:TagSession` (the `CellId` key only) on three
-     `cdk-cell-*` roles and nothing else (spec §8, decision 7).
+     `cdk-cell-*` roles and nothing else (spec §8, decision 7, as PR 149
+     changes it).
 
-### Option 3: Keep two cells in each `large` account, and record the residual
+### Option 3: Keep two cells in each `large` account, and record it
 Change nothing in the tiers. Record that two cells in one account share
-the CloudFormation execution role and keep the build-time reach that
-ADR-0006 describes, and say why that is acceptable here.
+the CDK bootstrap and keep the build-time reach that stress ADR-0006
+describes, and say why that is acceptable here.
 
 - Accounts: 2 at `large` (spec §4.1).
 - Cost: none.
 - Quota and comparability: none. `large` keeps the load per account that
   the spec was written for.
 - Residual threat: a compromised cell build can change the other cell in
-  its account through the CDK, and a script that calls a service directly
-  is limited only as far as the owner's tag policies go. The accounts hold
+  its account through the bootstrap roles: it can update or delete the
+  other cell's stacks and write its assets. A direct call outside the
+  bootstrap reaches only its own SSM namespace through the role pair,
+  and anything else the owner's tag policies allow. The accounts hold
   only stress cells from one pinned commit, and the cross-cell probes
   (PS-7, spec §5.1) test the run-time path through the edge, not the
   build path. A hostile build in a stress account is outside what the
@@ -166,7 +193,7 @@ ADR-0006 describes, and say why that is acceptable here.
 - Stress code and text: no tier or code change. The redeploy and the
   account check above apply under every option. Spec §3.7 and the
   "Known limitations" of `stress/application/README.md` name the shared
-  execution role, which is the text change of this option.
+  bootstrap, which is the text change of this option.
 
 ## Decision
 Recommended: Option 3. The decision is open until the deciders choose.
@@ -177,7 +204,8 @@ build-time reach between two cells in one account is a risk the test
 accepts. Option 1 closes that reach by changing the load per account at
 `large`, which moves the per-account numbers of spec §4.4 and §5.1, and by
 adding two accounts for the owner to build and check. Option 2 does not
-work with run-time cell ids and the `/cell/` path rule.
+work with run-time cell ids and the `/cell/` path rule, and closes the
+path only with a per-cell bootstrap the cell build cannot run.
 
 Option 1 is the choice if a `large` run will build a cell script that is
 not the pinned commit, or if the account-by-account quota numbers should
@@ -186,7 +214,7 @@ the spec and fixtures listed under Option 1 and the owner steps, and
 nothing in a cell.
 
 If Option 3 is chosen, this record moves to Accepted and the shared
-execution role goes into spec §3.7 and the "Known limitations" of the
+bootstrap goes into spec §3.7 and the "Known limitations" of the
 application README. If Option 1 is chosen, the tier, spec and owner-step
 changes above follow in a separate pull request, and this record moves to
 Accepted with the account count named.
@@ -198,8 +226,9 @@ wall, and a cell build can change any cell in its account through the
 CDK.
 
 Harder: the isolation claim for two cells in one account stays at
-ADR-0006's level for the CDK path, and the tags narrow script calls only
-as far as the owner's policies go. Every stress cell account redeploys
+stress ADR-0006's level for the CDK path, and the tags narrow other
+direct calls only as far as the owner's policies go. Every stress cell
+account redeploys
 `CellPolicies` and then its role pair before the first run that uses a
 control plane with the per-build tags, and the account check accepts the
 three-statement trust before that run. The first `large` run, not this
@@ -208,6 +237,6 @@ problem.
 
 Revisit when a stress run builds a cell script outside the pinned
 commit, when the first `large` run shows a per-account quota that two
-cells share badly, when the CDK bootstrap gains per-stack execution
-roles, or when an account owner can provision a role for a cell before the
-cell exists.
+cells share badly, when the CDK bootstrap gains per-cell deploy,
+publishing and execution roles, or when an account owner can provision a
+role for a cell before the cell exists.
