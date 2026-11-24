@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 
 - Status: Accepted
 - Date: 2026-11-18
-- Amended by: ADR-0011, ADR-0016, ADR-0023
+- Amended by: ADR-0011, ADR-0016
 - Deciders: Dave Roberts (PSA)
 
 ## Context
@@ -119,8 +119,3 @@ role, trusted by the platform account, that allows `ssm:GetParameter` on
 the stress cells' ingress parameters only, for front-door phase two. It
 deploys in an owner stack tagged `stress:part=account-base`, like the
 rest of the base.
-
-Note 2026-11-23: ADR-0023 (Proposed) records that two cells in one `large`
-account share the CloudFormation execution role once the control plane tags
-each build, and sets out three options for it: one cell per account, an
-execution role per cell, or keeping two cells and recording the residual.

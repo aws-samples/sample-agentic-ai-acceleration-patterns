@@ -59,20 +59,21 @@ one.
 
 Under every option each stress cell account takes two changes once, before
 the first run on a control plane with the per-build tags, and no build runs
-between them and the platform deploy:
+between the role pair redeploy and the platform deploy:
 
-1. `CellPolicies` is deployed again, because `cell-build-policy` gains
+1. `CellPolicies` is deployed again, because `cell-build-policy` must allow
    `sts:TagSession` on the three `cdk-cell-*` roles, limited to the
    `CellId` key. The build's session carries the tag, and chaining into
    the cell bootstrap with it needs that action on the caller.
-2. The role pair is redeployed with the control plane's new trust
-   (`stress/application/deploy-role-pair.sh`). Each half's trust has three
-   statements: the API role may `sts:AssumeRole` with no tags; the build
-   role may `sts:AssumeRole` only with its half's tag keys and the external
-   id; and the build role may `sts:TagSession` only with those keys, at
-   least one of them transitive, with no external id (STS does not
-   evaluate the external id on `sts:TagSession`). A pair with the old
-   single `sts:AssumeRole` statement refuses every tagged build.
+2. The role pair is redeployed with the trust that control-plane
+   ADR-0051 defines (`stress/application/deploy-role-pair.sh`). Each
+   half's trust has three statements: the API role may `sts:AssumeRole`
+   with no tags; the build role may `sts:AssumeRole` only with its half's
+   tag keys and the external id; and the build role may `sts:TagSession`
+   only with those keys, at least one of them transitive, with no
+   external id (STS does not evaluate the external id on
+   `sts:TagSession`). A pair with the old single `sts:AssumeRole`
+   statement refuses every tagged build.
 
 The pre-run account check (`pairTrustProblems` in
 `samples/control-plane/test/stress/account-check.ts`, and the account check
@@ -82,8 +83,8 @@ change and the policy change, not this record.
 ## Options considered
 ### Option 1: One cell per account
 Register every cell account with `maxCells` 1. At `large` that is 4 cell
-accounts, so 2 more than today. `small` and `medium` already work this
-way.
+accounts, where `large` has 2 (spec §4.1). `small` and `medium` already
+work this way.
 
 - Accounts: 4 cell accounts (plus the platform account) at `large`. Each
   new account needs the owner stacks, `CDKToolkit-cell`, the role pair,
@@ -126,7 +127,8 @@ deploy role pass only that role (`iam:PassRole` limited by the build's
 - Cost: no new account. Each cell adds one execution role, its policy and
   its boundary in a cell account, with no meter of their own.
 - Quota and comparability: none. The load per account stays as it is.
-- Residual threat: closed, if the roles hold.
+- Residual threat: closed, if the other cell cannot rewrite a per-cell
+  role (see the reasons below).
 - It does not fit this test, for three reasons:
   1. The owner cannot create the role beforehand, because the cell id is
      minted when the cell is created (above). A fixed set of slots
@@ -162,9 +164,11 @@ ADR-0006 describes, and say why that is acceptable here.
   (PS-7, spec §5.1) test the run-time path through the edge, not the
   build path. A hostile build in a stress account is outside what the
   test measures.
-- Stress code and text: none beyond the redeploy and the account check
-  above. The spec and `stress/application/README.md` list the shared
-  execution role under the known limitations.
+- Stress code and text: no tier or code change. The redeploy and the
+  account check above apply under every option. The spec (§3.7 and its
+  known limitations) and the "Known limitations" of
+  `stress/application/README.md` name the shared execution role, which is
+  the text change of this option.
 
 ## Decision
 Recommended: Option 3. The decision is open until the deciders choose.
@@ -179,11 +183,13 @@ work with run-time cell ids and the `/cell/` path rule.
 
 Option 1 is the choice if a `large` run will build a cell script that is
 not the pinned commit, or if the account-by-account quota numbers should
-read the same at every tier. It can be adopted later: it changes
-`tiers.ts` and the owner steps, and nothing in a cell.
+read the same at every tier. It can be adopted later: it changes the tier,
+the spec and fixtures listed under Option 1 and the owner steps, and
+nothing in a cell.
 
-If Option 3 is chosen, this record moves to Accepted and the known
-limitation above goes into the spec and the application README. If
+If Option 3 is chosen, this record moves to Accepted and the shared
+execution role goes into the spec's and the application README's known
+limitations. If
 Option 1 is chosen, the tier, spec and owner-step changes above follow in
 a separate pull request, and this record moves to Accepted with the
 account count named.
@@ -191,7 +197,8 @@ account count named.
 ## Consequences
 Easier under Option 3: no change to the tiers, the cell accounts or the
 quota numbers. The stress test keeps the rule it has: the account is the
-wall, and a cell build can change any cell in its account.
+wall, and a cell build can change any cell in its account through the
+CDK.
 
 Harder: the isolation claim for two cells in one account stays at
 ADR-0006's level for the CDK path, and the tags narrow script calls only
