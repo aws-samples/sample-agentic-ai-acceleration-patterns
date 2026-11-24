@@ -14,10 +14,9 @@ SPDX-License-Identifier: MIT-0
 
 A cell account holds one role pair, and every cell build in the account
 assumes the pair's cell role (spec §3.7). Stress ADR-0006 accepts the
-result: a
-compromised cell build can change any cell in its account, which is the
-role pair's scope, and spec §3.7 adds that it can change nothing else in
-the account, because the account holds only cells.
+result: a compromised cell build can change any cell in its account,
+which is the role pair's scope, and spec §3.7 adds that it can change
+nothing else in the account, because the account holds only cells.
 
 The control plane's per-build identity change (control-plane ADR-0051,
 written in
@@ -43,14 +42,15 @@ per account, shared by every cell in it:
   service, with no caller tags, so the tag cannot reach the roles and
   resources the stacks create.
 
-The build's sessions on these roles carry the `CellId` tag, but no policy
-of the standard bootstrap checks it. Two cells in one account therefore
-share the bootstrap's reach.
+The build's sessions on the deploy and publishing roles carry the
+`CellId` tag, but no policy of the standard bootstrap checks it. Two
+cells in one account therefore share the bootstrap's reach.
 
 The execution policy and boundary allow the cell's services on any
-resource in the account, and IAM writes on roles under the path `/cell/`
-only. The standalone account, not the policy, keeps that reach to cells,
-and neither names one cell.
+resource in the account, and IAM writes only on roles under the path
+`/cell/` plus the service-linked roles of the cell's services. The
+standalone account, not the policy, keeps that reach to cells. Neither
+the policy nor the boundary names one cell.
 
 The tiers put cells in accounts as follows (`stress/src/tiers.ts`):
 
@@ -183,9 +183,10 @@ describes, and say why that is acceptable here.
   the spec was written for.
 - Residual threat: a compromised cell build can change the other cell in
   its account through the bootstrap roles: it can update or delete the
-  other cell's stacks and write its assets. A direct call outside the
-  bootstrap reaches only its own SSM namespace through the role pair,
-  and anything else the owner's tag policies allow. The accounts hold
+  other cell's stacks and write its assets. Through the role pair, a
+  direct call can write only its own cell's SSM namespace and read the
+  shared ones. The owner's `cell-build-policy` adds nothing beyond the
+  bootstrap roles. The accounts hold
   only stress cells from one pinned commit, and the cross-cell probes
   (PS-7, spec §5.1) test the run-time path through the edge, not the
   build path. A hostile build in a stress account is outside what the
@@ -222,21 +223,19 @@ Accepted with the account count named.
 ## Consequences
 Easier under Option 3: no change to the tiers, the cell accounts or the
 quota numbers. The stress test applies the rule that the account is the
-wall, and a cell build can change any cell in its account through the
-CDK.
+wall.
 
 Harder: the isolation claim for two cells in one account stays at
 stress ADR-0006's level for the CDK path, and the tags narrow other
 direct calls only as far as the owner's policies go. Every stress cell
-account redeploys
-`CellPolicies` and then its role pair before the first run that uses a
-control plane with the per-build tags, and the account check accepts the
-three-statement trust before that run. The first `large` run, not this
-record, shows whether two cells in one account raise a per-account quota
-problem.
+account redeploys `CellPolicies` and then its role pair before the first
+run that uses a control plane with the per-build tags, and the account
+check accepts the three-statement trust before that run. The first
+`large` run, not this record, shows whether two cells in one account
+raise a per-account quota problem.
 
 Revisit when a stress run builds a cell script outside the pinned
 commit, when the first `large` run shows a per-account quota that two
 cells share badly, when the CDK bootstrap gains per-cell deploy,
 publishing and execution roles, or when an account owner can provision a
-role for a cell before the cell exists.
+cell's bootstrap roles before the cell exists.
