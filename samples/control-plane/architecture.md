@@ -1206,9 +1206,10 @@ Design points:
   `/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}`
   and what is under it — all in that account (ADR-0051). It cannot mutate
   cell-owned parameters, and a session reaches no other cell's or
-  deployment's namespace; a script that reaches the build role's
-  credentials can still assume the pair with another cell's tags (threat
-  model T29, M35). One pair serves every application the account
+  deployment's namespace, for defects and scripts that stay in their
+  session; a script that reaches the build role's credentials can assume
+  the pair in any registered account with any cell's or tenant's tags
+  (threat model T29, M35). One pair serves every application the account
   admits, so one application's scripts can read another's shared namespaces
   in the same account (trusted vendor code; a pair per application is a
   recorded seam, spec §11). Each half trusts the control plane account in

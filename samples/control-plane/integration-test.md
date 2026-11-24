@@ -68,7 +68,9 @@ integ-runner to `$AWS_REGION` (overriding its multi-Region defaults). It
 fails fast when either required variable is unset, and when a stack of
 this run's fleet name already exists in account A: such a stack belongs to
 an interrupted run with the same run id, whose leftovers must be removed
-first (After an interruption).
+first (After an interruption). It also refuses to start when
+`/control-plane/tenant-api-url` exists in account A and the Region
+(Sharing accounts between runs).
 
 The run lasts about two hours (estimate). Start it from a shell that
 outlives it (for example `nohup`, `tmux` or `screen`), with credentials
@@ -100,10 +102,10 @@ repeated runs.
 
 Only one run, of this test or of the session tag test below, fits in
 account A and a Region at a time: every control plane stack creates the
-fixed `/control-plane/tenant-api-url` parameter (README, Deploy). The
-`integ` tasks check for that parameter before they deploy and refuse to
-start when it exists. Runs in other Regions, or
-with another account A, can share account B.
+fixed `/control-plane/tenant-api-url` parameter (README, Deploy). Both
+integ tasks check for that parameter before they deploy and refuse to
+start when it exists. Runs in other Regions, or with another account A,
+can share account B.
 
 The run's fleet name is in every stack name, the assertion stack's test name
 included, is the `fleetName` of the stack under test and of the role pair
@@ -237,10 +239,11 @@ others in A.
 
 If the runner process ends early, CloudFormation finishes whichever stack it
 was deploying, and every stack it had deployed stays in A and B because the
-runner never finished its destroy step. A rerun with the same run id refuses
-to start until they are gone. Hook builds the workflow had started stop by
-themselves within their run and queued timeouts; the hook projects go with
-the stack under test.
+runner never finished its destroy step. Until they are gone, the stack
+under test holds `/control-plane/tenant-api-url`, so no run of either test
+starts in account A and that Region, whatever its run id. Hook builds the
+workflow had started stop by themselves within their run and queued
+timeouts; the hook projects go with the stack under test.
 
 After a complete run the test harness still leaves default Lambda log
 groups in A, from the setup stack's custom resources and probe functions and
@@ -335,7 +338,8 @@ What it does not prove:
   `test/shared/session-tags.test.ts`. The main test covers the API role's
   untagged AssumeRole (the PutAccount probe).
 - A script that reaches the build role's credentials. Such a script can
-  assume the pair with another cell's tags (threat model T29, M35).
+  assume the pair in any registered account with any cell's or tenant's
+  tags (threat model T29, M35).
 
 ### Session tag test shortcuts
 

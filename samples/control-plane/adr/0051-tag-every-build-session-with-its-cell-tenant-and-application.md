@@ -134,13 +134,13 @@ Option 3 for their own account; this record does not choose for them.
   hands creation to the CloudFormation execution role, which acts without
   them; an owner who needs per-cell scoping of stack-created resources takes
   Option 2 or Option 3.
-- The tags stop a script that uses the session it is given. The build
-  role sets them, and the script runs in the same container as the agent
-  that holds the build role's credentials (threat model T29). A script
-  that reaches those credentials can assume the pair with another cell's
-  tags, so the tags guard against defects, not against a hostile script
-  that escapes its session. The boundary against that script is the
-  CodeBuild container (threat model T13, T29).
+- The tags hold for defects and scripts that stay in their session. The
+  build role sets them, and the script runs in the same container as the
+  agent that holds the build role's credentials (threat model T29). A
+  script that reaches those credentials can assume the pair in any
+  registered account with any cell's or tenant's tags. Nothing in the
+  sample stops it; that is the CodeBuild trust boundary the sample accepts
+  (T29, M35), and `maxCells: 1` does not change it.
 - The API role's refusal of a tagged AssumeRole is shown by the trust
   evaluator in the unit tests only; the integration test does not call the
   pair as the API role with tags.

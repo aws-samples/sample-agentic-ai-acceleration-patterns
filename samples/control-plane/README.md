@@ -271,13 +271,13 @@ AssumeRole with its tag keys and the external id, and the build role's
 TagSession with those tags (STS does not evaluate the external id there).
 The pair's own grants name each session's own namespace by its tags, so
 through them cell 1's session cannot write cell 2's parameters in the same
-account. This holds for a script that uses the session it is given; a
-script that reaches the build role's credentials (threat T29) can still
-name another cell, so the tags guard against defects and well-behaved
-scripts, not a script that escapes its session. A stack the script
-deploys acts through its CloudFormation execution role, which carries no
-tags (Production hardening checklist,
-Accounts). The CodeBuild build assumes the role before your script runs,
+account. This holds for defects and scripts that stay in their session.
+A script that reaches the build role's credentials can assume the pair in
+any registered account with any cell's or tenant's tags; the sample
+accepts that as the CodeBuild trust boundary (threat model T29, M35). A
+stack the script deploys acts through its CloudFormation execution role,
+which carries no tags (Production hardening checklist, Accounts). The
+CodeBuild build assumes the role before your script runs,
 so the script executes **in** the cell's
 account with exactly what that account's owner installed. One pair serves
 every application the account admits. A customer installs
@@ -1201,11 +1201,12 @@ generated from it (`smithy build`).
   `/application-plane/tenants/<tenantId>/<applicationId>/*`. Both paths are
   named by the session's tags (ADR-0051), so one pair in an account holding
   several cells still keeps each cell's and each deployment's parameters
-  apart, for a script that uses the session it is given (a script that
-  reaches the build role's credentials can name another cell, T29). The
-  sample scopes both to the demo SSM namespaces; the account
-  owner widens them deliberately for real provisioning (this is THE
-  hardening point). The CodeBuild roles themselves hold nothing but
+  apart, for defects and scripts that stay in their session (a script that
+  reaches the build role's credentials can assume the pair in any
+  registered account with any cell's or tenant's tags, T29, M35). The
+  sample scopes both to the demo SSM namespaces; the account owner widens
+  them deliberately for real provisioning (this is THE hardening point).
+  The CodeBuild roles themselves hold nothing but
   `sts:AssumeRole` and `sts:TagSession` (with the build's tag keys only) on
   those two role names, so the owner's trust policy — not a vendor-side list
   — decides which accounts the fleet can reach (ADR-025). One pair serves
@@ -1420,12 +1421,12 @@ application's cells (threat T5, the highest-consequence open item).
       which acts without the build's tags, so a per-cell policy on the cell
       role does not reach them. Where stack-created resources must be kept
       apart per cell, give each cell its own execution role or register the
-      account with `maxCells: 1` (ADR-0051, Options 2 and 3).
-      The tags also hold only while the script uses the session it is
-      given: a script that reaches the build role's credentials can assume
-      the pair with another cell's tags (T29). The tags guard against
-      defects and scripts that stay in their session; the boundary against
-      a script that escapes it is the CodeBuild container (T13, T29).
+      account with `maxCells: 1` (ADR-0051, Options 2 and 3). The tags
+      also hold only for defects and scripts that stay in their session. A
+      script that reaches the build role's credentials can assume the pair
+      in any registered account with any cell's or tenant's tags, and
+      `maxCells: 1` does not change that; the sample accepts it as the
+      CodeBuild trust boundary (T29, M35).
 - [ ] If an owner removes the pair while cells exist there, builds in that
       account fail into `*_FAILED` and the records cannot be cleaned up
       through the API until the pair is restored (T26, accepted by design).

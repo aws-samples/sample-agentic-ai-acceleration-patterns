@@ -429,7 +429,7 @@ the same account never shares a path with it.
 
 All reads and writes stay inside the namespaces control-plane already grants
 its tenant provisioning role (control-plane spec §6.2: read on both shared
-namespaces and its own cell's namespace, read and write/delete on its own
+namespaces and its own cell's namespace, get, put and delete on its own
 deployment's `/application-plane/tenants/<tenantId>/<applicationId>` and
 what is under it, named by the build session's tags, control-plane
 ADR-0051). The parked password path above sits inside that grant, so no

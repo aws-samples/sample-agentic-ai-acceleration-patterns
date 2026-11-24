@@ -10,6 +10,9 @@
 # CP_INTEG_RUN_ID (optional: [a-z0-9]{1,23}, without aws, amazon or cognito;
 # generated when unset; two runs must not share one), CDK_DEFAULT_ACCOUNT
 # (resolved with sts get-caller-identity when unset).
+#
+# Refuses to start while a stack of this run exists, or while
+# /control-plane/tenant-api-url exists in the account and Region.
 set -uo pipefail
 
 TEST="${1:-integ.tenant.ts}"
@@ -35,7 +38,8 @@ echo "Run id ${CP_INTEG_RUN_ID}, fleet name cp-integ-${CP_INTEG_RUN_ID}"
 
 # Refuse to start while a stack of THIS run exists (only a reused run id can
 # meet one): it belongs to a run in progress or to an interrupted run, and the
-# scenario expects empty state. Other runs' stacks do not block this one.
+# scenario expects empty state. This check is per run; the parameter check
+# below is per account and Region.
 bash test/integ-scripts/leftovers.sh stacks
 check=$?
 if [ "$check" -eq 2 ]; then
@@ -52,10 +56,10 @@ fi
 # account A of the two-account scenario).
 export CDK_DEFAULT_ACCOUNT="${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}"
 
-# One control plane stack per account and Region: its tenant API URL
-# parameter has a fixed name, so a second run here fails late in CloudFormation
-# early validation. Refuse up front instead (integration-test.md, Sharing
-# accounts between runs).
+# One control plane stack per account and Region, whatever its run id: its
+# tenant API URL parameter has a fixed name, so a second stack here fails in
+# CloudFormation early validation after the runner has started. Refuse up
+# front instead (integration-test.md, Sharing accounts between runs).
 if param_err=$(aws ssm get-parameter --name /control-plane/tenant-api-url --region "$AWS_REGION" --query Parameter.Name --output text 2>&1 >/dev/null); then
   echo "/control-plane/tenant-api-url already exists in account ${CDK_DEFAULT_ACCOUNT} ${AWS_REGION}: another control plane stack (an integ run in progress or a deployment) owns it. Use another account or Region, or wait for that run to finish"
   exit 1
