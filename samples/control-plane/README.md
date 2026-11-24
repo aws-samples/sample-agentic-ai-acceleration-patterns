@@ -749,6 +749,11 @@ owner redeploys the pair, and the operator re-runs the operation
 (`UpdateCell`, `UpdateDeployment`, or delete and create again after
 `CREATE_FAILED`).
 
+To roll back, keep the same order with the earlier version: hold builds,
+redeploy the earlier `CellAccountStack` in every other account, deploy the
+earlier control plane stack, then start builds again. Between the two
+deploys every build fails closed at AssumeRole, as on the way up.
+
 A cell script that assumes a further role in its account (a CDK bootstrap
 role, for example) keeps the tags on that session, because they are
 transitive, and no later session can replace them. That chained AssumeRole
@@ -1423,10 +1428,13 @@ application's cells (threat T5, the highest-consequence open item).
       [Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/reference_policies_actions-resources-contextkeys.html)
       for which condition keys each action supports; an action that supports
       neither a tag key nor a name you control cannot be scoped per cell.
-      A policy that lets the pair role chain with `sts:TagSession` should
-      also require a tagged caller (`"Null": { "aws:PrincipalTag/CellId":
-      "false" }`), so the API role's untagged probe session cannot pass a
-      `CellId` of its choosing.
+      A policy that lets the pair role chain with `sts:TagSession` may also
+      require a tagged caller (`"Null": { "aws:PrincipalTag/CellId":
+      "false" }`), so an untagged API role session cannot pass a `CellId`
+      of its choosing. The shipped examples (above and the stress
+      `cell-build-policy`) omit it: the API role's probe session carries a
+      deny-all session policy, and T30 already treats code running as the
+      API role as full reach.
 - [ ] **Know what the tags do not cover.** A `cdk deploy` (or any
       CloudFormation stack) creates resources as the stack's execution role,
       which acts without the build's tags, so a per-cell policy on the cell

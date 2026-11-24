@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { App, Environment, Token } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { buildEnvironment, evaluateJsonata } from './workflow-jsonata';
-import { CellAccountStack, CellAccountStackProps } from '../src/cell-account/cell-account.cdk';
+import { CellAccountStack, CellAccountStackProps, TRUST_POLICY_DEFAULT_QUOTA } from '../src/cell-account/cell-account.cdk';
 import { isFullCommitSha, sourcePinningWarning } from '../src/shared/service-config';
 import {
   TenantStack,
@@ -859,8 +859,11 @@ describe('the workflow assumes the account role before every script and releases
       encoding: 'utf8',
     });
     expect(run.status).toBe(0);
-    const argv = run.stdout.split('\n').filter((l) => l !== '');
+    // Command substitution strips the trailing newline and printf adds one
+    // back, so every line but the last is one argument, empty ones included.
+    const argv = run.stdout.split('\n').slice(0, -1);
     expect(argv.slice(0, 6)).toEqual(['sts', 'assume-role', '--role-arn', 'arn:aws:iam::222222222222:role/p', '--role-session-name', 'op']);
+    expect(argv).toContain('--query');
     return argv.slice(6, argv.indexOf('--query'));
   };
   const ids = { CELL_ID: '01KCELL0000000000000000001', TENANT_ID: '01KTENANT00000000000000001', APPLICATION_ID: 'app-x' };
@@ -1008,20 +1011,21 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
     return Template.fromStack(stack);
   }
 
-  /** The tenant half's trust as IAM stores it: compact JSON with the partition resolved to `aws`. */
-  function tenantTrustChars(externalId: string, fleetName?: string): { chars: number; warned: boolean } {
+  /** The tenant half's trust as IAM stores it: compact JSON with the partition resolved. */
+  function tenantTrustChars(externalId: string, fleetName?: string, region = 'eu-central-1'): { chars: number; warned: boolean } {
     const stack = new CellAccountStack(new App(), 'account-b', {
       controlPlaneAccountId,
-      env: { account: '222222222222', region: 'eu-central-1' },
+      env: { account: '222222222222', region },
       externalId,
       ...(fleetName ? { fleetName } : {}),
     });
+    const partition = region.startsWith('us-gov-') ? 'aws-us-gov' : 'aws';
     const roles = Template.fromStack(stack).findResources('AWS::IAM::Role') as Record<string, any>;
     const tenant = Object.values(roles).find((r) => r.Properties.RoleName.endsWith('-tenant-provisioning'));
     const resolve = (v: any): any => {
       if (Array.isArray(v)) return v.map(resolve);
       if (v && typeof v === 'object') {
-        if (v.Ref === 'AWS::Partition') return 'aws';
+        if (v.Ref === 'AWS::Partition') return partition;
         if (v['Fn::Join']) return (v['Fn::Join'][1] as any[]).map(resolve).join(v['Fn::Join'][0]);
         return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, resolve(x)]));
       }
@@ -1032,16 +1036,15 @@ describe('CellAccountStack (spec R-25, ADR-025)', () => {
     return { chars, warned };
   }
 
-  test('warns at synth when the external id pushes the tenant trust over the 2,048-character quota, and the estimate tracks the real size', () => {
-    for (const [length, fleetName] of [[300, undefined], [400, undefined], [430, undefined], [410, 'f'.repeat(32)]] as const) {
-      const { chars, warned } = tenantTrustChars('x'.repeat(length), fleetName);
-      const fleet = fleetName ?? 'control-plane';
-      const estimate = 1165 + 3 * fleet.length + 2 * length;
-      expect(Math.abs(chars - estimate)).toBeLessThanOrEqual(10);
-      expect(warned).toBe(estimate > 2048);
+  test('warns at synth exactly when the external id pushes the tenant trust over the 2,048-character quota', () => {
+    const cases: Array<[number, string | undefined, string | undefined]> = [
+      [300, undefined, undefined], [400, undefined, undefined], [421, undefined, undefined], [422, undefined, undefined],
+      [430, undefined, undefined], [410, 'f'.repeat(32), undefined], [401, undefined, 'us-gov-west-1'], [402, undefined, 'us-gov-west-1'],
+    ];
+    for (const [length, fleetName, region] of cases) {
+      const { chars, warned } = tenantTrustChars('x'.repeat(length), fleetName, region);
+      expect([length, fleetName, region, warned]).toEqual([length, fleetName, region, chars > TRUST_POLICY_DEFAULT_QUOTA]);
     }
-    expect(tenantTrustChars('x'.repeat(430)).warned).toBe(true);
-    expect(tenantTrustChars('x'.repeat(300)).warned).toBe(false);
   });
 
   test('installs the pair trusting the control plane account narrowed to the API role and the build roles, with the external id on both', () => {

@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
 
-import { Annotations, CfnOutput, Stack, StackProps } from 'aws-cdk-lib';
+import { Annotations, CfnOutput, Stack, StackProps, Token } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
@@ -110,8 +110,12 @@ export class CellAccountRoles extends Construct {
       // Each half's trust holds the external id twice (one per AssumeRole
       // statement). The tenant half is the larger: measured by synth at
       // about 1,165 characters plus 3 per fleet name character, plus the id
-      // twice. Warn at synth rather than fail at CloudFormation deploy.
-      const tenantTrustChars = TENANT_TRUST_BASE_CHARS + 3 * this.fleetName.length + 2 * externalId.length;
+      // twice, in partition `aws`; its six ARNs grow with a longer partition
+      // (`aws-us-gov` adds 42), and an unresolved partition is counted as the
+      // longest. Warn at synth rather than fail at CloudFormation deploy.
+      const partitionChars = Token.isUnresolved(partition) ? 'aws-us-gov'.length : partition.length;
+      const tenantTrustChars = TENANT_TRUST_BASE_CHARS + 6 * (partitionChars - 3)
+        + 3 * this.fleetName.length + 2 * externalId.length;
       if (tenantTrustChars > TRUST_POLICY_DEFAULT_QUOTA) {
         Annotations.of(this).addWarningV2(
           'control-plane:trustPolicySize',
