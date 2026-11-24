@@ -8,20 +8,22 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { agentRequestBody, ensureScope } from './agent-path';
 import { EVIDENCE_LINE_CHARS, EVIDENCE_LINES, evidenceLines } from './cloud';
-import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix } from './common';
+import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix, type Backend } from './common';
 import { Ctx, TOKEN_REUSE_MS } from './ctx';
 import { imageNameOf } from './deploy';
 import { HOSTILE_DIR, MAX_CODE_BYTES, PROBES, probeCode } from './hostile';
-import { checkLeftovers, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes } from './leftovers';
+import { checkLeftovers, cleanAfter, formatFindings, leftoverExitCode, namesLogGroup, newPolicyFindings, policyFindings, serviceLogPrefixes, unavailableReason } from './leftovers';
 import { claimsFor, mint, signJws } from './mint.function';
 import { formatRecord, median, Recorder } from './record';
 import { runPhase } from './runner';
 import { canonicalPath, presignUrl, signRequest } from './sigv4';
+import { type RunState } from './state';
 import { matrix, SPEC_TABLE_ORDER, STEPS, unitKey, validateSteps, type StepSpec } from './steps';
 import { collectHandles, sameKeys } from './steps/basic';
 import { neededQuotaGb, slotsFree } from './steps/build';
 import { DRIVER_STEPS, IMPLS } from './steps/index';
 import { CONNECTED, LAMBDA_RESPONSE_BYTES, LOOKUP_SLOW, PROBE_BOUND_MS, controlAnswered, controlOutputOk, denied, egressFailed, noConnection, reverseName, unexpectedBlocked } from './steps/probes';
+import { teardownUnit } from './steps/teardown';
 import { lastJsonLine, parseFunctionResponse, parseGatewayResponse } from './tool-result';
 
 describe('step order and matrix', () => {
@@ -170,6 +172,221 @@ describe('the context', () => {
     const found = await checkLeftovers(aws as never, 'P', state);
     expect(found).toEqual([{ kind: 'check-failed', id: 'image', detail: expect.stringMatching(/empty service name/) }]);
     expect(prefixes).toEqual(['/aws/lambda-microvms/img']);
+  });
+});
+
+describe('the leftover check when the credentials or the CLI fail', () => {
+  const FRG = { type: 'AWS::Route53Resolver::FirewallRuleGroup', physicalId: 'rslvr-frg-1' };
+  const FRG_ID = `${FRG.type}:${FRG.physicalId}`;
+  const stateOf = (resources: Array<{ type: string; physicalId: string }>): RunState => ({
+    prefix: 'P',
+    region: 'r',
+    stackName: 'P',
+    startedAt: 't',
+    destroyed: false,
+    resources: resources.map((r) => ({ ...r, logicalId: 'L' })),
+    policyBaseline: {},
+    runtimeNames: [],
+    imageNames: [],
+  });
+  const cliError = (stderr: string) => Object.assign(new Error(`aws route53resolver get-firewall-rule-group failed: ${stderr}`), { stderr });
+  const fake = (over: Record<string, unknown>) => ({
+    cfn: { send: async () => ({ Stacks: [] }) },
+    logs: { send: async () => ({ logGroups: [], resourcePolicies: [] }) },
+    ...over,
+  });
+  const sdkError = (name: string) => Object.assign(new Error('the call failed'), { name });
+
+  test('a CLI that cannot find credentials is reported as a check that could not run, never as a leftover', async () => {
+    const aws = fake({ cli: async () => { throw cliError('Unable to locate credentials. You can configure credentials by running "aws configure".'); } });
+    const found = await checkLeftovers(aws as never, 'P', stateOf([FRG]));
+    expect(found).toEqual([{ kind: 'check-unavailable', id: FRG_ID, detail: 'no credentials found' }]);
+    const text = formatFindings(found);
+    expect(text).not.toMatch(/LEFT|nothing left/);
+    expect(text).toMatch(/could not run.*Repeat it once the credentials and the AWS CLI work/);
+    expect(found[0].known).toBeUndefined();
+    expect(leftoverExitCode(found)).toBe(1);
+  });
+
+  test('only the known leftover exits 0', () => {
+    expect(leftoverExitCode([{ kind: 'logs-resource-policy', id: 'p', detail: 'd', known: true }])).toBe(0);
+    expect(leftoverExitCode([])).toBe(0);
+  });
+
+  test('a run is recorded as destroyed only when the stack went and the check found nothing but the known leftover', () => {
+    const known = { kind: 'logs-resource-policy', id: 'p', detail: 'd', known: true };
+    expect(cleanAfter(true, [known])).toBe(true);
+    expect(cleanAfter(false, [])).toBe(false);
+    expect(cleanAfter(true, [{ kind: 'check-unavailable', id: 'stacks', detail: 'the credentials expired' }])).toBe(false);
+  });
+
+  test('an AWS error that is not a credentials error on the stack list reaches the caller', async () => {
+    const aws = fake({ cfn: { send: async () => { throw sdkError('ThrottlingException'); } } });
+    await expect(checkLeftovers(aws as never, 'P', undefined)).rejects.toMatchObject({ name: 'ThrottlingException' });
+  });
+
+  test('an SDK error that is not a credentials error is a check-failed that names the error', async () => {
+    const aws = fake({ ec2: { send: async () => { throw sdkError('ThrottlingException'); } } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([{ type: 'AWS::EC2::VPC', physicalId: 'vpc-1' }]))).toEqual([{ kind: 'check-failed', id: 'AWS::EC2::VPC:vpc-1', detail: 'ThrottlingException' }]);
+  });
+
+  test('a resource that is still there is reported as LEFT', async () => {
+    const aws = fake({ cli: async () => '{}' });
+    const found = await checkLeftovers(aws as never, 'P', stateOf([FRG]));
+    expect(found).toEqual([{ kind: 'dns-firewall-rule-group', id: 'rslvr-frg-1', detail: 'still there' }]);
+    expect(formatFindings(found)).toBe('LEFT dns-firewall-rule-group rslvr-frg-1: still there');
+  });
+
+  test('a leftover found before the credentials fail stays in the list, beside the check that could not run', async () => {
+    const aws = fake({ cli: async () => '{}', ec2: { send: async () => { throw sdkError('ExpiredTokenException'); } } });
+    const found = await checkLeftovers(aws as never, 'P', stateOf([FRG, { type: 'AWS::EC2::VPC', physicalId: 'vpc-1' }]));
+    expect(found.map((f) => f.kind)).toEqual(['dns-firewall-rule-group', 'check-unavailable']);
+    expect(formatFindings(found)).toMatch(/^LEFT dns-firewall-rule-group[\s\S]*CHECK NOT RUN/);
+  });
+
+  test.each([
+    ['ExpiredToken', 'the credentials expired'],
+    ['ExpiredTokenException', 'the credentials expired'],
+    ['InvalidClientTokenId', 'the credentials were refused'],
+    ['UnrecognizedClientException', 'the credentials were refused'],
+    ['AccessDenied', 'access denied'],
+    ['AccessDeniedException', 'access denied'],
+    ['UnauthorizedOperation', 'access denied'],
+    ['RequestExpired', 'the credentials expired'],
+    ['InvalidAccessKeyId', 'the credentials were refused'],
+    ['CredentialsProviderError', 'no credentials found'],
+    ['SSOTokenLoadError', 'no credentials found'],
+    ['TokenRefreshRequired', 'the credentials expired'],
+    ['AuthFailure', 'the credentials were refused'],
+    ['SignatureDoesNotMatch', 'the credentials were refused'],
+    ['IncompleteSignature', 'the credentials were refused'],
+    ['MissingAuthenticationToken', 'the credentials were refused'],
+    ['InvalidSignatureException', 'the credentials were refused'],
+    ['UnauthorizedException', 'access denied'],
+    ['NotAuthorized', 'access denied'],
+  ])('an SDK client error named %s is a check that could not run (%s)', async (name, reason) => {
+    const aws = fake({ ec2: { send: async () => { throw sdkError(name); } } });
+    const found = await checkLeftovers(aws as never, 'P', stateOf([{ type: 'AWS::EC2::VPC', physicalId: 'vpc-1' }]));
+    expect(found).toEqual([{ kind: 'check-unavailable', id: 'AWS::EC2::VPC:vpc-1', detail: reason }]);
+  });
+
+  test.each([
+    ['the credentials expired', 'An error occurred (ExpiredToken) when calling the GetFirewallRuleGroup operation: The security token included in the request is expired'],
+    ['the credentials were refused', 'An error occurred (InvalidClientTokenId) when calling the GetFirewallRuleGroup operation: The security token included in the request is invalid.'],
+    ['access denied', 'An error occurred (AccessDeniedException) when calling the GetFirewallRuleGroup operation: User is not authorized'],
+    ['no credentials found', 'Error when retrieving credentials from custom-process: the command failed'],
+    ['no credentials found', 'The config profile (work) could not be found'],
+    ['no credentials found', 'Could not load credentials from any providers'],
+    ['no credentials found', 'Error loading SSO Token'],
+    ['no credentials found', 'Token for my-sso does not exist'],
+    ['the credentials expired', 'The security token included in the request is expired'],
+    ['the credentials were refused', 'The security token included in the request is invalid.'],
+    ['the credentials expired', 'Error when retrieving token from sso: Token has expired and refresh failed'],
+    ['the aws CLI could not be started', 'aws route53resolver get-firewall-rule-group failed: spawn aws EACCES'],
+    ['no credentials found', 'Error loading SSO Token: Token for https://example.com/start does not exist'],
+    ['the credentials expired', 'The SSO session associated with this profile has expired or is otherwise invalid. To refresh this SSO session run aws sso login with the corresponding profile.'],
+    ['the credentials expired', 'Error when calling the operation: The SSO access token has either expired or is otherwise invalid.'],
+  ])('a CLI failure is a check that could not run: %s', async (reason, stderr) => {
+    const aws = fake({ cli: async () => { throw cliError(stderr); } });
+    expect((await checkLeftovers(aws as never, 'P', stateOf([FRG])))[0]).toEqual({ kind: 'check-unavailable', id: FRG_ID, detail: reason });
+  });
+
+  test.each([
+    ['AWS::ECS::TaskDefinition', 'td:1', 'ecs'],
+    ['AWS::Lambda::MicrovmImage', 'img-1', 'microvms'],
+  ])('a %s lookup that reads other errors as "nothing there" reports a credentials error', async (type, physicalId, client) => {
+    const resource = [{ type, physicalId }];
+    const gone = fake({ [client]: { send: async () => { throw sdkError('ClientException'); } } });
+    expect(await checkLeftovers(gone as never, 'P', stateOf(resource))).toEqual([]);
+    const expired = fake({ [client]: { send: async () => { throw sdkError('ExpiredTokenException'); } } });
+    expect(await checkLeftovers(expired as never, 'P', stateOf(resource))).toEqual([{ kind: 'check-unavailable', id: `${type}:${physicalId}`, detail: 'the credentials expired' }]);
+  });
+
+  test('the container instances of a cluster are looked up with the same rule', async () => {
+    const send = async (cmd: { constructor: { name: string } }) => {
+      if (cmd.constructor.name === 'DescribeClustersCommand') return { clusters: [{ status: 'INACTIVE' }] };
+      throw sdkError('ExpiredTokenException');
+    };
+    const found = await checkLeftovers(fake({ ecs: { send } }) as never, 'P', stateOf([{ type: 'AWS::ECS::Cluster', physicalId: 'c1' }]));
+    expect(found).toEqual([{ kind: 'check-unavailable', id: 'AWS::ECS::Cluster:c1', detail: 'the credentials expired' }]);
+  });
+
+  test('an error that names both a missing resource and a denied call is a check that could not run', async () => {
+    const aws = fake({ cli: async () => { throw cliError('An error occurred (AccessDeniedException) when calling the GetFirewallRuleGroup operation: access denied, or the resource does not exist'); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-unavailable', id: FRG_ID, detail: 'access denied' }]);
+  });
+
+  test('a stack list that cannot run ends the check with one finding (the rest is not tried), with or without a state file', async () => {
+    const send = jest.fn(async () => { throw sdkError('ExpiredTokenException'); });
+    const aws = fake({ cfn: { send }, cli: async () => '{}' });
+    const expected = [{ kind: 'check-unavailable', id: 'stacks', detail: 'the credentials expired' }];
+    expect(await checkLeftovers(aws as never, 'P', undefined)).toEqual(expected);
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual(expected);
+  });
+
+  test('log group and policy listings that cannot run are reported as checks that could not run', async () => {
+    const aws = fake({ logs: { send: async () => { throw sdkError('ExpiredTokenException'); } } });
+    const state = { ...stateOf([]), runtimeNames: ['rt'] };
+    expect((await checkLeftovers(aws as never, 'P', state)).map((f) => `${f.kind} ${f.id}`)).toEqual(['check-unavailable runtime-log-groups', 'check-unavailable logs-resource-policies']);
+  });
+
+  test('a not-found answer means the resource is gone', async () => {
+    const aws = fake({ cli: async () => { throw cliError('An error occurred (ResourceNotFoundException) when calling the GetFirewallRuleGroup operation: not found'); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([]);
+  });
+
+  test('a long stderr that repeats a classifier phrase is read in linear time', () => {
+    const t0 = Date.now();
+    for (const phrase of ['Token for ', 'config profile ', 'SSO session ']) expect(unavailableReason(new Error(phrase.repeat(30_000)))).toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  test('a not-found answer that follows a long stderr still means the resource is gone', async () => {
+    const stderr = `${'warning line\n'.repeat(300)}An error occurred (ResourceNotFoundException) when calling the GetFirewallRuleGroup operation: not found`;
+    const aws = fake({ cli: async () => { throw Object.assign(new Error(`aws route53resolver get-firewall-rule-group failed: ${stderr.slice(0, 2000)}`), { stderr }); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([]);
+  });
+
+  test('any other CLI failure is a check-failed that names the AWS error code', async () => {
+    const aws = fake({ cli: async () => { throw cliError('An error occurred (ThrottlingException) when calling the GetFirewallRuleGroup operation: Rate exceeded'); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-failed', id: FRG_ID, detail: 'ThrottlingException' }]);
+  });
+
+  test('an AWS error code after the first 2000 characters of the stderr is still named', async () => {
+    const stderr = `${'warning line\n'.repeat(300)}An error occurred (ThrottlingException) when calling the GetFirewallRuleGroup operation: Rate exceeded`;
+    const aws = fake({ cli: async () => { throw Object.assign(new Error(`aws route53resolver get-firewall-rule-group failed: ${stderr.slice(0, 2000)}`), { stderr }); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-failed', id: FRG_ID, detail: 'ThrottlingException' }]);
+  });
+
+  test('a dotted AWS error code is named whole', async () => {
+    const aws = fake({ cli: async () => { throw cliError('An error occurred (InvalidParameterValue.Range) when calling the GetFirewallRuleGroup operation: bad'); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-failed', id: FRG_ID, detail: 'InvalidParameterValue.Range' }]);
+  });
+
+  test('a CLI failure with no AWS error code is a check-failed with a fixed phrase', async () => {
+    const aws = fake({ cli: async () => { throw cliError('Could not connect to the endpoint URL'); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-failed', id: FRG_ID, detail: 'the call failed without an AWS error code' }]);
+  });
+
+  test('a finding never carries the text of the error', async () => {
+    const aws = fake({ cli: async () => { throw cliError('Unable to locate credentials. The value was marker-one-xyz'); } });
+    expect(JSON.stringify(await checkLeftovers(aws as never, 'P', stateOf([FRG])))).not.toMatch(/marker-one-xyz/);
+  });
+
+  test.each([
+    ['microvm', 'no MicroVM image log group is left \\(not checked\\)'],
+    ['agentcore', 'no AgentCore runtime log group is left \\(not checked\\)'],
+  ] as Array<[Backend, string]>)('the teardown step on %s fails the run, and does not call the backend clean, when the check could not run', (backend, logLine) => {
+    const rec = new Recorder('r', () => 0, () => undefined);
+    const findings = [{ kind: 'check-unavailable', id: 'stacks', detail: 'the credentials expired' }];
+    rec.begin(`teardown:run-code:${backend}`);
+    teardownUnit(rec, { step: 'teardown', instance: 'run-code', backend }, { findings, destroyed: true }, true);
+    const evidence = rec.toJSON('t').steps[0].evidence;
+    expect(rec.failed).toBe(true);
+    expect(evidence).toMatch(new RegExp(`nothing left of ${backend}: not checked`));
+    expect(evidence).toMatch(/the leftover check could run \(stacks: the credentials expired\)/);
+    expect(evidence).not.toMatch(/no other resource/);
+    expect(evidence).toMatch(new RegExp(logLine));
   });
 });
 
