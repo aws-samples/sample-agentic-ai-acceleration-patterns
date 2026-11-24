@@ -368,12 +368,24 @@ export function cellBuildBootstrapRoleArns(): string[] {
 }
 
 /**
- * The cell build policy (control-plane ADR-0047): `sts:AssumeRole` on the deploy,
- * file-publishing and image-publishing cell bootstrap roles, and nothing else.
+ * The cell build policy (control-plane ADR-0047): `sts:AssumeRole` and `sts:TagSession`
+ * on the deploy, file-publishing and image-publishing cell bootstrap roles, and nothing else.
  */
 export function cellBuildPolicyDocument(): iam.PolicyDocument {
   return new iam.PolicyDocument({
-    statements: [new iam.PolicyStatement({ sid: 'AssumeCellBootstrapRoles', actions: ['sts:AssumeRole'], resources: cellBuildBootstrapRoleArns() })],
+    statements: [
+      new iam.PolicyStatement({ sid: 'AssumeCellBootstrapRoles', actions: ['sts:AssumeRole'], resources: cellBuildBootstrapRoleArns() }),
+      // The cell build's session carries the transitive CellId tag (control-plane
+      // ADR-0051), and a chained AssumeRole that inherits it needs sts:TagSession on
+      // the caller too (shown by control-plane's session tag integ test, whose
+      // chained role takes this same grant). No key but the inherited one.
+      new iam.PolicyStatement({
+        sid: 'TagCellBootstrapSessions',
+        actions: ['sts:TagSession'],
+        resources: cellBuildBootstrapRoleArns(),
+        conditions: { 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId'] } },
+      }),
+    ],
   });
 }
 

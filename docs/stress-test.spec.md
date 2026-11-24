@@ -507,9 +507,13 @@ policy, `cell-build-policy` or `cell-tenant-build-policy` with the
 owner's suffix, or an inline policy other than the stack's default one
 with the control plane's SSM namespace actions on
 `/application-plane/`), a role pair half whose trust is not the stack's
-(one statement allowing `sts:AssumeRole` to the platform account,
-conditioned on `aws:PrincipalArn` being the fleet's build role for that
-half or its API role, and nothing else), or a `/cell/` role trusted from
+(three statements, all to the platform account: one allowing
+`sts:AssumeRole` conditioned on `aws:PrincipalArn` being the fleet's API
+role; one allowing `sts:AssumeRole` conditioned on `aws:PrincipalArn`
+being the fleet's build role for that half and on that half's session tag
+keys; and one allowing `sts:TagSession` to the same build role only with
+exactly that half's tag keys, at least one of them transitive,
+control-plane ADR-0051; and nothing else), or a `/cell/` role trusted from
 outside (above). The stack list, `iam:ListRoles`, and for the role pair
 `iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies` and
 `iam:GetRolePolicy` give all of it.
@@ -771,12 +775,13 @@ decides no pass criterion.
 | 12 | The stress cell deploys the front door's cell API origin, and the platform account reads the cell's ingress parameter with a reader role in the account base | the route hook needs a cell route, and phase two needs the ingress URL, which the control plane does not return | stress ADR-0019 |
 | 13 | PS-1 times a tenant to its first served `/api/whoami`, with the warm-up tenant timed apart | the agent path is not open for the first tenant, and a model call per tenant is not the onboarding | stress ADR-0020 |
 
-Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` on
-the account's CDK bootstrap roles. Each cell account carries one bootstrap,
-for cells only, whose execution role carries the cell permissions boundary
-and every role a cell creates the cell workload boundary (stress ADR-0011).
-The policies, the `/cell/` aspect and the scripts ship in
-`stress/application/` (W-10):
+Decision 7, the cell bootstrap. A `cdk deploy` needs `sts:AssumeRole` and
+`sts:TagSession` on the account's CDK bootstrap roles (the build's session
+carries a transitive tag, control-plane ADR-0051). Each cell account carries
+one bootstrap, for cells only, whose execution role carries the cell
+permissions boundary and every role a cell creates the cell workload
+boundary (stress ADR-0011). The policies, the `/cell/` aspect and the
+scripts ship in `stress/application/` (W-10):
 
 | Part | Value |
 |---|---|
@@ -786,7 +791,7 @@ The policies, the `/cell/` aspect and the scripts ship in
 | Cell permissions boundary | `cell-permissions-boundary`, on the execution role: the same services and IAM read, IAM role writes on `role/cell/*`, and the same `iam:PassRole` and `iam:CreateServiceLinkedRole` allows as the execution policy; it holds no run-time call and no `sts:AssumeRole`; it denies `iam:CreateRole` and `iam:PutRolePermissionsBoundary` unless the boundary is the cell workload boundary, any IAM role write, `iam:PassRole` or `sts:AssumeRole` on a role outside `/cell/` (the deny's `NotResource` is `role/cell/*`), `iam:PassRole` to any service but Lambda and AgentCore, `iam:CreateServiceLinkedRole` for any other service, Lambda function URLs with `AuthType NONE`, removing a boundary, users, access keys, policy writes, SSM writes to the account owner's parameters (`/application-plane/shared/identity/*`, `/cdk-bootstrap/cell/*`), and changes to the API Gateway account setting (`apigateway:PATCH`, `PUT`, `DELETE` on `/account`) |
 | Cell workload boundary | `cell-workload-boundary`, on every role a cell creates (stress ADR-0011): the run-time services (AgentCore, the Bedrock model calls, CloudWatch, DynamoDB, `execute-api`, KMS, Lambda, CloudWatch Logs, SSM, `sts:TagSession`, `sts:GetCallerIdentity`, X-Ray), read of `cdk-cell-assets-*`, and `sts:AssumeRole` on `role/cell/*` only; it denies every IAM action, `sts:AssumeRole` outside `/cell/`, resource-policy and sharing writes (Lambda permissions and function URLs, KMS key policies and grants, CloudWatch Logs resource policies, subscriptions, destinations, account policies, log deliveries and export tasks, DynamoDB resource policies and table exports, SSM, AgentCore and X-Ray resource policies), Lambda function URLs with `AuthType NONE`, SSM writes to the owner's parameters and changes to the API Gateway account setting |
 | Cell synth | `@aws-cdk/core:bootstrapQualifier` `cell` and `@aws-cdk/core:permissionsBoundary` `{"name":"cell-workload-boundary"}` as object context (`cellSynthContext` in `stress/application/cell-path.ts`, `cdk.json` or `CDK_CONTEXT_JSON`); a CLI `--context` passes the boundary as a string, which the CDK ignores |
-| Role pair | `control-plane`'s `cellBuildManagedPolicyArns` (ADR-0047); the cell account owner attaches `cell-build-policy`, which allows `sts:AssumeRole` on the deploy, file-publishing and image-publishing `cdk-cell-*` roles of its own account and Region, and nothing else (not the lookup role, which holds `ReadOnlyAccess` without the boundary) |
+| Role pair | `control-plane`'s `cellBuildManagedPolicyArns` (ADR-0047); the cell account owner attaches `cell-build-policy`, which allows `sts:AssumeRole` on the deploy, file-publishing and image-publishing `cdk-cell-*` roles of its own account and Region, and `sts:TagSession` on the same roles with the `CellId` key only (the build's transitive tag, control-plane ADR-0051), and nothing else (not the lookup role, which holds `ReadOnlyAccess` without the boundary) |
 
 Three walls hold the scope together. The two boundaries keep the execution
 role and every cell role under them, and no role a cell creates holds an

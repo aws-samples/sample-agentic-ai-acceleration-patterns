@@ -21,16 +21,44 @@ const role = (name: string, path: string, principal: unknown = { Service: 'lambd
   boundaryArn,
 });
 
-/** The trust control-plane's CellAccountStack writes, as IAM returns it. */
+/** The session tag keys each half's build passes (control-plane ADR-0051), written out so the test does not read them from the code it checks. */
+const TAG_KEYS = { cell: ['CellId'], tenant: ['CellId', 'TenantId', 'ApplicationId'] } as const;
+
+/** The trust control-plane's CellAccountStack writes, as IAM returns it: the API statement, then the build's AssumeRole and TagSession statements. */
 function pairTrust(half: 'cell' | 'tenant'): any {
+  const keys = [...TAG_KEYS[half]];
+  const required = Object.fromEntries(keys.map((k) => [`aws:RequestTag/${k}`, 'false']));
+  const buildRole = { 'aws:PrincipalArn': `arn:aws:iam::${OTHER}:role/${FLEET}-${half}-build` };
   return {
     Version: '2012-10-17',
-    Statement: [{
-      Effect: 'Allow',
-      Principal: { AWS: `arn:aws:iam::${OTHER}:root` },
-      Action: 'sts:AssumeRole',
-      Condition: { ArnEquals: { 'aws:PrincipalArn': [`arn:aws:iam::${OTHER}:role/${FLEET}-${half}-build`, `arn:aws:iam::${OTHER}:role/${FLEET}-api`] } },
-    }],
+    Statement: [
+      {
+        Effect: 'Allow',
+        Principal: { AWS: `arn:aws:iam::${OTHER}:root` },
+        Action: 'sts:AssumeRole',
+        Condition: { ArnEquals: { 'aws:PrincipalArn': `arn:aws:iam::${OTHER}:role/${FLEET}-api` } },
+      },
+      {
+        Effect: 'Allow',
+        Principal: { AWS: `arn:aws:iam::${OTHER}:root` },
+        Action: 'sts:AssumeRole',
+        Condition: {
+          'ArnEquals': buildRole,
+          'Null': required,
+          'ForAllValues:StringEquals': { 'aws:TagKeys': keys },
+        },
+      },
+      {
+        Effect: 'Allow',
+        Principal: { AWS: `arn:aws:iam::${OTHER}:root` },
+        Action: 'sts:TagSession',
+        Condition: {
+          'ArnEquals': buildRole,
+          'Null': { ...required, 'sts:TransitiveTagKeys': 'false' },
+          'ForAllValues:StringEquals': { 'aws:TagKeys': keys, 'sts:TransitiveTagKeys': keys },
+        },
+      },
+    ],
   };
 }
 
@@ -168,30 +196,82 @@ describe('the cell account check (spec §3.7)', () => {
     ]);
   });
 
+  it('accepts the pair\'s tag-named namespace grants and refuses one widened to every cell or tenant (ADR-0051)', () => {
+    const s = healthy();
+    const parameter = (path: string) => `arn:aws:ssm:${REGION}:${ACCOUNT}:parameter${path}`;
+    const withGrant = (half: 'cell' | 'tenant', resource: string) => ({
+      ...s.pair[half]!,
+      inline: [{ ...s.pair[half]!.inline![0], document: { Statement: [{ Effect: 'Allow', Action: 'ssm:PutParameter', Resource: resource }] } }],
+    });
+    expect(check({ ...s, pair: { ...s.pair, cell: withGrant('cell', parameter('/application-plane/cells/${aws:PrincipalTag/CellId}/*')) } })).toEqual([]);
+    expect(check({
+      ...s,
+      pair: { ...s.pair, tenant: withGrant('tenant', parameter('/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}')) },
+    })).toEqual([]);
+    const cellName = s.pair.cell!.inline![0].name;
+    const tenantName = s.pair.tenant!.inline![0].name;
+    expect(check({ ...s, pair: { ...s.pair, cell: withGrant('cell', parameter('/application-plane/cells/*')) } })).toEqual([
+      `role pair cell role ${FLEET}-cell-provisioning: inline policy ${cellName} grants more than the SSM namespace actions`,
+    ]);
+    expect(check({ ...s, pair: { ...s.pair, tenant: withGrant('tenant', parameter('/application-plane/tenants/*')) } })).toEqual([
+      `role pair tenant role ${FLEET}-tenant-provisioning: inline policy ${tenantName} grants more than the SSM namespace actions`,
+    ]);
+    // The cell role never holds the tenant's deployment namespace.
+    expect(check({
+      ...s,
+      pair: { ...s.pair, cell: withGrant('cell', parameter('/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}')) },
+    })).toEqual([
+      `role pair cell role ${FLEET}-cell-provisioning: inline policy ${cellName} grants more than the SSM namespace actions`,
+    ]);
+  });
+
   it('refuses a role pair trust other than its stack\'s: another principal, a wider role list, an extra statement, a dropped condition', () => {
     const s = healthy();
     const wrong = `role pair cell role ${FLEET}-cell-provisioning has a trust policy other than its stack's`;
     const base = pairTrust('cell');
-    const st = base.Statement[0];
+    const [api, assume, tag] = base.Statement;
+    /** A condition block with one operator removed, as IAM would return it. */
+    const without = (condition: Record<string, unknown>, operator: string) =>
+      Object.fromEntries(Object.entries(condition).filter(([op]) => op !== operator));
     const variants: any[] = [
-      { ...base, Statement: [{ ...st, Principal: { AWS: 'arn:aws:iam::333333333333:root' } }] },
-      { ...base, Statement: [{ ...st, Principal: { AWS: '*' } }] },
-      { ...base, Statement: [{ ...st, Principal: { AWS: st.Principal.AWS, Service: 'ec2.amazonaws.com' } }] },
-      { ...base, Statement: [{ ...st, Condition: { ArnEquals: { 'aws:PrincipalArn': [...st.Condition.ArnEquals['aws:PrincipalArn'], `arn:aws:iam::${OTHER}:role/admin`] } } }] },
-      { ...base, Statement: [{ ...st, Condition: { ArnLike: { 'aws:PrincipalArn': `arn:aws:iam::${OTHER}:role/*` } } }] },
-      { ...base, Statement: [{ ...st, Condition: undefined }] },
-      { ...base, Statement: [st, { Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::333333333333:root' }, Action: 'sts:AssumeRole' }] },
-      { ...base, Statement: [{ ...st, Action: ['sts:AssumeRole', 'sts:TagSession'] }] },
-      { ...base, Statement: [{ ...st, Condition: { ...st.Condition, StringEquals: { 'sts:ExternalId': 'x' } } }] },
+      // The API statement.
+      { ...base, Statement: [{ ...api, Principal: { AWS: 'arn:aws:iam::333333333333:root' } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Principal: { AWS: '*' } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Principal: { AWS: api.Principal.AWS, Service: 'ec2.amazonaws.com' } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Condition: { ArnEquals: { 'aws:PrincipalArn': [api.Condition.ArnEquals['aws:PrincipalArn'], `arn:aws:iam::${OTHER}:role/admin`] } } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Condition: { ArnLike: { 'aws:PrincipalArn': `arn:aws:iam::${OTHER}:role/*` } } }, assume, tag] },
+      { ...base, Statement: [{ ...api, Condition: undefined }, assume, tag] },
+      // The API role may not pass tags (ADR-0051).
+      { ...base, Statement: [{ ...api, Action: ['sts:AssumeRole', 'sts:TagSession'] }, assume, tag] },
+      { ...base, Statement: [{ ...api, Condition: { ...api.Condition, StringEquals: { 'sts:ExternalId': 'x' } } }, assume, tag] },
+      // The build AssumeRole statement: untagged, no key list, an extra key, TagSession folded in.
+      { ...base, Statement: [api, { ...assume, Condition: { ArnEquals: assume.Condition.ArnEquals } }, tag] },
+      { ...base, Statement: [api, { ...assume, Condition: without(assume.Condition, 'Null') }, tag] },
+      { ...base, Statement: [api, { ...assume, Condition: without(assume.Condition, 'ForAllValues:StringEquals') }, tag] },
+      { ...base, Statement: [api, { ...assume, Condition: { ...assume.Condition, 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId', 'TenantId'] } } }, tag] },
+      { ...base, Statement: [api, { ...assume, Action: ['sts:AssumeRole', 'sts:TagSession'] }, tag] },
+      // The build TagSession statement: no transitive keys, an extra key, an extra action, the external id.
+      { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, Null: { 'aws:RequestTag/CellId': 'false' } } }] },
+      { ...base, Statement: [api, assume, { ...tag, Condition: without(tag.Condition, 'ForAllValues:StringEquals') }] },
+      { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId', 'TenantId'], 'sts:TransitiveTagKeys': ['CellId'] } } }] },
+      { ...base, Statement: [api, assume, { ...tag, Action: ['sts:TagSession', 'sts:SetSourceIdentity'] }] },
+      { ...base, Statement: [api, assume, { ...tag, Condition: { ...tag.Condition, StringEquals: { 'sts:ExternalId': 'x' } } }] },
+      // A statement missing, or a fourth one.
+      { ...base, Statement: [api] },
+      { ...base, Statement: [api, assume] },
+      { ...base, Statement: [api, tag] },
+      { ...base, Statement: [assume, tag] },
+      { ...base, Statement: [api, assume, tag, { Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::333333333333:root' }, Action: 'sts:AssumeRole' }] },
+      { ...base, Statement: [api, api, tag] },
     ];
     for (const t of variants) {
       expect(check({ ...s, pair: { ...s.pair, cell: { ...s.pair.cell!, trust: t } } })).toEqual([wrong]);
     }
-    // The tenant role names the tenant build role, never the cell build role.
+    // The tenant role names the tenant build role and the tenant tags, never the cell's.
     const swapped = { ...s.pair.tenant!, trust: pairTrust('cell') };
     expect(check({ ...s, pair: { ...s.pair, tenant: swapped } })).toEqual([`role pair tenant role ${FLEET}-tenant-provisioning has a trust policy other than its stack's`]);
-    // IAM may return the principal as the bare account id.
-    const bare = { ...base, Statement: [{ ...st, Principal: { AWS: OTHER } }] };
+    // IAM may return the principal as the bare account id, single values as lists, and statements in any order.
+    const bare = { ...base, Statement: [{ ...tag, Principal: { AWS: OTHER } }, { ...assume, Principal: { AWS: OTHER } }, { ...api, Principal: { AWS: OTHER }, Action: ['sts:AssumeRole'] }] };
     expect(check({ ...s, pair: { ...s.pair, cell: { ...s.pair.cell!, trust: bare } } })).toEqual([]);
   });
 

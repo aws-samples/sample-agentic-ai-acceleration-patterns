@@ -593,7 +593,7 @@ and the integration driver read the parameters. With `identityApi:
 'none'` the sample consumes no other sample.
 
 **Consumed by**: no sample yet. The interface is shaped for a control-plane script calling `CreateTenantKey`
-and writing `keyArn` to `/application-plane/tenants/<tenantId>`; the
+and writing `keyArn` under `/application-plane/tenants/<tenantId>/<applicationId>`; the
 extraction sample, a consumer role on `DeliveryAccepted`;
 `agentic-runtime-isolation`, whose tenant role can be a consumer role with
 `s3:GetObject` on `documents/${aws:PrincipalTag/TenantId}/*` and

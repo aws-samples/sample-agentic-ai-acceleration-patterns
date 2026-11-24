@@ -281,15 +281,18 @@ describe('CellPoliciesStack (spec §8 decision 7, ADR-0006, ADR-0011)', () => {
   describe('the build policy (control-plane ADR-0047)', () => {
     const p = managedPolicy(json, 'cell-build-policy');
 
-    it('assumes the deploy and publishing cell bootstrap roles only, never the lookup role', () => {
+    it('assumes the deploy and publishing cell bootstrap roles only, never the lookup role, tagging with the inherited CellId only', () => {
+      const roles = ['deploy', 'file-publishing', 'image-publishing'].map(
+        (r) => `arn:<AWS::Partition>:iam::<AWS::AccountId>:role/cdk-${CELL_QUALIFIER}-${r}-role-<AWS::AccountId>-<AWS::Region>`,
+      );
       expect(p.statements).toEqual([
+        { Sid: 'AssumeCellBootstrapRoles', Effect: 'Allow', Action: 'sts:AssumeRole', Resource: roles },
         {
-          Sid: 'AssumeCellBootstrapRoles',
+          Sid: 'TagCellBootstrapSessions',
           Effect: 'Allow',
-          Action: 'sts:AssumeRole',
-          Resource: ['deploy', 'file-publishing', 'image-publishing'].map(
-            (r) => `arn:<AWS::Partition>:iam::<AWS::AccountId>:role/cdk-${CELL_QUALIFIER}-${r}-role-<AWS::AccountId>-<AWS::Region>`,
-          ),
+          Action: 'sts:TagSession',
+          Resource: roles,
+          Condition: { 'ForAllValues:StringEquals': { 'aws:TagKeys': ['CellId'] } },
         },
       ]);
       expect(JSON.stringify(p.statements)).not.toContain('lookup');

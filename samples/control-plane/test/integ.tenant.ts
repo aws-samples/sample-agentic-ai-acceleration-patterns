@@ -35,8 +35,10 @@ import { TenantStack } from '../src/tenant/tenant.cdk';
  * and uses it in every stack name, as the `fleetName` of the stack under test
  * and of the account B role pair, and in every other name that must be unique
  * in an account or a Region. The application ids derive from the run id
- * (`x-<run id>`, `y-<run id>`, `z-<run id>`). Two runs can then share both
- * accounts and a Region.
+ * (`x-<run id>`, `y-<run id>`, `z-<run id>`). Only one control plane stack
+ * fits in account A and a Region at a time (the fixed
+ * `/control-plane/tenant-api-url` parameter), so runs there go one after
+ * another (integration-test.md, "Sharing accounts between runs").
  *
  * Setup (in A): a throwaway Cognito user pool acts as the vendor IdP (its ID
  * tokens carry iss + aud, which the authorizer validates via OIDC discovery,
@@ -2584,8 +2586,8 @@ const waitForCell4Gone = integ.assertions
 // Cell 4's last event is its delete: the script, then G's CELL_DELETE. G
 // recorded a CELL_DELETE for every cell, in the order the cells were deleted.
 // This run's tenant and cell namespaces are empty in A (a check looks at this
-// run's ids only: another run may share the account and Region, spec §10), and
-// in B just below.
+// run's ids only, as other control-plane stacks' cells may share the
+// namespaces), and in B just below.
 const cellsDeleted = probeBatch([
   ledger('story after the cell deletes', 'story', storyCellDeleted, { cell: 'cell4' }),
   ledger(

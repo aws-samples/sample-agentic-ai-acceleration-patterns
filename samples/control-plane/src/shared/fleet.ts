@@ -33,6 +33,73 @@ export const FLEET_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** The two halves of the account role pair (spec §6.4). */
 export type ProvisioningRoleKind = 'cell' | 'tenant';
 
+/**
+ * The session tags a build passes when it assumes its half of the pair
+ * (ADR-0051), all transitive: a cell build tags its session with the cell,
+ * a tenant build with the cell, the tenant and the application. The values
+ * are the service-resolved `CELL_ID`, `TENANT_ID` and `APPLICATION_ID`.
+ */
+export const SESSION_TAG_KEYS: Readonly<Record<ProvisioningRoleKind, readonly string[]>> = {
+  cell: ['CellId'],
+  tenant: ['CellId', 'TenantId', 'ApplicationId'],
+};
+
+/**
+ * The conditions on a build's `sts:AssumeRole` to its half of the pair
+ * (ADR-0051), in the pair's trust: every tag of {@link SESSION_TAG_KEYS} is
+ * present and no other key is passed. They make an untagged AssumeRole
+ * fail, because STS evaluates `sts:TagSession` only when a request carries
+ * tags. A `ForAllValues` condition alone is true for a request with no
+ * tags, which is why the `Null` conditions are there.
+ */
+export function sessionTagRequestConditions(kind: ProvisioningRoleKind): Record<string, Record<string, string | string[]>> {
+  const keys = [...SESSION_TAG_KEYS[kind]];
+  return {
+    'Null': Object.fromEntries(keys.map((key) => [`aws:RequestTag/${key}`, 'false'])),
+    'ForAllValues:StringEquals': { 'aws:TagKeys': keys },
+  };
+}
+
+/**
+ * The conditions on a build's `sts:TagSession` to its half of the pair
+ * (ADR-0051), used by the pair's trust and by the build role's own grant:
+ * every tag of {@link SESSION_TAG_KEYS} is present, at least one key is
+ * transitive, and no other key is passed or made transitive. They do not
+ * require every key transitive: the buildspec makes all of them transitive,
+ * and the threat model (M35) records the residual. The trust's TagSession
+ * statement carries no `sts:ExternalId` condition: STS evaluates that key
+ * on `sts:AssumeRole` only, and a TagSession statement that requires it
+ * refuses every tagged request (shown by the integration test).
+ */
+export function sessionTagConditions(kind: ProvisioningRoleKind): Record<string, Record<string, string | string[]>> {
+  const keys = [...SESSION_TAG_KEYS[kind]];
+  return {
+    'Null': {
+      ...Object.fromEntries(keys.map((key) => [`aws:RequestTag/${key}`, 'false'])),
+      'sts:TransitiveTagKeys': 'false',
+    },
+    'ForAllValues:StringEquals': {
+      'aws:TagKeys': keys,
+      'sts:TransitiveTagKeys': keys,
+    },
+  };
+}
+
+/**
+ * The build session's own cell namespace, `/application-plane/cells/<cellId>`,
+ * named by the session's `CellId` tag (ADR-0051). IAM resolves the policy
+ * variable per request; a session without the tag is expected to match
+ * nothing (no integration probe asks an untagged session for SSM access).
+ */
+export const OWN_CELL_PATH = '/application-plane/cells/${aws:PrincipalTag/CellId}';
+
+/**
+ * The build session's own deployment namespace,
+ * `/application-plane/tenants/<tenantId>/<applicationId>` (ADR-037), named by
+ * the session's `TenantId` and `ApplicationId` tags (ADR-0051).
+ */
+export const OWN_DEPLOYMENT_PATH = '/application-plane/tenants/${aws:PrincipalTag/TenantId}/${aws:PrincipalTag/ApplicationId}';
+
 /** Name of the provisioning role an account installs for one half of the pair. */
 export function provisioningRoleName(fleetName: string, kind: ProvisioningRoleKind): string {
   return `${fleetName}-${kind}-provisioning`;

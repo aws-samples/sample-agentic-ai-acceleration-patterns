@@ -17,6 +17,10 @@
  * `iam:GetRolePolicy`, and this decides.
  */
 
+// fleet.ts has no imports: this file must load without aws-cdk-lib, so the
+// stress package can run its tests when samples/control-plane is not installed.
+import { OWN_CELL_PATH, OWN_DEPLOYMENT_PATH, sessionTagConditions, sessionTagRequestConditions } from '../../src/shared/fleet';
+
 export const CELL_TOOLKIT_STACK = 'CDKToolkit-cell';
 export const ACCOUNT_BASE_TAG = { key: 'stress:part', value: 'account-base' } as const;
 const CELL_PATH = '/cell/';
@@ -68,39 +72,47 @@ export interface CheckInput {
   readonly platformAccountId: string;
 }
 
+/** A trust statement reduced to what the check compares: actions and condition values as sorted lists. */
+function trustStatementShape(st: Record<string, unknown>): string | undefined {
+  const keys = Object.keys(st).filter((k) => k !== 'Sid').sort();
+  if (JSON.stringify(keys) !== JSON.stringify(['Action', 'Condition', 'Effect', 'Principal']) || st.Effect !== 'Allow') return undefined;
+  const principal = (st.Principal ?? {}) as Record<string, unknown>;
+  if (JSON.stringify(Object.keys(principal)) !== JSON.stringify(['AWS'])) return undefined;
+  const condition = (st.Condition ?? {}) as Record<string, Record<string, unknown>>;
+  const conditions = Object.keys(condition).sort().map((op) => [
+    op,
+    Object.keys(condition[op] ?? {}).sort().map((k) => [k, asList(condition[op]?.[k]).map(String).sort()]),
+  ]);
+  return JSON.stringify({ actions: asList(st.Action).map(String).sort(), principals: asList(principal.AWS).map(String), conditions });
+}
+
 /**
  * Problems with a role pair half's trust policy: it must be what control-plane's
- * `CellAccountStack` writes (and `stress/test/role-pair-app.test.ts` pins), exactly one
- * statement that allows `sts:AssumeRole` to the platform account's root, conditioned on
- * `ArnEquals aws:PrincipalArn` naming exactly the fleet's `<fleet>-<kind>-build` and
- * `<fleet>-api` roles, with no other condition. A vendor-owned cell account carries no
- * external id (control-plane ADR-0029).
+ * `CellAccountStack` writes (and `stress/test/role-pair-app.test.ts` pins), exactly three
+ * statements to the platform account's root. One allows `sts:AssumeRole` to the fleet's
+ * `<fleet>-api` role (`ArnEquals aws:PrincipalArn`), with no other condition. One allows
+ * `sts:AssumeRole` to the fleet's `<fleet>-<kind>-build` role only with the half's tag keys
+ * (`sessionTagRequestConditions`), and one `sts:TagSession` to the same role only with the
+ * half's tag keys, at least one transitive (`sessionTagConditions`, control-plane ADR-0051). A vendor-owned
+ * cell account carries no external id (control-plane ADR-0029).
  */
 export function pairTrustProblems(half: 'cell' | 'tenant', role: RoleState, s: AccountState, input: CheckInput): string[] {
-  const root = `arn:${s.partition}:iam::${input.platformAccountId}:root`;
-  const expected = [
-    `arn:${s.partition}:iam::${input.platformAccountId}:role/${input.fleet}-${half}-build`,
-    `arn:${s.partition}:iam::${input.platformAccountId}:role/${input.fleet}-api`,
-  ].sort();
+  const arn = (name: string) => `arn:${s.partition}:iam::${input.platformAccountId}:role/${name}`;
   const statements = asList((role.trust as { Statement?: unknown } | null)?.Statement) as Record<string, unknown>[];
   const wrong = `role pair ${half} role ${role.name} has a trust policy other than its stack's`;
-  if (statements.length !== 1) return [wrong];
-  const st = statements[0] ?? {};
-  const keys = Object.keys(st).filter((k) => k !== 'Sid').sort();
-  const actions = asList(st.Action).map(String);
-  const principal = (st.Principal ?? {}) as Record<string, unknown>;
-  const awsPrincipals = asList(principal.AWS).map(String);
-  const condition = (st.Condition ?? {}) as Record<string, Record<string, unknown>>;
-  const arns = asList(condition.ArnEquals?.['aws:PrincipalArn']).map(String).sort();
-  const ok =
-    JSON.stringify(keys) === JSON.stringify(['Action', 'Condition', 'Effect', 'Principal']) &&
-    st.Effect === 'Allow' &&
-    actions.length === 1 && actions[0] === 'sts:AssumeRole' &&
-    JSON.stringify(Object.keys(principal)) === JSON.stringify(['AWS']) &&
-    awsPrincipals.length === 1 && (awsPrincipals[0] === root || awsPrincipals[0] === input.platformAccountId) &&
-    JSON.stringify(Object.keys(condition)) === JSON.stringify(['ArnEquals']) &&
-    JSON.stringify(Object.keys(condition.ArnEquals ?? {})) === JSON.stringify(['aws:PrincipalArn']) &&
-    JSON.stringify(arns) === JSON.stringify(expected);
+  if (statements.length !== 3) return [wrong];
+  // IAM may return the principal as the account's root ARN or the bare account id.
+  const roots = [`arn:${s.partition}:iam::${input.platformAccountId}:root`, input.platformAccountId];
+  const expected = (actions: string[], conditions: Record<string, Record<string, string | string[]>>) =>
+    roots.map((root) => trustStatementShape({ Effect: 'Allow', Principal: { AWS: root }, Action: actions, Condition: conditions }));
+  const buildRole = { 'aws:PrincipalArn': arn(`${input.fleet}-${half}-build`) };
+  const wanted = [
+    expected(['sts:AssumeRole'], { ArnEquals: { 'aws:PrincipalArn': arn(`${input.fleet}-api`) } }),
+    expected(['sts:AssumeRole'], { ArnEquals: buildRole, ...sessionTagRequestConditions(half) }),
+    expected(['sts:TagSession'], { ArnEquals: buildRole, ...sessionTagConditions(half) }),
+  ];
+  const shapes = statements.map((st) => trustStatementShape(st ?? {}));
+  const ok = wanted.every((shape) => shapes.some((x) => shape.includes(x)));
   return ok ? [] : [wrong];
 }
 
@@ -119,10 +131,27 @@ export const PAIR_INLINE_ACTIONS: readonly string[] = [
 ];
 
 /**
+ * The parameter paths the role pair stack grants each half (control-plane §6.2): the shared
+ * namespaces, and the session's own cell and deployment named by its session tags
+ * (control-plane ADR-0051). A pair widened back to every cell's or every tenant's
+ * namespace is refused.
+ */
+export const PAIR_PARAMETER_PATHS: Readonly<Record<'cell' | 'tenant', readonly string[]>> = (() => {
+  const shared = ['/application-plane/shared/*', '/application-plane/applications/*'];
+  const own = (path: string) => [path, `${path}/*`];
+  return {
+    cell: [...shared, ...own(OWN_CELL_PATH)],
+    tenant: [...shared, ...own(OWN_CELL_PATH), ...own(OWN_DEPLOYMENT_PATH)],
+  };
+})();
+
+/**
  * Problems with what the role pair half holds beyond its own stack's set: a managed policy
  * other than its owner policy, an inline policy other than the stack's default policy, or a
- * default policy that grants anything but the SSM namespace actions on
- * `/application-plane/` parameters.
+ * default policy that grants anything but the SSM namespace actions on the
+ * {@link PAIR_PARAMETER_PATHS} of its half. Actions and paths are checked apart, not
+ * per path: a tenant role given a write on its own cell's path still passes
+ * (the unit tests of the stack pin the per-path actions).
  */
 export function pairPolicyProblems(half: 'cell' | 'tenant', role: RoleState, s: AccountState, suffix = ''): string[] {
   const problems: string[] = [];
@@ -150,7 +179,7 @@ export function pairPolicyProblems(half: 'cell' | 'tenant', role: RoleState, s: 
         actions.length > 0 &&
         actions.every((a) => PAIR_INLINE_ACTIONS.includes(a)) &&
         resources.length > 0 &&
-        resources.every((r) => r.startsWith(prefix) && r.includes(`:${s.accountId}:parameter/application-plane/`));
+        resources.every((r) => r.startsWith(prefix) && PAIR_PARAMETER_PATHS[half].some((path) => r.endsWith(`:${s.accountId}:parameter${path}`)));
       if (!ok) problems.push(`role pair ${half} role ${role.name}: inline policy ${p.name} grants more than the SSM namespace actions`);
     }
   }

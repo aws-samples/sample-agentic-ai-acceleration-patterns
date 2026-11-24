@@ -21,7 +21,18 @@ import {
   SCRIPT_OUTPUTS_REJECTED_REASON,
 } from './hook.workflow';
 import { recordEventStates } from './record-event.workflow';
-import { buildProjectArn, buildProjectName, buildRoleName, hookRoleName, provisioningRoleArn, ProvisioningRoleKind, BuildProjectKind, workflowName } from '../shared/fleet';
+import {
+  buildProjectArn,
+  buildProjectName,
+  buildRoleName,
+  hookRoleName,
+  provisioningRoleArn,
+  ProvisioningRoleKind,
+  BuildProjectKind,
+  SESSION_TAG_KEYS,
+  sessionTagConditions,
+  workflowName,
+} from '../shared/fleet';
 import { nagFindingResource, acknowledgeGranularFinding, suppressTemplateScanners } from '../shared/nag';
 
 export interface ProvisioningWorkflowProps {
@@ -105,6 +116,13 @@ export const TRANSACTION_CANCELED_RETRY = {
  */
 export const EXECUTION_TIMEOUT = Duration.hours(26);
 
+/** The build variable that holds each session tag's value (ADR-0051). */
+const SESSION_TAG_VARIABLES: Readonly<Record<string, string>> = {
+  CellId: 'CELL_ID',
+  TenantId: 'TENANT_ID',
+  ApplicationId: 'APPLICATION_ID',
+};
+
 /**
  * The inline buildspec — every execution overrides source and runs its
  * resolved script. Before the script starts, the build assumes the hosting
@@ -122,76 +140,100 @@ export const EXECUTION_TIMEOUT = Duration.hours(26);
  * returns nothing fails closed before the script runs. Role chaining caps the
  * credentials at one hour, equal to BUILD_TIMEOUT (N-7). A refused AssumeRole
  * fails the build like any script failure and lands in `*_FAILED`.
+ *
+ * The AssumeRole passes the session tags of its half (ADR-0051,
+ * {@link SESSION_TAG_KEYS}), all transitive, so every session in the chain
+ * names the cell, and on a tenant build the tenant and the application. The
+ * values are only the service-resolved `CELL_ID`, `TENANT_ID` and
+ * `APPLICATION_ID` (never a `PARAM_` variable, R-32), quoted, in the same
+ * argument array as the external id. A pair whose trust does not allow
+ * `sts:TagSession` refuses the AssumeRole, so the first build fails.
+ * The two halves differ only in that line.
  */
-export const INLINE_BUILDSPEC = [
-  'version: 0.2',
-  'env:',
-  '  shell: bash',
-  // R-43: SCRIPT_OUTPUTS is the build's only exported variable (spike H-1:
-  // the total of exported variables is limited, and overflow is silent).
-  '  exported-variables:',
-  '    - SCRIPT_OUTPUTS',
-  'phases:',
-  '  build:',
-  '    commands:',
-  // Brace-less `$VAR` expansions throughout: the buildspec is embedded in the
-  // state machine DefinitionString, where `${...}` reads as an Fn::Sub
-  // placeholder to CloudFormation's template validator.
-  '      - |',
-  '        set -euo pipefail',
-  '        set --',
-  '        if [ -n "$PROVISIONING_EXTERNAL_ID" ]; then set -- --external-id "$PROVISIONING_EXTERNAL_ID"; fi',
-  '        CREDENTIALS=$(aws sts assume-role --role-arn "$PROVISIONING_ROLE_ARN" --role-session-name "$OPERATOR_SESSION_NAME" "$@" --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text)',
-  '        read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< "$CREDENTIALS"',
-  '        if [ -z "$AWS_SESSION_TOKEN" ]; then',
-  '          echo "AssumeRole returned no credentials"',
-  '          exit 1',
-  '        fi',
-  '        export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN',
-  '        unset CREDENTIALS PROVISIONING_EXTERNAL_ID',
-  '        unset AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_AUTHORIZATION_TOKEN',
-  '        set --',
-  '        echo "Assumed $PROVISIONING_ROLE_ARN in account $CELL_ACCOUNT_ID"',
-  // R-43: a fresh directory outside the source tree, and a path in it that
-  // does not yet exist, so nothing committed to the source stands in for output.
-  '        OUTPUTS_DIR=$(mktemp -d)',
-  '        OUTPUTS_FILE="$OUTPUTS_DIR/outputs.json"',
-  '        export OUTPUTS_FILE',
-  '        bash "$SCRIPT_PATH"',
-  // R-43: after the script succeeded, parse the file, refuse a repeated key,
-  // check the rest, and export the compact re-serialisation (never the
-  // file's bytes), always: `{}` when the script wrote none. A file that
-  // fails fails create and update, and is dropped on delete (P-9). This is
-  // a format check in the container the script just ran in, not a trust
-  // boundary; the workflow checks the value again (T40, T44).
-  "        SCRIPT_OUTPUTS='{}'",
-  '        OUTPUTS_ERROR=""',
-  '        if [ -e "$OUTPUTS_FILE" ] || [ -L "$OUTPUTS_FILE" ]; then',
-  '          if [ -L "$OUTPUTS_FILE" ]; then',
-  '            OUTPUTS_ERROR="OUTPUTS_FILE is a symbolic link"',
-  String.raw`          elif ! jq -e 'type == "object" and ([to_entries[] | (.key | test("\\A[A-Za-z][A-Za-z0-9_]{0,63}\\z")) and (.value | type == "string" and test("\\A[ -~]*\\z"))] | all)' "$OUTPUTS_FILE" > /dev/null 2>&1; then`,
-  '            OUTPUTS_ERROR="OUTPUTS_FILE is not a JSON object of valid keys and printable ASCII string values"',
-  "          elif [ \"$(jq -n --stream '[inputs | select(length == 2) | .[0][0]] | (length != (unique | length))' \"$OUTPUTS_FILE\")\" = true ]; then",
-  '            OUTPUTS_ERROR="OUTPUTS_FILE repeats a key"',
-  '          else',
-  '            COMPACT=$(jq -c . "$OUTPUTS_FILE")',
-  '            if [ "$(printf %s "$COMPACT" | wc -c)" -gt 4096 ]; then',
-  '              OUTPUTS_ERROR="OUTPUTS_FILE is longer than 4096 bytes in compact form"',
-  '            else',
-  '              SCRIPT_OUTPUTS="$COMPACT"',
-  '            fi',
-  '          fi',
-  '        fi',
-  '        if [ -n "$OUTPUTS_ERROR" ]; then',
-  '          if [ "$OPERATION" = delete ]; then',
-  '            echo "Dropping the script outputs on delete: $OUTPUTS_ERROR"',
-  '          else',
-  '            echo "Script outputs rejected: $OUTPUTS_ERROR"',
-  '            exit 1',
-  '          fi',
-  '        fi',
-  '        export SCRIPT_OUTPUTS',
-].join('\n');
+export const INLINE_BUILDSPECS: Readonly<Record<ProvisioningRoleKind, string>> = {
+  cell: inlineBuildspec('cell'),
+  tenant: inlineBuildspec('tenant'),
+};
+
+/** The `--tags` and `--transitive-tag-keys` arguments of one half, appended to the AssumeRole argument array. */
+function sessionTagArguments(kind: ProvisioningRoleKind): string {
+  const keys = SESSION_TAG_KEYS[kind];
+  const tags = keys.map((key) => `"Key=${key},Value=$${SESSION_TAG_VARIABLES[key]}"`).join(' ');
+  return `set -- "$@" --tags ${tags} --transitive-tag-keys ${keys.join(' ')}`;
+}
+
+function inlineBuildspec(kind: ProvisioningRoleKind): string {
+  return [
+    'version: 0.2',
+    'env:',
+    '  shell: bash',
+    // R-43: SCRIPT_OUTPUTS is the build's only exported variable (spike H-1:
+    // the total of exported variables is limited, and overflow is silent).
+    '  exported-variables:',
+    '    - SCRIPT_OUTPUTS',
+    'phases:',
+    '  build:',
+    '    commands:',
+    // Brace-less `$VAR` expansions throughout: the buildspec is embedded in the
+    // state machine DefinitionString, where `${...}` reads as an Fn::Sub
+    // placeholder to CloudFormation's template validator.
+    '      - |',
+    '        set -euo pipefail',
+    '        set --',
+    '        if [ -n "$PROVISIONING_EXTERNAL_ID" ]; then set -- --external-id "$PROVISIONING_EXTERNAL_ID"; fi',
+    `        ${sessionTagArguments(kind)}`,
+    '        CREDENTIALS=$(aws sts assume-role --role-arn "$PROVISIONING_ROLE_ARN" --role-session-name "$OPERATOR_SESSION_NAME" "$@" --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" --output text)',
+    '        read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< "$CREDENTIALS"',
+    '        if [ -z "$AWS_SESSION_TOKEN" ]; then',
+    '          echo "AssumeRole returned no credentials"',
+    '          exit 1',
+    '        fi',
+    '        export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN',
+    '        unset CREDENTIALS PROVISIONING_EXTERNAL_ID',
+    '        unset AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_AUTHORIZATION_TOKEN',
+    '        set --',
+    '        echo "Assumed $PROVISIONING_ROLE_ARN in account $CELL_ACCOUNT_ID"',
+    // R-43: a fresh directory outside the source tree, and a path in it that
+    // does not yet exist, so nothing committed to the source stands in for output.
+    '        OUTPUTS_DIR=$(mktemp -d)',
+    '        OUTPUTS_FILE="$OUTPUTS_DIR/outputs.json"',
+    '        export OUTPUTS_FILE',
+    '        bash "$SCRIPT_PATH"',
+    // R-43: after the script succeeded, parse the file, refuse a repeated key,
+    // check the rest, and export the compact re-serialisation (never the
+    // file's bytes), always: `{}` when the script wrote none. A file that
+    // fails fails create and update, and is dropped on delete (P-9). This is
+    // a format check in the container the script just ran in, not a trust
+    // boundary; the workflow checks the value again (T40, T44).
+    "        SCRIPT_OUTPUTS='{}'",
+    '        OUTPUTS_ERROR=""',
+    '        if [ -e "$OUTPUTS_FILE" ] || [ -L "$OUTPUTS_FILE" ]; then',
+    '          if [ -L "$OUTPUTS_FILE" ]; then',
+    '            OUTPUTS_ERROR="OUTPUTS_FILE is a symbolic link"',
+    String.raw`          elif ! jq -e 'type == "object" and ([to_entries[] | (.key | test("\\A[A-Za-z][A-Za-z0-9_]{0,63}\\z")) and (.value | type == "string" and test("\\A[ -~]*\\z"))] | all)' "$OUTPUTS_FILE" > /dev/null 2>&1; then`,
+    '            OUTPUTS_ERROR="OUTPUTS_FILE is not a JSON object of valid keys and printable ASCII string values"',
+    "          elif [ \"$(jq -n --stream '[inputs | select(length == 2) | .[0][0]] | (length != (unique | length))' \"$OUTPUTS_FILE\")\" = true ]; then",
+    '            OUTPUTS_ERROR="OUTPUTS_FILE repeats a key"',
+    '          else',
+    '            COMPACT=$(jq -c . "$OUTPUTS_FILE")',
+    '            if [ "$(printf %s "$COMPACT" | wc -c)" -gt 4096 ]; then',
+    '              OUTPUTS_ERROR="OUTPUTS_FILE is longer than 4096 bytes in compact form"',
+    '            else',
+    '              SCRIPT_OUTPUTS="$COMPACT"',
+    '            fi',
+    '          fi',
+    '        fi',
+    '        if [ -n "$OUTPUTS_ERROR" ]; then',
+    '          if [ "$OPERATION" = delete ]; then',
+    '            echo "Dropping the script outputs on delete: $OUTPUTS_ERROR"',
+    '          else',
+    '            echo "Script outputs rejected: $OUTPUTS_ERROR"',
+    '            exit 1',
+    '          fi',
+    '        fi',
+    '        export SCRIPT_OUTPUTS',
+  ].join('\n');
+}
 
 /**
  * The provisioning workflow (architecture.md §7).
@@ -250,9 +292,10 @@ export const INLINE_BUILDSPEC = [
  *
  * Two shared CodeBuild projects with distinct service roles separate cell
  * builds from tenant builds (ADR-002, ADR-012). The project roles hold no
- * application-plane permission (ADR-025): each may only assume its half
- * of the provisioning role pair in the cell's account (`accountId`,
- * `cellRoleArn` / `tenantRoleArn`, `externalId` in the input), and the
+ * application-plane permission (ADR-025): each may only assume, and tag a
+ * session for (ADR-0051), its half of the provisioning role pair in the
+ * cell's account (`accountId`, `cellRoleArn` / `tenantRoleArn`,
+ * `externalId` in the input), and the
  * buildspec does so before the script runs. Every lifecycle transition is
  * compare-and-set on the exact expected status; failure writes are
  * conditional on attribute_exists(PK); the deployment-delete and cell-delete
@@ -292,10 +335,11 @@ export class ProvisioningWorkflow extends Construct {
     // Two shared CodeBuild projects (ADR-002 refined by ADR-012, ADR-025).
     // Base source is NO_SOURCE + dummy buildspec: every execution overrides
     // both. The project roles carry NO application-plane permission: each
-    // may only assume its half of the provisioning role pair, by name, in
-    // any registered account (N-8). The pair in each account — installed by
-    // the account owner — is the provisioning blast radius and THE hardening
-    // point of the sample (P-12, §6.4).
+    // may only assume, and tag a session for, its half of the provisioning
+    // role pair, by name, in any registered account (N-8, ADR-0051). The
+    // pair in each account — installed by the account owner — is the
+    // provisioning blast radius and THE hardening point of the sample
+    // (P-12, §6.4).
     // ------------------------------------------------------------------
     // M15 (T13): explicit CodeBuild log groups with bounded retention —
     // the service-created default groups never expire.
@@ -1034,7 +1078,7 @@ export class ProvisioningWorkflow extends Construct {
             SourceTypeOverride: jsonata(inputRef('$.sourceType')),
             SourceLocationOverride: jsonata(inputRef('$.sourceLocation')),
             ...(withPin ? { SourceVersion: jsonata(inputRef('$.sourceVersion')) } : {}),
-            BuildspecOverride: INLINE_BUILDSPEC,
+            BuildspecOverride: INLINE_BUILDSPECS[resultField === 'cellBuildResult' ? 'cell' : 'tenant'],
             EnvironmentVariablesOverride: environmentOverride(environment, parametersPath),
           },
           Output: buildResultOutput(resultField),
@@ -1252,8 +1296,9 @@ function accountEnvVars(roleArnPath: string): EnvVar[] {
 /**
  * A control-plane build role with its physical name (`<fleet>-<kind>-build`,
  * ADR-025): the account role pair trusts it by ARN, so the name is the
- * cross-account contract. Its only application-facing permission is
- * AssumeRole on `<fleet>-<kind>-provisioning` in ANY account (N-8): accounts
+ * cross-account contract. Its only application-facing permissions are
+ * AssumeRole, and TagSession with its half's session tags (ADR-0051), on
+ * `<fleet>-<kind>-provisioning` in ANY account (N-8): accounts
  * are registered at run time, and the target role's trust policy — written
  * by the account owner — is the gate (M20). The CodeBuild Project adds its
  * own log-group grant.
@@ -1270,7 +1315,7 @@ function buildRole(scope: Construct, id: string, fleetName: string, kind: Provis
         'aws:SourceArn': buildProjectArn(stack.partition, stack.region, stack.account, fleetName, `${kind}-build` as BuildProjectKind),
       },
     }),
-    description: `${fleetName} control plane ${kind} build: may only assume ${fleetName}-${kind}-provisioning in registered accounts (ADR-025)`,
+    description: `${fleetName} control plane ${kind} build: may only assume and tag a session for ${fleetName}-${kind}-provisioning in registered accounts (ADR-025, ADR-0051)`,
   });
   const target = provisioningRoleArn(stack.partition, '*', fleetName, kind);
   role.addToPolicy(
@@ -1280,10 +1325,20 @@ function buildRole(scope: Construct, id: string, fleetName: string, kind: Provis
       resources: [target],
     }),
   );
+  // ADR-0051: a cross-account AssumeRole that passes session tags needs
+  // sts:TagSession on both sides; here only with exactly this half's tags.
+  role.addToPolicy(
+    new iam.PolicyStatement({
+      sid: 'TagProvisioningSession',
+      actions: ['sts:TagSession'],
+      resources: [target],
+      conditions: sessionTagConditions(kind),
+    }),
+  );
   acknowledgeGranularFinding(
     role,
     `AwsSolutions-IAM5[Resource::${nagFindingResource(role, target)}]`,
-    'Accounts are registered at run time (ADR-024), so the AssumeRole resource names the provisioning role by fixed name in any account (spec N-8); the target role\'s trust policy, written by the account owner, is the gate (M20).',
+    'Accounts are registered at run time (ADR-024), so the AssumeRole and TagSession resource names the provisioning role by fixed name in any account (spec N-8); the target role\'s trust policy, written by the account owner, is the gate (M20). TagSession is limited to the session tags of ADR-0051.',
   );
   suppressTemplateScanners(role, {
     cfnNag: [{ id: 'W28', reason: 'The physical name is the cross-account contract: every account role pair trusts this role by ARN (spec §6.4, ADR-025).' }],

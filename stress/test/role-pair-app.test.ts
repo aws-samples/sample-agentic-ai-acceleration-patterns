@@ -7,7 +7,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 // The account check's own expectations, so the template and the check cannot drift apart.
 // eslint-disable-next-line import/no-relative-packages
-import { PAIR_INLINE, PAIR_INLINE_ACTIONS, PAIR_POLICY } from '../../samples/control-plane/test/stress/account-check';
+import { PAIR_INLINE, PAIR_INLINE_ACTIONS, PAIR_PARAMETER_PATHS, PAIR_POLICY, pairTrustProblems } from '../../samples/control-plane/test/stress/account-check';
 
 /**
  * Synthesises `application/role-pair-app.ts` as `deploy-role-pair.sh` does and pins the
@@ -70,18 +70,45 @@ function synth(): any {
     expect(role.Properties.Path).toBeUndefined();
     expect(role.Properties.PermissionsBoundary).toBeUndefined();
     expect(role.Properties.ManagedPolicyArns).toEqual([`arn:aws:iam::${CELL}:policy/${policy}`]);
+    // Control-plane ADR-0051: the API role untagged; the build role only with its session tags.
+    const keys = kind === 'cell' ? ['CellId'] : ['CellId', 'TenantId', 'ApplicationId'];
+    const principal = { AWS: { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:iam::${CP}:root`]] } };
     expect(role.Properties.AssumeRolePolicyDocument.Statement).toEqual([
       {
         Action: 'sts:AssumeRole',
         Effect: 'Allow',
-        Principal: { AWS: { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:iam::${CP}:root`]] } },
+        Principal: principal,
+        Condition: { ArnEquals: { 'aws:PrincipalArn': `arn:aws:iam::${CP}:role/${FLEET}-api` } },
+      },
+      {
+        Action: 'sts:AssumeRole',
+        Effect: 'Allow',
+        Principal: principal,
         Condition: {
-          ArnEquals: {
-            'aws:PrincipalArn': [`arn:aws:iam::${CP}:role/${FLEET}-${kind}-build`, `arn:aws:iam::${CP}:role/${FLEET}-api`],
-          },
+          'ArnEquals': { 'aws:PrincipalArn': `arn:aws:iam::${CP}:role/${FLEET}-${kind}-build` },
+          'Null': Object.fromEntries(keys.map((k) => [`aws:RequestTag/${k}`, 'false'])),
+          'ForAllValues:StringEquals': { 'aws:TagKeys': keys },
+        },
+      },
+      {
+        Action: 'sts:TagSession',
+        Effect: 'Allow',
+        Principal: principal,
+        Condition: {
+          'ArnEquals': { 'aws:PrincipalArn': `arn:aws:iam::${CP}:role/${FLEET}-${kind}-build` },
+          'Null': { ...Object.fromEntries(keys.map((k) => [`aws:RequestTag/${k}`, 'false'])), 'sts:TransitiveTagKeys': 'false' },
+          'ForAllValues:StringEquals': { 'aws:TagKeys': keys, 'sts:TransitiveTagKeys': keys },
         },
       },
     ]);
+  });
+
+  it.each(['cell', 'tenant'] as const)('writes a %s trust the account check accepts', (half) => {
+    const trust = JSON.parse(JSON.stringify(byName(`${FLEET}-${half}-provisioning`).Properties.AssumeRolePolicyDocument)
+      .replace(/\{"Fn::Join":\["",\["arn:",\{"Ref":"AWS::Partition"\},":iam::(\d{12}):root"\]\]\}/g, '"arn:aws:iam::$1:root"'));
+    const role = { name: `${FLEET}-${half}-provisioning`, path: '/', arn: `arn:aws:iam::${CELL}:role/${FLEET}-${half}-provisioning`, trust };
+    const state = { accountId: CELL, partition: 'aws', stacks: [], roles: [], pair: {} };
+    expect(pairTrustProblems(half, role, state, { fleet: FLEET, accountBaseStackArns: [], platformAccountId: CP })).toEqual([]);
   });
 
   it('gives each half the default policy the account check expects: its name, its SSM actions and its parameter resources', () => {
@@ -93,6 +120,7 @@ function synth(): any {
       expect(mine).toHaveLength(1);
       // CloudFormation names the inline policy by PolicyName, which the check matches.
       expect(mine[0].Properties.PolicyName).toMatch(PAIR_INLINE[half]);
+      const paths = new Set<string>();
       for (const st of mine[0].Properties.PolicyDocument.Statement as any[]) {
         expect(st.Effect).toBe('Allow');
         expect(st.NotAction).toBeUndefined();
@@ -106,8 +134,11 @@ function synth(): any {
           expect(parts[1]).toEqual({ Ref: 'AWS::Partition' });
           const rendered = parts.map((x) => (typeof x === 'string' ? x : x.Ref === 'AWS::AccountId' ? CELL : `<${x.Ref}>`)).join('');
           expect(rendered).toMatch(new RegExp(`^arn:<AWS::Partition>:ssm:[^:]+:${CELL}:parameter/application-plane/`));
+          paths.add(rendered.slice(rendered.indexOf(':parameter/') + ':parameter'.length));
         }
       }
+      // The template grants exactly the paths the account check accepts for this half (control-plane ADR-0051).
+      expect([...paths].sort()).toEqual([...PAIR_PARAMETER_PATHS[half]].sort());
     }
   });
 });

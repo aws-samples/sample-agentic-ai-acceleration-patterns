@@ -57,6 +57,9 @@ describe('stsHandshakeProbe (R-26, ADR-027, ADR-028)', () => {
     expect(calls).toHaveLength(2);
     for (const call of calls) {
       expect(call.ExternalId).toBeUndefined();
+      // ADR-0051: the probe passes no session tags; the pair trusts the API role for AssumeRole only.
+      expect(call.Tags).toBeUndefined();
+      expect(call.TransitiveTagKeys).toBeUndefined();
     }
   });
 

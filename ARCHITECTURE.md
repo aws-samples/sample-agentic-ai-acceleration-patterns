@@ -226,7 +226,7 @@ scripts read and write only the namespaces of the account the cell lives in.
 | `/application-plane/applications/<applicationId>/shared/front-door-hook` | `tenant-front-door` `RouteHookAccess` stack, in the control plane's account | one JSON document (`version`, `registrarUrl`, `appDomain`, `addressing`) that the route hook reads; kept when the stack is deleted |
 | `/application-plane/shared/code-sandbox/*` | `agentic-untrusted-code-sandboxes` demo stack | `sandboxes`, one JSON document (`version`, `toolTarget`, `runCodeFunctionArn`, `backends`, `defaultBackend`, `registryTableName`, `inputBucketName`, `offboardFunctionArn`, and per backend `imageArn`, `clusterArn` and `taskDefinitionArn`, or `runtimeArn`) |
 | `/application-plane/cells/<cellId>/*` | the cell create script | a cell's shared deployment |
-| `/application-plane/tenants/<tenantId>` | the tenant create script | a tenant's own deployment state |
+| `/application-plane/tenants/<tenantId>/<applicationId>` | the tenant create script | a tenant's own deployment state |
 
 A new shared component takes a new sub-path under
 `/application-plane/shared/<component>/*` and records it here. A sample
@@ -247,7 +247,7 @@ sequenceDiagram
   V->>CP: POST /tenants (optionally naming the account)
   CP->>CB: cell create (if no free cell; claims the account's cell slot), then tenant create
   CB->>CB: assume the account's provisioning role
-  CB->>CB: provision tenant resources, write /application-plane/tenants/<tenantId>
+  CB->>CB: provision tenant resources, write /application-plane/tenants/<tenantId>/<applicationId>
   V->>ID: CreateTenant, create first tenant admin (IAM)
   ID-->>V: tenant registered in the identity provider
 ```
@@ -304,7 +304,7 @@ rest).
 
 | Sample | Concept | Consumes | Publishes |
 |---|---|---|---|
-| [`control-plane`](./samples/control-plane/) | control plane: account registry, cell and tenant lifecycle across vendor-owned and tenant-owned accounts | a vendor IdP; a role pair installed in every account that hosts cells (its `CellAccountStack`) | `/control-plane/tenant-api-url`; constructs `CellAccountRoles`, `CellAccountStack`; scripts write `/application-plane/cells/*` and `/application-plane/tenants/*` in the cell's account |
+| [`control-plane`](./samples/control-plane/) | control plane: account registry, cell and tenant lifecycle across vendor-owned and tenant-owned accounts | a vendor IdP; a role pair installed in every account that hosts cells (its `CellAccountStack`) | `/control-plane/tenant-api-url`; constructs `CellAccountRoles`, `CellAccountStack`; scripts write their own cell's `/application-plane/cells/<cellId>/*` and their own deployment's `/application-plane/tenants/<tenantId>/<applicationId>/*` in the cell's account |
 | [`tenant-identity`](./samples/tenant-identity/) | tenant identity: the token contract on Cognito | nothing | `/application-plane/shared/identity/*` |
 | [`agentic-runtime-isolation`](./samples/agentic-runtime-isolation/) | Agentic runtime isolation: the agent platform at scale. Enforced isolation at the invocation, delegation and data layers, with a Policy and interceptor check at the tools layer: one ingress, the only principal each AgentCore Runtime trusts, verifies the identity token, resolves the grant (agent needs ∪ agent tools ∩ tenant tools ∩ user tools) from an entitlement store, mints a 5-minute transaction token (the identity token never leaves the ingress) and invokes the agent's Runtime with tenant-scoped credentials from an always-on TVM, in a fresh microVM session per request by default (with `session` set, one per tenant, the default scope, or per user); one tools gateway by default (more optional), each with its own Policy engine, serves the tools: a REQUEST interceptor is the per-tool wall and signs a tenant context, Policy then admits the target, and each tool assumes its own tenant role; with `agentDelegation` on the `api-gateway` ingress, an agent hands the transaction to a declared target agent through `POST /{agent}/delegations`, and the ingress re-issues the token for that hop (the caller nested in `act`, `maxDepth` bounding the chain) | `tenant-identity` `shared-pool` (its parameters; the integration driver uses its `/platform/*` API to register scopes and create demo tenants) | constructs `SharedIngress`, `AgentBackend`, `ToolTarget`, `TokenSigner`, `EntitlementStore`; one JSON parameter `/application-plane/shared/agent-runtime/ingress` plus registry rows `backends/<name>` and `tools/<target>` |
 | [`tenant-encrypted-ingestion`](./samples/tenant-encrypted-ingestion/) | data layer: per-tenant encrypted ingestion; one bucket and pipeline for every tenant, each tenant's documents encrypted with its own KMS key (vendor-owned `vendor-key` or tenant-owned `tenant-key`) bound to its prefixes by key policy, tenant-scoped roles with ABAC on `TenantId`, write-once presigned uploads, a deployer-extensible validator chain before anything lands, cryptographic offboarding | `tenant-identity` `shared-pool` (demo stack, integration test and demo only: its parameters and its `PUT|GET|DELETE /platform/scopes/{scope}`); the construct takes any issuer meeting §2.1, with `identityApi: 'none'` | construct `TenantEncryptedIngestion`; `/application-plane/shared/ingestion/*` |

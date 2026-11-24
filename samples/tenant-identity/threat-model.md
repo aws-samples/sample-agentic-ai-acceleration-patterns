@@ -201,10 +201,14 @@ hardening checklist.
   role. The key side has no residual: without
   `kms:Decrypt` on `AdminPasswordKey`, `ssm:GetParameter --with-decryption`
   on the parked password fails (mounting spec §6.5). The parameter itself
-  sits under `/application-plane/tenants/*`, which that same role may write
-  and delete for every application, so another application's tenant script
-  can overwrite or delete a parked password it cannot read; the loss is the
-  one §8 of the mounting spec already recovers from (`DeleteUser`, then
+  sits under the deployment's own
+  `/application-plane/tenants/<tenantId>/<applicationId>/*`, and the tenant
+  role's session may write and delete only its own deployment's path
+  (control-plane ADR-0051), so another deployment's tenant script cannot
+  overwrite or delete it through the pair. Residual: a policy the account
+  owner attaches to the tenant role, or a script that reaches the build
+  role's credentials (control-plane T29), can still reach it; the loss is
+  the one §8 of the mounting spec already recovers from (`DeleteUser`, then
   `CreateUser {firstAdmin: true}`).
 
 ## Security review (2026-10-22)

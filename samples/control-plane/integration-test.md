@@ -68,7 +68,9 @@ integ-runner to `$AWS_REGION` (overriding its multi-Region defaults). It
 fails fast when either required variable is unset, and when a stack of
 this run's fleet name already exists in account A: such a stack belongs to
 an interrupted run with the same run id, whose leftovers must be removed
-first (After an interruption).
+first (After an interruption). It also refuses to start when
+`/control-plane/tenant-api-url` exists in account A and the Region
+(Sharing accounts between runs).
 
 The run lasts about two hours (estimate). Start it from a shell that
 outlives it (for example `nohup`, `tmux` or `screen`), with credentials
@@ -96,19 +98,25 @@ sample. Because the task always runs with `--force`, no workflow depends on a
 committed snapshot; your local snapshot is kept (gitignored) to speed up
 repeated runs.
 
-### Parallel runs
+### Sharing accounts between runs
 
-Two runs can share accounts A and B and one Region. The run's fleet name
-is in every stack name, the assertion stack's test name included, is the
-`fleetName` of the stack under test and of the role pair the account B
-stack installs, and is in every other name the test creates that must be
-unique in an account or a Region: the probe role in B, the test policy on
-B's cell role (`<fleet>-cell-extra`), the hook test paths and policies, and
-the user pool domain prefix. The stack under test names
-its roles, build projects and workflow after the fleet (spec R-41), so
-those differ per run as well. The application ids carry the run id because
-an application id is at most 32 characters, too short for the fleet name
-plus a suffix, and the parameter paths it names
+Only one run, of this test or of the session tag test below, fits in
+account A and a Region at a time: every control plane stack creates the
+fixed `/control-plane/tenant-api-url` parameter (README, Deploy). Both
+integ tasks check for that parameter before they deploy and refuse to
+start when it exists. Runs in other Regions, or with another account A,
+can share account B.
+
+The run's fleet name is in every stack name, the assertion stack's test name
+included, is the `fleetName` of the stack under test and of the role pair
+the account B stack installs, and is in every other name the test creates
+that must be unique in an account or a Region: the probe role in B, the test
+policy on B's cell role (`<fleet>-cell-extra`), the hook test paths and
+policies, and the user pool domain prefix. The stack under test names its
+roles, build projects and workflow after the fleet (spec R-41), so those
+differ per run as well. The application ids carry the run id because an
+application id is at most 32 characters, too short for the fleet name plus a
+suffix, and the parameter paths it names
 (`/application-plane/applications/<id>/shared/` from `demoApplicationIds`,
 `/application-plane/tenants/<tenantId>/<id>`) are per account and Region.
 The leftover check looks for that run's stacks only, and a check that a
@@ -116,16 +124,15 @@ parameter namespace ends empty looks at that run's applications, cells and
 tenants only. Each run uses its own checkout or worktree, because
 integ-runner writes its snapshot and `cdk.out` beside the test.
 
-Runs in one account and Region share its quotas, and those limit how many
-fit at once: CodeBuild's concurrent builds per account and Region, which
-every run's script builds and hook builds draw on, and the API Gateway
-control plane request rate, which a deploy of several REST APIs at once can
-exceed.
+A run shares account A's quotas with every other workload in the account and
+Region: CodeBuild's concurrent builds per account and Region, which every
+run's script builds and hook builds draw on, and the API Gateway control
+plane request rate, which a deploy of several REST APIs at once can exceed.
 
-They also share state that per-run names do not separate. The stack under
-test's REST API creates the API Gateway CloudWatch role and the
-`AWS::ApiGateway::Account` setting that names it. That setting is one per
-account and Region, goes to whichever run deployed last, and CDK retains
+Runs one after another also share state that per-run names do not separate.
+The stack under test's REST API creates the API Gateway CloudWatch role and
+the `AWS::ApiGateway::Account` setting that names it. That setting is one
+per account and Region, goes to whichever run deployed last, and CDK retains
 both when the stack is deleted. The role and the setting are expected
 leftovers, outside the per-run leftover check.
 
@@ -232,10 +239,11 @@ others in A.
 
 If the runner process ends early, CloudFormation finishes whichever stack it
 was deploying, and every stack it had deployed stays in A and B because the
-runner never finished its destroy step. A rerun with the same run id refuses
-to start until they are gone. Hook builds the workflow had started stop by
-themselves within their run and queued timeouts; the hook projects go with
-the stack under test.
+runner never finished its destroy step. Until they are gone, the stack
+under test holds `/control-plane/tenant-api-url`, so no run of either test
+starts in account A and that Region, whatever its run id. Hook builds the
+workflow had started stop by themselves within their run and queued
+timeouts; the hook projects go with the stack under test.
 
 After a complete run the test harness still leaves default Lambda log
 groups in A, from the setup stack's custom resources and probe functions and
@@ -265,3 +273,84 @@ test output only (README, Known issues).
 | A hook record lists the names of the variables its build received (CodeBuild's own `CODEBUILD_*` left out, to fit an SSM standard parameter) | Nothing; the list exists so the assertions can see what R-42 withholds |
 | The hook script ships with account B's fixed external id beside it, so it can report whether any variable held that value (never the value itself) | Nothing; a hook never needs the external id, and a real one is a secret the owner hands over out of band |
 | Record operations whose event runs no hook build are polled inside the step probe every 5 seconds, not by an assertion waiter, because the assertion stack holds 200 outputs at most and the scenario is near that | Polls `GetApplication`, `GetTenant` or `GetAccount` at whatever interval suits its client |
+
+## Session tags
+
+[`test/integ.session-tags.ts`](./test/integ.session-tags.ts) is a second,
+smaller integration test for the session tags of
+[ADR-0051](./adr/0051-tag-every-build-session-with-its-cell-tenant-and-application.md)
+(spec R-52). It checks with real IAM, across the same two accounts, what the
+unit tests (`test/shared/session-tags.test.ts`, `test/main.test.ts`) only
+model: which AssumeRole requests the pair's trust admits, and what a tagged
+session may then do.
+
+It deploys a small fleet of its own (`cp-integ-<run id>`, its own run id):
+the stack under test in A, the role pair in B behind the external id
+`control-plane-integ-handshake`, two test roles in B that the cell session
+chains into, and a test policy on B's cell role (through
+`cellBuildManagedPolicyArns`) that lets it assume them. It registers nothing
+through the API. Each check starts a build in one of the stack's own
+provisioning projects, so the build runs as the project's real build role,
+with the source and environment overrides the workflow passes, and exports
+its results as `SCRIPT_OUTPUTS`.
+
+```bash
+export AWS_REGION=eu-central-1
+export CP_INTEG_ACCOUNT_B=<ACCOUNT_B_ID>
+npx projen integ:session-tags
+```
+
+The same prerequisites, guards and leftover check as the main test apply
+(How to run it, After an interruption). It cannot run while another control
+plane stack exists in account A and the Region (from the main test, from
+this test, or a real deployment): every stack creates the fixed
+`/control-plane/tenant-api-url` parameter (Sharing accounts between runs).
+
+A run takes about 10 minutes: about 4 to deploy, 2 for the builds and 3 to
+tear down. It costs a few cents of short CodeBuild builds, Lambda calls and
+SSM parameters (estimate). The last green run is in the
+[`architecture.md` status block](./architecture.md#verification-status).
+
+| Build | Project | Buildspec | What it checks |
+|---|---|---|---|
+| `cell-negatives` | cell | a test buildspec that does not assume the pair, so the script holds the build role's own credentials. The build role's grant carries the same TagSession conditions as B's trust, so a request with the wrong keys is refused by both; the untagged request and the one without the external id are refused by B's trust alone (the unit tests check each policy on its own) | The pair refuses an AssumeRole that is untagged, has `CellId` not transitive, adds another key (transitive or not), passes the tenant keys, or omits the external id; it admits `CellId`, transitive, with the external id (the positive control) |
+| `tenant-negatives` | tenant | the same | The pair refuses an AssumeRole that is untagged, passes `CellId` alone, omits `TenantId`, has the three tags not transitive, or omits the external id; it admits the three tags with only `CellId` transitive (the trust allows any non-empty subset as transitive, the buildspec makes all three) and the three transitive (the positive control) |
+| `cell-1`, `cell-2` | cell | the sample's own cell buildspec (`INLINE_BUILDSPECS.cell`) | Two cells in one account. Each cell's session writes, lists and deletes its own `/application-plane/cells/<cellId>` parameters and reads the shared namespace; it cannot write or list the other cell's namespace or write a tenant namespace. It cannot chain into a role on which its policy allows `sts:AssumeRole` alone. It chains into a role on which its policy also allows `sts:TagSession`, and that session writes only under its own `CellId` (a policy that names `${aws:PrincipalTag/CellId}`), so the tag reached the next hop with the cell's value. Setting `CellId` on that chained AssumeRole is refused with `InvalidParameterValue` |
+| `tenant-1` | tenant | the sample's own tenant buildspec (`INLINE_BUILDSPECS.tenant`) | The tenant's session writes and deletes its own `/application-plane/tenants/<tenantId>/<applicationId>` and the parameters under it, and lists its own cell's namespace; it cannot write another application's or another tenant's deployment namespace, list another cell's namespace or write its own cell's |
+
+Every script cleans up what it wrote, a write that should have been refused
+included, so the run leaves no parameter in B. A cleanup that fails prints
+`Left behind in this account: <name>` in that build's log. The leftover
+check reads account A only, so after a failed run look in B for parameters
+under `/application-plane/cells/`, `/application-plane/tenants/` and
+`/cp-integ/<fleet>/chain/`.
+
+The cell session chains through a test policy on B's cell role whose
+`sts:TagSession` grant names the `CellId` key only, as the stress test's
+`cell-build-policy` does.
+
+What it does not prove:
+
+- The workflow's own StartBuild. The builds are started with the overrides
+  the workflow sets, and the unit tests pin that the workflow passes the
+  same variables; the main test runs the workflow end to end.
+- The home account, where the R-41 deny also applies to the pair (unit
+  tests pin that it denies no STS or SSM action).
+- A `cdk deploy`. A stack's resources are created by its CloudFormation
+  execution role, which carries no tags, so per-cell scoping of an owner's
+  policy does not reach them (README, Production hardening checklist).
+- The API role's refusal of a tagged AssumeRole. No build calls the pair as
+  the API role; that refusal rests on the trust evaluator in
+  `test/shared/session-tags.test.ts`. The main test covers the API role's
+  untagged AssumeRole (the PutAccount probe).
+- A script that reaches the build role's credentials. Such a script can
+  assume the pair in any registered account with any cell's or tenant's
+  tags (threat model T29, M35).
+
+### Session tag test shortcuts
+
+| In the test | What a consumer does instead |
+|---|---|
+| Builds are started directly on the provisioning projects with test cell, tenant and application ids, and two builds use a buildspec that does not assume the pair | Builds start only through the workflow, with the service-resolved ids, under the inline buildspec |
+| Two test roles in B trust B's cell role, with `sts:TagSession`, and a test policy on the cell role lets it assume them | The owner's own roles and policies, scoped by the session tags |
+| A run probe in A starts each build once, finds it again by a `PROBE_LABEL` variable and returns its exported results | Nothing |

@@ -4,6 +4,7 @@
 import { ArnFormat, Stack } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
+import { OWN_CELL_PATH, OWN_DEPLOYMENT_PATH } from './fleet';
 import { acknowledgeGranularFinding, nagFindingResource } from './nag';
 
 /**
@@ -25,7 +26,16 @@ export function readSharedResourcesStatement(scope: Construct): iam.PolicyStatem
   });
 }
 
-/** Read + write/delete on `/application-plane/cells/*` (the cell role only). */
+// Defined in the import-free fleet.ts, so the stress account check can load
+// them without aws-cdk-lib installed.
+export { OWN_CELL_PATH, OWN_DEPLOYMENT_PATH };
+
+/** A tagged namespace and everything under it: the path itself is a parameter or a `GetParametersByPath` path. */
+function namespaceArns(scope: Construct, path: string): string[] {
+  return [ssmParameterArn(scope, path), ssmParameterArn(scope, `${path}/*`)];
+}
+
+/** Read + write/delete on the session's own cell namespace (the cell role only, ADR-0051). */
 export function manageCellNamespaceStatement(scope: Construct): iam.PolicyStatement {
   return new iam.PolicyStatement({
     sid: 'ManageCellNamespace',
@@ -37,25 +47,25 @@ export function manageCellNamespaceStatement(scope: Construct): iam.PolicyStatem
       'ssm:DeleteParameter',
       'ssm:AddTagsToResource',
     ],
-    resources: [ssmParameterArn(scope, '/application-plane/cells/*')],
+    resources: namespaceArns(scope, OWN_CELL_PATH),
   });
 }
 
-/** Read-only on `/application-plane/cells/*` (the tenant role: it reads its cell's identifiers). */
+/** Read-only on the session's own cell namespace (the tenant role: it reads its cell's identifiers, ADR-0051). */
 export function readCellNamespaceStatement(scope: Construct): iam.PolicyStatement {
   return new iam.PolicyStatement({
     sid: 'ReadCellNamespace',
     actions: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
-    resources: [ssmParameterArn(scope, '/application-plane/cells/*')],
+    resources: namespaceArns(scope, OWN_CELL_PATH),
   });
 }
 
-/** Read + write/delete on `/application-plane/tenants/*` (the tenant role only). */
+/** Read + write/delete on the session's own deployment namespace (the tenant role only, ADR-0051). */
 export function manageTenantNamespaceStatement(scope: Construct): iam.PolicyStatement {
   return new iam.PolicyStatement({
     sid: 'ManageTenantNamespace',
     actions: ['ssm:GetParameter', 'ssm:PutParameter', 'ssm:DeleteParameter', 'ssm:AddTagsToResource'],
-    resources: [ssmParameterArn(scope, '/application-plane/tenants/*')],
+    resources: namespaceArns(scope, OWN_DEPLOYMENT_PATH),
   });
 }
 
@@ -80,5 +90,17 @@ export function acknowledgeSsmNamespaceGrant(scope: Construct, parameterPath: st
     scope,
     `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, ssmParameterArn(scope, parameterPath))}]`,
     `Prefix-scoped parameter namespace '${parameterPath}' is the ADR-010 contract between the control plane and provisioning scripts - the wildcard is the namespace boundary.`,
+  );
+}
+
+/**
+ * Acknowledges the AwsSolutions-IAM5 finding for the `/*` under a namespace
+ * named by session tags ({@link OWN_CELL_PATH}, {@link OWN_DEPLOYMENT_PATH}).
+ */
+export function acknowledgeTaggedSsmGrant(scope: Construct, taggedPath: string): void {
+  acknowledgeGranularFinding(
+    scope,
+    `AwsSolutions-IAM5[Resource::${nagFindingResource(scope, ssmParameterArn(scope, `${taggedPath}/*`))}]`,
+    `The wildcard covers the parameters under the build session's own namespace '${taggedPath}' only: the path is named by the session's transitive tags, which the control plane sets and the pair's trust requires (ADR-0051, ADR-010). A session without the tags matches nothing.`,
   );
 }
