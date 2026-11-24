@@ -8,7 +8,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { agentRequestBody, ensureScope } from './agent-path';
 import { EVIDENCE_LINE_CHARS, EVIDENCE_LINES, evidenceLines } from './cloud';
-import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix } from './common';
+import { DEFAULT_DEPLOY_CONCURRENCY, deployConcurrency, runRegion, stackPrefix, type Backend } from './common';
 import { Ctx, TOKEN_REUSE_MS } from './ctx';
 import { imageNameOf } from './deploy';
 import { HOSTILE_DIR, MAX_CODE_BYTES, PROBES, probeCode } from './hostile';
@@ -17,6 +17,7 @@ import { claimsFor, mint, signJws } from './mint.function';
 import { formatRecord, median, Recorder } from './record';
 import { runPhase } from './runner';
 import { canonicalPath, presignUrl, signRequest } from './sigv4';
+import { type RunState } from './state';
 import { matrix, SPEC_TABLE_ORDER, STEPS, unitKey, validateSteps, type StepSpec } from './steps';
 import { collectHandles, sameKeys } from './steps/basic';
 import { neededQuotaGb, slotsFree } from './steps/build';
@@ -177,8 +178,16 @@ describe('the context', () => {
 describe('the leftover check when the credentials or the CLI fail', () => {
   const FRG = { type: 'AWS::Route53Resolver::FirewallRuleGroup', physicalId: 'rslvr-frg-1' };
   const FRG_ID = `${FRG.type}:${FRG.physicalId}`;
-  const stateOf = (resources: Array<{ type: string; physicalId: string }>) => ({
-    prefix: 'P', region: 'r', stackName: 'P', startedAt: 't', destroyed: false, resources, policyBaseline: {}, runtimeNames: [], imageNames: [],
+  const stateOf = (resources: Array<{ type: string; physicalId: string }>): RunState => ({
+    prefix: 'P',
+    region: 'r',
+    stackName: 'P',
+    startedAt: 't',
+    destroyed: false,
+    resources: resources.map((r) => ({ ...r, logicalId: 'L' })),
+    policyBaseline: {},
+    runtimeNames: [],
+    imageNames: [],
   });
   const cliError = (stderr: string) => Object.assign(new Error(`aws route53resolver get-firewall-rule-group failed: ${stderr}`), { stderr });
   const fake = (over: Record<string, unknown>) => ({
@@ -343,6 +352,12 @@ describe('the leftover check when the credentials or the CLI fail', () => {
     expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-failed', id: FRG_ID, detail: 'ThrottlingException' }]);
   });
 
+  test('an AWS error code after the first 2000 characters of the stderr is still named', async () => {
+    const stderr = `${'warning line\n'.repeat(300)}An error occurred (ThrottlingException) when calling the GetFirewallRuleGroup operation: Rate exceeded`;
+    const aws = fake({ cli: async () => { throw Object.assign(new Error(`aws route53resolver get-firewall-rule-group failed: ${stderr.slice(0, 2000)}`), { stderr }); } });
+    expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-failed', id: FRG_ID, detail: 'ThrottlingException' }]);
+  });
+
   test('a dotted AWS error code is named whole', async () => {
     const aws = fake({ cli: async () => { throw cliError('An error occurred (InvalidParameterValue.Range) when calling the GetFirewallRuleGroup operation: bad'); } });
     expect(await checkLeftovers(aws as never, 'P', stateOf([FRG]))).toEqual([{ kind: 'check-failed', id: FRG_ID, detail: 'InvalidParameterValue.Range' }]);
@@ -361,7 +376,7 @@ describe('the leftover check when the credentials or the CLI fail', () => {
   test.each([
     ['microvm', 'no MicroVM image log group is left \\(not checked\\)'],
     ['agentcore', 'no AgentCore runtime log group is left \\(not checked\\)'],
-  ])('the teardown step on %s fails the run, and does not call the backend clean, when the check could not run', (backend, logLine) => {
+  ] as Array<[Backend, string]>)('the teardown step on %s fails the run, and does not call the backend clean, when the check could not run', (backend, logLine) => {
     const rec = new Recorder('r', () => 0, () => undefined);
     const findings = [{ kind: 'check-unavailable', id: 'stacks', detail: 'the credentials expired' }];
     rec.begin(`teardown:run-code:${backend}`);

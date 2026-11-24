@@ -188,16 +188,15 @@ endpoints and DNS Firewall resources.
 
 A line that starts with `LEFT` is something the run left, or a resource the
 check could not read because AWS answered with an error (`LEFT check-failed`,
-with the AWS error code or a reason). Any `LEFT` line sets the exit status
-to 1.
+with the AWS error code or a reason). Any `LEFT` line means exit status 1.
 
 When the credentials fail or the AWS CLI cannot start (no credentials, an
-expired or refused token, access denied, no `aws` binary), the check cannot
-tell whether everything is gone. It lists `CHECK NOT RUN` with a short reason,
-adds a closing line that says the check must be repeated once the credentials
-and the AWS CLI work, never prints `nothing left`, and exits 1. Fix them and
-run the check again. In the `teardown` step the same case fails the check
-`the leftover check could run`.
+expired or refused token, access denied, no `aws` binary it can start), the
+check cannot tell whether everything is gone. It lists `CHECK NOT RUN` with a
+short reason, adds a closing line that says the check must be repeated once
+the credentials and the AWS CLI work, never prints `nothing left`, and exits
+with status 1. Fix them and run the check again. In the `teardown` step the
+same case fails the check `the leftover check could run`.
 
 Remove by hand what the `LEFT` lines list: the construct's own log groups with
 `aws logs delete-log-group`, a leftover runtime log group under
@@ -207,9 +206,10 @@ deleted). The tenant-identity `shared-pool` stays.
 
 Known limitation: the lookups of container instances, task definitions and
 MicroVMs read any other error (a throttle, a network error) as "nothing
-there", so those three can miss a leftover without a line. An AWS error on the
-stack list, a service log group listing or the resource policy listing stops
-the check with that error and no list; run it again.
+there", so those three can miss a leftover without a line. Any other AWS
+error (not a credentials or access error) on the stack list, a service log
+group listing or the resource policy listing stops the check with that error
+and no list; run it again.
 
 ## Test-only shortcuts
 

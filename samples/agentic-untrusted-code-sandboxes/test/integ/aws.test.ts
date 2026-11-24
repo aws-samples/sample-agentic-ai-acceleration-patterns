@@ -62,7 +62,7 @@ describe('aws.cli', () => {
     ['an exit code', { code: 255, stderr: '' }, 'the aws CLI exited with code 255'],
     ['a whitespace-only stderr', { code: 255, stderr: ' \n' }, 'the aws CLI exited with code 255'],
     ['a buffer limit', { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', stderr: '' }, 'the aws CLI failed (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)'],
-    ['no code and no signal', { stderr: '' }, 'the aws CLI failed (undefined)'],
+    ['no code and no signal', { stderr: '' }, 'the aws CLI failed (no exit code)'],
   ])('a process with no stderr and %s is described by that', async (_shape, props, text) => {
     (execFile as unknown as jest.Mock).mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Callback) => {
       cb(Object.assign(new Error('Command failed: aws sts get-caller-identity --secret-arg'), props));
@@ -97,6 +97,10 @@ describe('redact', () => {
     ['a SigV4 signature in an Authorization header', `Authorization: AWS4-HMAC-SHA256 Credential=x/s, SignedHeaders=host, Signature=${'f'.repeat(64)}`, 'Authorization: AWS4-HMAC-SHA256 Credential=x/s, SignedHeaders=host, Signature=<redacted>'],
     ['a lower-case signature query value', 'https://h/?signature=abc', 'https://h/?signature=<redacted>'],
     ['a base64url token', `token ${'a-b_'.repeat(30)} sent`, 'token <token> sent'],
+    ['a JWT with short parts', `token eyJhbGciOiJSUzI1NiJ9.${'p'.repeat(60)}.${'s'.repeat(60)} sent`, 'token <token> sent'],
+    ['a lower-case x-amz query value', 'https://h/?x-amz-security-token=abc', 'https://h/?x-amz-security-token=<redacted>'],
+    ['a short FwoG session token', `token FwoG${'b'.repeat(60)} sent`, 'token <token> sent'],
+    ['a long base64 run ending in =', `token ${'b'.repeat(120)}== sent`, 'token <token> sent'],
     ['a key id inside a longer capital run', `XAKIA${'B'.repeat(16)}`, 'X<key>'],
   ])('replaces %s', (_shape, text, expected) => {
     expect(redact(text)).toBe(expected);

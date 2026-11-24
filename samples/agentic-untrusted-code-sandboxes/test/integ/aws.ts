@@ -37,7 +37,7 @@ const STDERR_KEPT = 64 * 1024;
 
 /**
  * Replaces what a CLI error can carry about the account and its credentials: ARNs (any partition), session tokens
- * (an `IQoJ`, `FwoG`, `FQoG` or `AQoD` token, and any base64 or base64url run of 100 characters or more), `X-Amz-*`
+ * (an `IQoJ`, `FwoG`, `FQoG` or `AQoD` token, and any base64, base64url or dotted JWT run of 100 characters or more), `X-Amz-*`
  * query values and any `Signature=` value (a SigV2 presigned URL or a SigV4 `Authorization` header), access key ids
  * (also inside a longer capital run), 40-character secret keys and 12-digit account ids (also next to a letter or
  * `_`). Pure. The rules also replace other text of the same shape: a git commit id (40 characters), a long path or
@@ -50,7 +50,7 @@ export function redact(text: string): string {
     .replace(/(X-Amz-[A-Za-z-]{1,64}=)[^&\s"']+/gi, '$1<redacted>')
     .replace(/(\bSignature=)[^&\s"',]+/gi, '$1<redacted>')
     .replace(/(?<![A-Za-z0-9+/])(?:IQoJ|FwoG|FQoG|AQoD)[A-Za-z0-9+/=]{40,}/g, '<token>')
-    .replace(/(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{100,}={0,2}/g, '<token>')
+    .replace(/(?<![A-Za-z0-9+/_.-])[A-Za-z0-9+/_.-]{100,}={0,2}/g, '<token>')
     .replace(/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])/g, '<key>')
     .replace(/(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/])/g, '<secret>')
     .replace(/(?<!\d)\d{12}(?!\d)/g, '<account>');
@@ -162,7 +162,7 @@ export class Aws {
         : code === 'ENOENT' || code === 'EACCES' ? `spawn aws ${code}`
           : typeof code === 'number' ? `the aws CLI exited with code ${code}`
             : typeof signal === 'string' ? `the aws CLI exited with signal ${signal}`
-              : `the aws CLI failed (${String(code)})`;
+              : `the aws CLI failed (${code === undefined || code === null ? 'no exit code' : String(code)})`;
       // The whole stderr is redacted before the cut, so no secret is split by it (every rule is linear). shortcut: a
       // redacted stderr over 128 KB keeps its first and last 64 KB; a cause in the middle of a longer one is not read.
       const redacted = redact(cause);
