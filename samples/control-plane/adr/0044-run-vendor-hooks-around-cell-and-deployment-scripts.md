@@ -4,7 +4,8 @@
 - Date: 2026-11-17
 - Amends: ADR-0002, ADR-0011, ADR-0012, ADR-0021, ADR-0022, ADR-0025,
   ADR-0032, ADR-0042
-- Amended by: ADR-0045
+- Amended by: ADR-0045; PR #149 (2026-11-24: one integration run per
+  account and Region, integration-test.md "Sharing accounts between runs")
 - Deciders: Dave Roberts (SA)
 
 ## Context
