@@ -22,8 +22,7 @@ the account, because the account holds only cells.
 The control plane's per-build identity change (control-plane ADR-0051,
 written in
 [PR 149](https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns/pull/149)
-and not on main until that PR merges) narrows that for
-some calls. It tags a cell build with a transitive `CellId` and a tenant
+and not on main until that PR merges) narrows that for some calls. It tags a cell build with a transitive `CellId` and a tenant
 build with `CellId`, `TenantId` and `ApplicationId`, and it scopes the role
 pair's own SSM grants by the tag. An owner can then write policies for
 `cellBuildManagedPolicyArns` and `tenantBuildManagedPolicyArns` that match
@@ -33,7 +32,7 @@ service, with no caller tags. The tag cannot reach the roles and resources
 the stacks create, so two cells in one account still share that one role's
 reach through the CDK.
 
-The stress cell bootstrap names that role (`CDKToolkit-cell`, spec §8,
+The stress cell bootstrap creates that role (`CDKToolkit-cell`, spec §8,
 decision 7). Its execution policy and boundary are scoped to cell
 resources and to cell roles on the IAM path `/cell/`, never to one cell.
 The tiers put cells in accounts as follows (`stress/src/tiers.ts`):
@@ -123,10 +122,10 @@ Give each cell its own execution role, scoped to that cell, and let the
 deploy role pass only that role (`iam:PassRole` limited by the build's
 `CellId` tag).
 
-- Accounts: 2 at `large`, as today.
+- Accounts: 2 at `large` (spec §4.1).
 - Cost: no new account. Each cell adds one execution role, its policy and
   its boundary in a cell account, with no meter of their own.
-- Quota and comparability: none. The load per account stays as it is.
+- Quota and comparability: none. The load per account is unchanged.
 - Residual threat: closed, if the other cell cannot rewrite a per-cell
   role (see the reasons below).
 - It does not fit this test, for three reasons:
@@ -137,7 +136,7 @@ deploy role pass only that role (`iam:PassRole` limited by the build's
      role can create a `/cell/` role at cell time (ADR-0006), but
      that role cannot be protected from the other cell, as the next point
      shows.
-  2. The `/cell/` path rule lets every execution role write any
+  2. The `/cell/` path rule lets a cell's execution role write any
      `/cell/` role (ADR-0006, spec §8 decision 7). A per-cell execution
      role on `/cell/` can be rewritten by the other cell's execution
      role, which removes the separation. A role off `/cell/` cannot be
@@ -153,7 +152,7 @@ Change nothing in the tiers. Record that two cells in one account share
 the CloudFormation execution role and keep the build-time reach that
 ADR-0006 describes, and say why that is acceptable here.
 
-- Accounts: 2 at `large`, as today.
+- Accounts: 2 at `large` (spec §4.1).
 - Cost: none.
 - Quota and comparability: none. `large` keeps the load per account that
   the spec was written for.
@@ -165,10 +164,9 @@ ADR-0006 describes, and say why that is acceptable here.
   build path. A hostile build in a stress account is outside what the
   test measures.
 - Stress code and text: no tier or code change. The redeploy and the
-  account check above apply under every option. The spec (§3.7 and its
-  known limitations) and the "Known limitations" of
-  `stress/application/README.md` name the shared execution role, which is
-  the text change of this option.
+  account check above apply under every option. Spec §3.7 and the
+  "Known limitations" of `stress/application/README.md` name the shared
+  execution role, which is the text change of this option.
 
 ## Decision
 Recommended: Option 3. The decision is open until the deciders choose.
@@ -188,15 +186,14 @@ the spec and fixtures listed under Option 1 and the owner steps, and
 nothing in a cell.
 
 If Option 3 is chosen, this record moves to Accepted and the shared
-execution role goes into the spec's and the application README's known
-limitations. If
-Option 1 is chosen, the tier, spec and owner-step changes above follow in
-a separate pull request, and this record moves to Accepted with the
-account count named.
+execution role goes into spec §3.7 and the "Known limitations" of the
+application README. If Option 1 is chosen, the tier, spec and owner-step
+changes above follow in a separate pull request, and this record moves to
+Accepted with the account count named.
 
 ## Consequences
 Easier under Option 3: no change to the tiers, the cell accounts or the
-quota numbers. The stress test keeps the rule it has: the account is the
+quota numbers. The stress test applies the rule that the account is the
 wall, and a cell build can change any cell in its account through the
 CDK.
 
