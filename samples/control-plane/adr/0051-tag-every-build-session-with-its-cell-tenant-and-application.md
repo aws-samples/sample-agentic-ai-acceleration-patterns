@@ -13,9 +13,9 @@ identity for every tenant. Nothing in the session says which cell, tenant or
 application it acts for. So the account owner cannot write a policy that
 lets cell 1's script change cell 1's resources and not cell 2's, and the
 pair's own grants reach every cell's `/application-plane/cells/*` and every
-deployment's `/application-plane/tenants/*` parameters. A defect or a
-hostile script in one cell can overwrite another cell's routing parameters
-in the same account.
+deployment's `/application-plane/tenants/*` parameters. A defect in one
+cell's script can overwrite another cell's routing parameters in the same
+account.
 
 The build already assumes the pair with the operator as session name
 (ADR-0025, M23). The cell, tenant and application ids it acts for are
@@ -134,6 +134,16 @@ Option 3 for their own account; this record does not choose for them.
   hands creation to the CloudFormation execution role, which acts without
   them; an owner who needs per-cell scoping of stack-created resources takes
   Option 2 or Option 3.
+- The tags stop a script that uses the session it is given. The build
+  role sets them, and the script runs in the same container as the agent
+  that holds the build role's credentials (threat model T29). A script
+  that reaches those credentials can assume the pair with another cell's
+  tags, so the tags guard against defects, not against a hostile script
+  that escapes its session. The boundary against that script is the
+  CodeBuild container (threat model T13, T29).
+- The API role's refusal of a tagged AssumeRole is shown by the trust
+  evaluator in the unit tests only; the integration test does not call the
+  pair as the API role with tags.
 - The session tag integration test (`test/integ.session-tags.ts`) shows,
   in two accounts with real IAM: the pair refuses a build role's AssumeRole
   untagged, with none of the tags transitive, with another key, with a missing

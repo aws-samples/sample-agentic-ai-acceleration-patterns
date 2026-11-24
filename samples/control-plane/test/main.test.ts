@@ -6,7 +6,6 @@ import { App, Environment, Token } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { buildEnvironment, evaluateJsonata } from './workflow-jsonata';
 import { CellAccountStack, CellAccountStackProps } from '../src/cell-account/cell-account.cdk';
-import { sessionTagConditions, sessionTagRequestConditions } from '../src/shared/fleet';
 import { isFullCommitSha, sourcePinningWarning } from '../src/shared/service-config';
 import {
   TenantStack,
@@ -15,6 +14,21 @@ import {
   validateTenantBuildManagedPolicyArns,
 } from '../src/tenant/tenant.cdk';
 import { validateConcurrentBuildLimit } from '../src/tenant/validation';
+
+// The session tag conditions written out with literal key lists, so the
+// trust tests do not compare the template to the function that built it
+// (ADR-0051). `transitive` adds the TagSession statement's
+// `sts:TransitiveTagKeys` conditions.
+function literalTagConditions(kind: 'cell' | 'tenant', transitive: boolean): any {
+  const keys = kind === 'cell' ? ['CellId'] : ['CellId', 'TenantId', 'ApplicationId'];
+  const present = Object.fromEntries(keys.map((key) => [`aws:RequestTag/${key}`, 'false']));
+  return transitive
+    ? {
+      'Null': { ...present, 'sts:TransitiveTagKeys': 'false' },
+      'ForAllValues:StringEquals': { 'aws:TagKeys': keys, 'sts:TransitiveTagKeys': keys },
+    }
+    : { 'Null': present, 'ForAllValues:StringEquals': { 'aws:TagKeys': keys } };
+}
 
 // Skip NodejsFunction esbuild bundling in unit tests - assertions target
 // infrastructure shape, not bundle contents.
@@ -709,10 +723,10 @@ describe('build roles and the home account role pair (ADR-025)', () => {
         expect(principals).not.toContain(`:role/control-plane-${kind === 'cell' ? 'tenant' : 'cell'}-build`);
         expect(principals).not.toContain('-api');
       }
-      expect(assume.Condition.Null).toEqual(sessionTagRequestConditions(kind).Null);
-      expect(assume.Condition['ForAllValues:StringEquals']).toEqual(sessionTagRequestConditions(kind)['ForAllValues:StringEquals']);
-      expect(tag.Condition.Null).toEqual(sessionTagConditions(kind).Null);
-      expect(tag.Condition['ForAllValues:StringEquals']).toEqual(sessionTagConditions(kind)['ForAllValues:StringEquals']);
+      expect(assume.Condition.Null).toEqual(literalTagConditions(kind, false).Null);
+      expect(assume.Condition['ForAllValues:StringEquals']).toEqual(literalTagConditions(kind, false)['ForAllValues:StringEquals']);
+      expect(tag.Condition.Null).toEqual(literalTagConditions(kind, true).Null);
+      expect(tag.Condition['ForAllValues:StringEquals']).toEqual(literalTagConditions(kind, true)['ForAllValues:StringEquals']);
     }
   });
 
@@ -722,7 +736,7 @@ describe('build roles and the home account role pair (ADR-025)', () => {
       const tag = statements.find((s) => s.Sid === 'TagProvisioningSession');
       expect(tag.Action).toBe('sts:TagSession');
       expect(JSON.stringify(tag.Resource)).toContain(`:iam::*:role/control-plane-${kind}-provisioning`);
-      expect(tag.Condition).toEqual(sessionTagConditions(kind));
+      expect(tag.Condition).toEqual(literalTagConditions(kind, true));
     }
     // The API role passes no tags: its probe stays AssumeRole only (ADR-027).
     const apiStatements = policyFor(logicalIdOf('control-plane-api')).Properties.PolicyDocument.Statement as any[];

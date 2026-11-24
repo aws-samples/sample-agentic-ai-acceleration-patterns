@@ -51,6 +51,19 @@ fi
 # is not set for it; the test needs the current account id at synth time (it is
 # account A of the two-account scenario).
 export CDK_DEFAULT_ACCOUNT="${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}"
+
+# One control plane stack per account and Region: its tenant API URL
+# parameter has a fixed name, so a second run here fails late in CloudFormation
+# early validation. Refuse up front instead (integration-test.md, Sharing
+# accounts between runs).
+if param_err=$(aws ssm get-parameter --name /control-plane/tenant-api-url --region "$AWS_REGION" --query Parameter.Name --output text 2>&1 >/dev/null); then
+  echo "/control-plane/tenant-api-url already exists in account ${CDK_DEFAULT_ACCOUNT} ${AWS_REGION}: another control plane stack (an integ run in progress or a deployment) owns it. Use another account or Region, or wait for that run to finish"
+  exit 1
+elif ! grep -q ParameterNotFound <<<"$param_err"; then
+  echo "Could not check for /control-plane/tenant-api-url: ${param_err}"
+  exit 1
+fi
+
 AWS_DEFAULT_REGION="$AWS_REGION" integ-runner --language typescript --parallel-regions "$AWS_REGION" --update-on-failed --force "$TEST"
 status=$?
 

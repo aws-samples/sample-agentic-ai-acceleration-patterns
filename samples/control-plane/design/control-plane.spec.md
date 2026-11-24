@@ -473,7 +473,9 @@ roles they run under — and the roles are deliberately **asymmetric**:
   (`/application-plane/tenants/<tenantId>/<applicationId>/*`).
 - Each build session is tagged with the cell, tenant and application it
   acts for (R-52), and the grants name those paths by the tags, so two
-  cells in one account do not share writable state.
+  cells in one account do not share writable state through the sessions
+  they are given. A script that reaches the build role's credentials can
+  still assume the pair with another cell's tags (threat model T29, M35).
 
 A compromised or buggy tenant script cannot corrupt cell-owned state. The
 permission boundary — not throughput — is why there are two build projects

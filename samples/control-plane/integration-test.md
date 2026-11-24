@@ -100,8 +100,9 @@ repeated runs.
 
 Only one run, of this test or of the session tag test below, fits in
 account A and a Region at a time: every control plane stack creates the
-fixed `/control-plane/tenant-api-url` parameter (README, Deploy), so a
-second stack under test fails early validation. Runs in other Regions, or
+fixed `/control-plane/tenant-api-url` parameter (README, Deploy). The
+`integ` tasks check for that parameter before they deploy and refuse to
+start when it exists. Runs in other Regions, or
 with another account A, can share account B.
 
 The run's fleet name is in every stack name, the assertion stack's test name
@@ -329,6 +330,12 @@ What it does not prove:
 - A `cdk deploy`. A stack's resources are created by its CloudFormation
   execution role, which carries no tags, so per-cell scoping of an owner's
   policy does not reach them (README, Production hardening checklist).
+- The API role's refusal of a tagged AssumeRole. No build calls the pair as
+  the API role; that refusal rests on the trust evaluator in
+  `test/shared/session-tags.test.ts`. The main test covers the API role's
+  untagged AssumeRole (the PutAccount probe).
+- A script that reaches the build role's credentials. Such a script can
+  assume the pair with another cell's tags (threat model T29, M35).
 
 ### Session tag test shortcuts
 
