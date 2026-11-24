@@ -4,6 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-20
+- Amended by: ADR-0074
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -53,3 +54,5 @@ mode launches only on a provider that enables Nitro Enclaves. The
 construct sets both. The tenant role starts the
 pinned revision, so a change to the task definition replaces the revision
 and the tool functions' environment in one deploy.
+
+Note 2026-11-24: amended by [ADR-0074](0074-lock-the-nitro-runner-in-memory-and-keep-the-watchdog-files-open.md). The `runner` container also sets the `memlock` ulimit to unlimited (soft and hard -1), so the runner can lock its pages. It is a ulimit, not a capability; the container still adds none.

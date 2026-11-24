@@ -59,6 +59,67 @@ class ConstantsTest(unittest.TestCase):
         lines = [line for line in jb.SYSV_SWEEP.splitlines() if line.strip()]
         self.assertEqual(lines[1].split("#")[0].strip(), "resource.setrlimit(resource.RLIMIT_MEMLOCK, (0, 0))")
         self.assertEqual(lines[0], "import ctypes, resource")
+        # Run those two lines: the limit they leave is 0, soft and hard. The rest of the sweep removes SysV objects,
+        # so it is not run here.
+        probe = "\n".join(lines[:2]) + "\nprint(resource.getrlimit(resource.RLIMIT_MEMLOCK))\n"
+        out = subprocess.run([jb.sys.executable, "-I", "-c", probe], capture_output=True, text=True, check=True)
+        self.assertEqual(out.stdout.strip(), "(0, 0)")
+
+    def test_nitro_claim_opens_the_watchdog(self):
+        # become_tenants opens the watchdog's files at claim, before any job (ADR-0074).
+        from runner import runner as rn
+
+        made = []
+
+        class FakeExecutor:
+            def __init__(self, *a, **kw):
+                self.opened = 0
+                made.append(self)
+
+            def open_watchdog(self):
+                self.opened += 1
+
+        size = sz.Sizing("nitro", 1024 * MIB)
+        with mock.patch("builtins.open", mock.mock_open(read_data="0::/task\n")), \
+                mock.patch.object(rn.job, "read_text", return_value=""), \
+                mock.patch.object(rn.job, "prepare_work"), \
+                mock.patch.object(rn.job, "task_memory_max", return_value=None), \
+                mock.patch.object(rn.sizing, "memory_m", return_value=size.m), \
+                mock.patch.object(rn.job, "Executor", FakeExecutor), \
+                mock.patch.object(rn, "Filter"), mock.patch.object(rn.job, "log"):
+            ex = rn.become_tenants("nitro")
+        self.assertIs(ex, made[0])
+        self.assertEqual(ex.opened, 1)
+
+    def test_the_lock_comes_after_claim_and_tls(self):
+        # Last, so the TLS libraries are mapped when MCL_CURRENT locks them (ADR-0074).
+        from runner import runner as rn
+
+        order = []
+
+        class FakeSandbox:
+            def __init__(self, *a, **kw):
+                self.fingerprint = None
+                self.boot_failed = threading.Event()
+                self.executor = None
+
+            def claim(self):
+                order.append("claim")
+
+        def stop_waiting(*a):
+            raise SystemExit(0)
+
+        env = {rn.BACKEND_ENV: "nitro", rn.wire.NONCE_HASH_ENV: "0" * 64}
+        with mock.patch.dict(os.environ, env), mock.patch.object(rn, "own_process_setup"), \
+                mock.patch.object(rn, "Sandbox", FakeSandbox), \
+                mock.patch.object(rn, "tls_context", side_effect=lambda: (order.append("tls"), (None, b""))[1]), \
+                mock.patch.object(rn.job, "lock_memory", side_effect=lambda: order.append("lock")), \
+                mock.patch.object(rn.signal, "signal"), \
+                mock.patch.object(rn, "serve", side_effect=lambda *a, **kw: order.append("serve")), \
+                mock.patch.object(rn.job, "log"), mock.patch.object(rn.threading.Event, "wait", side_effect=stop_waiting):
+            with self.assertRaises(SystemExit):
+                rn.main()
+        self.assertEqual(order, ["claim", "tls", "lock", "serve"])
 
     def test_a_refused_lock_ends_the_nitro_start(self):
         from runner import runner as rn
@@ -164,6 +225,28 @@ class MonitorTest(unittest.TestCase):
                 ex._above_l()
         self.assertEqual(len(closed), 1)
         self.assertIsNone(ex._group_fds)
+
+    def test_nitro_watchdog_reads_a_long_memory_stat(self):
+        # A memory.stat longer than one read is read whole, so shmem past the first chunk still counts.
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))
+        padding = "".join("pad_%04d 0\n" % i for i in range(jb.GROUP_READ // 10 + 1))
+        write(os.path.join(self.group, "memory.stat"), "file 0\n" + padding + "shmem %d\n" % (100 * MIB))
+        self.assertGreater(os.path.getsize(os.path.join(self.group, "memory.stat")), jb.GROUP_READ)
+        self.assertTrue(ex._above_l())  # 800 MiB counted, L = 768 MiB; one read would have counted 700
+
+    def test_nitro_watchdog_serialises_its_files(self):
+        # A monitor that outlives its job and the next one's take turns, so neither closes a pair the other reads.
+        ex = self.executor("nitro", task_group=self.group)
+        write(os.path.join(self.group, "memory.current"), str(700 * MIB))
+        write(os.path.join(self.group, "memory.stat"), "file 0\nshmem 0\n")
+        done = threading.Event()
+        with ex._group_lock:
+            t = threading.Thread(target=lambda: (ex._above_l(), done.set()))
+            t.start()
+            self.assertFalse(done.wait(0.2))  # waits for the lock
+        t.join(2)
+        self.assertTrue(done.is_set())
 
     def test_microvm_floor(self):
         ex = self.executor("microvm")

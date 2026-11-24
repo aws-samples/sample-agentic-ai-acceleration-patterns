@@ -37,9 +37,10 @@ POST_JOB_DEADLINE_S = 3.0
 DIRTY_POLL_S = POST_JOB_DEADLINE_S
 READ_CHUNK = 65536
 CURRENT_READ = 64  # one pread of memory.current, a single number
-GROUP_READ = 8192  # one pread of memory.stat, about 2 KiB
+GROUP_READ = 8192  # pread size for memory.stat (about 2 KiB); a longer file takes more reads
 CPU_LIMIT_SLACK_MS = 100
 # mlockall(2) flags (linux/mman.h).
+# shortcut: the x86_64 and arm64 values, the only architectures the images build for; others (e.g. sparc) differ.
 MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT = 1, 2, 4
 PR_SET_NO_NEW_PRIVS = 38
 JOB_PATH = "/usr/local/bin:/usr/bin:/bin"
@@ -237,6 +238,9 @@ class Executor:
         self._exceeded = threading.Event()
         self._libc = ctypes.CDLL(None, use_errno=True)
         self._group_fds: Optional[Tuple[int, int]] = None  # nitro: memory.current and memory.stat, open for the task's life
+        # A monitor that outlives its job (_collect joins it for at most the deadline) may poll beside the next one;
+        # the lock keeps one from closing a pair the other still reads.
+        self._group_lock = threading.Lock()
 
     # Step 1 and 2: the job child.
 
@@ -445,17 +449,20 @@ class Executor:
     def _above_l(self) -> bool:
         # The two files stay open and are read with pread: an open per poll allocates in the kernel and in the
         # runner, and an allocation while the job holds the task group at its limit waited seconds (ADR-0074).
-        if self._group_fds is None:
-            self._group_fds = self._open_group_files()
-        fds = self._group_fds
-        try:
-            current = os.pread(fds[0], CURRENT_READ, 0).decode("ascii")
-            stat = os.pread(fds[1], GROUP_READ, 0).decode("ascii")
-        except OSError:
-            self._group_fds = None  # the next poll opens them again
-            for fd in fds:
-                os.close(fd)
-            raise
+        with self._group_lock:
+            if self._group_fds is None:
+                self._group_fds = self._open_group_files()
+            fds = self._group_fds
+            try:
+                current = os.pread(fds[0], CURRENT_READ, 0).decode("ascii")
+                stat = _pread_all(fds[1], GROUP_READ).decode("ascii")
+            except OSError:
+                # shortcut: the next poll opens them again, and that open allocates while the group may be full.
+                # A read error on a held cgroup file has not been seen (ADR-0074).
+                self._group_fds = None
+                for fd in fds:
+                    os.close(fd)
+                raise
         return sz.counted(current, stat) > self.sizing.l
 
     def open_watchdog(self) -> None:
@@ -608,6 +615,17 @@ class Executor:
     def kill_all(self) -> None:
         """On SIGTERM: end any job. No reap here: a job thread may still be in Popen.wait()."""
         self._kill_uid()
+
+
+def _pread_all(fd: int, size: int) -> bytes:
+    """Read a whole file from offset 0 with pread, size bytes at a time; one read when the file is shorter."""
+    data = os.pread(fd, size, 0)
+    while len(data) % size == 0 and data:
+        more = os.pread(fd, size, len(data))
+        if not more:
+            break
+        data += more
+    return data
 
 
 def lock_memory(libc=None) -> None:

@@ -598,7 +598,9 @@ before any job, keeps them open and reads them with `pread`. On one
 stack, in one Region, at the default task size, 0 of 26 fills of the
 final runner overran: each answered `memoryExceeded` in 0.54 to 7.4 s
 on the same task with `/work` kept (0 of 70 across the runner variants
-of ADR-0074). A fill that still overran would end as before (§4.1 step
+of ADR-0074). These counts come from a `nitro`-only demo stack driven
+through `runCodeFunction`, not from an S-row or a test in the
+repository. A fill that still overran would end as before (§4.1 step
 5), with the tenant's `/work` lost and nothing crossing tenants.
 
 Mounts (S-16). On every backend `/dev/shm` is the only tmpfs uid 1001

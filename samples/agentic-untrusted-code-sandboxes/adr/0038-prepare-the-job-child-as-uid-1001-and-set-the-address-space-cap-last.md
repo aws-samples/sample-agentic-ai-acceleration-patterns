@@ -5,6 +5,7 @@
 - Status: Accepted
 - Date: 2026-11-20
 - Amends: ADR-0019
+- Amended by: ADR-0074
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -80,3 +81,5 @@ The Docker test checks every limit from inside a job, on Python 3.13 and
 between `fork` and `exec` in a threaded process; it is kept to system calls
 and objects prepared before the fork. A single-threaded helper that execs
 the job would remove that hazard and is the upgrade path if it ever shows.
+
+Note 2026-11-24: amended by [ADR-0074](0074-lock-the-nitro-runner-in-memory-and-keep-the-watchdog-files-open.md). Step 2 also sets `RLIMIT_MEMLOCK` to 0, soft = hard, on every backend, so uid 1001 can lock no memory.

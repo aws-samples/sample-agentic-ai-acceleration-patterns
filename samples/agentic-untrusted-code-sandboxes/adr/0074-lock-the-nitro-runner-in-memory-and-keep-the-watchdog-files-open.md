@@ -4,7 +4,7 @@
 
 - Status: Accepted
 - Date: 2026-11-23
-- Amends: [ADR-0022](0022-leave-room-for-the-runner-in-the-nitro-process-cap.md)
+- Amends: [ADR-0022](0022-leave-room-for-the-runner-in-the-nitro-process-cap.md), [ADR-0038](0038-prepare-the-job-child-as-uid-1001-and-set-the-address-space-cap-last.md), [ADR-0046](0046-write-the-nitro-task-definition-in-l1-with-no-task-role.md)
 - Deciders: Dave Roberts (Partner Solutions Architect)
 
 ## Context
@@ -13,8 +13,9 @@ On `nitro` the runner and the job share one memory limit, the task
 group's (ADR-0021, ADR-0022). A job that fills memory from every process
 slot at once (the job and 63 children, each up to A) stalled the runner:
 it wrote no `job_done` line within `runTimeout` + 5 s, the tool stopped
-the task as an overrun, and the tenant lost `/work` (issue 144). The
-cause was not known.
+the task as an overrun, and the tenant lost `/work`
+([issue 144](https://github.com/aws-samples/sample-agentic-ai-acceleration-patterns/issues/144)).
+The cause was not known.
 
 A demo stack with only the `nitro` backend, in a non-production test
 account, reproduced it: 5 of 8 such fills overran, each after 35.1 s
@@ -22,14 +23,15 @@ account, reproduced it: 5 of 8 such fills overran, each after 35.1 s
 the runner's task logged the task group twice a second. The task's VM
 has 1 vCPU and about 1156 MiB; the task group's limit is 1024 MiB; there
 is no swap. In each stall the group sat at 1015 to 1023 MiB, its page
-cache fell from about 19 MiB to 3 MiB, and the group counted about 31,000
-refaults of file pages, with memory pressure (PSI `full`) at 44 to 54 %.
+cache fell from about 19 MiB to 3 MiB, and the group counted about
+31,000 refaults of file pages, with memory pressure (PSI `full`) at 44
+to 54 %.
 The kernel killed 46 to 51 job processes one at a time, and the job's
 other processes filled the freed memory again. The side process itself
 wrote nothing for 33 to 43 s.
 
-So the stall is page-cache thrashing at the limit. With no swap, the only
-pages the kernel can reclaim are file pages, and the runner's code
+So the stall is page-cache thrashing at the limit. With no swap, the
+only pages the kernel can reclaim are file pages, and the runner's code
 (the interpreter, its libraries, the runner's modules) is among them.
 The runner's pages were evicted and read back over and over, so the
 watchdog (ADR-0022) and the HTTP thread barely ran. The kernel's
@@ -44,7 +46,8 @@ Pros: the runner's code and data stay in memory, so the job's fill
 cannot evict them; with nothing left to reclaim, the kernel kills job
 processes at once. The job does not inherit the lock. Cons: the task
 definition must raise the `memlock` ulimit, and the job must get it back
-to 0. With the lock alone, a fill still took 1.2 to 23.7 s (14 fills):
+to 0. With the lock alone, a fill still took 1.2 to 23.7 s (14 fills,
+before the variants below and not counted among them):
 the watchdog opened its two cgroup files on every poll, and those reads
 waited 6 to 19 s, because an open allocates and every allocation in the
 full group waits.
@@ -88,9 +91,14 @@ Option 1, with the watchdog's files kept open:
    them open for the task's life, and reads them with `pread`. A read
    error closes them, and the next poll opens them again. If the open
    at claim fails, the runner logs `watchdog_open_failed` and the first
-   poll opens the files, as before this decision. Both are opened with
-   `O_CLOEXEC` and the job is started with `close_fds`, so the job never
-   holds them. The decision of ADR-0022 (the watchdog at L on
+   poll opens the files, as before this decision. A poll that reopens
+   them after a read error allocates while the group may be full; that
+   is a known shortcut, since a read error on a held cgroup file has not
+   been seen. The watchdog holds a lock across the open, read and close,
+   so a monitor that outlives its job cannot close a pair the next one
+   uses. Both are opened with
+   `O_CLOEXEC` and the job is started with `close_fds`, so no job code
+   ever holds them. The decision of ADR-0022 (the watchdog at L on
    `memory.current` less the file cache, A = L − 64 MiB) is unchanged.
 
 Measured on the same stack: with the lock and the open files, 0 of 70
